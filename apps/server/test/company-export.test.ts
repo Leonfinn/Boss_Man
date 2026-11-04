@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 const b64 = (s: string) => Buffer.from(s).toString("base64");
-const SECRET = "sk-live-SUPERSECRETVALUE-1234567890";
+const SECRET = "sk-live-SUPERSECRETVALUE-zzqqxx";
 
 async function setup() {
   const { db, close } = await openPglite();
@@ -63,8 +63,10 @@ describe("company export (docs/11, step 1)", () => {
     expect(lines).toEqual([expect.objectContaining({ title: "Fix the notice wording", assignee: "celebrimbor", project: "run-maintain-deploy" })]);
     // The secret's value (and any part of it a hint might show) appears nowhere in the file.
     const all = Buffer.concat(Object.values(zip).map((b) => Buffer.from(b))).toString("latin1");
+    // Assert on a full value and a non-hex substring: short hex-looking tails like
+    // "7890" can occur by chance in random ids, which made this test flaky.
     expect(all).not.toContain("SUPERSECRET");
-    expect(all).not.toContain("7890");
+    expect(all).not.toContain(SECRET);
   });
 
   it("leaves out the wiki and tickets unless asked, and 404s an unknown company", async () => {

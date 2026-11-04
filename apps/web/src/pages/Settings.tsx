@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { RUNNER_ADDONS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
+import { RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, ApiError, type Agent, type Company, type FundingSource, type Project } from "../api";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
@@ -1101,6 +1101,9 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "maxNudgesPerHour", label: "Most Scrum Master actions per hour", unit: "actions" },
   { key: "alertMinutes", label: "Move an alert up a level after", unit: "minutes" },
   { key: "maxCeoAlertsPerHour", label: "Most alerts sent to the CEO per hour", unit: "alerts" },
+  { key: "silentSteerMinutes", label: "Ask a silent run for a status after", unit: "minutes" },
+  { key: "silentFlagMinutes", label: "Flag a silent run to the Scrum Master after", unit: "minutes" },
+  { key: "unprovenHours", label: "Flag an unproven cause ('likely') after", unit: "hours" },
 ];
 
 /** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */
@@ -1130,6 +1133,7 @@ export function Watchdog({ company }: { company: Company }) {
       return "Saved.";
     });
   const on = status.settings.enabled;
+  const recordOnly = status.settings.recordOnly;
   return (
     <Section id="watchdog-h" title="Watchdog">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -1141,9 +1145,19 @@ export function Watchdog({ company }: { company: Company }) {
           : status.trippedAt && !on
           ? `Switched itself off ${when(status.trippedAt)}: ${status.trippedReason}. Look at its recent actions, then switch it back on.`
           : on
-            ? `On. Last check ${status.lastSweepAt ? when(status.lastSweepAt) : "not yet"} · ${status.openFlags} open issue${status.openFlags === 1 ? "" : "s"}.`
+            ? `On${recordOnly ? " (record only: it writes down what it would do and reaches nobody)" : ""}. Last check ${status.lastSweepAt ? when(status.lastSweepAt) : "not yet"} · ${status.openFlags} open issue${status.openFlags === 1 ? "" : "s"}.`
             : "Off."}
       </p>
+      {/* Record-only mode (BOS-166): a rehearsal day, written down and sent to nobody. */}
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <input id="wd-record" type="checkbox" checked={recordOnly} onChange={(e) => void save({ recordOnly: e.target.checked })} style={{ marginTop: 4 }} />
+        <label htmlFor="wd-record" style={{ maxWidth: 720 }}>
+          <strong>Record only (rehearse)</strong>:{" "}
+          <span className="muted">
+            The watchdog still checks the board and keeps its warnings up to date, but it writes down what it would have done and reaches nobody: no wake, nudge, assignment, escalation or reminder to you, and its hourly limits aren’t used. The log and the daily summary mark these as not sent. Untick this to let it act again from the next check.
+          </span>
+        </label>
+      </div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         <label htmlFor="wd-sm">Scrum Master</label>
         <select id="wd-sm" value={sm} onChange={(e) => setSm(e.target.value)}>
@@ -1359,6 +1373,134 @@ function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: ()
   );
 }
 
+/** How the rules judge advises on permission cards (BOS-337). It only picks the suggested button; it never answers a card. */
+function PermissionJudgeSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const act = useAction();
+  const mode = company.permissionJudge ?? "watch";
+  return (
+    <Section id="permission-judge-h" title="Advice on permission cards">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Boss Man can look at where a command reaches (its own folder, secrets, other agents, the network) and suggest Allow or Deny with a one-line reason. It only suggests: you or the CEO still press the button, and pushes to main, publishing, deploys, secrets and other agents' work stay decided by fixed rules.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="permission-judge">Advice</label>
+        <select
+          id="permission-judge"
+          value={mode}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { permissionJudge: e.target.value } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        >
+          <option value="advise">Advise: suggest a button and say why</option>
+          <option value="watch">Watch: only record what it would suggest next to your answer</option>
+          <option value="off">Off: use the older text rules</option>
+        </select>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type SecondOpinion = { enabled: boolean; baseUrl: string; model: string; secretId: string | null };
+
+/** The optional model second opinion on permission cards (BOS-338): off by default. The key is a secret from the encrypted store. */
+function SecondOpinionSetting({ company }: { company: Company }) {
+  const cur = usePoll((signal) => api<SecondOpinion>(`/api/companies/${company.id}/second-opinion`, { signal }), 600_000, `second-${company.id}`);
+  const secrets = usePoll((signal) => api<Array<{ id: string; name: string }>>("/api/secrets", { signal }), 600_000, "secrets");
+  const [v, setV] = useState<SecondOpinion | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const sv = useSaveState(v);
+  // Only the first load fills the form, so a background refresh never overwrites an edit in progress.
+  useEffect(() => {
+    if (!cur.data || v) return;
+    setV(cur.data);
+    sv.reset(cur.data);
+  }, [cur.data]);
+  if (!v) return null;
+  const judgeOff = (company.permissionJudge ?? "watch") === "off";
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    api(`/api/companies/${company.id}/second-opinion`, { method: "PUT", body: v })
+      .then(
+        () => (sv.markSaved(), setMsg("Saved.")),
+        (err: Error) => setMsg(err.message),
+      )
+      .finally(() => setBusy(false));
+  };
+  const test = () => {
+    setBusy(true);
+    setMsg("Asking the model…");
+    api<{ ok: boolean; message: string }>(`/api/companies/${company.id}/second-opinion/test`, { method: "POST", body: v })
+      .then(
+        (r) => setMsg(r.message),
+        (err: Error) => setMsg(err.message),
+      )
+      .finally(() => setBusy(false));
+  };
+  return (
+    <Section id="second-opinion-h" title="Second opinion from a model (optional)">
+      <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <p className="muted" style={{ fontSize: 14 }}>
+          Off by default. When it's on, a card the rules above would suggest allowing is also shown to a model you pick. It can only make the advice stricter: a card is suggested Allow only when both agree. If the model is slow (over 5 seconds), down, out of credit or gives an answer Boss Man can't read, the rules decide alone. It never presses a button. The card's text is sent to the provider, with tokens, keys and passwords removed first.
+        </p>
+        {judgeOff && <p className="muted" style={{ fontSize: 14 }}>Advice on permission cards is off, so the model isn't asked. Set it to Watch or Advise first.</p>}
+        <label>
+          <input type="checkbox" checked={v.enabled} onChange={(e) => setV({ ...v, enabled: e.target.checked })} /> Ask a model for a second opinion
+        </label>
+        <div>
+          <strong style={{ fontSize: 14 }}>Suggested models</strong> <span className="muted" style={{ fontSize: 14 }}>(from our test on 203 real cards; click one to fill in the fields)</span>
+          <ul style={{ margin: "6px 0", paddingLeft: 20, fontSize: 14 }}>
+            {SECOND_OPINION_PRESETS.map((p) => (
+              <li key={p.label}>
+                <button type="button" className="linkish" onClick={() => setV({ ...v, baseUrl: p.baseUrl, model: p.model })}>
+                  {p.label}
+                </button>{" "}
+                <span className="muted">— {p.note}</span>
+              </li>
+            ))}
+          </ul>
+          <small className="muted">Decision models such as Jev, d3 and the others that only return a score don't work for this: they can't tell safe from unsafe reliably and give no reason. Use a chat model.</small>
+        </div>
+        <div className="field">
+          <label htmlFor="second-url">Provider address</label>
+          <input id="second-url" value={v.baseUrl} placeholder="https://openrouter.ai/api/v1" onChange={(e) => setV({ ...v, baseUrl: e.target.value })} />
+          <small className="muted">Any OpenAI-compatible service (it must accept /chat/completions): OpenRouter, Synthetic, or your own server such as Ollama.</small>
+        </div>
+        <div className="field">
+          <label htmlFor="second-model">Model</label>
+          <input id="second-model" value={v.model} placeholder="openai/gpt-oss-safeguard-20b" onChange={(e) => setV({ ...v, model: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="second-key">API key</label>
+          <select id="second-key" value={v.secretId ?? ""} onChange={(e) => setV({ ...v, secretId: e.target.value || null })}>
+            <option value="">None (a local server)</option>
+            {(secrets.data ?? []).map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.name}
+              </option>
+            ))}
+          </select>
+          {!v.secretId && <small className="muted">Add the key under Secrets first, then pick it here.</small>}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <SaveButton {...sv} busy={busy} />
+          <button type="button" className="btn" disabled={busy || !v.baseUrl || !v.model} onClick={test}>
+            Test
+          </button>
+        </div>
+        {msg && <p role="status">{msg}</p>}
+      </form>
+    </Section>
+  );
+}
+
 /** The company's hourly nudge limit (BOS-73). */
 function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
@@ -1388,6 +1530,43 @@ function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => v
           Save
         </button>
       </div>
+      {act.view}
+    </Section>
+  );
+}
+
+/** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
+export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [gb, setGb] = useState(company.diskCapBytes != null ? String(+(company.diskCapBytes / 1024 ** 3).toFixed(1)) : "");
+  const act = useAction();
+  const n = Number(gb);
+  const valid = Number.isInteger(n) && n >= 1 && n <= 100_000;
+  return (
+    <Section id="workspace-disk-h" title="Workspace disk">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Each ticket keeps its working files on the runner's disk until it has been done for a while. When the company's workspaces grow past this cap, Boss Man tells you once a day with the biggest ones named. It is a warning only: it never stops runs or refuses new workspaces. Worktrees of tickets done more than 7 days ago are released automatically.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="disk-cap">Disk cap (GB)</label>
+        <input id="disk-cap" type="number" min={1} max={100000} step={1} placeholder="20" value={gb} onChange={(e) => setGb(e.target.value)} style={{ width: 100 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { diskCapGb: n } });
+              onChanged();
+              return "Saved. It applies at the next hourly clean-up.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      <p className="muted" style={{ fontSize: 13 }}>
+        {company.diskCapBytes != null ? `Currently ${(company.diskCapBytes / 1024 ** 3).toFixed(1)} GB.` : "Currently the server default, 20 GB."}
+      </p>
       {act.view}
     </Section>
   );
@@ -1969,7 +2148,10 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <NudgeCap company={company} onChanged={onChanged} />
+            <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
+            <PermissionJudgeSetting company={company} onChanged={onChanged} />
+            <SecondOpinionSetting company={company} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />
             <Chapters company={company} />

@@ -6,10 +6,10 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DEFAULT_REVIEW_POLICY, type ReviewPolicy, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, reviewRequests, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { resolveReviewer } from "../src/services/review-policy.js";
-import { MERGE_ACTIVITY_MS } from "../src/services/review.js";
+import { MERGE_ACTIVITY_MS, setInfraRetryBase } from "../src/services/review.js";
 import { raiseMergeStuck } from "../src/services/decisions.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -43,16 +43,18 @@ async function setup() {
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
   /** Set to make the runner's merge fail, as when it drops off mid-way. */
-  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null; holdVerify: Promise<void> | null } = { merge: false, changed: false, holdMerge: null, holdVerify: null };
+  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null; holdVerify: Promise<void> | null; verifyTimeout: boolean } = { merge: false, changed: false, holdMerge: null, holdVerify: null, verifyTimeout: false };
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
     if (c.type === "workspace.diff") ok(faults.changed ? { ...DIFF, files: [{ path: "src/a.ts", added: 1, removed: 0 }] } : DIFF);
-    if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
+    if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok(faults.verifyTimeout ? { ok: false, exitCode: null, timedOut: true, output: "", ms: 1 } : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
     if (c.type === "workspace.merge" && faults.merge) queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: false, error: "The runner went away" }));
     else if (c.type === "workspace.merge") void (faults.holdMerge ?? Promise.resolve()).then(() => ok({ status: "merged", commit: "c".repeat(40) }));
+    if (c.type === "workspace.carried") ok({ carried: [] });
+    if (c.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
     return true;
-  });
+  }, ["carried-check"]);
   let seq = 0;
   const emit = (event: RunnerEvent) => built.runners.ingest(runner!, { seq: ++seq, at: new Date().toISOString(), event });
   const ticket = async (fields: Record<string, unknown> = {}) => {
@@ -375,5 +377,61 @@ describe("review policy API", () => {
     const tiers = (await c.req("GET", `/api/risk-tiers?companyId=${c.company.id}`)).json() as Array<{ tier: string; summary: string }>;
     expect(tiers.find((t) => t.tier === "low")!.summary).toContain("Sam reviews it;");
     expect(tiers.find((t) => t.tier === "high")!.summary).toContain("and you sign it off");
+  });
+});
+
+describe("the merge sweep for approved tickets (BOS-362)", () => {
+  const approvedLongAgo = async (c: Awaited<ReturnType<typeof setup>>, id: string) => {
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, id));
+    await c.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: c.senior.id, round: 1, seq: 0, status: "approved", decidedAt: new Date(Date.now() - 4 * 3_600_000) });
+  };
+
+  it("retries an approved ticket even though people keep talking on it", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await approvedLongAgo(c, t.id);
+    // A chase or a reply a minute ago: the ticket is not quiet, but its merge has been waiting for hours.
+    await c.db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, t.id));
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 1 });
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(1);
+  });
+
+  it("waits out a fresh approval, so a merge that has just started is not doubled", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await approvedLongAgo(c, t.id);
+    await c.db.update(reviewRequests).set({ decidedAt: new Date() }).where(eq(reviewRequests.ticketId, t.id));
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
+    expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(0);
+  });
+
+  it("is not stopped by an answered merge card, and a new card replaces its key", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await approvedLongAgo(c, t.id);
+    const row = await c.row(t.id);
+    const [old] = await c.db.insert(decisions).values({ companyId: row.companyId, kind: "question", question: "old", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", tier: "owner", status: "answered", dedupeKey: `merge-stuck:${t.id}`, context: { type: "check_stuck", ticketId: t.id } }).returning();
+    c.faults.merge = true;
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 1 });
+    await vi.waitFor(async () => expect((await c.db.select().from(decisions).where(and(eq(decisions.dedupeKey, `merge-stuck:${t.id}`), eq(decisions.status, "open")))).length).toBe(1));
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, old!.id)))[0]!.dedupeKey).toBeNull();
+    // The retry is once per server start: the next sweep leaves it to the open card.
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
+    expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(1);
+  });
+
+  it("raises a new card when the retry's check times out, even with an answered card holding the key", async () => {
+    setInfraRetryBase(1);
+    const c = await setup();
+    const t = await c.ticket();
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await approvedLongAgo(c, t.id);
+    const row = await c.row(t.id);
+    const [old] = await c.db.insert(decisions).values({ companyId: row.companyId, kind: "question", question: "old", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", tier: "owner", status: "answered", dedupeKey: `merge-stuck:${t.id}`, context: { type: "check_stuck", ticketId: t.id } }).returning();
+    c.faults.verifyTimeout = true;
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 1 });
+    await vi.waitFor(async () => expect((await c.db.select().from(decisions).where(and(eq(decisions.dedupeKey, `merge-stuck:${t.id}`), eq(decisions.status, "open")))).length).toBe(1));
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, old!.id)))[0]!.dedupeKey).toBeNull();
   });
 });

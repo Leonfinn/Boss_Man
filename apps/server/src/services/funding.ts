@@ -9,14 +9,32 @@ import {
   parseSyntheticQuota,
   type BudgetWindow,
   type QuotaSample,
+  type SyntheticQuota,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, budgetPolicies, companies, costEvents, fundingSources, providerQuotaReadings, providerQuotaWarnings, quotaSamples, runs, secretGrants } from "../db/schema.js";
+import { agents, budgetPolicies, companies, costEvents, fundingSources, providerQuotaReadings, providerQuotaWarnings, quotaSamples, runs, secretGrants, settings } from "../db/schema.js";
 
 type FundingRow = typeof fundingSources.$inferSelect;
 type PolicyRow = typeof budgetPolicies.$inferSelect;
 /** Used and limit for a provider's own quota endpoint; null used/limit means the reading is unknown. */
-export type ProviderQuota = { used: number | null; limit: number | null; renewsAt: string | null };
+export type ProviderQuota = { used: number | null; limit: number | null; renewsAt: string | null; measure: "weekly" | "requests" };
+
+/**
+ * The weekly plan's percentage-left reading is stored in the existing used/limit pair, so no new
+ * columns and no migration: the week is 10,000 "units", used is the credits already spent and
+ * limit is 10,000 (BOS-260). Readings taken at or above this limit were stored before that change
+ * and are the old request window, not weekly credits.
+ */
+export const SYNTHETIC_WEEKLY_LIMIT = 10_000;
+
+const weeklyReading = (q: Extract<SyntheticQuota, { weekly: unknown }>) => ({
+  used: Math.round(((100 - q.weekly!.percentRemaining) / 100) * SYNTHETIC_WEEKLY_LIMIT),
+  limit: SYNTHETIC_WEEKLY_LIMIT,
+  // The warning period keys on the renewal, so a regeneration time that moves every reading would warn
+  // again each time. The week is 49.9 ticks long, so the tick number names the same week all day.
+  renewsAt: (q.weekly!.nextRegenAt ?? new Date()).toISOString(),
+  measure: "weekly" as const,
+});
 
 /** How long the newest Synthetic reading is served before asking Synthetic again (BOS-239). */
 export const PROVIDER_QUOTA_REFRESH_MS = 5 * 60_000;
@@ -24,15 +42,30 @@ export const PROVIDER_QUOTA_REFRESH_MS = 5 * 60_000;
 export const PROVIDER_QUOTA_HISTORY_MS = 30 * 86_400_000;
 /** The newest readings returned as the trend, count and age. */
 const PROVIDER_QUOTA_HISTORY = 20;
-/** The percentages of the limit the owner hears about, each once per period. */
-export const PROVIDER_QUOTA_THRESHOLDS = [80, 100] as const;
+/**
+ * The percentages of the weekly credits the owner hears about, each once per period (BOS-260):
+ * credits come back 2% at a time, so these are the warning points the owner asked for.
+ */
+export const PROVIDER_QUOTA_THRESHOLDS = [60, 80, 92] as const;
+/** The old request-window reading warned at these; kept only for accounts that report no weekly credits. */
+export const PROVIDER_QUOTA_REQUEST_THRESHOLDS = [80, 100] as const;
 
-/** The key that groups warnings by renewal period: the renewal time rounded down to the hour, so a
- * renewal time that drifts by a few minutes between readings doesn't warn the owner twice. */
-export function providerQuotaPeriod(renewsAt: string | null): string {
+/** Credits come back 2% every 202 minutes, so a week is about 49.9 of those ticks. */
+const WEEKLY_REGEN_TICK_MS = 202 * 60_000;
+const WEEKLY_REGEN_TICKS = 50;
+
+/**
+ * The key that groups warnings by renewal period, so the owner hears each threshold once per period
+ * and again in the next. For the request window that is the renewal rounded down to the hour. For
+ * weekly credits the time is the *next* regeneration, which moves every tick, so the key is which of
+ * the week's (about 50) regeneration ticks it falls in, counted from the epoch: it stays the same all
+ * week and changes when the week does.
+ */
+export function providerQuotaPeriod(renewsAt: string | null, weekly = false): string {
   if (!renewsAt) return "";
   const ms = Date.parse(renewsAt);
   if (Number.isNaN(ms)) return "";
+  if (weekly) return `week-${Math.floor(ms / (WEEKLY_REGEN_TICK_MS * WEEKLY_REGEN_TICKS))}`;
   return new Date(Math.floor(ms / 3_600_000) * 3_600_000).toISOString();
 }
 
@@ -41,12 +74,20 @@ export type ProviderQuotaView = {
   used: number | null;
   limit: number | null;
   renewsAt: string | null;
+  /**
+   * Which measure `used / limit` is: the plan's weekly credits (the real one, BOS-260) or the old
+   * request window, which the plan often doesn't spend and must never be shown as total usage.
+   */
+  measure: "weekly" | "requests";
   /** Seconds since the reading was taken from Synthetic; null when there is no reading. */
   ageSeconds: number | null;
   history: Array<{ used: number; limit: number; renewsAt: string | null; takenAt: string }>;
-  /** The warnings the owner has already had in this period (80, 100). */
+  /** The warnings the owner has already had in this period (60, 80, 92 for weekly credits). */
   warned: number[];
 };
+
+/** Readings at or above this limit are the weekly credits stored in the used/limit pair (BOS-260). */
+const isWeeklyReading = (limit: number) => limit >= SYNTHETIC_WEEKLY_LIMIT;
 
 type FundingDeps = { reveal?: (secretId: string) => Promise<string | null>; fetch?: typeof fetch; now?: () => Date };
 
@@ -67,7 +108,7 @@ function toWindow(p: PolicyRow, source: FundingRow | undefined): BudgetWindow {
 export function fundingService(db: Db, deps: FundingDeps = {}) {
   const http = deps.fetch ?? fetch;
   const now = deps.now ?? (() => new Date());
-  const unknown: ProviderQuota = { used: null, limit: null, renewsAt: null };
+  const unknown: ProviderQuota = { used: null, limit: null, renewsAt: null, measure: "weekly" };
   /** A refresh already under way per source, so two loads at once ask Synthetic once.
    * shortcut: lost on restart, harmless because the stored reading survives and is read again after 5 minutes. */
   const refreshing = new Map<string, Promise<ProviderQuota | null>>();
@@ -95,7 +136,12 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
       const res = await http("https://api.synthetic.new/v2/quotas", { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10_000) });
       if (!res.ok) return unknown;
       const q = parseSyntheticQuota(await res.json());
-      return q ? { used: q.used, limit: q.limit, renewsAt: q.renewsAt?.toISOString() ?? null } : unknown;
+      if (!q) return unknown;
+      // Weekly credits are what the plan spends; the request window is only a fallback when Synthetic
+      // sends nothing weekly, so an account that doesn't spend it never reads a bare "0 of 500" (BOS-260).
+      if (q.weekly) return weeklyReading(q);
+      const r = q.requests!;
+      return { used: r.used, limit: r.limit, renewsAt: r.renewsAt?.toISOString() ?? null, measure: "requests" };
     } catch {
       return unknown;
     }
@@ -116,9 +162,13 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
       const q = await callProviderQuota(source);
       // A failure keeps the last good reading: nothing new is stored, so the age shows how old it is.
       if (q.used !== null && q.limit !== null) {
+        const previous = await newestReading(source.id);
         await db.insert(providerQuotaReadings).values({ fundingSourceId: source.id, used: q.used, limit: q.limit, renewsAt: q.renewsAt ? new Date(q.renewsAt) : null, takenAt });
         // Prune the history to the last 30 days (BOS-239).
         await db.delete(providerQuotaReadings).where(and(eq(providerQuotaReadings.fundingSourceId, source.id), lt(providerQuotaReadings.takenAt, new Date(takenAt.getTime() - PROVIDER_QUOTA_HISTORY_MS))));
+        // Weekly credits move 2% at a time, so a refresh between ticks repeats the same point; drop the
+        // older copy so the trend counts real changes, not how often the page was refreshed (BOS-260).
+        if (previous && previous.used === q.used && previous.limit === q.limit) await db.delete(providerQuotaReadings).where(eq(providerQuotaReadings.id, previous.id));
         lastFailed.delete(source.id);
       } else {
         // Store nothing on failure, so remember the attempt: the next few loads reuse the old reading
@@ -153,15 +203,20 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
       .where(eq(providerQuotaReadings.fundingSourceId, source.id))
       .orderBy(desc(providerQuotaReadings.takenAt))
       .limit(PROVIDER_QUOTA_HISTORY);
-    const renewsAt = at.renewsAt?.toISOString() ?? null;
+    const measure = isWeeklyReading(at.limit) ? ("weekly" as const) : ("requests" as const);
+    const weekly = measure === "weekly";
+    // On the weekly measure the renewal is the next regeneration, not when the plan ends, so it is
+    // not "when it renews": the card says so in words instead of showing a time that would mislead.
+    const renewsAt = weekly ? null : at.renewsAt?.toISOString() ?? null;
     const warned = await db
       .select({ threshold: providerQuotaWarnings.threshold })
       .from(providerQuotaWarnings)
-      .where(and(eq(providerQuotaWarnings.fundingSourceId, source.id), eq(providerQuotaWarnings.period, providerQuotaPeriod(renewsAt))));
+      .where(and(eq(providerQuotaWarnings.fundingSourceId, source.id), eq(providerQuotaWarnings.period, providerQuotaPeriod(at.renewsAt?.toISOString() ?? null, weekly))));
     return {
       used: at.used,
       limit: at.limit,
       renewsAt,
+      measure,
       ageSeconds: Math.max(0, Math.round((now().getTime() - at.takenAt.getTime()) / 1000)),
       history: history.map((h) => ({ used: h.used, limit: h.limit, renewsAt: h.renewsAt?.toISOString() ?? null, takenAt: h.takenAt.toISOString() })),
       warned: warned.map((w) => w.threshold).sort((a, b) => a - b),
@@ -169,31 +224,46 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
   }
 
   /**
-   * Tell the owner once per period when a Synthetic reading passes 80% and again at 100% (BOS-239).
-   * The period is the renewal time, so the next period warns again; nothing is sent twice.
+   * Tell the owner once per period when the plan's weekly credits pass 60%, 80% and 92% used (BOS-260).
+   * The period is the stored week, so the next week warns again; nothing is sent twice. On an account
+   * that reports no weekly credits, the old request window warns at 80% and 100% as before.
    */
   async function providerQuotaNotices(source: FundingRow, notify: (n: { title: string; body: string }) => Promise<unknown>, timeZone = "Europe/London") {
     if (source.provider !== "synthetic") return [];
     const view = await providerQuota(source);
     if (!view || view.used === null || view.limit === null || view.limit <= 0) return [];
-    const period = providerQuotaPeriod(view.renewsAt);
+    const weekly = view.measure === "weekly";
+    // The stored time is the next regeneration for weekly credits (it names the week), the renewal otherwise.
+    const period = providerQuotaPeriod(view.history[0]?.renewsAt ?? view.renewsAt, weekly);
     const percent = (view.used / view.limit) * 100;
     const paid = await db.select({ name: agents.name, company: companies.name }).from(agents).innerJoin(companies, eq(companies.id, agents.companyId)).where(and(eq(agents.fundingSourceId, source.id), sql`${agents.retiredAt} is null`)).orderBy(agents.name);
     const when = (iso: string | null) =>
       iso
         ? `${new Date(iso).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone })} at ${new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone })}`
         : "Synthetic doesn't say";
+    // The card says "about X% used": the stored count is the percentage rounded to 0.01 points.
+    const usedPercent = Math.floor(percent);
+    const leftPercent = 100 - usedPercent;
+    const regenAt = view.history[0]?.renewsAt ?? null;
+    const thresholds = weekly ? PROVIDER_QUOTA_THRESHOLDS : PROVIDER_QUOTA_REQUEST_THRESHOLDS;
     const sent: number[] = [];
-    for (const threshold of PROVIDER_QUOTA_THRESHOLDS) {
+    for (const threshold of thresholds) {
       if (percent < threshold) continue;
       const told = await db.insert(providerQuotaWarnings).values({ fundingSourceId: source.id, period, threshold, warnedAt: now() }).onConflictDoNothing().returning();
       if (!told.length) continue;
       const who = paid.length ? paid.map((a) => `${a.name} (${a.company})`).join(", ") : "no agents right now";
+      const title = weekly
+        ? leftPercent <= 0
+          ? `${source.name}: the weekly Synthetic credits are used up`
+          : `${source.name}: about ${usedPercent}% of this week's Synthetic credits are used`
+        : threshold >= 100
+          ? `${source.name}: the Synthetic request allowance is used up`
+          : `${source.name}: ${threshold}% of the Synthetic request allowance is used`;
+      const body = weekly
+        ? `About ${usedPercent}% of this week's credits are used, ${leftPercent}% left. Credits come back 2% at a time${regenAt ? ` (next about ${when(regenAt)})` : ""}. Paid from it: ${who}. Boss Man won't pause any runs; move less urgent work or wait for credits to come back.`
+        : `${view.used.toLocaleString()} of ${view.limit.toLocaleString()} requests used (${Math.round(percent)}%). It renews ${when(view.renewsAt)}. Paid from it: ${who}. Boss Man won't pause any runs; move less urgent work or wait for the renewal.`;
       try {
-        await notify({
-          title: threshold >= 100 ? `${source.name}: the Synthetic allowance is used up` : `${source.name}: ${threshold}% of the Synthetic allowance is used`,
-          body: `${view.used.toLocaleString()} of ${view.limit.toLocaleString()} requests used (${Math.round(percent)}%). It renews ${when(view.renewsAt)}. Paid from it: ${who}. Boss Man won't pause any runs; move less urgent work or wait for the renewal.`,
-        });
+        await notify({ title, body });
       } catch {
         // The warning never reached the owner: drop the row so the next reading tries again.
         await db.delete(providerQuotaWarnings).where(and(eq(providerQuotaWarnings.fundingSourceId, source.id), eq(providerQuotaWarnings.period, period), eq(providerQuotaWarnings.threshold, threshold)));
@@ -265,6 +335,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         credit,
         quota,
         windowsSeen,
+        claudeActive: ((await db.select().from(settings).where(eq(settings.key, "claude-active-account")))[0]?.value ?? null) === id,
         forecasts,
         /** Synthetic's own used/limit reading, its age and its history; null for other providers. */
         providerQuota: await providerQuota(source),

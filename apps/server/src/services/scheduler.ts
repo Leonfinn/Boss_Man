@@ -4,12 +4,13 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
+import { pickAccount } from "./claude-accounts.js";
 import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
@@ -31,6 +32,8 @@ import { conversationLines } from "./ticket-chat.js";
 import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
+import { AGE_STEP_MS, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
+export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
 export type Limits = {
   instance: number;
@@ -75,6 +78,8 @@ export const WATCH_REASON = "ticket watch";
 export const MISSED_REASON = "missed work";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
+/** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
+export const DECISION_REASON = "decision";
 /** Tickets moved to review, gathered into one CEO run (R85). */
 export { REVIEW_REASON };
 /** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
@@ -109,6 +114,16 @@ export type WakeInput = {
   /** Set by notify(): deliver the note into this live run instead of starting one. */
   steerRunId?: string | null;
 };
+
+/**
+ * What wake() and notify() hand back: the wake row, plus what became of it. A caller that
+ * needs the wake to have happened must check for "dropped" (only agent-started wakes are ever
+ * dropped, plus the loop limits for those); "merged" means it joined a wake already waiting.
+ */
+export type WakeResult = typeof wakes.$inferSelect & { outcome: WakeOutcome };
+const outcomeOf = (row: typeof wakes.$inferSelect, merged = false): WakeResult => ({ ...row, outcome: row.status === "dropped" ? "dropped" : row.status === "steered" ? "steered" : merged ? "merged" : row.status === "deferred" ? "deferred" : "queued" });
+/** A message the owner didn't send via a run counts as the owner's; one an agent sent is agent-started. */
+const wakeClassOf = (w: { reason: string; causedByRunId?: string | null }): WakeClass => (fromOwner(w) ? "waiting" : w.reason === "message" ? "agent" : wakeClass(w.reason));
 
 /** Boss Man's own alerts go up the alert ladder (BOS-64): the Scrum Master, then the CEO, then the owner. */
 type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "companyId" | "question">) => Promise<unknown>;
@@ -232,6 +247,16 @@ export function schedulerService(
     return !full.some((s) => s.utilization >= 1) && !samples.some((s) => s.overageInUse);
   }
 
+  /** For the hold notice: when no other Claude account can take over, how to swap by hand (BOS-383). */
+  async function swapAdvice(source: typeof fundingSources.$inferSelect) {
+    if (source.provider !== "anthropic") return "";
+    const pool = await claudeAccounts(source);
+    for (const other of pool.filter((p) => p.id !== source.id)) {
+      if (holdingWindows(other, await latestQuotaWindows(other.id), now()).length === 0) return ` New runs move to ${other.name} automatically.`;
+    }
+    return " To keep agents working on a second Claude plan now: Settings → Secrets → the Claude token → Rotate, paste the second plan's token. It moves every agent in the company at once; runs already going finish on the first plan. To undo, Rotate back to the first token (keep it saved elsewhere: Boss Man never shows it again). Or add the second plan on the Funding page so new runs switch by themselves.";
+  }
+
   /**
    * Tells the owner, once, when routine work stops or starts again, and once when extra-usage
    * credits begin being spent. Safe to run on every pass.
@@ -257,7 +282,7 @@ export function schedulerService(
             companyId: null,
             level: "flag",
             title: `Routine work paused${reset}`,
-            body: `${source.name}'s ${windowLabel(first.window).name} is at ${Math.round(first.utilization * 100)}%. ${stillRuns}`,
+            body: `${source.name}'s ${windowLabel(first.window).name} is at ${Math.round(first.utilization * 100)}%. ${stillRuns}${await swapAdvice(source)}`,
             link: "#/funding",
           })
           .catch((err) => deps.log?.(`quota hold notification failed: ${(err as Error).message}`));
@@ -383,7 +408,7 @@ export function schedulerService(
       .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
       .where(and(inArray(tickets.id, ids), eq(tickets.watcherAgentId, w.agentId)));
     for (const { t, assignee } of watched) {
-      const [last] = await db.select().from(runs).where(eq(runs.ticketId, t.id)).orderBy(desc(runs.startedAt)).limit(1);
+      const [last] = await db.select().from(runs).where(and(eq(runs.ticketId, t.id), sql`${runs.origin} is distinct from ${WATCH_REASON}`, sql`${runs.origin} is distinct from ${REVIEW_REASON}`)).orderBy(desc(runs.startedAt)).limit(1);
       const deps = await db
         .select({ ticket: tickets.title, ticketId: ticketDependencies.blockerTicketId, state: tickets.systemState, activity: tickets.lastActivityAt, decision: decisions.question, decisionStatus: decisions.status, engagement: ticketDependencies.blockerEngagementId })
         .from(ticketDependencies)
@@ -412,9 +437,18 @@ export function schedulerService(
     return lines;
   }
 
-  /** What a watcher's report would be about, as one string to compare with the last report's (R85). */
+  /**
+   * What a watcher's report would be about, as one string to compare with the last report's (R85).
+   * Only the ticket's own work counts: a ticket watch and a review of it are not the ticket
+   * moving, or each report would cause the next (BOS-268).
+   */
   async function watchFacts(x: typeof tickets.$inferSelect) {
-    const [last] = await db.select({ id: runs.id, endedAt: runs.endedAt, outcome: runs.outcome }).from(runs).where(eq(runs.ticketId, x.id)).orderBy(desc(runs.startedAt)).limit(1);
+    const [last] = await db
+      .select({ id: runs.id, endedAt: runs.endedAt, outcome: runs.outcome })
+      .from(runs)
+      .where(and(eq(runs.ticketId, x.id), sql`${runs.origin} is distinct from ${WATCH_REASON}`, sql`${runs.origin} is distinct from ${REVIEW_REASON}`))
+      .orderBy(desc(runs.startedAt))
+      .limit(1);
     const deps = await db
       .select({ ticket: tickets.systemState, decision: decisions.status, engagement: engagements.status })
       .from(ticketDependencies)
@@ -446,8 +480,8 @@ export function schedulerService(
     // Work in review waits on its reviewer (the review flow wakes them), so the tree hasn't stalled.
     if (tree.some((x) => x.t.systemState === "review")) return null;
     const ids = tree.map((x) => x.t.id);
-    const [busyRun] = await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt))).limit(1);
-    const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(inArray(wakes.ticketId, ids), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
+    const [busyRun] = await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt), sql`${runs.origin} is distinct from ${WATCH_REASON}`)).limit(1);
+    const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(inArray(wakes.ticketId, ids), ne(wakes.reason, WATCH_REASON), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
     if (busyRun || busyWake) return null;
     const deps = await db
       .select({ blocked: ticketDependencies.blockedTicketId, ticket: tickets.title, ticketState: tickets.systemState, decision: decisions.status, engagement: engagements.status })
@@ -509,7 +543,9 @@ export function schedulerService(
     for (const x of due) byWatcher.set(x.watcherAgentId!, [...(byWatcher.get(x.watcherAgentId!) ?? []), x.id]);
     for (const [agentId, ids] of byWatcher) {
       const add = ids.map((id) => `Watch ticket ${id}`).join("\n");
-      await self.notify(agentId, { reason: WATCH_REASON, note: add, priority: 1 });
+      // A report on one ticket carries that ticket (so the queue, the Runs list and the ticket caps see it);
+      // one run reporting on several keeps them in its note, as it must not pick one.
+      await self.notify(agentId, { reason: WATCH_REASON, note: add, priority: 1, ticketId: ids.length === 1 ? ids[0] : null });
     }
     // After the reports, so a watcher that is both due and stopped reports first.
     await watchTrees(watched);
@@ -525,7 +561,7 @@ export function schedulerService(
     const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
     for (const x of due) {
       if (paused.has(x.companyId)) continue;
-      const claimed = await db.update(tickets).set({ monitorAt: null }).where(and(eq(tickets.id, x.id), eq(tickets.monitorAt, x.monitorAt!))).returning({ id: tickets.id });
+      const claimed = await db.update(tickets).set({ monitorAt: null, monitorRestartAt: null }).where(and(eq(tickets.id, x.id), eq(tickets.monitorAt, x.monitorAt!))).returning({ id: tickets.id });
       if (!claimed.length) continue;
       const log = (summary: string) => record(db, { companyId: x.companyId, agentId: x.assigneeAgentId, ticketId: x.id, kind: "monitor", summary, at: now() });
       if (!x.assigneeAgentId || (x.systemState !== "in_progress" && x.systemState !== "review")) {
@@ -540,10 +576,10 @@ export function schedulerService(
       }
       const n = x.monitorAttempts + 1;
       await db.update(tickets).set({ monitorAttempts: n }).where(eq(tickets.id, x.id));
-      const w = await self.notify(x.assigneeAgentId, { ticketId: x.id, reason: "check due", note: `Check due (${n} of ${x.monitorMax}): ${x.monitorNote}. Re-check it now. If you still need to wait, call schedule_check again; otherwise carry on or finish.` });
+      const w = await self.notify(x.assigneeAgentId, { ticketId: x.id, reason: "check due", note: `Check due (${n} of ${x.monitorMax}): ${x.monitorNote}. Re-check it now. If you still need to wait, call schedule_check again; otherwise carry on or finish.${x.monitorRestartAt ? ` The runner restarted at ${x.monitorRestartAt.toISOString()}; any background check you started is gone. Check its log and rerun only what you need.` : ""}` });
       if (w.status === "dropped") {
         // Retry next tick.
-        await db.update(tickets).set({ monitorAt: x.monitorAt, monitorAttempts: x.monitorAttempts }).where(eq(tickets.id, x.id));
+        await db.update(tickets).set({ monitorAt: x.monitorAt, monitorAttempts: x.monitorAttempts, monitorRestartAt: x.monitorRestartAt }).where(eq(tickets.id, x.id));
         continue;
       }
       await log(`Check ${n} of ${x.monitorMax} fired: ${x.monitorNote}`);
@@ -622,7 +658,7 @@ export function schedulerService(
             `If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan. If you stop with work still to do (the next batch of a long job), call schedule_check for when to carry on and say when in your state note; if you set nothing, Boss Man wakes you ${CARRY_ON_MS / 60_000} minutes after a run that made progress.`,
           );
         lines.push("", PLAIN_SUMMARY_RULE);
-        lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session.");
+        lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session." + (t.t.systemState === "review" ? " This ticket is already in review: a set_ticket_state to review only updates the note and does not re-request reviews (ticket_reply also works)." : ""));
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));
         // The ticket's conversation with the owner (R65).
@@ -667,13 +703,34 @@ export function schedulerService(
     return null;
   }
 
+  /** The tickets a review wake's note lists, in the order it lists them. */
+  const reviewTicketsOf = (note: string | null | undefined) => [...(note ?? "").matchAll(/^- ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) /gm)].map((m) => m[1]!);
+
+  /**
+   * The one ticket a wake is about when it isn't formally on one (BOS-268): a review wake that
+   * lists a single ticket, or any other wake whose note names exactly one existing ticket. A wake
+   * that lists none (owner chat, housekeeping) or several (a reviewer covering several tickets,
+   * the watchdog's list) keeps no ticket, so its card can't point at the wrong one. A tree wake
+   * keeps its own reason and gets its ticket from the tree instead. A nudge is left to
+   * `ticketNamedIn`, whose fallback link already covers it.
+   */
+  async function wakeTicket(w: typeof wakes.$inferSelect): Promise<string | null> {
+    if (w.ticketId) return null;
+    // A tree wake starts in the folder of a named ticket, which it must not: it keeps to its reason.
+    if (w.reason === CHAT_REASON || w.reason === TREE_REASON) return null;
+    const ids = w.reason === REVIEW_REASON ? reviewTicketsOf(w.note) : [...new Set(w.note?.match(NOTE_TICKET_IDS) ?? [])];
+    if (ids.length !== 1) return null;
+    const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ids[0]!), eq(tickets.companyId, w.companyId)));
+    return t?.id ?? null;
+  }
+
   /** A review wake's first ticket, when its project has a repo: the reviewer gets its own copy of that ticket's work. */
-  async function reviewCopy(w: typeof wakes.$inferSelect) {
-    if (w.reason !== REVIEW_REASON || w.ticketId) return null;
+  async function reviewCopy(w: typeof wakes.$inferSelect, onTicket?: string | null) {
+    if (w.reason !== REVIEW_REASON || (w.ticketId && w.ticketId !== onTicket)) return null;
     // An older runner would ignore the review flag and put the reviewer in the author's own worktree.
     const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, w.companyId));
     if (!runner || !deps.runners.can(runner.id, "review-copy")) return null;
-    const id = w.note?.match(/^- ([0-9a-f-]{36}) /m)?.[1];
+    const id = onTicket ?? reviewTicketsOf(w.note)[0];
     if (!id) return null;
     const [t] = await db
       .select({ ticketId: tickets.id, title: tickets.title, projectId: tickets.projectId, repoUrl: projects.repoUrl, baseRef: projects.defaultBranch })
@@ -683,7 +740,49 @@ export function schedulerService(
     return t?.repoUrl ? { ...t, repoUrl: t.repoUrl } : null;
   }
 
-  async function launch(w: typeof wakes.$inferSelect): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
+  /**
+   * A run that could not start is a card on the first failure, naming the reason (BOS-314), not
+   * after three. One card per agent at a time: while one is open, further failed starts add none.
+   */
+  async function flagFailedStart(w: typeof wakes.$inferSelect, reason: string) {
+    const [open] = await db.select({ id: decisions.id }).from(decisions).where(and(like(decisions.dedupeKey, `start-fail:${w.agentId}:%`), eq(decisions.status, "open"))).limit(1);
+    if (open) return;
+    const [agent] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
+    const [t] = w.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}` });
+  }
+
+  /** The owner's ranked Claude subscriptions in order, when this source is one of them (BOS-383). */
+  async function claudeAccounts(source: typeof fundingSources.$inferSelect) {
+    if (source.fallbackRank == null) return [];
+    const rows = await db.select().from(fundingSources).where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "anthropic"), isNotNull(fundingSources.fallbackRank)));
+    return rows.sort((a, b) => (a.fallbackRank ?? 0) - (b.fallbackRank ?? 0));
+  }
+
+  /** Tells the owner, quietly, when new runs move to another account or back; remembered in settings so each change is told once. */
+  async function noteActiveAccount(activeId: string, pool: (typeof fundingSources.$inferSelect)[]) {
+    if (pool.length < 2) return;
+    const key = "claude-active-account";
+    const [row] = await db.select().from(settings).where(eq(settings.key, key));
+    const before = typeof row?.value === "string" ? row.value : null;
+    if (before === activeId) return;
+    await db.insert(settings).values({ key, value: activeId }).onConflictDoUpdate({ target: settings.key, set: { value: activeId } });
+    const now = pool.find((p) => p.id === activeId);
+    const was = pool.find((p) => p.id === before);
+    // The first ever choice is not a switch.
+    if (!before || !now || !deps.notifyOwner) return;
+    await deps
+      .notifyOwner({
+        companyId: null,
+        level: "note",
+        title: `New runs now use ${now.name}`,
+        body: was ? `${now.fallbackRank! < (was.fallbackRank ?? 0) ? `${now.name} is back under its limit again` : `${was.name} is at its limit`}, so new runs go to ${now.name}. Runs already going finish on the account they started on.` : `New runs go to ${now.name}.`,
+        link: "#/funding",
+      })
+      .catch((err) => deps.log?.(`claude account notice failed: ${(err as Error).message}`));
+  }
+
+  async function launch(w: typeof wakes.$inferSelect, onSource?: string): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
     const [agent] = await db.select().from(agents).where(eq(agents.id, w.agentId));
     const [company] = await db.select().from(companies).where(eq(companies.id, w.companyId));
     const [runner] = await db.select().from(runners).where(eq(runners.companyId, w.companyId));
@@ -698,31 +797,39 @@ export function schedulerService(
       .where(and(eq(wakes.id, w.id), isNull(wakes.runId), inArray(wakes.status, ["queued", "deferred"])))
       .returning({ id: wakes.id });
     if (!claimed.length) return { ok: false, claimed: true };
-    // An agent starting on a waiting ticket moves it to in progress, so the board shows what is being worked on; first, so the prompt quotes the bumped version (R81).
-    // A ticket that still waits on unfinished work is not started (BOS-254); the prompt tells the agent.
-    const startedIt = w.ticketId ? await startTicket(w.ticketId) : false;
-    const notStarted = w.ticketId && !startedIt ? await startRefusalFor(w.ticketId) : null;
+    // The owner chat runs with board tools only, in its own folder, outside the CEO's chapters.
+    const chat = w.reason === CHAT_REASON && deps.chat ? deps.chat : null;
+    // A wake about exactly one ticket starts the run on it (BOS-268), so the Runs list and the
+    // agent's card never say "no ticket" while a reviewer works on one.
+    const onTicket = await wakeTicket(w);
+    const runTicketId = onTicket ?? w.ticketId;
+    // Starting work is for a wake with a ticket of its own; a reviewer was handed a ticket in
+    // review, so neither starting nor the start check applies to it.
+    const startsTicket = !!w.ticketId && w.reason !== WATCH_REASON;
+    const startedIt = startsTicket ? await startTicket(w.ticketId!) : false;
+    const notStarted = startsTicket && !startedIt ? await startRefusalFor(w.ticketId!) : null;
     // Work on a provider ticket for an engagement is charged back to the requester (R26).
-    const [ticket] = w.ticketId
+    const [ticket] = runTicketId
       ? await db
           .select({ engagementId: tickets.engagementId, projectId: tickets.projectId, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt })
           .from(tickets)
           .innerJoin(projects, eq(projects.id, tickets.projectId))
-          .where(eq(tickets.id, w.ticketId))
+          .where(eq(tickets.id, runTicketId))
       : [];
-    // The owner chat runs with board tools only, in its own folder, outside the CEO's chapters.
-    const chat = w.reason === CHAT_REASON && deps.chat ? deps.chat : null;
-    const copy = await reviewCopy(w);
+    const copy = await reviewCopy(w, onTicket);
     const briefAt = now();
-    const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(w, agent, company.name, briefAt, notStarted);
+    // A watch wake carries its ticket for the queue and the caps, but its run only reports on it: no worktree, no start, no ticket brief.
+    const workTicketId = w.reason === WATCH_REASON ? null : w.ticketId;
+    const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(workTicketId === w.ticketId ? w : { ...w, ticketId: null }, agent, company.name, briefAt, notStarted);
     // A CEO's run belongs to its current chapter (CEO continuity).
     const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
     // Why the run started is kept on it, so a run with no ticket still says what it was for
-    // (BOS-118). Only a nudge names a ticket the run is not formally on: a review wake lists
-    // several, and picking one of them would point the card at the wrong ticket.
+    // (BOS-118). Only a nudge names a ticket the run is not formally on: a review wake that
+    // lists several starts on none (BOS-268), and picking one of them would point the card at
+    // the wrong ticket.
     const origin = w.reason;
-    const aboutTicket = w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
+    const aboutTicket = onTicket ? null : w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, fundingSourceId: onSource ?? null, agentId: w.agentId, ticketId: runTicketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
@@ -745,16 +852,18 @@ export function schedulerService(
       runId,
       agentId: agent.id,
       agentKind: agent.agentKind,
+      // The name now, not the one the agent was hired under: a rename shows in their commits (BOS-265).
+      agentName: agent.name,
       model: agent.model,
       ...(agent.thinking ? { thinking: agent.thinking } : {}),
-      fundingSourceId: agent.fundingSourceId,
-      cwd: chat ? chat.cwd(w.companyId, w.agentId) : path.posix.join(workspaceRoot, w.ticketId ?? agent.id),
+      fundingSourceId: onSource ?? agent.fundingSourceId,
+      cwd: chat ? chat.cwd(w.companyId, w.agentId) : path.posix.join(workspaceRoot, workTicketId ?? agent.id),
       // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).
       ...(chat || agent.duty === "assistant" ? { boardToolsOnly: true } : {}),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
-      // A plan-first ticket starts in plan mode until its plan is approved (R40).
-      ...(ticket?.planFirst && !ticket.planApprovedAt ? { mode: "plan" as const } : {}),
-      ...(ticket?.repoUrl && w.ticketId ? { workspace: { projectId: ticket.projectId, ticketId: w.ticketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
+      // A plan-first ticket starts in plan mode until its plan is approved (R40). Plan mode is the assignee's: a reviewer is never put in it (BOS-371).
+      ...(ticket?.planFirst && !ticket.planApprovedAt && w.reason !== REVIEW_REASON ? { mode: "plan" as const } : {}),
+      ...(ticket?.repoUrl && workTicketId && !copy ? { workspace: { projectId: ticket.projectId, ticketId: workTicketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
       prompt: chapter?.prompt ?? wakePrompt,
       mcpToken,
@@ -839,16 +948,25 @@ export function schedulerService(
         resumeRunId: input.resumeRunId ?? null,
       };
 
+      // Someone waiting on this wake is never dropped for looking like a loop (DR-002): the loop
+      // limits raise their alert and the wake goes ahead, so a card can't be lost to a loop guard.
+      const cls = wakeClassOf(input);
+      const keep = cls === "waiting";
       if (depth > limits.maxDepth) {
-        const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `chain of ${depth} wake-ups exceeds ${limits.maxDepth}` }).returning();
-        await deps.alert(agent.companyId, `${agent.name} was woken ${depth} times in a chain, which looks like a loop. The last wake ("${input.reason}") was dropped. Look into it, then wake the agent again if it's fine.`, {
-          ticketId: base.ticketId,
-          about: [agent.id, causedByAgentId],
-          // One climbing alert per looping agent while it is open, not one (and one CEO run) per dropped wake.
-          dedupeKey: `alert:chain:${agent.id}`,
-          rewake: { agentId: agent.id, ticketId: base.ticketId, reason: input.reason },
-        });
-        return row!;
+        const loopAlert = () =>
+          deps.alert(agent.companyId, `${agent.name} was woken ${depth} times in a chain, which looks like a loop. The last wake ("${input.reason}") was ${keep ? "kept, because someone is waiting on it" : "dropped"}. Look into it${keep ? "" : ", then wake the agent again if it's fine"}.`, {
+            ticketId: base.ticketId,
+            about: [agent.id, causedByAgentId],
+            // One climbing alert per looping agent while it is open, not one (and one CEO run) per dropped wake.
+            dedupeKey: `alert:chain:${agent.id}`,
+            rewake: { agentId: agent.id, ticketId: base.ticketId, reason: input.reason },
+          });
+        if (!keep) {
+          const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `chain of ${depth} wake-ups exceeds ${limits.maxDepth}` }).returning();
+          await loopAlert();
+          return outcomeOf(row!);
+        }
+        await loopAlert();
       }
       if (causedByAgentId === agent.id) {
         const since = new Date(now().getTime() - 10 * 60_000);
@@ -857,15 +975,30 @@ export function schedulerService(
           .from(wakes)
           .where(and(eq(wakes.agentId, agent.id), eq(wakes.causedByAgentId, agent.id), gt(wakes.createdAt, since)));
         if ((recent[0]?.n ?? 0) >= limits.selfWakesPer10Min) {
-          const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `woke itself more than ${limits.selfWakesPer10Min} times in 10 minutes` }).returning();
-          await deps.alert(agent.companyId, `${agent.name} keeps waking itself (more than ${limits.selfWakesPer10Min} times in 10 minutes). New self-wakes are being dropped.`, { ticketId: base.ticketId, about: [agent.id], dedupeKey: `alert:self:${agent.id}` });
-          return row!;
+          const selfAlert = () =>
+            deps.alert(agent.companyId, `${agent.name} keeps waking itself (more than ${limits.selfWakesPer10Min} times in 10 minutes). New self-wakes are ${keep ? "still going through when someone is waiting on them, but look into it" : "being dropped"}.`, { ticketId: base.ticketId, about: [agent.id], dedupeKey: `alert:self:${agent.id}` });
+          if (!keep) {
+            const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `woke itself more than ${limits.selfWakesPer10Min} times in 10 minutes` }).returning();
+            await selfAlert();
+            return outcomeOf(row!);
+          }
+          await selfAlert();
         }
       }
-      // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
-      // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
-      // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON && input.reason !== RETRO_REASON) {
+      // A note steered into a live run starts nothing, so no run cap applies to it and the count below ignores it.
+      if (input.steerRunId) {
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, agent.companyId));
+        const text = `Message from Boss Man (${input.reason}): ${input.note}`;
+        if (runner && deps.runners.send(runner.id, { type: "run.message", runId: input.steerRunId, text, interrupt: false })) {
+          const [row] = await db.insert(wakes).values({ ...base, status: "steered", statusReason: `delivered into run ${input.steerRunId}` }).returning();
+          return outcomeOf(row!);
+        }
+      }
+      // Runs with no ticket (triage, chasing) cost as much as ticket work but are easy to set off in
+      // a loop, so each agent gets a few an hour, but only of the wakes agents start themselves.
+      // A wake someone is waiting on, or one Boss Man scheduled, is never dropped for it and does
+      // not use the allowance up (R68, BOS-272, DR-002).
+      if (!base.ticketId && cls === "agent") {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -875,14 +1008,9 @@ export function schedulerService(
               eq(wakes.agentId, agent.id),
               isNull(wakes.ticketId),
               gt(wakes.createdAt, since),
-              sql`${wakes.status} <> 'dropped'`,
-              sql`not (${wakes.reason} in (${sql.join([...OWNER_REASONS].map((r) => sql`${r}`), sql`, `)}) and (${wakes.reason} <> 'message' or ${wakes.causedByRunId} is null))`,
-              sql`${wakes.reason} <> ${WATCH_REASON}`,
-              sql`${wakes.reason} <> ${TREE_REASON}`,
-              sql`${wakes.reason} <> ${REVIEW_REASON}`,
-              sql`${wakes.reason} <> ${ANSWER_REASON}`,
-              sql`${wakes.reason} <> ${WATCHDOG_REASON}`,
-              sql`${wakes.reason} <> ${RETRO_REASON}`,
+              sql`${wakes.status} not in ('dropped', 'steered')`,
+              // Only the wakes this limit is for: agent-started ones (and any reason nobody classified), not the owner's own or Boss Man's.
+              sql`not (${wakes.reason} in (${sql.join([...reasonsOfClass("waiting"), ...reasonsOfClass("scheduled")].map((r) => sql`${r}`), sql`, `)}) and (${wakes.reason} <> 'message' or ${wakes.causedByRunId} is null))`,
             ),
           );
         if ((recent?.n ?? 0) >= limits.ticketlessPerHour) {
@@ -901,15 +1029,7 @@ export function schedulerService(
               { about: [agent.id], dedupeKey: `alert:ticketless:${agent.id}` },
             );
           }
-          return row!;
-        }
-      }
-      if (input.steerRunId) {
-        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, agent.companyId));
-        const text = `Message from Boss Man (${input.reason}): ${input.note}`;
-        if (runner && deps.runners.send(runner.id, { type: "run.message", runId: input.steerRunId, text, interrupt: false })) {
-          const [row] = await db.insert(wakes).values({ ...base, status: "steered", statusReason: `delivered into run ${input.steerRunId}` }).returning();
-          return row!;
+          return outcomeOf(row!);
         }
       }
       // Agent wakes below high priority wait out the owner's quiet hours; one morning run covers them (R86).
@@ -920,7 +1040,7 @@ export function schedulerService(
       const [row] = await db.insert(wakes).values(hold ? { ...base, status: "deferred", statusReason: hold.why, notBefore: hold.until } : base).returning();
       // Start it now rather than at the next timer pass (R85).
       if (!hold && deps.tickOnWake !== false) void this.tick().catch((err) => deps.log?.(`scheduler pass after a wake failed: ${(err as Error).message}`));
-      return row!;
+      return outcomeOf(row!);
     },
 
     /**
@@ -965,13 +1085,16 @@ export function schedulerService(
       if (release) notBefore = null;
       // A review line starts "- <ticket id>"; a ticket already listed isn't listed twice.
       const listed = !note || !!waiting.note?.includes(input.reason === REVIEW_REASON ? (note.split(" ")[1] ?? "\0") : note);
+      // A newer scheduled wake replaces the unstarted one (DR-002), since it says what is true now;
+      // the watch and tree wakes list tickets, so theirs add to the list instead.
+      const replaces = wakeClassOf(input) === "scheduled" && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && !!note;
       const [row] = await db
         .update(wakes)
-        .set({ note: listed ? waiting.note : [waiting.note, note].filter(Boolean).join(input.reason === REVIEW_REASON ? "\n" : "\n\n"), priority: Math.max(waiting.priority, priority), notBefore, ...(release ? { status: "queued" as const, statusReason: null } : {}) })
+        .set({ note: replaces ? note : listed ? waiting.note : [waiting.note, note].filter(Boolean).join(input.reason === REVIEW_REASON ? "\n" : "\n\n"), priority: Math.max(waiting.priority, priority), notBefore, ...(release ? { status: "queued" as const, statusReason: null } : {}) })
         .where(eq(wakes.id, waiting.id))
         .returning();
       if (release && deps.tickOnWake !== false) void this.tick().catch((err) => deps.log?.(`scheduler pass after a wake failed: ${(err as Error).message}`));
-      return row!;
+      return outcomeOf(row!, true);
     },
 
     /**
@@ -1120,6 +1243,13 @@ export function schedulerService(
         .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)))))
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
       if (queue.length === 0) return result;
+      // Priority order, but a wake Boss Man scheduled gains 1 for every 15 minutes it has waited, so a
+      // low-priority watch can't wait for ever behind a full house (DR-002). The stored priority, and
+      // so the quota hold, is untouched. Someone-is-waiting wakes go first. The sort is stable, so
+      // equal ranks stay oldest first.
+      const rank = (w: (typeof queue)[number]) => w.priority + (wakeClassOf(w) === "scheduled" ? Math.floor((t.getTime() - w.createdAt.getTime()) / AGE_STEP_MS) : 0);
+      const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
+      queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a));
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
@@ -1130,21 +1260,28 @@ export function schedulerService(
       }
 
       const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
+      // An owner chat has its own slot per agent and uses none of the work slots below.
+      const working = active.filter((r) => r.purpose !== "chat");
       // The owner's Settings override the instance and company limits when saved (settings.run_limits).
       const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
       const stored = lrow?.value as { instance?: number; company?: number } | undefined;
       const maxTotal = stored?.instance ?? limits.instance;
       const maxCompany = stored?.company ?? limits.company;
-      let total = active.length;
+      let total = working.length;
       const byCompany = new Map<string, number>();
       const byAgent = new Map<string, number>();
       // An agent's chat run doesn't hold up its own work, or the other way round: one of each.
       const chatting = new Set<string>();
       for (const r of active) {
-        byCompany.set(r.companyId, (byCompany.get(r.companyId) ?? 0) + 1);
         if (r.purpose === "chat") chatting.add(r.agentId ?? r.companyId);
-        else if (r.agentId) byAgent.set(r.agentId, (byAgent.get(r.agentId) ?? 0) + 1);
+        else {
+          byCompany.set(r.companyId, (byCompany.get(r.companyId) ?? 0) + 1);
+          if (r.agentId) byAgent.set(r.agentId, (byAgent.get(r.agentId) ?? 0) + 1);
+        }
       }
+      // One work slot per company is kept free for a wake someone is waiting on (DR-002), so a card
+      // never waits for a long run to end. With only one or two slots there is nothing to spare.
+      const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
 
       // Budget admission fails closed: if budgets can't be read, nothing launches.
       let budgets: Awaited<ReturnType<ReturnType<typeof fundingService>["budgetStatuses"]>>;
@@ -1177,7 +1314,8 @@ export function schedulerService(
         }
         const isChat = w.reason === CHAT_REASON;
         // Chats with the owner are held only by their agent's one chat slot; work wakes face all three limits.
-        if (isChat ? chatting.has(w.agentId) : total >= maxTotal || (byCompany.get(w.companyId) ?? 0) >= maxCompany || (byAgent.get(w.agentId) ?? 0) >= limits.agent) {
+        const spare = wakeClassOf(w) === "waiting" ? 0 : reserved;
+        if (isChat ? chatting.has(w.agentId) : total + spare >= maxTotal || (byCompany.get(w.companyId) ?? 0) + spare >= maxCompany || (byAgent.get(w.agentId) ?? 0) >= limits.agent) {
           // A review stuck behind its busy reviewer goes to another qualified reviewer who is free.
           const waited = t.getTime() - w.createdAt.getTime();
           if (w.reason === REVIEW_REASON && (byAgent.get(w.agentId) ?? 0) >= limits.agent && waited >= limits.reviewHandoverMs) {
@@ -1215,7 +1353,7 @@ export function schedulerService(
         for (const b of budgets.filter((b) => b.status.action === "ask" && inScope(b))) await askAboutBudget(b, w.companyId);
 
         // A project's monthly cap holds new runs for its tickets; runs already going finish.
-        if (wt?.monthlyCap != null) {
+        if (wt?.monthlyCap != null && w.reason !== WATCH_REASON) {
           const month = monthStartUtc(t);
           const spent = await projectSpendMicros(db, wt.projectId, month);
           if (spent >= wt.monthlyCap) {
@@ -1239,12 +1377,12 @@ export function schedulerService(
 
         // A ticket's spend across all its runs has a ceiling, because review and retry loops multiply runs (R53).
         const ticketCap = wt?.cap ?? wt?.projectCap;
-        if (w.ticketId && ticketCap != null) {
+        if (w.ticketId && ticketCap != null && w.reason !== WATCH_REASON) {
           const [spent] = await db
             .select({ total: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
             .from(costEvents)
             .innerJoin(runs, eq(runs.id, costEvents.runId))
-            .where(eq(runs.ticketId, w.ticketId));
+            .where(and(eq(runs.ticketId, w.ticketId), sql`${runs.origin} is distinct from ${WATCH_REASON}`));
           const total = Number(spent?.total ?? 0);
           if (total >= ticketCap) {
             await db
@@ -1267,34 +1405,62 @@ export function schedulerService(
         // Above high priority a wake, or any wake on an urgent ticket, still goes through the quota
         // check: under the default "pause" it is held at the limit, so nothing spends unapproved
         // extra usage (BOS-253).
-        const [urgentTicket] = w.ticketId ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
-        if (agent?.fundingSourceId && (w.priority < limits.highPriority || !!urgentTicket?.urgent)) {
+        const [urgentTicket] = w.ticketId && w.reason !== WATCH_REASON ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+        const holdApplies = w.priority < limits.highPriority || !!urgentTicket?.urgent;
+        let onSource: string | undefined;
+        if (agent?.fundingSourceId) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));
           if (source?.kind === "subscription") {
-            const samples = await latestQuotaWindows(source.id);
-            const full = holdingWindows(source, samples, t);
-            // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
-            // the limit itself, so the default "pause" never spends unapproved extra usage.
-            if (!quotaPasses(source, full, samples, !!urgentTicket?.urgent)) {
-              const until = full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null);
-              await defer(`subscription ${full.map((s) => s.window).join(", ")} window nearly used up`, until);
+            // An agent on one of the owner's ranked Claude subscriptions goes to the first one with
+            // room (BOS-383); an agent on any other source is checked against its own as before.
+            const pool = source.fallbackRank != null && source.provider === "anthropic" ? await claudeAccounts(source) : [];
+            // An account after the first with no login (its secret was deleted) would silently run on the company's default token, so it counts as unavailable.
+            const usable = pool.filter((a, i) => i === 0 || a.secretId);
+            const accounts = usable.length ? usable : [source];
+            const checked: { source: typeof source; rank: number; passes: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
+            for (const a of accounts) {
+              const samples = await latestQuotaWindows(a.id);
+              const full = holdingWindows(a, samples, t);
+              // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
+              // the limit itself, so the default "pause" never spends unapproved extra usage.
+              checked.push({ source: a, rank: a.fallbackRank ?? 0, passes: quotaPasses(a, full, samples, !!urgentTicket?.urgent), full });
+            }
+            const picked = pickAccount(checked);
+            if (holdApplies && !picked) {
+              // Every account is full: wait for the one that frees up first.
+              const resets = checked.map((c) => c.full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null));
+              const until = resets.reduce<Date | null>((m, r) => (r && (!m || r < m) ? r : m), null);
+              const first = checked[0]!;
+              await defer(`subscription ${first.full.map((s) => s.window).join(", ")} window nearly used up`, until);
               continue;
+            }
+            if (pool.length) {
+              // High-priority work that skips the hold still lands on a account with room, else the agent's own.
+              const chosenId = (picked ?? source).id;
+              onSource = chosenId;
+              // Only ordinary work says which account new runs use. An urgent ticket may pass a
+              // threshold that holds everyone else, so it can land on a different account; letting it
+              // announce would flip the notice back and forth every pass (BOS-453).
+              if (!urgentTicket?.urgent && picked) await noteActiveAccount(chosenId, pool);
             }
           }
         }
 
-        const launched = await launch(w);
+        const launched = await launch(w, onSource);
         if (!launched.ok) {
           // Another pass already took it; leave its state alone.
           if ("claimed" in launched) continue;
           await wait(launched.reason);
+          await flagFailedStart(w, launched.reason);
           continue;
         }
         result.launched++;
-        total++;
-        byCompany.set(w.companyId, (byCompany.get(w.companyId) ?? 0) + 1);
         if (isChat) chatting.add(w.agentId);
-        else byAgent.set(w.agentId, (byAgent.get(w.agentId) ?? 0) + 1);
+        else {
+          total++;
+          byCompany.set(w.companyId, (byCompany.get(w.companyId) ?? 0) + 1);
+          byAgent.set(w.agentId, (byAgent.get(w.agentId) ?? 0) + 1);
+        }
       }
       return result;
     },

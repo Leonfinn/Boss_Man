@@ -42,6 +42,16 @@ describe("watchdog settings (BOS-58)", () => {
     expect(calls.find((c) => c.method === "PATCH")).toMatchObject({ url: "/api/companies/c1/watchdog", body: { enabled: true, scrumMasterAgentId: "sm", inProgressHours: 3, reviewHours: 2, blockedHours: 8 } });
   });
 
+  it("ticks record only in Settings and PATCHes just that setting (BOS-166)", async () => {
+    const calls = stub(status({ settings: { ...DEFAULT_WATCHDOG, enabled: true }, scrumMaster: { id: "sm", name: "Scrum Master", paused: false } }));
+    render(<Watchdog company={company} />);
+    const box = (await screen.findByLabelText(/record only/i)) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    await vi.waitFor(() => expect(calls.find((c) => c.method === "PATCH")).toBeTruthy());
+    expect(calls.find((c) => c.method === "PATCH")!.body).toMatchObject({ recordOnly: true });
+  });
+
   it("shows when it tripped its cap, and offers to switch it back on", async () => {
     stub(status({ settings: { ...DEFAULT_WATCHDOG, enabled: false }, scrumMaster: { id: "sm", name: "Scrum Master", paused: false }, trippedAt: "2026-10-26T10:00:00Z", trippedReason: "it would have woken the Scrum Master more than 4 times in an hour" }));
     render(<Watchdog company={company} />);

@@ -3,15 +3,15 @@
 // wakes the Scrum Master once with the list of flags that are due. The Scrum Master's few
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
 // called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
-import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, or, sql } from "drizzle-orm";
-import { readWatchdogSettings, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
+import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { readWatchdogSettings, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, engagements, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkAsk } from "./decisions.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
-import { activeRows, latestRows, REVIEW_REASON } from "./review-kinds.js";
+import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { backtest } from "./watchdog-backtest.js";
 import { buildSummary } from "./watchdog-summary.js";
 import { backoffGapMs, evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type SnapTicket, type Trip } from "./watchdog-rules.js";
@@ -40,6 +40,8 @@ const MAX_OWNER_REMINDERS = 3;
 const RETRY_DROPPED_MS = 15 * 60_000;
 /** The Scrum Master's own actions on a problem: one per problem per hand-off, whichever kind. */
 const SM_ACTION_KINDS: readonly WatchdogActionKind[] = ["nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision"];
+/** A rehearsal entry (BOS-166) reached nobody, so it never uses up a hand-off's one action. */
+const notRecorded = sql`${watchdogActions.after}->>'recorded' is null`;
 
 export class WatchdogError extends Error {
   constructor(
@@ -144,6 +146,25 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     return a!;
   }
 
+  /**
+   * A hand-off in rehearsal (BOS-166): the flag keeps its normal schedule, the cap isn't asked, and
+   * one "would have woken" row is written per hand-off with the problems it would have listed.
+   */
+  async function recordHandOff(c: typeof companies.$inferSelect, sm: { id: string; name: string }, flags: Array<typeof watchdogFlags.$inferSelect>, s: WatchdogSettings, t: Date, moved: ReadonlySet<string>) {
+    for (const f of flags) {
+      const steps = moved.has(f.id) ? 0 : f.backoffSteps;
+      await db.update(watchdogFlags).set({ dueAt: new Date(t.getTime() + backoffGapMs(f.rule as WatchdogRule, s, steps)), lastFlaggedAt: t, flagCount: sql`${watchdogFlags.flagCount} + 1`, backoffSteps: steps + 1 }).where(eq(watchdogFlags.id, f.id));
+    }
+    return recordMove({
+      companyId: c.id,
+      kind: "record_sweep_wake",
+      targetAgentId: sm.id,
+      reason: `${flags.length} problem${flags.length === 1 ? "" : "s"} found (record only)`,
+      after: { flagIds: flags.map((f) => f.id) },
+      summary: `Record only: would have woken ${sm.name} about ${flags.length} problem${flags.length === 1 ? "" : "s"} (flag${flags.length === 1 ? "" : "s"} ${flags.map((f) => f.id).join(", ")}). Nothing was sent.`,
+    });
+  }
+
   /** An attempt that reached the wake path but was refused there: logged, and counted toward the cap. */
   async function refuse(base: Parameters<typeof log>[0] extends infer R ? Omit<R & object, "summary" | "undoable"> : never, why: string): Promise<never> {
     await log({ ...base, after: { refused: why.slice(0, 300) }, undoable: false, summary: `The Scrum Master tried to ${base.kind.replace("_", " ")} but it was refused: ${why}` });
@@ -172,7 +193,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       );
     if (!open.length) throw new WatchdogError(409, `That ticket isn't among the problems the watchdog handed you${rules ? ` for this action (it needs: ${rules.map((r) => WATCHDOG_RULE_LABEL[r]).join(" or ")})` : ""}, or its flag has cleared. Act only on the listed problems.`);
     for (const f of open) {
-      const [used] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), inArray(watchdogActions.kind, [...SM_ACTION_KINDS]), gte(watchdogActions.createdAt, f.lastFlaggedAt!))).limit(1);
+      const [used] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), inArray(watchdogActions.kind, [...SM_ACTION_KINDS]), gte(watchdogActions.createdAt, f.lastFlaggedAt!), notRecorded)).limit(1);
       if (!used) return f;
     }
     throw new WatchdogError(409, `You already used ${kind.replace("_", " ")} on this problem since it was handed to you (one action per problem, of any kind). If it is still stuck after its limit it comes back to you; escalate it if it can't wait.`);
@@ -219,13 +240,26 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
   async function withinCap(companyId: string, group: "runs" | "nudges", s: WatchdogSettings, detail = "") {
     const kinds = group === "runs" ? ["sweep_wake"] : [...WATCHDOG_NUDGE_KINDS];
     const max = group === "runs" ? s.maxSmRunsPerHour : s.maxNudgesPerHour;
+    // Only the counts that mean "reached someone" spend the cap: alert hops, trips, upserts and summaries
+    // sit in the same log and never did. Record-only entries (BOS-166) reached nobody either, so the test
+    // for a recorded row and the named list both keep a rehearsal from tripping the watchdog.
     const [row] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(watchdogActions)
-      .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, kinds), gt(watchdogActions.createdAt, new Date(now().getTime() - H)), group === "runs" ? sql`${watchdogActions.after}->>'dropped' is null` : undefined));
+      .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, kinds), gt(watchdogActions.createdAt, new Date(now().getTime() - H)), group === "runs" ? sql`${watchdogActions.after}->>'dropped' is null` : undefined, sql`coalesce(${watchdogActions.after} ? 'recorded', false) = false`, notInArray(watchdogActions.kind, [...WATCHDOG_NON_CAPPED_KINDS])));
     if ((row?.n ?? 0) < max) return true;
     await trip(companyId, group === "runs" ? `it would have woken the Scrum Master more than ${max} times in an hour${detail ? ` (${detail})` : ""}` : `the Scrum Master would have taken more than ${max} actions that reach someone in an hour`);
     return false;
+  }
+
+  /**
+   * A rehearsal entry (BOS-166): one row per thing the sweep would have done while record-only mode
+   * is on. It carries `recorded: true` so the cap, the once-per-hand-off rule and undo all pass over
+   * it, and the activity view can mark it "not sent".
+   */
+  async function recordMove(row: { companyId: string; kind: WatchdogActionKind; reason: string; summary: string; ticketId?: string | null; flagId?: string | null; targetAgentId?: string | null; after?: Record<string, unknown> }) {
+    const { after, ...rest } = row;
+    return log({ ...rest, after: { ...(after ?? {}), recorded: true }, undoable: false });
   }
 
   /** The caller must be the company's active Scrum Master, with the watchdog on. */
@@ -235,6 +269,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const c = await company(companyId);
     const s = readWatchdogSettings(c.watchdog);
     if (!s.enabled) throw new WatchdogError(409, "The watchdog is switched off, so its actions are too. Only the owner can switch it back on.");
+    if (s.recordOnly) throw new WatchdogError(409, "The watchdog is in record-only mode: it writes down what it would do and reaches nobody, so there is no action for you to take. The owner switches it to full action in Settings.");
     const until = watchdogPausedUntil(c, now());
     if (until) throw new WatchdogError(409, `The watchdog is paused after reaching its hourly limit. It resumes by itself at ${until.toISOString().slice(11, 16)} UTC.`);
     return { sm, s };
@@ -298,6 +333,12 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
           ? { blockedTicketId: dep.blockedTicketId, kind: "engagement", resolved: engagementStatus === "signed_off" }
           : { blockedTicketId: dep.blockedTicketId, kind: "decision", decisionId: dep.blockerDecisionId!, resolved: decisionStatus !== "open", openedAt: decisionAt ?? new Date(0) },
     );
+    // Tickets in review whose reviews have all passed: they wait for the merge sweep, so "no movement in review" doesn't apply (BOS-362).
+    const mergeWaiting = new Set<string>();
+    for (const r of rows) if (r.systemState === "review") {
+      const rr = await latestRows(db, r.id);
+      if (rr.length && evaluateReviews(rr) === "passed") mergeWaiting.add(r.id);
+    }
     const snapTickets: SnapTicket[] = rows.map((r) => ({
       id: r.id,
       state: r.systemState,
@@ -308,6 +349,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       scheduled: !!r.monitorAt || (!!r.assigneeAgentId && waiting.has(`${r.assigneeAgentId}:${r.id}`)),
       awaitingPlan: r.planFirst && !r.planApprovedAt,
       withOwner: withOwner.has(r.id),
+      mergeWaiting: mergeWaiting.has(r.id),
       bounces: bounces.get(r.id) ?? 0,
     }));
     return {
@@ -358,10 +400,12 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const moved = new Set<string>();
     const handed = list.filter((f) => f.lastFlaggedAt && f.backoffSteps > 0);
     if (!handed.length) return moved;
+    // From the earlier of the last hand-off and the flag opening, so a comment that arrived just before a
+    // hand-off (and so was never counted) still starts its back-off over (BOS-166).
     const comments = await db
       .select({ ticketId: activity.ticketId, at: activity.at })
       .from(activity)
-      .where(and(inArray(activity.ticketId, handed.map((f) => f.ticketId)), eq(activity.kind, "message"), gt(activity.at, new Date(Math.min(...handed.map((f) => f.lastFlaggedAt!.getTime()))))));
+      .where(and(inArray(activity.ticketId, handed.map((f) => f.ticketId)), eq(activity.kind, "message"), gt(activity.at, new Date(Math.min(...handed.map((f) => Math.min(f.lastFlaggedAt!.getTime(), f.openedAt.getTime())))))));
     for (const f of handed) {
       const last = f.lastFlaggedAt!.getTime();
       const x = snap.tickets.find((y) => y.id === f.ticketId);
@@ -425,12 +469,16 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     // A few are sent one by one; a pile of them is one summary, so a flood can't flood the owner.
     const reminders: Array<{ f: typeof watchdogFlags.$inferSelect; info: ReturnType<typeof snap.titles.get>; idle: number }> = [];
     for (const f of due.filter((x) => x.rule === "owner_decision_waiting")) {
-      const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), eq(watchdogActions.kind, "owner_reminder"))).limit(1);
+      // A recorded rehearsal counts as "told" too: live mode reminds once per flag for all time, so a second rehearsal must not record another (BOS-166).
+      const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), inArray(watchdogActions.kind, ["owner_reminder", "record_owner_reminder"]))).limit(1);
       await db.update(watchdogFlags).set({ dueAt: later(f), lastFlaggedAt: t }).where(eq(watchdogFlags.id, f.id));
-      // The owner may have acted since this flag opened; don't tell them again that they are holding it up (BOS-123).
-      if (!told && !(await recentOwnerAnswer(db, { companyId: c.id, ticketIds: [f.ticketId], since: f.openedAt, decisionTypes: ["question", "deploy"] }))) reminders.push({ f, info: snap.titles.get(f.ticketId), idle: (f.detail as Trip["detail"]).idleMs ?? 0 });
+      // The owner may have answered the card since this flag opened; don't tell them again that they are
+      // holding it up (BOS-123). Only an answer to this very card settles it: another card's answer or a
+      // passing message on the ticket leaves it waiting (BOS-175).
+      if (!told && !(await recentOwnerAnswer(db, { companyId: c.id, ticketIds: [f.ticketId], since: f.openedAt, decisionTypes: ["question", "deploy"], decisionId: (f.detail as Trip["detail"]).decisionId ?? null }))) reminders.push({ f, info: snap.titles.get(f.ticketId), idle: (f.detail as Trip["detail"]).idleMs ?? 0 });
     }
-    if (reminders.length > MAX_OWNER_REMINDERS) {
+    // Record only (BOS-166): the owner is told nothing, and each reminder it would have sent is written down instead.
+    if (reminders.length > MAX_OWNER_REMINDERS && !s.recordOnly) {
       const oldest = Math.max(...reminders.map((r) => r.idle));
       await deps.notifyOwner({
         companyId: c.id,
@@ -441,14 +489,24 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       });
     }
     for (const { f, info, idle } of reminders) {
+      const reason = `waiting ${ago(idle)} on the owner's decision`;
+      if (s.recordOnly) {
+        await recordMove({ companyId: c.id, kind: "record_owner_reminder", ticketId: f.ticketId, flagId: f.id, reason, after: { wouldBeOneOf: reminders.length }, summary: `Record only: would have reminded the owner that ${info?.ref ?? "a ticket"} has waited ${ago(idle)} for their decision. Nothing was sent.` });
+        continue;
+      }
       if (reminders.length <= MAX_OWNER_REMINDERS) await deps.notifyOwner({ companyId: c.id, level: "flag", title: `${info?.ref ?? "A ticket"} has waited ${ago(idle)} for your decision`, body: `"${info?.title ?? ""}" can't move until you answer. It's in Your Review.`, link: `#/tickets/${f.ticketId}` });
-      await log({ companyId: c.id, kind: "owner_reminder", ticketId: f.ticketId, flagId: f.id, reason: `waiting ${ago(idle)} on the owner's decision`, summary: `Boss Man reminded the owner: this has waited ${ago(idle)} for their decision` });
+      await log({ companyId: c.id, kind: "owner_reminder", ticketId: f.ticketId, flagId: f.id, reason, summary: `Boss Man reminded the owner: this has waited ${ago(idle)} for their decision` });
     }
 
     // Rule 4: snoozed twice in a row and still tripping goes to the CEO, not back to the Scrum Master.
     for (const f of due.filter((x) => x.rule !== "owner_decision_waiting" && x.snoozeCount >= 2)) {
       const boss = await ceo(c.id);
       if (!boss) continue;
+      if (s.recordOnly) {
+        // Record only: the flag is not marked escalated, so the full action on the next sweep still hands it to the CEO.
+        await recordMove({ companyId: c.id, kind: "record_auto_escalate", ticketId: f.ticketId, flagId: f.id, targetAgentId: boss.id, reason: "snoozed twice in a row and still tripping", after: { flagIds: [f.id] }, summary: `Record only: would have handed this to ${boss.name} (snoozed twice in a row and still ${WATCHDOG_RULE_LABEL[f.rule as WatchdogRule]}). Nothing was sent.` });
+        continue;
+      }
       if (!(await withinCap(c.id, "nudges", s))) return { flagged: 0 };
       const info = snap.titles.get(f.ticketId);
       const w = await deps.notify(boss.id, {
@@ -482,6 +540,11 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const byRule = new Map<string, number>();
     for (const f of wanted) byRule.set(f.rule, (byRule.get(f.rule) ?? 0) + 1);
     const because = `${wanted.length} problem${wanted.length === 1 ? " was" : "s were"} due: ${[...byRule].map(([r, n]) => `${n} ${WATCHDOG_RULE_LABEL[r as WatchdogRule]}`).join(", ")}`;
+    // Record only (BOS-166): no wake and no cap. The flags keep the normal schedule and back-off, and the entry says what it would have listed.
+    if (s.recordOnly) {
+      await recordHandOff(c, sm, list, s, t, await movedSince(snap, list));
+      return { flagged: list.length };
+    }
     if (!(await withinCap(c.id, "runs", s, because))) return { flagged: 0 };
     const note = [
       `Watchdog: ${list.length} ticket problem${list.length === 1 ? "" : "s"} found by Boss Man's rule checks.`,
@@ -563,9 +626,15 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
    */
   async function urgentCheck(companyId: string) {
     for (const d of (await ownerDecisions(companyId)).filter((x) => x.blocks.length >= URGENT_BLOCKED)) {
-      const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "urgent_alert"), sql`${watchdogActions.after}->>'decisionId' = ${d.id}`)).limit(1);
+      // A recorded rehearsal counts as already paged too: live mode pages once per decision, so a second sweep must not record another (BOS-166).
+      const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, ["urgent_alert", "record_urgent_page"]), sql`${watchdogActions.after}->>'decisionId' = ${d.id}`)).limit(1);
       if (told) continue;
       const q = d.question.replace(/\s+/g, " ").trim().slice(0, 140);
+      // Record only (BOS-166): no page. The entry is written down so the log and summary say it would have paged.
+      if (readWatchdogSettings((await company(companyId)).watchdog).recordOnly) {
+        await recordMove({ companyId, kind: "record_urgent_page", reason: `one decision holds ${d.blocks.length} tickets`, after: { decisionId: d.id, tickets: d.blocks }, summary: `Record only: would have paged the owner that one decision holds ${d.blocks.length} tickets (${d.blocks.join(", ")}). Nothing was sent.` });
+        continue;
+      }
       await deps.notifyOwner({ companyId, level: "page", title: `Your decision is holding up ${d.blocks.length} tickets`, body: `"${q}" blocks ${d.blocks.join(", ")}. It is in Your Review.`, link: "#/decisions" });
       await log({ companyId, kind: "urgent_alert", reason: `one decision holds ${d.blocks.length} tickets`, after: { decisionId: d.id, tickets: d.blocks }, summary: `Boss Man paged the owner: one decision holds ${d.blocks.length} tickets (${d.blocks.join(", ")})` });
     }
@@ -578,7 +647,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const [last] = await db.select({ at: watchdogActions.createdAt }).from(watchdogActions).where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "daily_summary"))).orderBy(desc(watchdogActions.createdAt)).limit(1);
     if (!force && last && t.getTime() - last.at.getTime() < 20 * H) return false;
     const since = last?.at ?? new Date(t.getTime() - 24 * H);
-    const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
+    const [c] = await db.select({ prefix: companies.ticketPrefix, watchdog: companies.watchdog }).from(companies).where(eq(companies.id, companyId));
+    const recordOnly = readWatchdogSettings(c?.watchdog).recordOnly;
     const opened = await db.select({ id: watchdogFlags.id, closedAt: watchdogFlags.closedAt }).from(watchdogFlags).where(and(eq(watchdogFlags.companyId, companyId), gte(watchdogFlags.openedAt, since)));
     const acts = await db
       .select({ kind: watchdogActions.kind, n: sql<number>`count(*)::int` })
@@ -597,6 +667,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       caught: opened.length,
       fixed: cleared[0]?.n ?? 0,
       actions: Object.fromEntries(acts.map((a) => [a.kind, a.n])),
+      recordOnly,
       open: openRows.map((r) => ({
         ref: ticketRef(c?.prefix, r.number) ?? `#${r.number}`,
         title: r.title.replace(/\s+/g, " ").slice(0, 80),
@@ -607,6 +678,11 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       decisions: await ownerDecisions(companyId),
     });
     if (!s) return false;
+    if (recordOnly) {
+      // Rehearsing: the summary goes to the activity log only, so the log can say what it would have reported.
+      await log({ companyId, kind: "daily_summary", reason: `Record only: would have sent the daily summary (${s.title.toLowerCase()})`, after: { stuck: s.stuck, oldest: s.oldestRef, body: s.body }, summary: "Record only: Boss Man wrote this daily summary down instead of sending it. Nothing was sent." });
+      return false;
+    }
     await deps.notifyOwner({ companyId, level: "note", title: s.title, body: s.body, link: "#/scrum-master" });
     await log({ companyId, kind: "daily_summary", reason: s.title, after: { stuck: s.stuck, oldest: s.oldestRef }, summary: "Boss Man sent the owner the Scrum Master's daily summary" });
     return true;
@@ -858,6 +934,11 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     issues: openIssues,
     urgentCheck,
     dailySummary,
+    /** True while the company is rehearsing (record-only mode, BOS-166): the sweep acts on nobody. */
+    async recordOnly(companyId: string) {
+      return readWatchdogSettings((await company(companyId)).watchdog).recordOnly;
+    },
+
     // The alert ladder (BOS-64) checks its Scrum Master actions with the same guard and cap.
     actor,
     capOrFail,
@@ -949,7 +1030,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const [f] = await db.select().from(watchdogFlags).where(and(eq(watchdogFlags.id, input.flagId), eq(watchdogFlags.companyId, companyId)));
       if (!f || f.status !== "open" || !f.lastFlaggedAt || f.escalatedAt || f.rule === "owner_decision_waiting") throw new WatchdogError(404, "No open problem with that flag ID among those handed to you.");
       if (f.snoozeCount >= 2) throw new WatchdogError(409, "This flag has been snoozed twice in a row already. It goes to the CEO when it comes due; escalate it now instead if it needs them.");
-      const [usedOn] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), inArray(watchdogActions.kind, [...SM_ACTION_KINDS]), gte(watchdogActions.createdAt, f.lastFlaggedAt))).limit(1);
+      const [usedOn] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), inArray(watchdogActions.kind, [...SM_ACTION_KINDS]), gte(watchdogActions.createdAt, f.lastFlaggedAt), notRecorded)).limit(1);
       if (usedOn) throw new WatchdogError(409, "You already took an action on this problem since it was handed to you (one action per problem). If it is still stuck after its limit it comes back to you.");
       const until = new Date(now().getTime() + input.hours * H);
       await db.update(watchdogFlags).set({ snoozedUntil: until, snoozeReason: reason, snoozeCount: f.snoozeCount + 1 }).where(eq(watchdogFlags.id, f.id));
@@ -1003,7 +1084,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
         const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, t.id));
-        const earlier = await recentOwnerAnswer(db, { companyId, ticketIds: [t.id, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], askerAgentId: sm.id, question: input.question });
+        const earlier = await recentOwnerAnswer(db, { companyId, ticketIds: [t.id, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question: input.question });
         if (earlier) throw new WatchdogError(409, `${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, add stillNeeded saying what changed.`);
       }
       const f = await handedFlag(companyId, t.id, "raise_decision");
@@ -1193,6 +1274,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         const when = issueAt ? issueAt.toLocaleDateString("en-GB", { day: "numeric", month: "short" }) : "";
         return {
           ...r.action,
+          // A rehearsal entry (BOS-166) says so, so the log can mark it as not sent.
+          recorded: (r.action.after as { recorded?: boolean } | null)?.recorded === true,
           actorName: r.actor ?? (r.action.actorAgentId ? null : "Boss Man"),
           targetName: t?.name ?? null,
           targetIsScrumMaster: t?.duty === SCRUM_MASTER_DUTY,

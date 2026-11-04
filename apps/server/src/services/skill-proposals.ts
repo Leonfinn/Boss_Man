@@ -5,7 +5,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agentSkills, agents, decisions, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
 import { record } from "./activity.js";
-import { securityReviewers } from "./review-policy.js";
+import { byLoad, securityReviewers } from "./review-policy.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "./decisions.js";
 import { hashFiles, scriptFilesOf, sha256, unreadableFile } from "./skill-files.js";
 import { normalise, parseSkillMd, skillName, skillNameOf, SkillError, type SkillFile, type skillsService } from "./skills.js";
@@ -127,6 +127,8 @@ export type SkillDeps = {
   tell?: (agentId: string, note: string) => Promise<unknown>;
   /** Closes an open review ticket when its proposal expires, so nobody keeps working a dead review. */
   closeReview?: (ticketId: string, stateNote: string) => Promise<unknown>;
+  /** Closes the review ticket as done once its verdict is in (BOS-304): the review is over, so its own reviewer finishes it. */
+  closeReviewDone?: (ticketId: string, stateNote: string) => Promise<unknown>;
   now?: () => Date;
 };
 
@@ -169,9 +171,10 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
     const open = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, `skill:${proposalId}`), eq(decisions.status, "open")));
     for (const d of open) await deps.withdrawDecision(d.id);
   };
-  /** The first available agent Settings > Reviews (or the old agent-page mark) names for security reviews; never the proposer. */
+  /** One of the agents Settings > Reviews names for security reviews, least loaded first; never the proposer. */
   async function securityReviewer(companyId: string, not: string | null) {
-    return (await securityReviewers(db, companyId)).find((a) => !a.paused && a.id !== not) ?? null;
+    const pool = (await securityReviewers(db, companyId)).filter((a) => !a.paused && a.id !== not);
+    return (await byLoad(db, pool))[0] ?? null;
   }
   async function reviewProject(companyId: string) {
     const [p] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.companyId, companyId), isNull(projects.archivedAt))).orderBy(asc(projects.createdAt));
@@ -316,7 +319,19 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
         .where(and(eq(skillProposals.id, p.id), eq(skillProposals.status, "in_review")))
         .returning();
       if (!row) throw new SkillError(409, "This proposal isn't waiting for a review.");
-      await record(db, { companyId, ticketId: p.reviewTicketId, agentId: reviewerId, kind: "skill.reviewed", summary: `Security review of ${p.name}: ${v.verdict === "conditions" ? "recommend with conditions" : v.verdict === "advise_against" ? "advise against" : "recommend"} (${(v.findings ?? []).length} finding${(v.findings ?? []).length === 1 ? "" : "s"}).` });
+      const verdictNote = `Security review of ${p.name}: ${v.verdict === "conditions" ? "recommend with conditions" : v.verdict === "advise_against" ? "advise against" : "recommend"} (${(v.findings ?? []).length} finding${(v.findings ?? []).length === 1 ? "" : "s"}).`;
+      await record(db, { companyId, ticketId: p.reviewTicketId, agentId: reviewerId, kind: "skill.reviewed", summary: verdictNote });
+      // The verdict ends the review, so this task closes itself (BOS-304): neither the reviewer nor
+      // the CEO should have to move it to done by hand. It is no code, so there is nothing to merge.
+      // The verdict is already saved; a failed close must not turn a good verdict into an error the
+      // reviewer would retry (which would hit "isn't waiting"). It is logged instead.
+      if (p.reviewTicketId) {
+        try {
+          await deps.closeReviewDone?.(p.reviewTicketId, verdictNote);
+        } catch (e) {
+          await record(db, { companyId, ticketId: p.reviewTicketId, agentId: null, kind: "skill.review_close_failed", summary: `The verdict was saved, but its review task was not closed: ${(e as Error).message}` });
+        }
+      }
       return this.toOwner(row);
     },
 

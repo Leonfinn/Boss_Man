@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, getTableName } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
-import { openPglite } from "../src/db/client.js";
+import { openPglite, type Db } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
 import { activity, agents, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
@@ -17,8 +17,38 @@ afterEach(async () => {
 
 type Row = { id: string; kind: string; question: string; recommendedOption: string; score: number; reasons: string[]; blocks: Array<{ ticketId: string; depth: number }>; dueDate: string | null };
 
+/** Wraps a db so every select made while `reads.on` is set is counted, with the rows it returned (BOS-409). */
+function countReads(inner: Db) {
+  const reads = { on: false, queries: 0, rows: 0, byTable: {} as Record<string, number> };
+  const wrap = (b: object, table = ""): object =>
+    new Proxy(b, {
+      get(target, prop) {
+        const v = Reflect.get(target, prop, target);
+        if (typeof v !== "function") return v;
+        if (prop === "then")
+          return (ok?: (r: unknown) => unknown, bad?: (e: unknown) => unknown) =>
+            v.call(target, (r: unknown) => {
+              if (reads.on && Array.isArray(r)) {
+                reads.queries++;
+                reads.rows += r.length;
+                reads.byTable[table] = (reads.byTable[table] ?? 0) + r.length;
+              }
+              return ok ? ok(r) : r;
+            }, bad);
+        return (...a: unknown[]) => {
+          const out = v.apply(target, a);
+          const from = prop === "from" ? getTableName(a[0] as never) : table;
+          return out && typeof out === "object" ? wrap(out, from) : out;
+        };
+      },
+    });
+  const db = new Proxy(inner, { get: (t, p) => (p === "select" ? (...a: unknown[]) => wrap((t.select as (...x: unknown[]) => object)(...a)) : Reflect.get(t, p, t)) }) as Db;
+  return { db, reads };
+}
+
 async function setup() {
-  const { db, close } = await openPglite();
+  const { db: rawDb, close } = await openPglite();
+  const { db, reads } = countReads(rawDb);
   let offset = 0;
   const clock = () => new Date(Date.now() + offset);
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: clock });
@@ -40,7 +70,7 @@ async function setup() {
   const queue = async () => (await req("GET", "/api/decisions")).json() as Row[];
   const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
-  return { ...built, db, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
+  return { ...built, db, reads, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
 }
 
 describe("ranked decision queue (R20)", () => {
@@ -260,6 +290,63 @@ describe("stale blockers (R21)", () => {
     expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.worker.id, ticketId: tls.id, reason: "unblocked" })]);
   });
 
+  it("withdraws the row once the blocked ticket is done, and flags only the live pairs (BOS-409)", async () => {
+    ctx = await setup();
+    const a = await blockedPair(ctx.ceo.id);
+    const other = await ctx.ticket({ title: "Get certs", assigneeAgentId: ctx.ceo.id });
+    const waiting = await ctx.ticket({ title: "Ship site", state: "blocked", assigneeAgentId: ctx.worker.id });
+    await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: other.id });
+    ctx.advance(25 * HOUR);
+    expect((await ctx.sweep()).staleBlockers).toEqual({ open: 2, raised: 2 });
+    await ctx.req("PATCH", `/api/tickets/${a.tls.id}`, { state: "done" });
+    expect((await ctx.sweep()).staleBlockers).toEqual({ open: 1, raised: 0 });
+    const open = await ctx.db.select().from(decisions).where(and(eq(decisions.kind, "stale_blocker"), eq(decisions.status, "open")));
+    expect(open).toHaveLength(1);
+    expect(open[0]!.question).toContain("Get certs");
+  });
+
+  it("reads the same rows however many done tickets or unrelated runs exist, and a fixed number of queries per live dependency count (BOS-409)", async () => {
+    ctx = await setup();
+    const measure = async () => {
+      ctx.reads.queries = 0;
+      ctx.reads.rows = 0;
+      ctx.reads.byTable = {};
+      ctx.reads.on = true;
+      await ctx.sweep();
+      ctx.reads.on = false;
+      return { queries: ctx.reads.queries, deps: ctx.reads.byTable["ticket_dependencies"] ?? 0, runs: ctx.reads.byTable["runs"] ?? 0 };
+    };
+    const pair = async (title: string) => {
+      const blocker = await ctx.ticket({ title: `Blocker ${title}`, assigneeAgentId: ctx.ceo.id });
+      const waiting = await ctx.ticket({ title: `Waiting ${title}`, state: "blocked", assigneeAgentId: ctx.worker.id });
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: blocker.id });
+      return { blocker, waiting };
+    };
+    await pair("a");
+    await pair("b");
+    ctx.advance(25 * HOUR);
+    await ctx.sweep(); // raises both cards, so the measured passes are steady-state
+    const two = await measure();
+
+    // Done tickets with dependencies, and runs on tickets nobody is waiting on, must not be read.
+    let loose = { id: "" };
+    for (let i = 0; i < 4; i++) {
+      const { waiting } = await pair(`done${i}`);
+      await ctx.req("PATCH", `/api/tickets/${waiting.id}`, { state: "done" });
+      loose = waiting;
+    }
+    const at = ctx.clock();
+    for (let i = 0; i < 6; i++) await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: loose.id, status: "succeeded", startedAt: at, lastEventAt: at, endedAt: at } as never);
+    expect(await measure()).toEqual(two);
+
+    // More live dependencies add no queries: blockers and engagements are fetched in one query each.
+    for (let i = 0; i < 6; i++) await pair(`live${i}`);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const eight = await measure();
+    expect(eight.queries).toBe(two.queries);
+  });
+
   it("withdraws the row once the blocker is done", async () => {
     ctx = await setup();
     const { domain } = await blockedPair(ctx.ceo.id);
@@ -298,15 +385,25 @@ describe("stalled runs (R32)", () => {
     expect(ctx.commands.at(-1)).toEqual({ type: "run.cancel", runId });
   });
 
-  it("says when a run never started, and recommends cancelling it", async () => {
+  it("holds the never-started alert while the runner has only just reconnected (BOS-331)", async () => {
     ctx = await setup();
     await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
     await ctx.scheduler.tick();
     ctx.advance(6 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    const status = (await ctx.serverStatus.status(ctx.company.id)) as { runner: { swapping: boolean } | null };
+    expect(status.runner?.swapping).toBe(true);
+  });
+
+  it("says when a run never started, and recommends cancelling it", async () => {
+    ctx = await setup();
+    await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
+    await ctx.scheduler.tick();
+    ctx.advance(11 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
     const [row] = await ctx.queue();
     expect(row).toMatchObject({ kind: "stalled_run", recommendedOption: "Cancel run" });
-    expect(row!.question).toBe(`CEO's run on "Checkout error states" never started: the runner hasn't reported it beginning in 6 minutes, probably because the runner restarted. Cancel it, then message CEO on the task to start again.`);
+    expect(row!.question).toBe(`CEO's run on "Checkout error states" never started: the runner hasn't reported it beginning in 11 minutes, probably because the runner restarted. Cancel it, then message CEO on the task to start again.`);
   });
 
   it("withdraws when the run speaks again, and says nothing more after keep waiting", async () => {
@@ -370,7 +467,8 @@ describe("stalled runs (R32)", () => {
   it("attaches evidence to a quiet run: last step, runner state, and what it waits on", async () => {
     ctx = await setup();
     const { runId, ticket } = await launch();
-    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run npm test", status: "in_progress" } } as unknown as RunnerEvent);
+    // A turn that ended: the runner said something last, and is not mid-command (BOS-217).
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run npm test", status: "completed" } } as unknown as RunnerEvent);
     ctx.advance(14 * 60_000);
     await ctx.sweep();
     const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
@@ -386,7 +484,7 @@ describe("stalled runs (R32)", () => {
     ctx = await setup();
     await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
     await ctx.scheduler.tick();
-    ctx.advance(6 * 60_000);
+    ctx.advance(11 * 60_000);
     await ctx.sweep();
     const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
     expect(row!.evidence).toMatchObject({ lastEventAt: null, lastStep: null, ticket: "Checkout error states" });
@@ -402,6 +500,76 @@ describe("stalled runs (R32)", () => {
     expect((await ctx.sweep()).stalledRuns.open).toBe(0);
     // The paused agent outranks other rows.
     expect((await ctx.queue())[0]!.reasons[0]).toBe("An agent is paused until you answer");
+  });
+
+  it("closes the alert by itself, with the reason, when the run ends after it was raised (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    expect(await ctx.queue()).toHaveLength(1);
+    const endedAt = ctx.clock();
+    await ctx.emit({ type: "run.ended", runId, stopReason: "end_turn", error: null });
+    // No sweep: the event alone closes it.
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    expect(d).toMatchObject({ status: "withdrawn", dedupeKey: null, context: { withdrawn: { by: "system", note: `the run ended normally at ${endedAt.toISOString().slice(11, 16)}` } } });
+    expect((await ctx.db.select().from(activity)).some((a) => a.kind === "decision_withdrawn" && a.summary.includes('CEO has sent nothing') && a.summary.includes('ended normally'))).toBe(true);
+  });
+
+  it("closes the alert by itself when the run speaks again (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    expect(await ctx.queue()).toHaveLength(1);
+    // No sweep: the event alone closes it.
+    await ctx.emit({ type: "run.update", runId, update: { kind: "agent_message_chunk" } } as RunnerEvent);
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system", note: "the run is active again" } } });
+  });
+
+  it("closes the alert on the next sweep too, for a run that ended without an event", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    // The server ended the run itself (e.g. the runner went away): the sweep closes the alert.
+    ctx.offline();
+    ctx.advance(35 * 60_000);
+    const res = await ctx.sweep();
+    expect(res.lostRuns).toBe(1);
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system" } } });
+  });
+
+  it("doesn't raise the 5-minute alert while the run waits inside a long command, then does after 15 (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "pnpm check-all", status: "in_progress" } } as unknown as RunnerEvent);
+    ctx.advance(10 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    expect(await ctx.queue()).toEqual([]);
+    ctx.advance(6 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+    const [row] = await ctx.queue();
+    expect(row!.question).toContain("has sent nothing for 16 minutes");
+    expect(row!.question).toContain("It is still inside pnpm check-all, so it may just be a long command.");
+  });
+
+  it("doesn't raise the 5-minute alert while a connected runner is still answering pings mid-command (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    // A turn boundary is the last event; the runner keeps saying hello while it waits on its own child process.
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "bash", status: "pending" } } as unknown as RunnerEvent);
+    ctx.advance(10 * 60_000);
+    await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    ctx.advance(6 * 60_000);
+    await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
   });
 
   it("drops a run's open permission request from the queue when the run ends", async () => {
@@ -491,7 +659,7 @@ describe("the server ends runs it can't reach", () => {
     const res = await ctx.sweep();
     expect(res.lostRuns).toBe(1);
     expect(await row(runId)).toMatchObject({ outcome: "lost: runner offline" });
-    expect(await ctx.queue()).toEqual([]);
+    expect((await ctx.queue()).filter((d) => !/could not start/.test(d.question))).toEqual([]);
   });
 
   it("never reaps a run on a connected runner that has sent events", async () => {

@@ -3,11 +3,11 @@
 // happens; finished runs fold their steps away. The box at the bottom talks to the agent: into
 // its live run (after the current turn, or interrupting it), or as a new run.
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { systemAuthor } from "@boss-man/shared";
+import { systemAuthor, ticketRef } from "@boss-man/shared";
 import { api, type Agent } from "../api";
 import { usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
-import { ImagePreviews, useImageAttach, withImage } from "./ImageAttach";
+import { ImagePreviews, useImageAttach, withAttachments } from "./ImageAttach";
 import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
@@ -111,12 +111,14 @@ function reviewMarks(reviews: TicketReview[]) {
   return marks;
 }
 
-export function TicketActivity({ ticketId, companyId, assignee, assigneeId = null, agents = [], reviews = null }: { ticketId: string; companyId?: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[]; reviews?: TicketReview[] | null }) {
+export function TicketActivity({ ticketId, companyId, assignee, assigneeId = null, agents = [], reviews = null, ticketNumber = null, prefix = null }: { ticketId: string; companyId?: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[]; reviews?: TicketReview[] | null; ticketNumber?: number | null; prefix?: string | null }) {
+  // Ticket references in the feed link to their ticket; this ticket is BOS-n (BOS-358).
+  const refCtx = { prefix, selfId: ticketId, tickets: ticketNumber ? [{ id: ticketId, number: ticketNumber, prefix }] : [] };
   const [busy, setBusy] = useState(false);
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
   const [text, setText] = useState("");
-  const img = useImageAttach(companyId, (md) => setText((t) => withImage(t, md)), ticketId);
+  const img = useImageAttach(companyId, ticketId);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   // "" is whoever is working the ticket; another agent (e.g. the CEO) can be asked about it instead.
   const [to, setTo] = useState("");
@@ -137,10 +139,12 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   }, [feed.length]);
 
   const send = async (interrupt = false) => {
-    if (!text.trim()) return;
+    const outgoing = withAttachments(text, img.attached);
+    if (!outgoing.trim()) return;
     try {
-      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: text.trim(), interrupt, ...(other ? { agentId: other.id } : {}) } });
+      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: outgoing.trim(), interrupt, ...(other ? { agentId: other.id } : {}) } });
       setText("");
+      img.clear();
       setNote(null);
       convo.reload();
       runs.reload();
@@ -182,11 +186,11 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
                 const { summary, details } = m!.author === "agent" ? splitDetails(m!.text) : { summary: m!.text, details: null };
                 return (
                   <>
-                    <p>{linked(summary, companyId)}</p>
+                    <p>{linked(summary, companyId, refCtx)}</p>
                     {details && (
                       <details>
                         <summary>Details</summary>
-                        <p>{linked(details, companyId)}</p>
+                        <p>{linked(details, companyId, refCtx)}</p>
                       </details>
                     )}
                   </>
@@ -229,15 +233,15 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           onKeyDown={onKey}
           onPaste={img.onPaste}
         />
-        <ImagePreviews text={text} onChange={setText} />
+        <ImagePreviews attached={img.attached} onRemove={img.remove} />
         <div className="compose-actions">
           {img.button}
-          <button className="btn primary" type="submit" disabled={!text.trim() || img.busy}>
+          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy}>
             Send
           </button>
           {live && (
             <>
-              <button className="btn" type="button" disabled={!text.trim() || !!other} onClick={() => void send(true)} title="Stops the agent's current turn, then gives it your message">
+              <button className="btn" type="button" disabled={(!text.trim() && !img.attached.length) || !!other} onClick={() => void send(true)} title="Stops the agent's current turn, then gives it your message">
                 Interrupt and send
               </button>
               <button className="btn" type="button" onClick={() => void stop()} style={{ color: "var(--red-ink)" }}>

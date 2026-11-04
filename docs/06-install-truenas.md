@@ -22,7 +22,7 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 - TrueNAS SCALE 24.10 or later, with an apps pool chosen under Apps > Configuration > Choose Pool. The Docker service only runs once a pool is chosen.
 - A root shell on the NAS: TrueNAS UI > System > Shell, or `su -` over SSH. Every command in this guide is typed there, so none has `sudo` in front.
 - A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
-- A GitHub account that can create a fine-grained token for the repos the agents will work on, and admin access to `Leonfinn/Boss_Man` to add a deploy key (the repo is private).
+- A GitHub account that can create a fine-grained token for the repos the agents will work on, and access to the public repo `Leonfinn/Boss_Man`, which needs no key (the repo is public).
 
 The commands below put Boss Man in `/mnt/NVME_Apps/Container_files/boss-man`, next to your other container apps on the mirrored NVMe pool. If you keep it somewhere else, change that path everywhere it appears. Replace `<nas-ip>` with the NAS's LAN address. Your router is at 192.168.68.1, so the NAS is most likely on 192.168.68.x. Check it in the TrueNAS UI under Network.
 
@@ -56,39 +56,14 @@ Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip
 cd /mnt/NVME_Apps/Container_files/boss-man
 ```
 
-The repo is private, and GitHub doesn't accept account passwords for git. The NAS reads it with a **deploy key**: an SSH key for this one repo, read-only unless you tick "Allow write access" ([GitHub blog](https://github.blog/engineering/read-only-deploy-keys)). The key and GitHub's host key are kept in the dataset, so snapshots cover them.
+The repository is private, so the NAS needs its own read-only deploy key. Follow [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host), with `B` set to this dataset and the clone going to `src`. Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` use the key saved in `core.sshCommand`.
 
-Make the key. It has no passphrase, so updates can run unattended:
+If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
-```sh
-ssh-keygen -t ed25519 -N "" -C "truenas-boss-man" -f /mnt/NVME_Apps/Container_files/boss-man/deploy_key
-```
+If the clone hangs, check that the host can reach github.com on port 22 (see docs/00, step 2).
 
-Show the public half. It's safe to copy; never copy the file without `.pub`.
+**Already installed with a deploy key?** Nothing to change. `src` keeps its `git@github.com:` address and the `core.sshCommand` setting, and updates keep working. To move to https later, run `git -C /mnt/NVME_Apps/Container_files/boss-man/src remote set-url origin https://github.com/Leonfinn/Boss_Man.git`; the old key can then be deleted from the repo's settings and the dataset.
 
-```sh
-cat /mnt/NVME_Apps/Container_files/boss-man/deploy_key.pub
-```
-
-On your Mac, open `https://github.com/Leonfinn/Boss_Man/settings/keys`, choose **Add deploy key**, call it `TrueNAS`, paste the line, and leave **Allow write access** unticked.
-
-Clone with that key:
-
-```sh
-env GIT_SSH_COMMAND='ssh -i /mnt/NVME_Apps/Container_files/boss-man/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/mnt/NVME_Apps/Container_files/boss-man/known_hosts' git clone git@github.com:Leonfinn/Boss_Man.git src
-```
-
-The first time, ssh asks whether to trust github.com. Type `yes` only if the ED25519 fingerprint matches the one on [GitHub's SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) page, `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU` when this was written.
-
-Make later `git pull`s use the same key:
-
-```sh
-git -C /mnt/NVME_Apps/Container_files/boss-man/src config core.sshCommand 'ssh -i /mnt/NVME_Apps/Container_files/boss-man/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/mnt/NVME_Apps/Container_files/boss-man/known_hosts'
-```
-
-If git isn't on the host (`git --version` fails), let me know: the throwaway-container route needs the key mounted in, which this guide doesn't cover yet.
-
-If the clone hangs, outbound port 22 is probably blocked, for example on your router.
 
 ## 3. Folders and ownership
 
@@ -150,9 +125,11 @@ chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
   ```
 
   If either is taken, pick other free ports and use them in `.env` and in the addresses below.
-- `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain HTTP on your LAN.
-  - With HTTPS in front of Boss Man, remove this line. That could be Tailscale Serve, or a reverse proxy on your OPNsense box.
-  - Browsers only allow notifications (R44) on HTTPS pages, so you need HTTPS for those anyway.
+- `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://<nas-ip>:3101` on your LAN. Once the Tailscale sidecar of section 10b is running (it sets `BOSSMAN_TRUSTED_PROXIES`), Boss Man decides per request: Secure on HTTPS through the sidecar, off on plain LAN http, whatever this line says, so you can leave it or remove it. Without the sidecar, removing it makes the cookie always Secure and plain http login fails.
+- Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
+  - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
+
+Memory limits for the server, database, runners and tool servers are set from this file too: see [docs/00, "Memory limits"](00-first-time-install.md#memory-limits-so-one-container-cant-take-the-whole-host). Nothing to add on TrueNAS; the defaults apply.
 
 ## 5. Build the images and start the server
 
@@ -432,7 +409,7 @@ docker compose exec -T db psql -U bossman -d bossman -tA -c 'SELECT count(*) FRO
 
 If step 5's second command stops with an error, the new empty database is half filled: do not start the app. Repeat step 5 (it drops and recreates) with the same or an older backup.
 
-**Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps the deploy key and `known_hosts`, so GitHub needs nothing new. Check what's there first:
+**Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps nothing GitHub-related to redo: the repo is cloned fresh over https (a deploy key from an older install, if you have one, stays in place). Check what's there first:
 
 ```sh
 ls -la /mnt/NVME_Apps/Container_files/boss-man
@@ -458,7 +435,7 @@ D=/mnt/NVME_Apps/Container_files/boss-man/deployer
 
 **Before you start**
 - `main` on GitHub should be branch-protected, so agents can only land reviewed PRs: Repo > Settings > Branches > add a rule for `main` that requires a pull request. The deployer treats the tip of `main` as approved code.
-- The `src` checkout must be on `main`, clean, and able to read GitHub with the deploy key from step 2. Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
+- The `src` checkout must be on `main`, clean, and able to read GitHub over https (or the old deploy key, if you installed with one). Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
 
   ```sh
   git -C /mnt/NVME_Apps/Container_files/boss-man/src ls-remote origin refs/heads/main
@@ -511,7 +488,7 @@ chown root:root $D/host.conf && chmod 600 $D/host.conf
 ```
 
 - `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
-- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`.
+- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`. The host publishes `SOAK_SECONDS` in `outbox/available.json` as `soakSeconds`, so Boss Man's runner-update trial uses the same length you set here (no second place to keep in step).
 - The script refuses to start if this file is not owned by the user running it with mode 600.
 - It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay or Home Assistant; that is untested.
 
@@ -741,7 +718,7 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
 ```
 
 **What the deployer will not do for you**
-- It refuses any change to infra files: `deploy/` (including the Caddyfile), the compose files, `scripts/`, CI files and any `Dockerfile`. `scripts/deploy.sh` refuses to run on this install too. Apply such a change by hand, after merging it on its own (see 9a step 3):
+- It refuses any change to infra files: `deploy/` (including the Caddyfile), the compose files, the deploy scripts (`scripts/deploy.sh`, `rebuild-live.sh`, `update-runner.sh`, `host-deployer.sh`; build-only scripts do not count, see docs/09 step 6) and any `Dockerfile`. `scripts/deploy.sh` refuses to run on this install too. Apply such a change by hand, after merging it on its own (see 9a step 3):
   - **Everything starts the same way:** bring the checkout up to `main` with `git fetch origin main && git merge --ff-only origin/main`.
   - **A `Dockerfile` or other server-image change:** rebuild the live colour in place, as in "Rebuild the live colour in place" below.
   - **The Caddyfile:** `docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`.
@@ -817,21 +794,87 @@ If you edited `.env` after the backup, copy those changes back by hand instead o
 
 ## 10. Phone notifications (optional)
 
-Boss Man can push pages and asks to your phone through your own [ntfy](https://github.com/binwiederhier/ntfy) server (R44). Boss Man only makes outbound requests to it, so nothing new is exposed at the router.
+Boss Man pushes pages and asks to your phone through your own [ntfy](https://github.com/binwiederhier/ntfy) server (R44), run on the same Docker host as Boss Man from `deploy/ntfy.yml` (any host: TrueNAS, a Proxmox VM or container, or plain Linux). Boss Man only makes outbound requests to it. Nothing is opened at the router and nothing is exposed on your LAN.
 
-What you need, from ntfy's own docs:
-- **A ntfy server** your phone can reach, for example on your tailnet ([install](https://docs.ntfy.sh/install/)). Lock it down with `auth-default-access: "deny-all"` ([access control](https://docs.ntfy.sh/config/#access-control)).
-- **A user and an access token** for Boss Man, made on the ntfy server with `ntfy user add` and `ntfy token add` ([access tokens](https://docs.ntfy.sh/config/#access-tokens)). Give that user write access to one topic, for example `bossman`, with `ntfy access`.
-- **The ntfy app** on your phone, subscribed to that topic on your server. On iPhone, instant delivery from a self-hosted server also needs `upstream-base-url: "https://ntfy.sh"` in the server's config, which forwards a wake-up (not the message) through ntfy.sh ([iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications)).
+How it is set up (all in `deploy/ntfy.yml`):
+- **Off by default,** its own Compose project like Penpot. A normal `docker compose up -d` never starts it.
+- **Tailnet and https only.** No port is opened on the host. ntfy joins the private `edge` network of the Tailscale container from section 10b, and that container's Serve config publishes it to your tailnet over https on port 8443 (Boss Man's own address stays on 443). It uses the same Tailscale certificate and the same Tailscale container, so there is only one Tailscale to look after. Funnel stays off.
 
-Then, in Boss Man, open **Notifications** and fill in **How you're told**:
-- **ntfy server**, **Topic** and **Access token**. The token is stored encrypted, like other credentials, and never shown again.
-- **Boss Man's address on your phone**, so tapping a notification opens its evidence. This needs to be an address your phone can reach, such as a Tailscale Serve HTTPS name.
-- **Quiet hours**, if you want them, and how many notifications each agent may send per hour.
+**Do section 10b (HTTPS through Tailscale Serve) first.** This section builds on it and doesn't work without it.
+- **Deny-all access.** Nobody can publish or read without a user. There is no sign-up and no web page.
+- **Short memory.** Messages are kept for 1 hour (`NTFY_CACHE_DURATION`), then dropped.
+- **No relay.** No upstream server is set, so nothing leaves your network.
 
-Choose **Send a test to my phone** to check it. If it fails, the message says what ntfy answered.
+Treat the topic name and the passwords as secrets: notifications will carry Approve links. Don't paste them into tickets, chat or this repository.
 
-ntfy's docs site wasn't reachable when this was written, so these links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs). Setting up ntfy itself on TrueNAS isn't covered here.
+### Your steps
+
+1. Make the data folder and give it to uid 1000. By default it is `ntfy` inside your Boss Man data folder (`$BOSSMAN_DATA`, as in section 10b), so the usual backup and move steps already cover it:
+   ```
+   sudo mkdir -p "${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy" && sudo chown 1000:1000 "${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy"
+   ```
+   It holds the users, tokens and cache. Keep it in your backup: restoring it on a new host keeps the tokens and the phone subscription working.
+2. Back up `.env`, then add one line. The address is the same ts.net name as in 10b, with port 8443:
+   ```
+   NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443
+   ```
+   Nothing else is needed. ntfy finds the `edge` network from section 10b by its default name (`boss-man_edge`). Only if you changed the Compose project name, or set `NTFY_DATA` or `NTFY_EDGE_NETWORK` yourself, add those lines too. `NTFY_DATA` and `NTFY_EDGE_NETWORK` are only for a different data folder or network; `NTFY_EDGE_NETWORK` is the name of that network, which `docker network ls` lists (it ends in `_edge`).
+3. Start it. **This needs BOS-242 (section 10b) merged with an extra port 8443 entry in `deploy/tailscale/serve.json`, `"${TS_CERT_DOMAIN}:8443"` proxying to `http://ntfy:80`, with no Funnel.** Check that the file has it before you go on: `grep -c ':8443' deploy/tailscale/serve.json` must print `1`. If it prints `0`, stop: nothing publishes ntfy yet.
+   ```
+   docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
+   docker exec <tailscale container> tailscale serve status
+   ```
+   Use the Tailscale container's name from `docker ps`. The status should list `https://<host-name>.<tailnet>.ts.net:8443` as **tailnet only** and must not mention Funnel. If it does, stop and tell me.
+4. Pick a topic name nobody could guess, such as 20 random letters and digits. It is a password. Make two users, one that can only publish and one that can only read. `ntfy user add` asks for a password, so type a long one each time:
+   ```
+   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add bossman-publish
+   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add phone-read
+   docker exec boss-man-ntfy-ntfy-1 ntfy access bossman-publish <topic> write-only
+   docker exec boss-man-ntfy-ntfy-1 ntfy access phone-read <topic> read-only
+   docker exec boss-man-ntfy-ntfy-1 ntfy token add bossman-publish
+   ```
+   The last command prints the **publish token** (it starts with `tk_`). Copy it now.
+5. In Boss Man, open **Settings > Secrets** and save the publish token as a new secret.
+6. Open **Settings > Notifications** and fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (the secret from step 5). Set **Boss Man's address on your phone** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If "Send a test" fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
+7. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
+8. In Boss Man, choose **Send a test to my phone**. It should arrive within seconds.
+
+Check that it is locked down. Both commands must print `401` or `403` (the first tries to read, the second to publish, with no login):
+```
+curl -s -o /dev/null -w '%{http_code}\n' https://<host-name>.<tailnet>.ts.net:8443/<topic>/json?poll=1
+curl -s -o /dev/null -w '%{http_code}\n' -d probe https://<host-name>.<tailnet>.ts.net:8443/<topic>
+```
+From a device that is not on your tailnet the address must not answer at all.
+
+### iPhone
+
+iPhones only get instant delivery from a self-hosted server if the server forwards a wake-up through ntfy.sh. If you use an iPhone, add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run step 3's `docker compose` command again. ntfy sends ntfy.sh only a poll request containing the message ID, never the title, text or buttons ([iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications)). Android doesn't need this: leave it unset.
+
+### Approve buttons
+
+ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the address from section 10b). The Approve button (BOS-243) only turns on when a publish token is set and Boss Man's public URL is https.
+
+### Moving off the Home Assistant webhook
+
+Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook in **Settings > Notifications**.
+
+### Any Docker host
+
+The same steps work on plain Linux Docker, a Proxmox VM and a Proxmox container (LXC), because ntfy rides on the Tailscale container from section 10b, which runs in Tailscale's userspace mode and needs no `/dev/net/tun`. Nothing here is specific to TrueNAS. Host differences (such as how to back up or add a tun device) are in `docs/20-https-tailscale.md`. Moving to a new host: copy `$BOSSMAN_DATA` (it includes `ntfy` and `tailscale`), bring up section 10b, then run step 3 again. Users, tokens and the phone subscription carry over.
+
+### Rolling back
+
+`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy down`. Port 8443 then answers with an error until you start it again; to remove it for good, delete the 8443 entry from `deploy/tailscale/serve.json`. Your messages are only kept for an hour and are not worth restoring. The users and tokens live in `NTFY_DATA/user.db`; copy that file first if you want to keep them.
+
+ntfy's docs site wasn't reachable when this was written, so the links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs).
+
+## 10b. HTTPS through Tailscale Serve (tailnet only)
+
+The steps are in [docs/20-https-tailscale.md](20-https-tailscale.md), which works on any Docker host. TrueNAS specifics:
+
+- `COMPOSE_FILE` becomes `docker-compose.yml:deploy/truenas.yml:deploy/tailscale.yml`, and the state folder is `/mnt/NVME_Apps/Container_files/boss-man/data/tailscale` (so create it there). Keep it in a dataset your snapshots cover.
+- Use the sidecar, not the TrueNAS Tailscale app: the app cannot show that LAN traffic is kept apart from the trusted address.
+- Blue/green (9d) is not covered yet.
 
 ## 11. Feedback portal (optional)
 

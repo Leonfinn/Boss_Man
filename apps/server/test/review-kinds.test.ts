@@ -8,6 +8,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, decisions, reviewRequests, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { handOverReviews } from "../src/services/review-kinds.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -44,6 +45,7 @@ async function setup() {
     if (c.type === "workspace.diff") ok(DIFF);
     if (c.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
     if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
+    if (c.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
     return true;
   });
   let seq = 0;
@@ -73,7 +75,7 @@ async function setup() {
     await emit({ type: "run.permission_request", runId, requestId, title: "Approve Plan", kind: "switch_mode", rawInput: {}, optionKinds: ["allow_once"], detail: PLAN });
     return (await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`)))[0]!;
   };
-  return { ...built, db, req, company, ceo, worker, other, senior: senior!, project, ticket, row, mcp, setPolicy, plan, sent };
+  return { ...built, db, req, base, company, ceo, worker, other, senior: senior!, project, ticket, row, mcp, setPolicy, plan, sent };
 }
 
 
@@ -81,7 +83,8 @@ async function kinds() {
   const c = await setup();
   const [sec] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Sec", role: "worker", agentKind: "claude", title: "Security Reviewer" }).returning();
   const [infra] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Ivy", role: "worker", agentKind: "claude", title: "Infra" }).returning();
-  await c.req("PATCH", `/api/agents/${infra!.id}`, { reviewKind: "infra" });
+  // A legacy mark (the agent page no longer sets it): "marked" cells must keep routing as before.
+  await c.db.update(agents).set({ reviewKind: "infra" }).where(eq(agents.id, infra!.id));
   // Medium needs a security review (by id) and an infra review (by whoever is marked).
   await c.setPolicy((p) => (p.medium.kinds = { security: sec!.id, infra: "marked" }));
   const t = await c.ticket({ state: "review" });
@@ -203,11 +206,13 @@ describe("review kinds", () => {
     expect((await c.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary)).toContain("No infra reviewer is marked, so the CEO reviews it");
   });
 
-  it("marking an agent moves the mark from whoever had it", async () => {
+  it("the agent page can no longer set who reviews: it points to Settings and changes nothing", async () => {
     const c = await kinds();
-    await c.req("PATCH", `/api/agents/${c.other.id}`, { reviewKind: "infra" });
+    const res = await c.req("PATCH", `/api/agents/${c.other.id}`, { reviewKind: "infra" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toContain("Settings > Reviews");
     const marked = (await c.db.select().from(agents).where(eq(agents.reviewKind, "infra"))).map((a) => a.id);
-    expect(marked).toEqual([c.other.id]);
+    expect(marked).toEqual([c.infra.id]);
   });
 
   it("escalates to the owner when the fourth round still asks for changes", async () => {
@@ -245,5 +250,139 @@ describe("review kinds", () => {
     const p = structuredClone(DEFAULT_REVIEW_POLICY);
     p.low.kinds = { infra: rival.ceo.id };
     expect((await c.req("PUT", `/api/companies/${c.company.id}/review-policy`, p)).statusCode).toBe(400);
+  });
+});
+
+// BOS-198: a cell may list several agents; each review still goes to exactly one of them.
+describe("review cells that list several agents", () => {
+  async function lists() {
+    const c = await setup();
+    const add = async (name: string) => (await c.db.insert(agents).values({ companyId: c.company.id, name, role: "worker", agentKind: "claude" }).returning())[0]!;
+    const ann = await add("Ann");
+    const bo = await add("Bo");
+    const cy = await add("Cy");
+    const policy = (security: string[], code: string | string[] = "senior-dev") => c.setPolicy((p) => ((p.medium.reviewer = code), (p.medium.kinds = { security })));
+    const review = async (fields: Record<string, unknown> = {}) => {
+      const t = await c.ticket({ state: "review", ...fields });
+      await c.scheduler.onTicketReview(t.id, c.worker.id);
+      return t;
+    };
+    const holder = async (ticketId: string, kind = "security") => (await latestRowsOf(c, ticketId)).find((r) => r.kind === kind)?.reviewerAgentId;
+    const notes = async (ticketId: string) => (await c.db.select().from(activity).where(eq(activity.ticketId, ticketId))).map((a) => a.summary);
+    return { ...c, ann, bo, cy, policy, review, holder, notes };
+  }
+  const latestRowsOf = async (c: { db: Awaited<ReturnType<typeof setup>>["db"] }, ticketId: string) => {
+    const all = await c.db.select().from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId));
+    const top = Math.max(...all.map((r) => r.round));
+    return all.filter((r) => r.round === top);
+  };
+
+  it("saves a list and refuses a duplicate, an empty list or a CEO mixed into it", async () => {
+    const c = await lists();
+    expect((await c.policy([c.ann.id, c.bo.id])).statusCode).toBe(200);
+    expect((await c.req("GET", `/api/companies/${c.company.id}/review-policy`)).json().medium.kinds.security).toEqual([c.ann.id, c.bo.id]);
+    expect((await c.policy([c.ann.id, c.ann.id])).statusCode).toBe(400);
+    expect((await c.policy([])).statusCode).toBe(400);
+    expect((await c.policy([c.ann.id, "ceo"])).statusCode).toBe(400);
+  });
+
+  it("gives one review per kind to the least loaded listed agent, list order breaking a first tie", async () => {
+    const c = await lists();
+    await c.policy([c.ann.id, c.bo.id]);
+    const t1 = await c.review();
+    expect((await latestRowsOf(c, t1.id)).map((r) => r.kind).sort()).toEqual(["code", "security"]);
+    expect(await c.holder(t1.id)).toBe(c.ann.id);
+    // Ann now holds an open review, Bo none.
+    const t2 = await c.review();
+    expect(await c.holder(t2.id)).toBe(c.bo.id);
+  });
+
+  it("breaks a tie on load by who was given a review least recently", async () => {
+    const c = await lists();
+    await c.policy([c.ann.id, c.bo.id]);
+    const t1 = await c.review();
+    const t2 = await c.review();
+    expect([await c.holder(t1.id), await c.holder(t2.id)]).toEqual([c.ann.id, c.bo.id]);
+    // Both finish: equal load (0); Ann was given hers first, so she is next.
+    await c.db.update(reviewRequests).set({ status: "approved" }).where(eq(reviewRequests.kind, "security"));
+    const t3 = await c.review();
+    expect(await c.holder(t3.id)).toBe(c.ann.id);
+  });
+
+  it("never picks the author, anyone who worked on the ticket, or a paused or retired agent", async () => {
+    const c = await lists();
+    await c.policy([c.ann.id, c.bo.id, c.cy.id]);
+    await c.db.update(agents).set({ paused: true }).where(eq(agents.id, c.ann.id));
+    await c.db.update(agents).set({ retiredAt: new Date() }).where(eq(agents.id, c.bo.id));
+    expect(await c.holder((await c.review()).id)).toBe(c.cy.id);
+    // Cy wrote this one, so with Ann paused and Bo retired nobody listed can take it.
+    const mine = await c.review({ assigneeAgentId: c.cy.id });
+    expect(await c.holder(mine.id)).toBe(c.ceo.id);
+    expect(await c.notes(mine.id)).toContain("No listed security reviewer can take it (Ann is paused; Bo is retired; Cy worked on it), so CEO reviews it");
+    // A run on the ticket that isn't a review counts as working on it.
+    await c.db.update(agents).set({ paused: false }).where(eq(agents.id, c.ann.id));
+    const t = await c.ticket({ state: "review" });
+    await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.ann.id, ticketId: t.id });
+    await c.scheduler.onTicketReview(t.id, c.worker.id);
+    expect(await c.holder(t.id)).toBe(c.cy.id);
+  });
+
+  it("keeps the same reviewer across rounds while they can, and moves on when they can't", async () => {
+    const c = await lists();
+    await c.policy([c.ann.id, c.bo.id]);
+    const t = await c.review();
+    expect(await c.holder(t.id)).toBe(c.ann.id);
+    // Ann gets busier than Bo elsewhere, yet round 2 stays with her for the context.
+    await c.review();
+    await c.review();
+    await c.scheduler.onTicketReview(t.id, c.worker.id);
+    expect((await latestRowsOf(c, t.id))[0]!.round).toBe(2);
+    expect(await c.holder(t.id)).toBe(c.ann.id);
+    await c.db.update(agents).set({ paused: true }).where(eq(agents.id, c.ann.id));
+    await c.scheduler.onTicketReview(t.id, c.worker.id);
+    expect(await c.holder(t.id)).toBe(c.bo.id);
+  });
+
+  it("lists work for the code review too, and the reviewer it picked can review", async () => {
+    const c = await lists();
+    await c.policy([c.cy.id], [c.ann.id, c.bo.id]);
+    const t = await c.review();
+    expect(await c.holder(t.id, "code")).toBe(c.ann.id);
+    const res = await (await c.mcp(c.ann.id)).callTool({ name: "review", arguments: { ticketId: t.id, action: "submit", verdict: "approved", kind: "code" } });
+    expect(textOf(res)).not.toContain("Only your company's CEO");
+  });
+
+  it("hands a busy listed reviewer's review to a free listed colleague", async () => {
+    const c = await lists();
+    await c.policy([c.ann.id, c.bo.id]);
+    const t = await c.review();
+    const [w] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.ann.id));
+    const left = await handOverReviews(c.db, { agentId: c.ann.id, note: w!.note }, () => false, async () => undefined, 11 * 60_000);
+    expect(await c.holder(t.id)).toBe(c.bo.id);
+    expect(left).toBeNull();
+  });
+
+  it("shows the CEO each agent's reviews on the board, from the same settings", async () => {
+    const c = await lists();
+    await c.policy([c.ann.id, c.bo.id], [c.ann.id]);
+    // The board tool is the CEO's chat view of the team.
+    const [run] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.ceo.id, purpose: "chat" }).returning();
+    const token = await issueRunToken(c.db, { companyId: c.company.id, agentId: c.ceo.id, runId: run!.id });
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://${c.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    const board = JSON.parse(textOf(await client.callTool({ name: "board", arguments: {} }))) as { agents: Array<{ name: string; reviews?: string }> };
+    const of = (name: string) => board.agents.find((a) => a.name === name)!.reviews;
+    expect(of("Ann")).toBe("Code (Medium), Security (Medium)");
+    expect(of("Bo")).toBe("Security (Medium)");
+    expect(of("Sam")).toBe("Code (High+)");
+    expect(of("Cy")).toBeUndefined();
+    await client.close();
+  });
+
+  it("names everyone listed in the risk help", async () => {
+    const c = await lists();
+    await c.policy([c.cy.id], [c.ann.id, c.bo.id]);
+    const tiers = (await c.req("GET", `/api/risk-tiers?companyId=${c.company.id}`)).json() as Array<{ tier: string; summary: string }>;
+    expect(tiers.find((x) => x.tier === "medium")!.summary).toContain("Ann or Bo");
   });
 });

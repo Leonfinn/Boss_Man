@@ -57,7 +57,11 @@ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     NODE_PATH=/usr/local/lib/node_modules
 
-ARG CLAUDE_CODE_VERSION=latest
+# Harness versions are pinned to exact versions so a rebuild never silently changes
+# behaviour. To update: check the new version (npm view <package> version), change the
+# number here, rebuild with Settings > Server and runner > Updates > Build and update runners,
+# and confirm it in server_status (runners show their harness versions).
+ARG CLAUDE_CODE_VERSION=2.1.316
 ARG OPENCODE_VERSION=1.19.3
 USER node
 ENV HOME=/home/node \

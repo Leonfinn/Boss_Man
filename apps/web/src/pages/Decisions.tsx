@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HARNESSES, harnessLabel, providerLabel } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
+import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
 import { describe, useTranscript } from "../transcript";
@@ -164,6 +165,47 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
 }
 
 /** Text with ticket references the server resolved (BOS-70) turned into links; anything else stays plain text. */
+/** One command to paste, in its own block with a Copy button that copies exactly this text (BOS-269). */
+function CommandBlock({ command }: { command: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const pre = useRef<HTMLPreElement>(null);
+  const copy = async () => {
+    const ok = await copyText(command);
+    setState(ok ? "copied" : "failed");
+    if (!ok) selectText(pre.current);
+    setTimeout(() => setState("idle"), 2000);
+  };
+  const label = state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy, select the text instead" : "Copy";
+  return (
+    <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start", margin: "6px 0" }}>
+      <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
+        <code>{command}</code>
+      </pre>
+      <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
+    </div>
+  );
+}
+
+/** A step's text: sentences as before, and each fenced ```sh block as its own command with a Copy button. */
+function StepText({ text, refs }: { text: string; refs?: Decision["refs"] }) {
+  const parts: Array<{ command: boolean; text: string }> = [];
+  const re = /```[a-z]*\n([\s\S]*?)\n```/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const before = text.slice(last, m.index).trim();
+    if (before) parts.push({ command: false, text: before });
+    parts.push({ command: true, text: m[1]! });
+    last = m.index + m[0].length;
+  }
+  const rest = text.slice(last).trim();
+  if (rest || parts.length === 0) parts.push({ command: false, text: parts.length === 0 ? text : rest });
+  return (
+    <>
+      {parts.map((p, i) => (p.command ? <CommandBlock key={i} command={p.text} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
+    </>
+  );
+}
+
 function Linked({ text, refs }: { text: string; refs?: Decision["refs"] }) {
   if (!refs || !Object.keys(refs).length) return <>{text}</>;
   return (
@@ -725,7 +767,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <summary>What you'll need to do</summary>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.handSteps.map((s, i) => (
-                            <li key={i}><Linked text={s} refs={d.refs} /></li>
+                            <li key={i}><StepText text={s} refs={d.refs} /></li>
                           ))}
                         </ol>
                       </details>
@@ -735,7 +777,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.steps.map((s, i) => (
-                            <li key={i}><Linked text={s} refs={d.refs} /></li>
+                            <li key={i}><StepText text={s} refs={d.refs} /></li>
                           ))}
                         </ol>
                       </div>
@@ -743,13 +785,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     {d.context?.check && (
                       <div>
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>How to check it worked</p>
-                        <p style={{ fontSize: 14 }}>{d.context.check}</p>
+                        <div style={{ fontSize: 14 }}><StepText text={d.context.check} refs={d.refs} /></div>
                       </div>
                     )}
                     {d.context?.rollback && (
                       <div>
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>How to roll back</p>
-                        <p style={{ fontSize: 14 }}>{d.context.rollback}</p>
+                        <div style={{ fontSize: 14 }}><StepText text={d.context.rollback} refs={d.refs} /></div>
                       </div>
                     )}
                     {d.context?.lastFailure && (
@@ -823,12 +865,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                 </label>
                               );
                             })}
+                            <small className="muted">A reviewer you hire does code, security, infra or adversarial reviews once you name them in Settings › Reviews.</small>
                           </fieldset>
                         )}
                         {d.recommendedOption && (
                           <p className="rec">
                             <strong>RECOMMENDED</strong>
                             {d.recommendedOption}
+                            {d.context?.judge?.mode === "advise" && <span className="muted"> — {d.context.judge.second?.state === "pending" ? "Waiting a few seconds for the second opinion" : d.context.judge.reason}.</span>}
+                            {d.context?.judge?.mode === "advise" && d.context.judge.second?.state === "deny" && (
+                              <span className="muted" style={{ display: "block" }}>
+                                Second opinion: {d.context.judge.second.reason}
+                              </span>
+                            )}
                           </p>
                         )}
                         {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (

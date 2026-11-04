@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef } from "@boss-man/shared";
-import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAttach";
+import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -144,22 +144,24 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
   const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "" };
   const [mode, setMode] = useState(initial.mode);
   const [form, setForm] = useState(blank);
-  const img = useImageAttach(companyId, (md) => setForm((f) => ({ ...f, body: withImage(f.body, md) })));
+  const img = useImageAttach(companyId);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const isFeature = mode === "feature";
+  const leaving = () => img.clear();
   // Plan first follows the risk level: high and critical work is planned and approved first.
   const planFirst = form.risk === "high" || form.risk === "critical";
+  const body = () => withAttachments(form.body, img.attached).trim();
   const submit = async (e?: FormEvent) => {
     e?.preventDefault();
     if (!form.title.trim() || busy) return;
     setBusy(true);
     try {
-      if (isFeature) await onAddFeature({ title: form.title.trim(), description: form.body.trim() || null, planWithCeo: form.plan && hasCeo, ...form.goal });
+      if (isFeature) await onAddFeature({ title: form.title.trim(), description: body() || null, planWithCeo: form.plan && hasCeo, ...form.goal });
       else
         await onAddTask({
           title: form.title.trim(),
-          body: form.body.trim() || null,
+          body: body() || null,
           risk: form.risk === "none" ? null : form.risk,
           planFirst,
           assigneeAgentId: form.assignee && form.assignee !== "owner" ? form.assignee : null,
@@ -179,7 +181,7 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
     if (!form.title.trim() || busy) return;
     setBusy(true);
     try {
-      await onGrill({ kind: mode, title: form.title.trim(), description: form.body.trim() || null });
+      await onGrill({ kind: mode, title: form.title.trim(), description: body() || null });
     } catch (err) {
       setError((err as Error).message);
       setBusy(false);
@@ -220,7 +222,7 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
           onPaste={img.onPaste}
           style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
         />
-        <ImagePreviews text={form.body} onChange={(body) => setForm({ ...form, body })} />
+        <ImagePreviews attached={img.attached} onRemove={img.remove} />
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           {img.button}
           <small className="muted">Or paste a screenshot into the description.</small>
@@ -310,7 +312,7 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
             Let the CEO question me first
           </button>
         )}
-        <button className="btn" type="button" onClick={onClose}>
+        <button className="btn" type="button" onClick={() => { leaving(); onClose(); }}>
           Cancel
         </button>
         <span className="muted" style={{ fontSize: 13 }}>

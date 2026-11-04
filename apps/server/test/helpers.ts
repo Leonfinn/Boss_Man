@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { agents, companies } from "../src/db/schema.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import type { LiveValidator } from "../src/services/secrets.js";
@@ -32,4 +34,16 @@ export async function approveAndWait(req: (method: "GET" | "POST", url: string, 
     await new Promise((r) => setTimeout(r, 10));
   }
   throw new Error("landing never finished");
+}
+
+/**
+ * Names (or un-names) an agent as a security reviewer in its company's Settings > Reviews, at the
+ * critical tier only so other tiers' tickets don't gain a security review. The skill add flow's
+ * Security Reviewer is any agent named there (BOS-198).
+ */
+export async function nameSecurityReviewer(db: TestApp["db"], agentId: string, on = true) {
+  const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId));
+  const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, a!.companyId));
+  const { security: _, ...rest } = c!.policy.critical.kinds ?? {};
+  await db.update(companies).set({ reviewPolicy: { ...c!.policy, critical: { ...c!.policy.critical, kinds: on ? { ...rest, security: agentId } : rest } } }).where(eq(companies.id, a!.companyId));
 }

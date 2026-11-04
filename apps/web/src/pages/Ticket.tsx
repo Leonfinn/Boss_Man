@@ -3,7 +3,7 @@ import { TASK_SIZES, windowLabel } from "@boss-man/shared";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
-import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAttach";
+import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
@@ -15,6 +15,7 @@ import { usePoll } from "../hooks";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
+import { ago } from "./Dashboard";
 
 /** The mark for one verdict on a "Done when" checklist row. */
 const VERDICT_MARK: Record<string, string> = { pass: "✓ pass", fail: "✗ fail", none: "not reported" };
@@ -195,7 +196,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const images = usePoll((signal) => api<TicketImage[]>(`/api/tickets/${id}/images`, { signal }), 30_000, `img-${id}`);
   const reviews = useTicketReviews(id);
   const t = ticket.data;
-  const img = useImageAttach(t?.companyId, (md) => setDraft((d) => withImage(d ?? "", md)), id);
+  // Every link on this screen is built the same way: page names open in this company, ticket references
+  // by prefix, raw routes as written (BOS-358).
+  const ticketLinks = t ? { companyId: t.companyId, prefix: t.ref?.replace(/-[0-9]+$/, "") ?? null, selfId: t.id, tickets: t.number ? [{ id: t.id, number: t.number, prefix: t.ref?.replace(/-[0-9]+$/, "") ?? null }] : [] } : undefined;
+  const img = useImageAttach(t?.companyId, id);
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
   const patch = async (body: Record<string, unknown>) => {
@@ -250,7 +254,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   };
   const saveDraft = async () => {
     if (draft === null) return;
-    await patch({ body: draft.trim() || null });
+    await patch({ body: withAttachments(draft, img.attached).trim() || null });
+    img.clear();
     setDraft(null);
   };
   const assign = (value: string) =>
@@ -462,7 +467,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             {draft === null ? (
               t.body ? (
                 <div id="desc-body" className={longBody && !descOpen ? "clamp-8" : undefined}>
-                  <Markdown text={t.body} />
+                  <Markdown text={t.body} linkContext={ticketLinks} />
                 </div>
               ) : (
                 <p className="muted">No description yet. Say what should be done and what counts as finished.</p>
@@ -483,7 +488,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   onPaste={img.onPaste}
                   style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
                 />
-                <ImagePreviews text={draft} onChange={setDraft} />
+                <ImagePreviews attached={img.attached} onRemove={img.remove} />
                 {img.error && (
                   <p className="error" role="alert">
                     {img.error}
@@ -491,10 +496,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 )}
                 <div style={{ display: "flex", gap: 8 }}>
                   {img.button}
-                  <button type="button" className="btn primary" disabled={draft === (t.body ?? "")} onClick={() => void saveDraft()}>
+                  <button type="button" className="btn primary" disabled={draft === (t.body ?? "") && !img.attached.length} onClick={() => void saveDraft()}>
                     Save description
                   </button>
-                  <button type="button" className="btn" onClick={() => setDraft(null)}>
+                  <button type="button" className="btn" onClick={() => { img.clear(); setDraft(null); }}>
                     Cancel
                   </button>
                 </div>
@@ -543,7 +548,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
           {t.plan && (
             <Fold title="Plan" hint={t.planApprovedAt ? `approved ${when(t.planApprovedAt)}` : "waiting for your approval"}>
-              <Markdown text={t.plan} />
+              <Markdown text={t.plan} linkContext={ticketLinks} />
               {!t.planApprovedAt && (
                 <p className="muted" style={{ fontSize: 14 }}>
                   Approve or send it back from <a href="#/decisions">Decisions</a>.
@@ -679,8 +684,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </p>
           )}
 
-          <ScrumMasterLog companyId={t.companyId} ticketId={t.id} heading="Scrum Master" />
-          <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
+          <ScrumMasterLog companyId={t.companyId} ticketId={t.id} folded />
+          <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} ticketNumber={t.number} prefix={t.ref?.replace(/-[0-9]+$/, "") ?? null} />
         </div>
 
         <aside className="card ticket-props" aria-label="Properties">
@@ -853,6 +858,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dd>{when(t.createdAt)}</dd>
             <dt>Last activity</dt>
             <dd>{when(t.lastActivityAt)}</dd>
+            {t.lastPostAt && (
+              <>
+                <dt>Last post</dt>
+                <dd>{ago(t.lastPostAt)}</dd>
+              </>
+            )}
           </dl>
           </div>
         </aside>

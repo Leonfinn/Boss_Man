@@ -55,8 +55,9 @@ describe("ticket watchers (R80)", () => {
     await c.scheduler.tick();
     const [first] = c.starts().filter((s) => s.agentId === c.scrum.id);
     expect(first).toBeDefined();
-    // A watch run has no ticket, so it never touches the ticket's branch or moves it.
+    // A watch run is on the one ticket it reports on (BOS-268) without touching its branch or moving it.
     expect(first!.workspace).toBeUndefined();
+    expect((await c.db.select().from(runs).where(eq(runs.id, first!.runId)))[0]).toMatchObject({ ticketId: t.id, origin: WATCH_REASON });
     expect(first!.prompt).toContain(`Ticket ${t.id} "Add checkout"`);
     expect(first!.prompt).toContain(`Depends on ticket ${blocker.id} "Pick a payments provider"`);
     expect(first!.prompt).toContain("post ONE short status update on that ticket with ticket_reply");

@@ -10,7 +10,58 @@ describe("links to wiki pages from a ticket", () => {
   it("turns [[slug]] in an agent's message into a link to the company's wiki page", () => {
     render(<p>{linked("The full list is on [[backlog-review]], see [[backlog-review#Top 10]].", "c1")}</p>);
     expect(screen.getByRole("link", { name: "backlog-review" }).getAttribute("href")).toBe("#/wiki/c1/backlog-review");
-    expect(screen.getByRole("link", { name: "backlog-review#Top 10" }).getAttribute("href")).toBe("#/wiki/c1/backlog-review");
+    // Chat and Markdown now keep the section the same way, landing on that heading (BOS-358).
+    expect(screen.getByRole("link", { name: "backlog-review#Top 10" }).getAttribute("href")).toBe("#/wiki/c1/backlog-review#Top 10");
+  });
+
+  it("keeps the page name on a full #/wiki/<company>/<slug> link, the way the wiki tool writes it (BOS-356)", () => {
+    render(
+      <p>
+        {linked(
+          "Cause: see [#/wiki/8c7f803d-8266-4cae-b17b-79e289142018/runbooks/move-boss-man-to-a-new-host](#/wiki/8c7f803d-8266-4cae-b17b-79e289142018/runbooks/move-boss-man-to-a-new-host) and #/wiki/8c7f803d-8266-4cae-b17b-79e289142018/runbooks/move-boss-man-to-a-new-host.",
+          "c1",
+        )}
+      </p>,
+    );
+    const href = "#/wiki/8c7f803d-8266-4cae-b17b-79e289142018/runbooks/move-boss-man-to-a-new-host";
+    const links = screen.getAllByRole("link");
+    expect(links).toHaveLength(2);
+    for (const link of links) expect(link.getAttribute("href")).toBe(href);
+  });
+
+  it("keeps the section on a wiki link, and does not stretch a link across a space (BOS-356)", () => {
+    render(<p>{linked("See #/wiki/c1/runbooks/move-boss-man-to-a-new-host#Step2, then the rest.", "c1")}</p>);
+    expect(screen.getByRole("link").getAttribute("href")).toBe("#/wiki/c1/runbooks/move-boss-man-to-a-new-host#Step2");
+    expect(screen.getByText(/then the rest\./)).toBeTruthy();
+  });
+
+  it("keeps the page name when a full wiki link is followed by a space or a new line (BOS-356)", () => {
+    const id = "8c7f803d-8266-4cae-b17b-79e289142018";
+    const href = `#/wiki/${id}/my-page`;
+    const link = (text: string) => {
+      const { unmount } = render(<p>{linked(text, id)}</p>);
+      expect(screen.getByRole("link").getAttribute("href")).toBe(href);
+      unmount();
+    };
+    link(`See ${href} and then some more.`);
+    link(`See ${href}\nnext line`);
+    link(`${href})`);
+  });
+
+  it("leaves an empty [x]() as plain text, with no link to an empty address (BOS-356)", () => {
+    render(<p>{linked("See [x]() here and [task](#/tickets/8c7f803d-8266-4cae-b17b-79e289142018).", "c1")}</p>);
+    expect(screen.getByText(/\[x\]\(\)/)).toBeTruthy();
+    expect(screen.queryAllByRole("link")).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "task" }).getAttribute("href")).toBe("#/tickets/8c7f803d-8266-4cae-b17b-79e289142018");
+  });
+
+  it("takes this company's id in front of a short page name, and leaves another company's unlinked (BOS-356)", () => {
+    const mine = "c1";
+    const theirs = "8c7f803d-8266-4cae-b17b-79e289142018";
+    render(<p>{linked(`See [[${mine}/backlog-review]] and [[${theirs}/their-page]].`, mine)}</p>);
+    expect(screen.getByRole("link", { name: "backlog-review" }).getAttribute("href")).toBe("#/wiki/c1/backlog-review");
+    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(screen.getByText(new RegExp(`\\[\\[${theirs}/their-page\\]\\]`))).toBeTruthy();
   });
 
   it("shows a page written on the parent task, says where it came from, and offers no Remove for it", () => {

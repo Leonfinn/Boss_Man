@@ -5,7 +5,7 @@
 #
 #   host-deployer.sh              handle one request, if there is one
 #   host-deployer.sh --dry-run    run every check and say what would happen; changes nothing
-#   host-deployer.sh --rollback   blue/green only, by hand at the NAS, as root: go back to the other colour (the
+#   host-deployer.sh --rollback   blue/green only, by hand on the host, as root: go back to the other colour (the
 #                                 previous release), also after the 15-minute window. With --dry-run it only checks.
 #
 # It reads one small request file the server wrote, treats it as data only, checks it, and runs
@@ -21,7 +21,9 @@
 #   RATE_LIMIT_SECONDS min gap between two runs of the same target (600)
 #   AVAILABLE_REFRESH_SECONDS  how often to look for a new commit on main (300); sooner when the server
 #                              leaves inbox/check ("Deploy latest" found nothing new; only its existence is read)
-#   SOAK_SECONDS       blue/green: how long the old colour stays up as a standby after a good swap (900)
+#   SOAK_SECONDS       blue/green: how long the old colour stays up as a standby after a good swap (900); also
+#                      published in available.json, so Boss Man's runner-update trial uses the same length
+#   SOAK_CHECK_SECONDS blue/green: how long a failing check during that window is retried before the automatic switch-back (60)
 #
 # Blue/green (docs/09-self-deploy.md, "Phase 3, part 2"): when COMPOSE_FILE (environment or the checkout's .env)
 # names deploy/truenas-bluegreen.yml, target "server" does a zero-downtime colour swap instead of deploy.sh.
@@ -38,7 +40,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron'
 D="${BOSSMAN_DEPLOYER:-$(cd "$(dirname "$0")" && pwd)}"
 REPO="$D/../src"
 WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SECONDS=300
-BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}"
+BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}" SOAK_CHECK_SECONDS="${SOAK_CHECK_SECONDS:-60}"
 CONF="$D/host.conf"
 if [[ -e $CONF ]]; then
   [[ ! -L $CONF && $(stat -c %u "$CONF") == "$(id -u)" && $(stat -c %a "$CONF") =~ ^[0-7]00$ ]] || { echo "ERROR: $CONF must be a plain file, owned by $(id -un), mode 600." >&2; exit 1; }
@@ -46,11 +48,13 @@ if [[ -e $CONF ]]; then
   source "$CONF"
 fi
 INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
-INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
+# Files that change how Boss Man runs or deploys. Build-only scripts (make-app-icons, check-*, test-*, lint-migrations, backups) are not on it (BOS-269);
+# docs/09-self-deploy.md lists the same files.
+INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
-NOT_INFRA='^deploy/penpot\.yml$'
+NOT_INFRA='^deploy/(penpot|ntfy)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
-RUNNER_PATHS='^(apps/runner/|apps/launcher/|packages/shared/|pnpm-lock\.yaml$)'
+RUNNER_PATHS='^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
@@ -58,7 +62,26 @@ g() { git -C "$REPO" "$@"; }
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { ((DRY)) || printf '%s %s\n' "$(now)" "$*" >>"$LOG"; printf '%s\n' "$*"; }
-json() { node -e 'const d=v=>v===null?"null":v===true?"true":v===false?"false":typeof v==="number"?String(v):typeof v==="string"?JSON.stringify(v):Array.isArray(v)?"["+v.map(d).join(", ")+"]":"{"+Object.keys(v).map(k=>JSON.stringify(k)+": "+d(v[k])).join(", ")+"}";const o={};for(const a of process.argv.slice(1)){const i=a.indexOf("=");o[a.slice(0,i)]=a.slice(i+1)}process.stdout.write(d(o)+"\n")' "$@"; }
+# JSON string literal for a value: escapes \ and ", writes newline/CR/tab as escapes and drops other control characters.
+jstr() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  s=${s//[[:cntrl:]]/}
+  printf '"%s"' "$s"
+}
+json() { # key=value ...: a flat object of strings, written as {"k": "v", ...} and a newline
+  local a out="" sep=""
+  for a in "$@"; do out+="$sep$(jstr "${a%%=*}"): $(jstr "${a#*=}")"; sep=", "; done
+  printf '{%s}\n' "$out"
+}
+# The value of a top-level string, number or boolean field of a flat JSON text on stdin; empty when absent or not simple.
+# Booleans print True/False because callers compare against "True". Only reads; nothing from the text is executed.
+jfield() { # field
+  local line
+  line="$(LC_ALL=C tr -d '\n\r' | LC_ALL=C grep -oE "\"$1\"[[:space:]]*:[[:space:]]*(\"[^\"\\\\]*\"|true|false|-?[0-9]+)" | head -n 1)" || true
+  line="${line#*:}"; line="${line#"${line%%[![:space:]]*}"}"
+  case $line in true) echo True ;; false) echo False ;; \"*) line="${line#\"}"; printf '%s' "${line%\"}" ;; *) printf '%s' "$line" ;; esac
+}
 
 [[ -d $INBOX && -d $OUTBOX ]] || { echo "ERROR: $INBOX and $OUTBOX must exist (docs/06-install-truenas.md, Install the host deployer)." >&2; exit 1; }
 mkdir -p "$STATE"
@@ -93,7 +116,7 @@ finish() { # result message [backup]: record the outcome, tell the owner, stop
   exit 0
 }
 
-# The newest commit on main as the remote says it, read with the deploy key. Empty if unreachable.
+# The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an older install's deploy key). Empty if unreachable.
 remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }' || true; }
 
 # Tells the server what is waiting (when main is ahead of what runs), so it can raise the decision.
@@ -117,15 +140,31 @@ refresh_available() {
       tip="" # main is not a fast-forward of what runs: nothing can be offered
     fi
   fi
-  node -e '
-const fs=require("fs");
-const [head,tip,cf,pf,infra,notinfra,runner,at]=process.argv.slice(1);
-const commits=fs.readFileSync(cf,"utf8").split("\n").filter(l=>l.trim()).map(l=>{const i=l.indexOf(" ");return {sha:l.slice(0,i),subject:l.slice(i+1)}});
-const paths=fs.readFileSync(pf,"utf8").split("\n").filter(l=>l.trim());
-const ri=new RegExp(infra),rn=new RegExp(notinfra),rr=new RegExp(runner);
-const d=v=>v===null?"null":v===true?"true":v===false?"false":typeof v==="number"?String(v):typeof v==="string"?JSON.stringify(v):Array.isArray(v)?"["+v.map(d).join(", ")+"]":"{"+Object.keys(v).map(k=>JSON.stringify(k)+": "+d(v[k])).join(", ")+"}";
-process.stdout.write(d({version:1,checkedAt:at,deployed:head,tip:tip,commits,paths:paths.slice(0,300),infraPaths:paths.filter(p=>ri.test(p)&&!rn.test(p)).slice(0,50),runnerChanged:paths.some(p=>rr.test(p))}));
-' "$head" "$tip" "$commits" "$paths" "$INFRA" "$NOT_INFRA" "$RUNNER_PATHS" "$(now)" >"$f.tmp"
+  local out="" sep="" line sha p
+  while IFS= read -r line; do
+    [[ -n ${line//[[:space:]]/} ]] || continue
+    sha="${line%% *}"; out+="$sep{\"sha\": $(jstr "$sha"), \"subject\": $(jstr "${line#* }")}"; sep=", "
+  done <"$commits"
+  local clist="[$out]" plist="" ilist="" runner=false n=0 ni=0
+  sep="" out=""
+  while IFS= read -r p; do
+    [[ -n ${p//[[:space:]]/} ]] || continue
+    if ((n < 300)); then plist+="$sep$(jstr "$p")"; sep=", "; n=$((n + 1)); fi
+    if [[ $p =~ $INFRA && ! $p =~ $NOT_INFRA ]] && ((ni < 50)); then ilist+="${ilist:+, }$(jstr "$p")"; ni=$((ni + 1)); fi
+    if [[ $p =~ $RUNNER_PATHS ]]; then runner=true; fi
+  done <"$paths"
+  # What this install really looks like, so the owner's hand-apply steps never guess a folder (BOS-269).
+  local srcdir deployerdir bg=false colour="" soak=""
+  srcdir="$(cd "$REPO" 2>/dev/null && pwd)" || srcdir=""
+  deployerdir="$(cd "$D" 2>/dev/null && pwd)" || deployerdir=""
+  if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
+  # The standby window as this host really runs it (host.conf's SOAK_SECONDS), so the server's trial wording matches it.
+  # A fragment with its own separator and quoting, so the JSON stays valid whatever the setting; absent = not blue/green.
+  if [[ $bg == true ]]; then
+    if [[ $SOAK_SECONDS =~ ^[0-9]{1,6}$ ]]; then soak=", \"soakSeconds\": $SOAK_SECONDS"; else log "SOAK_SECONDS is not a whole number of seconds; not reporting the trial length."; fi
+  fi
+  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s%s}' \
+    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" "$soak" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
@@ -203,7 +242,6 @@ probe() { # service port path
   if [[ $1 == proxy ]]; then compose exec -T proxy wget -q -T 5 -O - "http://127.0.0.1:$2$3"
   else compose exec -T "$1" node -e "fetch('http://127.0.0.1:$2$3').then(async r=>{console.log(await r.text());process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"; fi
 }
-jfield() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let o;try{o=JSON.parse(s)}catch{process.stdout.write("");return}const v=o==null?undefined:o[process.argv[1]];process.stdout.write(v===true?"True":v===false?"False":v==null?"":String(v))})' "$1" 2>/dev/null || true; }
 
 # Polls /api/ready of a service until it is ok, has this role and (when given) this commit.
 wait_ready() { # service role commit seconds
@@ -220,7 +258,7 @@ backup_database() {
   local dir="${BOSSMAN_BACKUP_DIR:-$D/..}" old f
   mkdir -p "$dir"
   BG_BACKUP="$dir/bossman-$(date +%F-%H%M).sql.gz"
-  compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial" || { rm -f "$BG_BACKUP.partial"; return 1; }
+  (umask 077; compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial") || { rm -f "$BG_BACKUP.partial"; return 1; }
   { [[ -s $BG_BACKUP.partial ]] && gzip -t "$BG_BACKUP.partial"; } || { rm -f "$BG_BACKUP.partial"; return 1; }
   mv "$BG_BACKUP.partial" "$BG_BACKUP"
   # Same retention as deploy.sh: only bossman-*.sql.gz, newest 14 kept.
@@ -246,8 +284,15 @@ switch_back() {
 }
 
 # After the swap: the proxy answers as the new leader at the new commit, and the portal answers.
-verify_live() { # commit seconds
-  wait_ready proxy leader "$1" "$2" && probe proxy 3101 /portal.html >/dev/null 2>&1
+verify_live() { # commit seconds: on failure VERIFY_WHY says which check failed and what it saw
+  local body=""
+  VERIFY_WHY=""
+  wait_ready proxy leader "$1" "$2" || { VERIFY_WHY="the server did not answer as the leader at ${1:0:8} through the proxy within ${2}s (last answer: $(probe proxy 3100 /api/ready 2>&1 | head -c 300 || true))"; return 1; }
+  local end=$((SECONDS + $2))
+  until body="$(probe proxy 3101 /portal.html 2>&1 >/dev/null)"; do
+    if ((SECONDS >= end)); then VERIFY_WHY="the portal page did not load through the proxy within ${2}s (${body:0:300})"; return 1; fi
+    sleep "$BG_POLL_SECONDS"
+  done
 }
 
 pre_fail() { # message: undo what happened before the hand-over; the live colour was never touched
@@ -285,10 +330,10 @@ do_deploy_bluegreen() {
   [[ -n $why ]] || compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || why="Could not signal $BG_IDLE."
   [[ -n $why ]] || wait_ready "server-$BG_IDLE" leader "$COMMIT" "$BG_HANDOVER_SECONDS" || why="$BG_IDLE did not become the leader."
   [[ -n $why ]] || flip_proxy "$BG_IDLE" || why="The proxy did not accept the switch to $BG_IDLE."
-  [[ -n $why ]] || verify_live "$COMMIT" "$BG_READY_SECONDS" || why="The checks through the proxy failed."
+  [[ -n $why ]] || verify_live "$COMMIT" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "$why Switched back to $BG_LIVE automatically. Backup: $BG_BACKUP"
-    else bg_fail failed "$why The switch-back ALSO failed: look at the NAS now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "$why The switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
     return 1
   fi
 
@@ -310,7 +355,7 @@ soak_tick() {
   [[ -n $commit && $old != "$new" ]] || { log "Ignoring a malformed $f."; ((DRY)) || rm -f "$f"; return 0; }
   if ((DRY)); then log "[dry-run] a soak is running: $new live, $old standby until $deadline"; return 0; fi
   [[ $(live_colour || true) == "$new" ]] || { log "The proxy no longer points at $new; ending the soak."; rm -f "$f"; return 0; }
-  if verify_live "$commit" 10; then
+  if verify_live "$commit" "$SOAK_CHECK_SECONDS"; then
     if (($(date +%s) >= deadline)); then
       log "Soak over: stopping the old colour ($old)."
       compose stop "server-$old" >>"$LOG" 2>&1 || log "Could not stop server-$old."
@@ -318,11 +363,13 @@ soak_tick() {
     fi
     return 0
   fi
+  log "Check failed on $new at ${commit:0:8}: $VERIFY_WHY"
   BG_LIVE="$old" BG_IDLE="$new" BG_PREV="$prev"
-  REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$commit" COMMIT="$prev"
+  # The record names the commit that failed (to_commit), as a swap-time rollback does, and the one we are back on (from_commit).
+  REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
   rm -f "$f"
-  if switch_back; then finish rolled_back "The checks on $new failed during the standby window; switched back to $old automatically (code back at ${prev:0:8})."
-  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the NAS now (docker compose ps; $LOG)."; fi
+  if switch_back; then finish rolled_back "The update to ${commit:0:8} was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the previous version (${prev:0:8}) automatically and is running normally on it."
+  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the host now (docker compose ps; $LOG)."; fi
 }
 
 # By hand, any time (also after the soak window): go back to the other colour, i.e. the previous release.
@@ -361,10 +408,10 @@ do_rollback_bluegreen() {
   [[ -n $why ]] || compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || why="Could not signal $BG_IDLE."
   [[ -n $why ]] || wait_ready "server-$BG_IDLE" leader "$ocommit" "$BG_HANDOVER_SECONDS" || why="$BG_IDLE did not become the leader."
   [[ -n $why ]] || flip_proxy "$BG_IDLE" || why="The proxy did not accept the switch to $BG_IDLE."
-  [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="The checks through the proxy failed."
+  [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "Rollback failed ($why); $BG_LIVE is live again. Backup: $BG_BACKUP"
-    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: look at the NAS now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
     return 1
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.
@@ -378,7 +425,7 @@ do_rollback_bluegreen() {
 
 # Reads a field of scripts/deploy.sh's own status file.
 # Booleans print True/False because callers compare against "True".
-deploy_status_field() { node -e 'const fs=require("fs");let o;try{o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{process.stdout.write("");process.exit(0)}const v=o==null?undefined:o[process.argv[2]];process.stdout.write(v===true?"True":v===false?"False":v==null?"":String(v))' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" "$1" 2>/dev/null || true; }
+deploy_status_field() { jfield "$1" <"${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" 2>/dev/null || true; }
 
 main() {
   local req="$INBOX/request.json"
@@ -390,7 +437,7 @@ main() {
     ((!DRY)) || exit "$rrc"
     COMMIT="$(g rev-parse HEAD)"
     log "${BG_RESULT:-failed}: ${BG_MSG:-Rollback stopped with an error.}"
-    write_status "${BG_RESULT:-failed}" "${BG_MSG:-Rollback stopped with an error. See $LOG on the NAS.}" "$BG_BACKUP"
+    write_status "${BG_RESULT:-failed}" "${BG_MSG:-Rollback stopped with an error. See $LOG on the host.}" "$BG_BACKUP"
     post_webhook "${BG_RESULT:-failed}" "${BG_MSG:-Rollback failed.}"
     exit "$rrc"
   fi
@@ -405,19 +452,21 @@ main() {
   STARTED="$(now)"; FROM="$(g rev-parse HEAD 2>/dev/null || true)"
 
   [[ -f $mine && ! -L $mine && $(stat -c %s "$mine") -le 4096 ]] || finish rejected "Rejected: the request file is not a plain file under 4 KB."
-  local parsed
-  parsed="$(node -e '
-const fs=require("fs");let d;
-try{d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{process.exit(1)}
-const str=v=>typeof v==="string";
-const ok=!!d&&typeof d==="object"&&!Array.isArray(d)&&["id","target","commit","requestedAt","approvedBy"].every(k=>str(d[k]))
- && /^[0-9a-fA-F-]{36}$/.test(d.id) && ["server","runner"].includes(d.target) && /^[0-9a-f]{40}$/.test(d.commit)
- && /^[A-Za-z0-9_.-]{1,64}$/.test(d.approvedBy) && /^[0-9T:.+Z-]{10,40}$/.test(d.requestedAt);
-if(!ok)process.exit(1);
-process.stdout.write(d.id+" "+d.target+" "+d.commit);
-' "$mine"
-)" || finish rejected "Rejected: the request file does not match the expected format."
-  read -r REQ_ID TARGET COMMIT <<<"$parsed"
+  # The request is untrusted: it must be one flat object whose five fields are plain strings of safe characters.
+  # Whitespace is dropped first, so the shape check below is one strict pattern; nothing is evaluated or sourced.
+  local k flat id target commit at by
+  [[ $(LC_ALL=C tr -d '\0' <"$mine" | wc -c) -eq $(stat -c %s "$mine") ]] || finish rejected "Rejected: the request file does not match the expected format."
+  flat="$(LC_ALL=C tr -d ' \t\r\n' <"$mine")"
+  local pair='"[A-Za-z]{1,32}":"[A-Za-z0-9_.:+-]{0,64}"'
+  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || finish rejected "Rejected: the request file does not match the expected format."
+  for k in id target commit requestedAt approvedBy; do
+    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || finish rejected "Rejected: the request file does not match the expected format."
+  done
+  id="$(jfield id <<<"$flat")" target="$(jfield target <<<"$flat")" commit="$(jfield commit <<<"$flat")"
+  at="$(jfield requestedAt <<<"$flat")" by="$(jfield approvedBy <<<"$flat")"
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target =~ ^(server|runner)$ && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] ||
+    finish rejected "Rejected: the request file does not match the expected format."
+  REQ_ID=$id TARGET=$target COMMIT=$commit
 
   # Accept both spacings: history lines written by older versions may be compact.
   if [[ -s $OUTBOX/history.jsonl ]] && grep -qE "\"id\":[[:space:]]*\"$REQ_ID\"" "$OUTBOX/history.jsonl"; then
@@ -434,7 +483,7 @@ process.stdout.write(d.id+" "+d.target+" "+d.commit);
     [[ $COMMIT == "$tip" ]] || { rm -f "$OUTBOX/available.json"; finish rejected "Rejected: ${COMMIT:0:8} is not the tip of main (${tip:0:8}). Approve the latest deploy instead."; }
   else
     # Runners are built from what is checked out, which is what the server deploy put there.
-    [[ $COMMIT == "$head" ]] || finish rejected "Rejected: runners are updated only to the commit that is deployed (${head:0:8}), not ${COMMIT:0:8}."
+    [[ $COMMIT == "$head" ]] || finish rejected "The runners were not updated. They can only be rebuilt from the version the server runs, which is ${head:0:8}, and you asked for ${COMMIT:0:8} (the server update to it may still be running, or was switched back). Nothing is broken and nothing needs doing now: once the server runs the version you want, use Build and update runners in Settings."
   fi
 
   last="$(cat "$STATE/last-$TARGET" 2>/dev/null || echo 0)"
@@ -448,7 +497,7 @@ process.stdout.write(d.id+" "+d.target+" "+d.commit);
     g merge-base --is-ancestor "$head" "$COMMIT" || finish rejected "Rejected: ${COMMIT:0:8} is not a fast-forward of the deployed ${head:0:8}."
     local infra
     infra="$(g diff --name-only "$head" "$COMMIT" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } | head -5 | paste -sd, - || true)"
-    [[ -z $infra ]] || finish rejected "Rejected: this change touches deployment files ($infra). Deploy it by hand at the NAS: scripts/deploy.sh"
+    [[ -z $infra ]] || finish rejected "Rejected: this change touches deployment files ($infra). Deploy it by hand on the host: scripts/deploy.sh"
   fi
 
   if ((DRY)); then
@@ -463,7 +512,7 @@ process.stdout.write(d.id+" "+d.target+" "+d.commit);
   local rc=0 result msg
   if [[ $TARGET == server ]] && bluegreen_enabled; then
     do_deploy_bluegreen >>"$LOG" 2>&1 || rc=$?
-    [[ $BG_RESULT == deployed ]] || BG_MSG="${BG_MSG:-The blue/green swap stopped with an error (exit $rc).} See $LOG on the NAS."
+    [[ $BG_RESULT == deployed ]] || BG_MSG="${BG_MSG:-The blue/green swap stopped with an error (exit $rc).} See $LOG on the host."
     finish "${BG_RESULT:-failed}" "$BG_MSG" "$BG_BACKUP"
   fi
   if [[ $TARGET == server ]]; then do_deploy_server >>"$LOG" 2>&1 || rc=$?; else do_update_runner >>"$LOG" 2>&1 || rc=$?; fi
@@ -478,7 +527,7 @@ process.stdout.write(d.id+" "+d.target+" "+d.commit);
     if [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="New runner image ready (commit ${COMMIT:0:8}); Boss Man is waiting for runs to finish, then swaps the runners and reports the result."; fi
   else
     case $result in partial | rolled_back) ;; *) result=failed ;; esac
-    msg="${msg:-The $TARGET action stopped with an error (exit $rc).} See $LOG on the NAS."
+    msg="${msg:-The $TARGET action stopped with an error (exit $rc).} See $LOG on the host."
   fi
   finish "$result" "$msg" "$(deploy_status_field backup)"
 }
