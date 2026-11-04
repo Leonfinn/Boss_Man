@@ -588,6 +588,24 @@ describe("scheduler", () => {
       expect((await ctx.db.select().from(notifications)).filter((n) => /New runs now use Max two/.test(n.title))).toHaveLength(1);
     });
 
+    it("tells the owner once about the switch even when urgent and routine work alternate over several polls (BOS-453)", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      await ctx.req("POST", "/api/scheduler/tick");
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: ctx.ceo.id })).json();
+      await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+      for (let i = 0; i < 4; i++) {
+        await ctx.db.update(runs).set({ endedAt: new Date() });
+        await ctx.db.delete(wakes);
+        // An urgent wake passes at 97% and lands on the first account; a routine wake goes to the second.
+        await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2, ...(i % 2 ? { ticketId: urgent.id } : {}) });
+        await ctx.req("POST", "/api/scheduler/tick");
+      }
+      const notes = (await ctx.db.select().from(notifications)).filter((n) => /New runs now use/.test(n.title));
+      expect(notes.map((n) => n.title)).toEqual(["New runs now use Max two"]);
+    });
+
     it("holds routine work when every account is full", async () => {
       const { a, b } = await twoAccounts();
       await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
