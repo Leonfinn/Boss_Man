@@ -613,7 +613,8 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null): Promise<MergeResult> {
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string } | null = null): Promise<MergeResult> {
+    if (phase) return this.mergePhase(spec, target, message, secrets, phase);
     if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS);
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
@@ -639,6 +640,50 @@ export class Workspaces {
         if (attempt === 1) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
       }
       throw new Error("unreachable");
+    });
+  }
+
+  /**
+   * Server-queued merge checks (DR-003, BOS-316) split the merge in two. "prepare" builds the merge commit and keeps it under a
+   * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
+   * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
+   */
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string }): Promise<MergeResult> {
+    const auth = gitAuthEnv(secrets);
+    const repo = this.repoDir(spec.projectId);
+    const branch = `refs/heads/${branchFor(spec.ticketId)}`;
+    const keep = `refs/bossman/merge/${spec.ticketId}`;
+    return this.withRepoLock(spec.projectId, async (): Promise<MergeResult> => {
+      const ticketDir = this.ticketDir(spec.ticketId);
+      if (existsSync(path.join(ticketDir, ".git"))) {
+        const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir });
+        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+      }
+      const tried = await this.tryMerge(repo, branch, target, auth);
+      if (tried.status !== "clean") return tried;
+      const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
+      const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
+      if (problems.length) return { status: "migration_journal" as const, problems };
+      if (phase.phase === "prepare") {
+        const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
+        await this.git(["update-ref", keep, commit], { cwd: repo });
+        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha };
+      }
+      // The target moved to something whose merge differs from what was checked: check again.
+      if (tried.tree !== phase.tree) return { status: "main_moved" };
+      // Same tree. The checked commit itself if its parents are still current; otherwise a new commit with the same tree.
+      const parents = (await this.git(["rev-list", "--parents", "-n", "1", phase.commit], { cwd: repo })).split(" ").slice(1);
+      const same = parents[0] === tried.targetSha && parents[1] === tried.branchSha;
+      const toPush = same ? phase.commit : await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
+      const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
+      if (pushed.code !== 0) {
+        // Rejected: the target moved again (try once more) or the push is refused for good (the next prepare would say so).
+        const again = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+        if (again === tried.targetSha) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
+        return { status: "main_moved" };
+      }
+      await this.git(["update-ref", "-d", keep], { cwd: repo }).catch(() => undefined);
+      return { status: "merged", commit: toPush, checked: { sha: phase.commit, tree: tried.tree, ms: 0 } };
     });
   }
 

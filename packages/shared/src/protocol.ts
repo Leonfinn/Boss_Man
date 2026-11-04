@@ -156,7 +156,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional() }),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -296,6 +296,8 @@ export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools:
 
 /** The outcome of merging a ticket's branch (R46). */
 export type MergeResult =
+  /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
+  | { status: "prepared"; commit: string; tree: string; targetSha: string }
   | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number } }
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }

@@ -72,6 +72,7 @@ import { applyPackage, ImportError, previewPackage, readPackage } from "./servic
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
+import { checkRequestService } from "./services/check-request.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
