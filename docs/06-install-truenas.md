@@ -488,7 +488,7 @@ chown root:root $D/host.conf && chmod 600 $D/host.conf
 ```
 
 - `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
-- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`.
+- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`. The host publishes `SOAK_SECONDS` in `outbox/available.json` as `soakSeconds`, so Boss Man's runner-update trial uses the same length you set here (no second place to keep in step).
 - The script refuses to start if this file is not owned by the user running it with mode 600.
 - It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay or Home Assistant; that is untested.
 
