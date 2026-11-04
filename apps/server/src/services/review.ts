@@ -12,7 +12,8 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck } from "./decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, supersedeSignoffs } from "./decisions.js";
+import { checkGate, checkPriority } from "./check-gate.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import type { notificationsService } from "./notifications.js";
@@ -53,7 +54,15 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
  * scripts/check-all.sh exits 75 with this wording before any step runs, so nothing the agent wrote failed.
  */
 export function checkWaitedForLock(v: { exitCode: number | null; output: string }): boolean {
-  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock/.test(v.output);
+  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock/.test(v.output) && !checkQueueStuck(v);
+}
+/**
+ * True when the queue itself stood still (BOS-370): a merge check keeps its place while the queue moves, and gives up
+ * only when its place and the slot holders have not changed for longer than a check runs. Retrying would only wait
+ * again, so the owner is told at once.
+ */
+export function checkQueueStuck(v: { exitCode: number | null; output: string }): boolean {
+  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock[^\n]*the queue made no progress for (\d+) min/.test(v.output);
 }
 /** Tries a merge check that only timed out on the lock this many times, pausing LOCK_RETRY_BASE_MS, then double, between them. */
 export const LOCK_RETRY_ATTEMPTS = 6;
@@ -61,6 +70,24 @@ export let LOCK_RETRY_BASE_MS = 60_000;
 /** For tests. */
 export const setLockRetryBase = (ms: number) => { LOCK_RETRY_BASE_MS = ms; };
 export const LOCK_RETRY_TEXT = "Merge check waiting for lock, retrying";
+
+/**
+ * A merge check that died from the host, not the code (killed, out of memory, timed out, or the runner never
+ * answered) is run again by itself this many times, pausing INFRA_RETRY_BASE_MS, then double, between them (BOS-446).
+ * The last try runs alone, with no other merge check beside it. Only after that does a card appear, for the CEO.
+ * checkNeverFinished is the one list of such causes; "the runner didn't answer" is added by the caller.
+ */
+export const INFRA_RETRY_ATTEMPTS = 3;
+export let INFRA_RETRY_BASE_MS = 30_000;
+/** For tests. */
+export const setInfraRetryBase = (ms: number) => { INFRA_RETRY_BASE_MS = ms; };
+export type InfraCause = "timed_out" | "out_of_memory" | "killed" | "no_answer";
+export const INFRA_CAUSE_TEXT: Record<InfraCause, (ms: number) => string> = {
+  timed_out: (ms) => `timed out after ${Math.max(1, Math.round(ms / 60_000))} min`,
+  out_of_memory: () => "ran out of memory",
+  killed: () => "was killed",
+  no_answer: () => "got no answer from the runner",
+};
 
 /** How long the server waits for the runner to merge or push an approved branch. */
 export const MERGE_WAIT_MS = 10 * 60_000;
@@ -125,7 +152,7 @@ async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title
   if (!latest || latest.systemState === "done") return;
   // One open merge card per ticket: this one replaces any older card (BOS-149).
   await clearMergeCards(db, t.id, { by: "system", note: `Replaced by a newer merge card: the check \`${command}\` ${reason}.`, at: new Date().toISOString() });
-  await db
+  const [row] = await db
     .insert(decisions)
     .values({
       companyId: t.companyId,
@@ -133,11 +160,14 @@ async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title
       question: `"${t.title}": the merge check \`${command}\` couldn't finish (it ${reason}). This isn't a problem with the agent's work.`,
       options: [CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP],
       recommendedOption: CHECK_AGAIN,
-      tier: "owner",
+      // The CEO first (BOS-446): Boss Man has already retried by itself, and the CEO can retry or send it back.
+      tier: "ceo",
       dedupeKey: `merge-stuck:${t.id}`,
       context: { type: "check_stuck", ticketId: t.id, command, output: output.slice(-1500) },
     })
-    .onConflictDoNothing();
+    .onConflictDoNothing()
+    .returning({ question: decisions.question });
+  return row?.question ?? null;
 }
 
 export function reviewService(
@@ -157,6 +187,8 @@ export function reviewService(
   let wake: NotifyHook | null = null;
   // shortcut: in memory, so a server restart mid-landing forgets the status (the ticket itself is unaffected); upgrade to a column if owners need it to survive restarts.
   const landings = new Map<string, LandingStatus>();
+  // At most N merge checks at once, quick or full (BOS-446); the rest wait in order, urgent and arch fixes first.
+  const gate = checkGate(db);
   // When each ticket's merge last said it was alive (BOS-362). The merge sweep reads this, not the ticket's
   // activity, which chat and chases also bump: talk must not hold a merge retry back, and a running merge must.
   // shortcut: in memory like `landings`; a restart ends every merge, so forgetting it is correct.
@@ -576,6 +608,8 @@ export function reviewService(
       await deps.loops.approved(ticketId, o.reviewer);
       // Where the review policy says the owner signs off, an agent's approval asks them (R48).
       if (o.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
+        // One open sign-off card per ticket: this round replaces any older one (BOS-446).
+        await supersedeSignoffs(db, ticketId, { by: "system", note: "Replaced by a newer sign-off card after a new review round.", at: new Date().toISOString() });
         const [d] = await db
           .insert(decisions)
           .values({
@@ -863,9 +897,15 @@ export function reviewService(
       const checkFailed = async (command: string, v: VerifyResult): Promise<{ outcome: "verify_failed" | "check_stuck" | "lock_wait"; delivered: string | null; detail: unknown }> => {
         // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
         if (checkWaitedForLock(v)) return { outcome: "lock_wait", delivered: null, detail: { ...v, command } };
-        const never = checkNeverFinished(v);
+        if (checkQueueStuck(v)) {
+          const mins = /no progress for (\d+) min/.exec(v.output)?.[1] ?? "60";
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The check queue made no progress for ${mins} minutes (the same check held the slot); the merge check gave up and it's in your Decisions.` });
+          await raiseCheckStuck(db, t, command, `was stopped: the check queue made no progress for ${mins} minutes, because the check holding the slot never finished`, v.output);
+          return { outcome: "check_stuck", delivered: null, detail: v };
+        }
+        const never: InfraCause | null = (v as { noAnswer?: boolean }).noAnswer ? "no_answer" : checkNeverFinished(v);
         if (never) {
-          const reason = never === "timed_out" ? `timed out after ${Math.max(1, Math.round(v.ms / 60_000))} min` : never === "out_of_memory" ? "ran out of memory" : "was killed";
+          const reason = INFRA_CAUSE_TEXT[never](v.ms);
           await raiseCheckStuck(db, t, command, reason, v.output);
           return { outcome: "check_stuck", delivered: null, detail: v };
         }
@@ -879,13 +919,25 @@ export function reviewService(
       const checkMerged = landing !== "pull_request" && checks.length > 0 && (await checkMergedResult());
       for (const command of checkMerged ? [] : checks) {
         await touch();
-        const runCheck = () => whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
-        let v = await runCheck();
-        // Killed or out of memory (not timed out, not a real failure): the runner or server was cut off, not the work. Run it once more before bothering the owner.
-        const first = checkNeverFinished(v);
-        if (!v.ok && (first === "killed" || first === "out_of_memory") && !checkWaitedForLock(v)) {
-          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The merge check ${first === "killed" ? "was killed" : "ran out of memory"} before it finished; running it once more. Nothing to do.` });
-          v = await runCheck();
+        // Through the gate: at most N checks run at once. A runner that doesn't answer counts as an infra failure too.
+        const runCheck = (alone: boolean) =>
+          whileActive(() =>
+            gate.run(checkPriority(t), alone, () =>
+              ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS).catch((err: Error): VerifyResult & { noAnswer: true } => ({ ok: false, exitCode: null, timedOut: false, output: err.message, ms: 0, noAnswer: true })),
+            ),
+          );
+        let v = await runCheck(false);
+        // Killed, out of memory, timed out or no answer: the host was cut off, not the work. Run it again by itself,
+        // keeping the ticket's place, before any card appears (BOS-446). The lock wait has its own retries in land().
+        for (let retry = 1; !v.ok && !checkWaitedForLock(v); retry++) {
+          const why: InfraCause | null = (v as { noAnswer?: boolean }).noAnswer ? "no_answer" : checkNeverFinished(v);
+          if (!why || retry > INFRA_RETRY_ATTEMPTS) break;
+          const pause = INFRA_RETRY_BASE_MS * 2 ** (retry - 1);
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The merge check ${INFRA_CAUSE_TEXT[why](v.ms)} before it finished; running it again (try ${retry} of ${INFRA_RETRY_ATTEMPTS}, in ${Math.max(1, Math.round(pause / 1000))}s${retry === INFRA_RETRY_ATTEMPTS ? ", on its own" : ""}). Nothing to do.` });
+          await whileActive(() => new Promise((resolve) => setTimeout(resolve, pause)));
+          const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+          if (now?.state !== "review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge check waited, so it was not retried." } };
+          v = await runCheck(retry === INFRA_RETRY_ATTEMPTS);
         }
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(command), passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
         if (!v.ok) return checkFailed(command, v);
@@ -912,11 +964,11 @@ export function reviewService(
       const m: MergeResult | PushResult = pr
         ? await whileActive(() => ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
         : await whileActive(() =>
-            ask<MergeResult>(
+            (checkMerged ? (w: () => Promise<MergeResult>) => gate.run(checkPriority(t), false, w) : (w: () => Promise<MergeResult>) => w())(() => ask<MergeResult>(
               (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})`, ...(checkMerged ? { checks } : {}) }),
               // The runner may check up to three merged results, one after another.
               checkMerged ? MERGE_WAIT_MS + 3 * checks.length * VERIFY_ASK_TIMEOUT_MS : MERGE_WAIT_MS,
-            ),
+            )),
           );
       if (m.status === "check_failed") {
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(m.command), passed: false, detail: m.result.output.slice(-500) });

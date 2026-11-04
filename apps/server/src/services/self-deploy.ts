@@ -14,6 +14,7 @@ import { record } from "./activity.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { sh, step } from "./steps.js";
+import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
@@ -53,7 +54,7 @@ const isSha = (s: string) => /^[0-9a-f]{7,64}$/.test(s);
 /** The ladder: success is a note, a refusal a flag, anything half-done or broken a page. */
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -273,6 +274,41 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     await db.insert(settings).values({ key: "self_deploy", value: { notified: key } }).onConflictDoUpdate({ target: settings.key, set: { value: { notified: key } } });
   }
 
+  // BOS-368: a server update reports "deployed" when it switches in, but it can still be switched back
+  // during its trial (the host's standby window, BOSSMAN_SOAK_SECONDS). The runner update is only offered
+  // once that trial is over and the server is still on that commit; until then it is held here.
+  const RUNNER_DUE = "self_deploy_runner_due";
+  const LAST_SERVER = "self_deploy_last_server";
+  type RunnerDue = { commit: string; fromCommit: string; after: string };
+  type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };
+  const trialMs = () => {
+    const soak = Number(process.env.BOSSMAN_SOAK_SECONDS);
+    return ((Number.isFinite(soak) && soak >= 0 ? soak : 900) + 120) * 1000;
+  };
+  async function getSetting<T>(key: string): Promise<T | null> {
+    const [row] = await db.select().from(settings).where(eq(settings.key, key));
+    return (row?.value as T | undefined) ?? null;
+  }
+  async function putSetting(key: string, value: object | null) {
+    if (value === null) await db.delete(settings).where(eq(settings.key, key));
+    else await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+  }
+  /** The held runner update, if its server update is still in its trial. */
+  async function inTrial() {
+    const due = await getSetting<RunnerDue>(RUNNER_DUE);
+    return due && Date.now() < Date.parse(due.after) ? due : null;
+  }
+  const TRIAL_MESSAGE = "The server update is still in its 15-minute trial, so the runners can't be updated yet. Boss Man offers the runner update by itself when the trial ends.";
+  /** Raises the held runner update once its trial is over, if the server is still on that commit; otherwise drops it quietly. */
+  async function releaseRunnerDue(a: Available | null) {
+    const due = await getSetting<RunnerDue>(RUNNER_DUE);
+    if (!due || Date.now() < Date.parse(due.after)) return;
+    await putSetting(RUNNER_DUE, null);
+    const last = await getSetting<LastServer>(LAST_SERVER);
+    if (last?.result === "deployed" && last.to === due.commit && a?.deployed === due.commit) await raise("runner", due.commit, due.fromCommit, a);
+    else deps.log?.(`self-deploy: runner update for ${short(due.commit)} dropped; the server is not on it after its trial`);
+  }
+
   /** A deploy has ended: tell the owner once, record it on the decision, and offer the runner update when it is due. */
   async function finished(s: DeployStatus) {
     const [row] = await db.select().from(settings).where(eq(settings.key, "self_deploy"));
@@ -289,15 +325,24 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const title = runnerRefused ? `Runner update not started (${short(s.to_commit)})` : s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
     const changes = s.result === "deployed" && ctx?.type === "self_deploy" ? (ctx.changes ?? []) : [];
     await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: changes.length ? `${s.message}\n\nWhat changed:\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
-    // A server update that was switched back (or failed) leaves no runner update to offer for the commit it never reached.
-    if (s.target === "server" && (s.result === "rolled_back" || s.result === "failed") && s.from_commit) {
-      for (const o of await openFor("runner")) if ((o.context as SelfDeployContext).commit === s.from_commit) await db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, o.id));
+    // BOS-364 withdrew only cards for the commit it never reached; BOS-368 withdraws every open runner card, whichever way round the host names the commits.
+    if (s.target === "server") {
+      await putSetting(LAST_SERVER, { result: s.result, from: s.from_commit, to: s.to_commit, ended: s.ended } satisfies LastServer);
+      // Switched back or failed: no runner update is due, whichever way round the host names the commits.
+      if (s.result === "rolled_back" || s.result === "failed") {
+        await putSetting(RUNNER_DUE, null);
+        // Free the dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped.
+        for (const o of await openFor("runner")) await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, o.id));
+      }
     }
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
       await record(db, { companyId: d.companyId, kind: "self_deploy", summary: `${title}. ${s.message}` });
-      // The server is deployed; the runners are a separate question the owner answers on its own.
-      if (s.target === "server" && s.result === "deployed" && ctx.runnerChanged) await raise("runner", s.to_commit, s.from_commit, await available());
+      // The server is deployed; the runners are a separate question, held until the server's trial is over.
+      if (s.target === "server" && s.result === "deployed" && ctx.runnerChanged) {
+        const ended = Date.parse(s.ended);
+        await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs()).toISOString() } satisfies RunnerDue);
+      }
     }
   }
 
@@ -335,14 +380,34 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const a = await available();
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
       if (a) await this.clearDoneOwnerTodos(a);
-      if (!a || !a.tip || s?.result === "running" || (await pending())) return;
+      if (s?.result !== "running") await releaseRunnerDue(a);
+      const woken = await this.noteLive(a, s);
+      if (!a || !a.tip || s?.result === "running" || (await pending())) return woken;
       // The host just refused or deployed this very commit: the offer is stale until the host rewrites it.
-      if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return;
+      if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return woken;
       if (a.tip === a.deployed) {
         for (const d of await openFor("server")) await db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, d.id));
-        return;
+        return woken;
       }
       await raise("server", a.tip, a.deployed, a);
+      return woken;
+    },
+
+    /**
+     * Tells the release log what is live now (BOS-284): the commit the host says it deployed (a deploy,
+     * a blue/green switch or switch-back, a rollback, or a hand-apply the host saw), then lets it wake
+     * each company's Release Manager on one small ticket. The commit is the same one server_status
+     * reports as live, so nothing here depends on where the host keeps its files. Returns how many
+     * Release Managers were woken.
+     */
+    async noteLive(a: Available | null, s: DeployStatus | null) {
+      if (!deps.releaseLog) return 0;
+      const live = a?.deployed || ((s && (s.result === "deployed" || s.result === "rolled_back") && s.to_commit) || "") || process.env.BOSSMAN_COMMIT || "";
+      if (!z.string().regex(/^[0-9a-f]{40}$/i).safeParse(live).success) return 0;
+      const rows = await db.select({ id: companies.id }).from(companies);
+      for (const c of rows) await deps.releaseLog.note(c.id, live);
+      const how: ReleaseHow = !s ? "restarted" : s.result === "rolled_back" ? "rolled-back" : "deployed";
+      return deps.releaseLog.releaseManagerWakes(how);
     },
 
     /** The "Deploy latest" button. Returns the open decision, or says why there is none. */
@@ -365,6 +430,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (!dir) return { error: "Self-deploy is not set up on this install." } as const;
       const a = await available();
       if (!a?.deployed) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
+      if (await inTrial()) return { error: TRIAL_MESSAGE } as const;
       const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
       const d = open ?? (await raise("runner", a.deployed, a.deployed, a, true));
       return d ? ({ decisionId: d.id } as const) : ({ error: "Create a company first: decisions belong to one." } as const);
@@ -381,6 +447,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const s = await status();
       if (s?.result === "running") throw new AnswerError("A deploy is running now. Wait for it to finish.");
       if (await pending()) throw new AnswerError("A deploy request is already waiting for the host. Try again in a minute.");
+      if (ctx.target === "runner" && (await inTrial())) throw new AnswerError(TRIAL_MESSAGE);
       // Only the commit that failed to deploy is refused: after a rollback or a deploy by hand, what runs can still be built.
       if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed" && s.to_commit === ctx.commit) throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
     },

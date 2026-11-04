@@ -59,6 +59,14 @@ export async function diskUsage(target: string): Promise<number> {
   return total;
 }
 
+/** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
+export class RepoLockTimeout extends Error {
+  constructor(projectId: string) {
+    super(`Timed out waiting for the lock on ${projectId}.`);
+    this.name = "RepoLockTimeout";
+  }
+}
+
 /**
  * Settings for every git call the runner makes itself. A repo's own config can name a hook folder
  * or a filesystem monitor, and both run programs, so a shared repo could otherwise run code inside
@@ -137,7 +145,7 @@ export class Workspaces {
         } catch {
           const age = Date.now() - (statSync(lockDir, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
           if (age > 10 * 60_000) rmSync(lockDir, { recursive: true, force: true });
-          else if (i > 600) throw new Error(`Timed out waiting for the lock on ${projectId}.`);
+          else if (i > 600) throw new RepoLockTimeout(projectId);
           else await new Promise((r) => setTimeout(r, 100));
         }
       }
@@ -513,16 +521,20 @@ export class Workspaces {
       };
       let tail = "";
       // While check-all.sh waits in its queue the clock is the (long) queue limit; it restarts at the full timeout once the checks really begin.
+      // The queue limit is a no-progress limit (BOS-370): it restarts whenever the printed place changes.
       let queued = false;
       let slotTaken = false;
+      let lastPlace = "";
       const onData = (chunk: string) => {
         tail = (tail + chunk).slice(-8192);
         if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
           slotTaken = true;
           arm(timeoutMs);
-        } else if (!queued && !slotTaken && tail.includes(CHECK_QUEUED_MARKER)) {
+        } else if (!slotTaken && tail.includes(CHECK_QUEUED_MARKER)) {
+          const place = [...chunk.matchAll(/waiting for a free check slot \(place (\d+) of/g)].pop()?.[1] ?? "";
+          if (!queued || (place && place !== lastPlace)) arm(queueMaxMs);
           queued = true;
-          arm(queueMaxMs);
+          if (place) lastPlace = place;
         }
       };
       child.stdout.setEncoding("utf8");
