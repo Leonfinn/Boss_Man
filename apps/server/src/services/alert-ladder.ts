@@ -52,6 +52,8 @@ export type AlertInput = {
   about?: Array<string | null | undefined>;
   /** The lowest rung allowed to settle it: "ceo" when the fix is beyond the Scrum Master (stopping work, a review outcome, host access). */
   from?: Rung;
+  /** Why it starts on that rung, said on the card's ladder (e.g. "the CEO is the target"). */
+  why?: string;
   rewake?: Ladder["rewake"];
   /** A duty alert goes to the Scrum Master even while the watchdog is off. */
   duty?: boolean;
@@ -270,7 +272,7 @@ export function alertLadder(
         .onConflictDoNothing()
         .returning();
       if (!d) return null;
-      const rung = await place(d, ladder, ladder.rung, input.from === "ceo" ? "only the CEO or the owner can act on it" : input.from === "owner" ? "only the owner can act on it" : "raised by Boss Man");
+      const rung = await place(d, ladder, ladder.rung, input.why ?? (input.from === "ceo" ? "only the CEO or the owner can act on it" : input.from === "owner" ? "only the owner can act on it" : "raised by Boss Man"));
       return rung ? { id: d.id, rung } : null;
     },
 

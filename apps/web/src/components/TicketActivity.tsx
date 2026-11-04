@@ -12,7 +12,20 @@ import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
 
-type Message = { id: string; author: "owner" | "agent" | "system"; agent: string | null; runId: string | null; text: string; delivery: string | null; createdAt: string };
+type Message = {
+  id: string;
+  author: "owner" | "agent" | "system";
+  agent: string | null;
+  runId: string | null;
+  text: string;
+  delivery: string | null;
+  createdAt: string;
+  /** The waiting-for-an-answer state of an owner message (BOS-425); null for anything else. */
+  replyState?: "delivered" | "queued" | null;
+  replyReminders?: number | null;
+  replyClearedAt?: string | null;
+  replyClearedBy?: string | null;
+};
 type Conversation = { items: Message[]; live: { id: string; agent: string | null } | null };
 type RunRow = { id: string; agent: string | null; startedAt: string; endedAt: string | null; outcome: string | null };
 
@@ -29,6 +42,16 @@ export function splitDetails(text: string): { summary: string; details: string |
   if (!m) return { summary: text, details: null };
   const details = text.slice(m.index + m[0].length).trim();
   return { summary: text.slice(0, m.index).trim(), details: details || null };
+}
+
+/** Under an owner message: whether it reached the agent, is waiting its turn, or has gone unanswered (BOS-425). Nothing once it is answered. */
+export function replyState(m: Message): string | null {
+  if (m.author !== "owner" || m.delivery === "unassigned" || !m.replyState) return null;
+  if (m.replyClearedAt) return null;
+  if (m.replyState === "queued") return "queued behind the agent first to pick it up: their other work comes first";
+  if ((m.replyReminders ?? 0) >= 2) return "not answered after 10 minutes, and the CEO has been asked";
+  if ((m.replyReminders ?? 0) >= 1) return "not answered yet; the agent has been asked again";
+  return "delivered to the running agent";
 }
 
 function byline(m: Message) {
@@ -199,6 +222,11 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
               <small>
                 {byline(m!)} · {when(m!.createdAt)}
               </small>
+              {replyState(m!) && (
+                <p className="muted reply-state" style={{ fontSize: 12, margin: "2px 0 0" }}>
+                  {replyState(m!)}
+                </p>
+              )}
             </div>
           ),
         )}

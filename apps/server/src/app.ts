@@ -62,6 +62,7 @@ import { SkillError, skillsService } from "./services/skills.js";
 import { hashFiles } from "./services/skill-files.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
+import { ownerRepliesService } from "./services/owner-replies.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
@@ -347,7 +348,14 @@ export async function buildApp(opts: AppOptions) {
   const runsSvc = runsService(db, { runners, now: opts.now });
   decisionsSvc.setCancelHook((runId) => runsSvc.cancel(runId));
   runsSvc.setWakeHook((w) => scheduler.wake(w));
-  const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w) });
+  // The owner's unanswered ticket messages (BOS-425). The scheduler and the alert ladder are built
+  // further down, so the hooks look them up when they run, not when this is built.
+  const ownerReplies = ownerRepliesService(db, {
+    notify: (agentId, w) => scheduler.notify(agentId, w),
+    alert: (input) => alerts.raise(input),
+    now: opts.now,
+  });
+  const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w), replies: ownerReplies });
   const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
   app.addHook("onClose", async () => semantic.stop());
   const wiki = wikiService(db, semantic);
@@ -435,6 +443,8 @@ export async function buildApp(opts: AppOptions) {
           const [run] = await db.select().from(runsTable).where(eq(runsTable.id, event.runId));
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
         })
+        // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
+        .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
         .then(() => scheduler.tick())
         .catch((err) => app.log.error({ err, companyId: runner.companyId }, "run-ended handling failed"));
@@ -468,6 +478,8 @@ export async function buildApp(opts: AppOptions) {
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),
+    // The owner's messages on tickets that nobody has answered (BOS-425).
+    ownerReplies: (t) => ownerReplies.sweep(t),
   });
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
@@ -2420,5 +2432,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
 }
