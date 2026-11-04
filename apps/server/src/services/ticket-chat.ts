@@ -121,7 +121,7 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       const [m] = await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId, author: "owner", agentId, runId, text, delivery }).returning();
       // The awaiting-reply marker (BOS-425): an agent's ticket_reply on this ticket clears it, and
       // a run that received it and ended silently re-wakes its agent.
-      await deps.replies?.opened({ companyId: t.companyId, ticketId, messageId: m!.id, agentId, delivery: delivery === "live" ? "live" : delivery === "unassigned" ? "unassigned" : "woken", runId });
+      await deps.replies?.opened({ companyId: t.companyId, ticketId, messageId: m!.id, agentId, delivery, runId });
       await record(db, { companyId: t.companyId, ticketId, kind: "message", summary: `Owner wrote: ${text}` });
       // The owner acted: anything else we told them about this ticket may be out of date (BOS-123).
       // The assignee is woken by the message already, so they get one note, not two.

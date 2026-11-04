@@ -124,14 +124,27 @@ describe("an owner's message on a ticket waits for an answer (BOS-425)", () => {
     // A second sweep on the same message asks nobody again.
     expect(await c().ownerReplies.sweep()).toMatchObject({ rewoken: 0 });
 
-    // A live run on the ticket holds the re-wake back.
+    // A live run on the ticket holds the five-minute re-wake back (the ten-minute ask, which is
+    // not here yet at six minutes, is covered on its own below).
     const t2 = await c().ticket("Working ticket");
     const live = await c().started(c().worker.id);
     await c().db.update(runs).set({ ticketId: t2.id }).where(eq(runs.id, live.id));
     await c().req("POST", `/api/tickets/${t2.id}/messages`, { text: "One more thing" });
     await c().age(t2.id, 6);
-    await c().ownerReplies.sweep();
-    expect(await c().open(t2.id)).toEqual([expect.objectContaining({ reminders: 0 })]);
+    const pass = await c().ownerReplies.sweep();
+    expect((await wakesFor(c().worker.id, t2.id)).filter((w) => w.reason === "woken by owner")).toEqual([]);
+    expect(pass.rewoken).toBe(0);
+  });
+
+  it("shows a message to an agent busy on another ticket as queued behind that work", async () => {
+    const t = await c().ticket("Waiting ticket");
+    // The target is in a live run on a different ticket, so no slot on this one is free.
+    const [other] = await c().db.insert(tickets).values({ companyId: c().company.id, projectId: (await c().db.select({ projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, t.id)))[0]!.projectId, title: "Other work", systemState: "in_progress", assigneeAgentId: c().worker.id }).returning();
+    const run = await c().started(c().worker.id);
+    await c().db.update(runs).set({ ticketId: other!.id }).where(eq(runs.id, run.id));
+    const sent = await c().req("POST", `/api/tickets/${t.id}/messages`, { text: "When you have a moment" });
+    expect(sent.json()).toMatchObject({ delivery: "queued" });
+    expect((await c().state(t.id))[0]).toMatchObject({ author: "owner", replyState: "queued", replyReminders: 0, replyClearedAt: null });
   });
 
   it("has the CEO answer for a busy assignee after ten minutes, saying who has the ticket", async () => {
@@ -158,16 +171,41 @@ describe("an owner's message on a ticket waits for an answer (BOS-425)", () => {
     expect(await c().db.select().from(ownerReplies).where(eq(ownerReplies.ticketId, t.id))).toEqual([expect.objectContaining({ reminders: 2, standInAgentId: c().ceo.id })]);
   });
 
+  it("still asks the CEO at ten minutes when the assignee is paused or retired", async () => {
+    const t = await c().ticket("Paused agent");
+    await c().db.delete(wakes);
+    await c().req("POST", `/api/tickets/${t.id}/messages`, { text: "Are you getting to this?" });
+    await c().db.update(agents).set({ paused: true }).where(eq(agents.id, c().worker.id));
+    // Ten minutes pass in one go; the 5-minute re-wake is skipped for a paused agent, but it must
+    // not stop the 10-minute ask.
+    await c().age(t.id, 11);
+    expect(await c().ownerReplies.sweep()).toMatchObject({ standIns: 1 });
+    expect(await c().db.select().from(ownerReplies).where(eq(ownerReplies.ticketId, t.id))).toEqual([expect.objectContaining({ reminders: 2, standInAgentId: c().ceo.id })]);
+    expect((await c().state(t.id))[0]).toMatchObject({ replyReminders: 2 });
+  });
+
+  it("still asks the CEO at ten minutes when the five-minute re-wake was never sent (a live run)", async () => {
+    const t = await c().ticket("Silent live run");
+    const run = await c().started(c().worker.id);
+    await c().db.update(runs).set({ ticketId: t.id }).where(eq(runs.id, run.id));
+    await c().req("POST", `/api/tickets/${t.id}/messages`, { text: "Use the brand blue" });
+    await c().db.delete(wakes);
+    // The run is still live past ten minutes: no 5-minute re-wake (a working run isn't interrupted),
+    // but the ask must go out, with reminders staying 0 until it does.
+    await c().age(t.id, 11);
+    expect((await c().open(t.id))[0]).toMatchObject({ reminders: 0 });
+    expect(await c().ownerReplies.sweep()).toMatchObject({ rewoken: 0, standIns: 1 });
+    expect((await c().state(t.id))[0]).toMatchObject({ replyReminders: 2 });
+  });
+
   it("asks the CEO to answer when the CEO holds the ticket, and the ask never goes to the owner", async () => {
     const t = await c().ticket("Ask the CEO");
     await c().db.delete(wakes);
     await c().req("POST", `/api/tickets/${t.id}/messages`, { text: "Is this worth doing?", agentId: c().ceo.id });
-    // Ten minutes pass in one go: the re-wake and the ask are both due, so the stand-in step runs
-    // straight after the re-wake claims its reminder.
+    // Ten minutes pass in one go: the re-wake and the ask are both due in the same sweep, each on
+    // its own age check, so the ask never waits on the re-wake.
     await c().age(t.id, 11);
-    const first = await c().ownerReplies.sweep();
-    expect(first).toMatchObject({ rewoken: 1 });
-    expect(await c().ownerReplies.sweep()).toMatchObject({ standIns: 1 });
+    expect(await c().ownerReplies.sweep()).toMatchObject({ rewoken: 1, standIns: 1 });
     // The ask starts on the Scrum Master's rung (the CEO's own rung would refuse itself), and the
     // ladder climbs to the CEO: never the owner, who would have to answer for the CEO.
     const card = (await c().db.select().from(decisions).where(eq(decisions.dedupeKey, `owner-reply:${(await c().open(t.id))[0]!.id}`)))[0];

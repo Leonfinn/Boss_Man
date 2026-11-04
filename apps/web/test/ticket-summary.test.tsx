@@ -385,7 +385,8 @@ describe("an owner message's delivery state (BOS-425)", () => {
 
   it("says how it reached the agent, when it waits its turn, and when it has gone unanswered", () => {
     expect(replyState(omsg({ delivery: "live", replyState: "delivered", replyReminders: 0 }))).toBe("delivered to the running agent");
-    expect(replyState(omsg({ delivery: "woken", replyState: "queued", replyReminders: 0 }))).toBe("queued behind the agent first to pick it up: their other work comes first");
+    expect(replyState(omsg({ delivery: "woken", replyState: "delivered", replyReminders: 0 }))).toBe("waiting: the agent will see it when it next starts a run");
+    expect(replyState(omsg({ delivery: "queued", replyState: "queued", replyReminders: 0 }))).toBe("waiting behind the agent's other work");
     expect(replyState(omsg({ delivery: "woken", replyState: "delivered", replyReminders: 1 }))).toBe("not answered yet; the agent has been asked again");
     expect(replyState(omsg({ delivery: "woken", replyState: "delivered", replyReminders: 2 }))).toBe("not answered after 10 minutes, and the CEO has been asked");
   });

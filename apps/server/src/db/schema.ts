@@ -553,7 +553,6 @@ export const runs = pgTable("runs", {
   silentSteeredAt: timestamp("silent_steered_at", { withTimezone: true }),
 }, (t) => [index("runs_ticket_open").on(t.ticketId, t.endedAt)]);
 
-
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
 export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
 /** What routine work does when a subscription window passes its hold threshold (BOS-227). */

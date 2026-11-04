@@ -48,10 +48,10 @@ export function splitDetails(text: string): { summary: string; details: string |
 export function replyState(m: Message): string | null {
   if (m.author !== "owner" || m.delivery === "unassigned" || !m.replyState) return null;
   if (m.replyClearedAt) return null;
-  if (m.replyState === "queued") return "queued behind the agent first to pick it up: their other work comes first";
+  if (m.replyState === "queued") return "waiting behind the agent's other work";
   if ((m.replyReminders ?? 0) >= 2) return "not answered after 10 minutes, and the CEO has been asked";
   if ((m.replyReminders ?? 0) >= 1) return "not answered yet; the agent has been asked again";
-  return "delivered to the running agent";
+  return m.delivery === "live" ? "delivered to the running agent" : "waiting: the agent will see it when it next starts a run";
 }
 
 function byline(m: Message) {

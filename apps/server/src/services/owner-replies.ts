@@ -8,7 +8,7 @@
 // the owner's wake class; at ten minutes the CEO is asked to answer on the target's behalf (the
 // Scrum Master when the CEO is the target). The message is never dropped, and nothing goes to the
 // owner: the ticket shows the message's state under it.
-import { and, asc, desc, eq, gt, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, ownerReplies, runs, ticketMessages, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -54,17 +54,6 @@ export function ownerRepliesService(
     return live ?? null;
   }
 
-  /** A waiting wake for this agent on this ticket: it will get to the message when its turn comes. */
-  async function waitingWake(ticketId: string, agentId: string, t: Date) {
-    const [w] = await db
-      .select({ notBefore: wakes.notBefore })
-      .from(wakes)
-      .where(and(eq(wakes.agentId, agentId), eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])))
-      .orderBy(asc(wakes.createdAt))
-      .limit(1);
-    return w ?? null;
-  }
-
   async function agentName(agentId: string | null) {
     if (!agentId) return null;
     const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, agentId));
@@ -76,7 +65,7 @@ export function ownerRepliesService(
    * its target. A second message into the same live run shares that run's fate, so the older row
    * takes the newer delivery (the run carries both, and answering clears both).
    */
-  async function opened(input: { companyId: string; ticketId: string; messageId: string; agentId: string | null; delivery: "live" | "woken" | "unassigned"; runId?: string | null }) {
+  async function opened(input: { companyId: string; ticketId: string; messageId: string; agentId: string | null; delivery: "live" | "woken" | "queued" | "unassigned"; runId?: string | null }) {
     if (input.delivery === "unassigned" || !input.agentId) return null;
     const runId = input.delivery === "live" ? (input.runId ?? null) : null;
     if (runId) {
@@ -86,11 +75,11 @@ export function ownerRepliesService(
         return same[0]!;
       }
     }
-    // A new run behind the target's other work is queued; one that can start now is delivered.
-    const queued = input.delivery === "woken" && !!(await liveRun(input.ticketId, input.agentId)) && !!(await waitingWake(input.ticketId, input.agentId, now()));
+    // The caller knows how it reached the target: into a live run, a new run now, or queued behind
+    // the target's work on another ticket. Stored as given, so the ticket shows the truth.
     const [row] = await db
       .insert(ownerReplies)
-      .values({ companyId: input.companyId, ticketId: input.ticketId, messageId: input.messageId, agentId: input.agentId, state: queued ? "queued" : "delivered", runId })
+      .values({ companyId: input.companyId, ticketId: input.ticketId, messageId: input.messageId, agentId: input.agentId, state: input.delivery === "queued" ? "queued" : "delivered", runId })
       .returning();
     return row ?? null;
   }
@@ -182,22 +171,25 @@ export function ownerRepliesService(
   /** Asks the CEO (or the Scrum Master) to answer for the target, with who has the ticket and when. Marks the row. */
   async function standIn(row: typeof ownerReplies.$inferSelect, targetName: string | null, t: Date) {
     const [ticket] = await db.select({ title: tickets.title, state: tickets.systemState }).from(tickets).where(eq(tickets.id, row.ticketId));
-    const when = await expectedAt(row.agentId!, t).then((w) => (row.state === "delivered" ? "it has stayed unanswered since the message" : w));
+    const when = await expectedAt(row.agentId!, t);
     const question = `The owner wrote on "${ticket?.title ?? "a ticket"}" ${ago(t.getTime() - row.createdAt.getTime())} ago and nobody has answered. ${targetName ?? "The agent it was sent to"} holds the ticket: ${when}. Read the message in the ticket's conversation and answer it with ticket_reply for them, saying who has the ticket and when they will get to it${ticket?.state === "done" ? "; the ticket is already done" : ""}.`;
     const where = await standInFor(row.companyId, row.agentId);
     const decision = await opts.alert({ companyId: row.companyId, ticketId: row.ticketId, question, about: where.about, from: where.from, ...(where.why ? { why: where.why } : {}), dedupeKey: `owner-reply:${row.id}`, context: { type: "question", ownerReplyId: row.id } });
     if (!decision) return false;
-    const claimed = await db.update(ownerReplies).set({ reminders: 2, alertDecisionId: decision.id, standInAgentId: where.standIn }).where(and(eq(ownerReplies.id, row.id), eq(ownerReplies.reminders, 1))).returning({ id: ownerReplies.id });
+    // Claimed whatever the earlier steps did: 0 (never re-woken: a live run, a paused target, a
+    // dropped wake) or 1 (re-woken once). Only the first claim raises the ask.
+    const claimed = await db.update(ownerReplies).set({ reminders: 2, alertDecisionId: decision.id, standInAgentId: where.standIn }).where(and(eq(ownerReplies.id, row.id), lt(ownerReplies.reminders, 2))).returning({ id: ownerReplies.id });
     if (!claimed.length) return false;
     await record(db, { companyId: row.companyId, agentId: null, ticketId: row.ticketId, kind: "message", summary: `The owner's message on "${ticket?.title ?? "a ticket"}" was unanswered after 10 minutes, so the CEO (or the Scrum Master, when the CEO holds the ticket) was asked to answer for ${targetName ?? "the agent"}.` });
     return true;
   }
 
   /**
-   * The sweep (BOS-425). At five minutes, a target with no live run on the ticket is woken again
-   * in the owner's wake class; at ten, the CEO (or the Scrum Master when the CEO is the target) is
-   * asked to answer on the target's behalf. Nothing is sent to the owner: the ticket shows the
-   * state under the message.
+   * The sweep (BOS-425). Two steps, each with its own age check so an early step's guard never
+   * blocks a later one: at five minutes, a target with no live run on the ticket (and not paused or
+   * retired) is woken again in the owner's wake class; at ten, whatever the target is doing, the
+   * CEO (or the Scrum Master when the CEO is the target) is asked to answer on its behalf. Nothing
+   * is sent to the owner: the ticket shows the state under the message.
    */
   async function sweep(t: Date = now()) {
     const result = { rewoken: 0, standIns: 0 };
@@ -206,13 +198,14 @@ export function ownerRepliesService(
       // A message that reached nobody (no assignee) is a note; there is no one to chase.
       if (!row.agentId) continue;
       const age = t.getTime() - row.createdAt.getTime();
-      if (age < limits.sweepAfterMs) continue;
       const [target] = await db.select({ name: agents.name, paused: agents.paused, retiredAt: agents.retiredAt }).from(agents).where(eq(agents.id, row.agentId));
       const [ticket] = await db.select({ title: tickets.title, state: tickets.systemState }).from(tickets).where(eq(tickets.id, row.ticketId));
-      // Five minutes: only when nothing runs for the target on this ticket, so a working run is never interrupted.
-      if (row.reminders < 1) {
-        if (await liveRun(row.ticketId, row.agentId)) continue;
-        if (!target || target.retiredAt || target.paused) continue;
+
+      // Five minutes: only when nothing runs for the target on this ticket, so a working run is
+      // never interrupted. A paused or retired target is not woken (nothing would come of it); the
+      // ten-minute stand-in below still covers it. A run that was re-woken after ending silently
+      // (reminders 1) is not woken again here: that was the one retry (spec step 2).
+      if (row.reminders < 1 && age >= limits.sweepAfterMs && target && !target.retiredAt && !target.paused && !(await liveRun(row.ticketId, row.agentId))) {
         const woke = await opts
           .notify(row.agentId, {
             ticketId: row.ticketId,
@@ -224,17 +217,21 @@ export function ownerRepliesService(
             (w) => (w as { outcome?: string } | null)?.outcome !== "dropped",
             () => false,
           );
-        if (!woke) continue;
-        const claimed = await db.update(ownerReplies).set({ reminders: 1 }).where(and(eq(ownerReplies.id, row.id), eq(ownerReplies.reminders, 0))).returning({ id: ownerReplies.id });
-        if (claimed.length) {
-          result.rewoken++;
-          await record(db, { companyId: row.companyId, agentId: null, ticketId: row.ticketId, kind: "message", summary: `The owner's message on "${ticket?.title ?? "a ticket"}" was unanswered after ${ago(age)}, so ${target.name} was woken again.` });
+        // A dropped wake is not a second chance spent (the 10-minute ask does not depend on it).
+        if (woke) {
+          const claimed = await db.update(ownerReplies).set({ reminders: 1 }).where(and(eq(ownerReplies.id, row.id), eq(ownerReplies.reminders, 0))).returning({ id: ownerReplies.id });
+          if (claimed.length) {
+            result.rewoken++;
+            await record(db, { companyId: row.companyId, agentId: null, ticketId: row.ticketId, kind: "message", summary: `The owner's message on "${ticket?.title ?? "a ticket"}" was unanswered after ${ago(age)}, so ${target.name} was woken again.` });
+          }
         }
-        continue;
       }
-      // Ten minutes: the stand-in answers for the target.
-      if (age < limits.standInAfterMs || row.reminders >= 2) continue;
-      if (await standIn(row, target && !target.retiredAt ? target.name : null, t)) result.standIns++;
+
+      // Ten minutes: the stand-in answers for the target. Unconditional on the 5-minute step: a
+      // live silent run, a paused or retired target, or a dropped re-wake must all reach it.
+      if (age >= limits.standInAfterMs && row.reminders < 2) {
+        if (await standIn(row, target && !target.retiredAt ? target.name : null, t)) result.standIns++;
+      }
     }
     return result;
   }
