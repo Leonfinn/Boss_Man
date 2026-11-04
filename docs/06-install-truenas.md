@@ -129,6 +129,8 @@ chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
 - Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
   - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
 
+Memory limits for the server, database, runners and tool servers are set from this file too: see [docs/00, "Memory limits"](00-first-time-install.md#memory-limits-so-one-container-cant-take-the-whole-host). Nothing to add on TrueNAS; the defaults apply.
+
 ## 5. Build the images and start the server
 
 Build the server image, which includes the web UI, and start Postgres and the server. For now, start them without the runner, which has no token yet.
