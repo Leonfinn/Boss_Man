@@ -6,8 +6,12 @@ const exec = (command: string) => ({ title: command, kind: "execute", rawInput: 
 
 describe("the /tmp-only switch", () => {
   it("allows commands that only work in /tmp when on, and still asks when off", () => {
-    for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && rm -rf /tmp/b", "rm -f /tmp/x && rmdir /tmp/y", "find /tmp/x -delete", "rm -rf /tmp/a && cp -r src /tmp/a"]) {
-      expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toEqual({ outcome: "allow", rule: SCRATCH_RULE.name });
+    for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && rm -rf /tmp/b", "rm -f /tmp/x && rmdir /tmp/y"]) {
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toMatchObject({ outcome: "allow", rule: SCRATCH_RULE.name });
+    }
+    // find -delete and cp -r into /tmp stopped being allowed here in BOS-165: the root or destination can be a link out of /tmp.
+    for (const c of ["find /tmp/x -delete", "rm -rf /tmp/a && cp -r src /tmp/a"]) {
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]), c).not.toMatchObject({ outcome: "allow" });
     }
     expect(evaluatePermission(exec("rm -rf /tmp/fp2"), []).outcome).toBe("ceo");
     expect(evaluatePermission(exec("rm -rf /tmp/fp2/x"), []).outcome).toBe("owner");
