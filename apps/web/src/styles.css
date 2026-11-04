@@ -89,8 +89,10 @@ p { margin: 0; }
 /* A phone stacks the menu above the page: the menu keeps its full width and natural height, and the
    page takes what is left of the window under it (BOS-270). */
 @media (max-width: 840px) {
-  .app:has(> main > .chat-page > .messenger) > nav { flex: 1 1 100%; height: auto; }
+  .app:has(> main > .chat-page > .messenger) { flex-direction: column; flex-wrap: nowrap; }
+  .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; width: 100%; height: auto; }
   .app:has(> main > .chat-page > .messenger) > nav.side { min-height: 0; }
+  .app:has(> main > .chat-page > .messenger) > main { flex: 1 1 auto; }
 }
 .page-head { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; }
 .page-head h1 { font-family: var(--display); font-weight: 800; font-size: 34px; line-height: 1.1; letter-spacing: -0.01em; }
