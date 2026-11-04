@@ -333,6 +333,52 @@ describe("review card during a merge", () => {
   });
 });
 
+describe("typing on a phone (BOS-245)", () => {
+  // jsdom has no matchMedia; a coarse pointer is what a phone reports.
+  const coarse = (matches: boolean) =>
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches, media: q, addEventListener: () => {}, removeEventListener: () => {} }));
+
+  it("Return adds a line in the ticket reply box instead of sending, and the hint drops Shift+Enter", async () => {
+    const posts: unknown[] = [];
+    coarse(true);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return posts.push(JSON.parse(String(init.body))), json({}, 201);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json([]);
+      }),
+    );
+    render(<TicketActivity ticketId="t1" assignee="Engineer" />);
+    const box = (await screen.findByLabelText("Message to the agent")) as HTMLTextAreaElement;
+    expect(box.getAttribute("placeholder")).toBe("Message Engineer");
+    expect(box.getAttribute("enterKeyHint")).toBe("newline");
+    fireEvent.change(box, { target: { value: "line one" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(posts).toEqual([]);
+  });
+
+  it("on a desktop, Return still sends, so the quick reply stays quick", async () => {
+    const posts: unknown[] = [];
+    coarse(false);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return posts.push(JSON.parse(String(init.body))), json({}, 201);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json([]);
+      }),
+    );
+    render(<TicketActivity ticketId="t1" assignee="Engineer" />);
+    const box = (await screen.findByLabelText("Message to the agent")) as HTMLTextAreaElement;
+    expect(box.getAttribute("placeholder")).toBe("Message Engineer. Enter sends, Shift+Enter adds a line.");
+    fireEvent.change(box, { target: { value: "quick reply" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(posts).toEqual([{ text: "quick reply", interrupt: false }]));
+  });
+});
+
 describe("an owner message's delivery state (BOS-425)", () => {
   type Msg = Parameters<typeof replyState>[0];
   const omsg = (over: Record<string, unknown>) => ({ author: "owner", agent: "Engineer", text: "Use the brand blue", delivery: null, createdAt: "2026-10-19T10:00:00Z", replyState: null, replyReminders: 0, replyClearedAt: null, ...over } as unknown as Msg);
