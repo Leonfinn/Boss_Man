@@ -26,6 +26,23 @@ export type GuardStatus = "on" | "off" | "unavailable";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Removes a container, allowing for one that a removal already under way is finishing (Docker answers
+ * "removal … is already in progress"). Waits for that one, looks again, and only says the removal
+ * failed if the container is still there; gone means done.
+ */
+async function removeSettled(docker: Docker, id: string, settleMs = 8000) {
+  if ((await docker.remove(id)) !== "racing") return;
+  const deadline = Date.now() + settleMs;
+  while (Date.now() < deadline) {
+    await sleep(250);
+    if (!(await docker.inspect(id))) return;
+  }
+  // Still there: ask again, and only now is the removal a failure.
+  if ((await docker.remove(id)) !== "racing" || !(await docker.inspect(id))) return;
+  throw new DockerError(500, "Removing the runner failed: it is still there");
+}
+
 /** The guard didn't come up. `hostCannot`: it said so itself (exit code 3), so retrying won't help. */
 class GuardUnavailable extends Error {
   constructor(
@@ -91,7 +108,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     if (mode === "off") return;
     try {
       const old = await guardOf(slug);
-      if (old) await docker.remove(old.Id);
+      if (old) await removeSettled(docker, old.Id);
       mkdirSync(netguardDir(cfg, slug), { recursive: true, mode: 0o755 });
       await docker.start(await docker.create(netguardName(slug), netguardSpec(cfg, slug, runnerId)));
       await guardReady(slug);
@@ -121,9 +138,8 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     for (const [sub] of MOUNTS) mkdirSync(path.join(companyDir(cfg, slug), sub), { recursive: true, mode: 0o700 });
     if (!existsSync(path.join(netguardDir(cfg, slug), "allow"))) writeAllow(slug, []);
     const old = await ours(slug);
-    if (old) await docker.remove(old.Id);
-    const id = await docker.create(containerName(slug), containerSpec(cfg, slug));
-    await docker.start(id);
+    if (old) await removeSettled(docker, old.Id);
+    const id = await docker.create(containerName(slug), containerSpec(cfg, slug));    await docker.start(id);
     try {
       await guard(slug, id);
     } catch (err) {
@@ -173,7 +189,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       const c = await ours(slug);
       const g = await guardOf(slug);
       if (g) await docker.remove(g.Id);
-      if (c) await docker.remove(c.Id);
+      if (c) await removeSettled(docker, c.Id);
       unavailable.delete(slug);
       rmSync(tokenFile(cfg, slug), { force: true });
       return { slug, removed: !!c };

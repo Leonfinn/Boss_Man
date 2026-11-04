@@ -74,12 +74,17 @@ export function dockerClient(socketPath = "/var/run/docker.sock") {
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/restart?t=30`);
       if (r.status !== 204) fail(r, "Restarting the runner failed");
     },
-    /** Stops (30 s for the runner to finish its journal write) and removes it. Volumes and binds stay. */
-    async remove(id: string) {
+    /**
+     * Stops (30 s for the runner to finish its journal write) and removes it. Volumes and binds stay.
+     * Returns "racing" when another removal of the same container is finishing it: the caller waits and looks again.
+     */
+    async remove(id: string): Promise<"gone" | "racing"> {
       const stop = await call("POST", `/containers/${encodeURIComponent(id)}/stop?t=30`);
       if (stop.status !== 204 && stop.status !== 304 && stop.status !== 404) fail(stop, "Stopping the runner failed");
       const r = await call("DELETE", `/containers/${encodeURIComponent(id)}?force=1`);
+      if (r.status === 409 && r.json && typeof r.json === "object" && /already in progress/i.test(String((r.json as { message?: unknown }).message ?? ""))) return "racing";
       if (r.status !== 204 && r.status !== 404) fail(r, "Removing the runner failed");
+      return "gone";
     },
   };
 }
