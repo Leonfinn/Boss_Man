@@ -141,6 +141,22 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       return all.map((r) => ({ slug: r.slug, companyId: company.get(r.slug) ?? null, current: r.current }));
     },
 
+    /**
+     * The company ids whose runner the launcher means to keep running (a container or a token file),
+     * or null when that can't be known: no launcher (runners are registered by hand), the launcher
+     * is down, or it is older than this server. Null means "treat every runner as wanted".
+     */
+    async wantedCompanies(): Promise<Set<string> | null> {
+      if (!opts) return null;
+      try {
+        const slugs = new Set(await call<string[]>("GET", "/wanted"));
+        const rows = await db.select().from(settings).where(like(settings.key, `${SLUG_KEY}%`));
+        return new Set(rows.filter((r) => slugs.has(r.value as string)).map((r) => r.key.slice(SLUG_KEY.length)));
+      } catch {
+        return null;
+      }
+    },
+
     /** One company's runner again on the current image; the launcher keeps its token and data. // leader-only */
     async recreate(slug: string) {
       await call("POST", `/runners/${slug}/recreate`);

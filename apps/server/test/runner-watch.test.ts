@@ -28,9 +28,14 @@ async function setup(names: string[]) {
   const alertsRaised: AlertInput[] = [];
   let t = Date.now();
   let hold = false;
+  const launcherState: { wanted: Set<string> | null | "down" } = { wanted: null };
   const watch = runnerWatchService(db, {
     isConnected: (id) => up.has(id),
     holdOn: async () => hold,
+    wantedCompanies: async () => {
+      if (launcherState.wanted === "down") throw new Error("launcher down");
+      return launcherState.wanted;
+    },
     notify: async (n) => void notes.push(n),
     alert: async (a) => {
       alertsRaised.push(a);
@@ -38,7 +43,7 @@ async function setup(names: string[]) {
     },
     now: () => new Date(t),
   });
-  return { db, rows, up, notes, alertsRaised, watch, advance: (ms: number) => (t += ms), setHold: (v: boolean) => (hold = v) };
+  return { launcherState, db, rows, up, notes, alertsRaised, watch, advance: (ms: number) => (t += ms), setHold: (v: boolean) => (hold = v) };
 }
 
 describe("runner watch (BOS-467)", () => {
@@ -129,7 +134,7 @@ describe("runner watch (BOS-467)", () => {
     expect(s.notes.filter((n) => n.level === "page").map((p) => p.title)).toEqual(["Beta's runner is offline"]);
     s.advance(DEPLOY_HEALTHY_MS);
     await s.watch.step();
-    expect(s.notes.some((n) => n.title === "Deploy not healthy: runners still offline" && n.body.includes("Beta"))).toBe(true);
+    expect(s.notes.some((n) => n.title === "Deploy not healthy: runners still offline" && n.body?.includes("Beta"))).toBe(true);
   });
 
   it("after a server restart, an old-lastSeenAt runner that has not reconnected is counted as missing", async () => {
@@ -139,6 +144,34 @@ describe("runner watch (BOS-467)", () => {
     await s.watch.step();
     s.advance(DEPLOY_HEALTHY_MS);
     await s.watch.step();
-    expect(s.notes.some((n) => n.title === "Deploy not healthy: runners still offline" && n.body.includes("Beta"))).toBe(true);
+    expect(s.notes.some((n) => n.title === "Deploy not healthy: runners still offline" && n.body?.includes("Beta"))).toBe(true);
+  });
+
+  it("stays quiet for old runners the launcher no longer wants, but pages for a wanted one and when the launcher can't answer", async () => {
+    const s = await setup(["Alpha", "Beta", "Gamma"]);
+    await s.db.update(runners).set({ lastSeenAt: new Date(Date.now() - 20 * 86_400_000) });
+    s.up.clear();
+    // Only Gamma is wanted by the launcher (Alpha and Beta were stopped or removed before this check existed).
+    s.launcherState.wanted = new Set([s.rows[2]!.companyId]);
+    await s.watch.step();
+    s.advance(OFFLINE_REPORT_MS);
+    await s.watch.step();
+    expect(s.notes.filter((n) => n.level === "page").map((p) => p.title)).toEqual(["Gamma's runner is offline"]);
+    s.advance(DEPLOY_HEALTHY_MS);
+    await s.watch.step();
+    const deploy = s.notes.find((n) => n.title === "Deploy not healthy: runners still offline");
+    expect(deploy?.body).toContain("Gamma");
+    expect(deploy?.body).not.toContain("Alpha");
+    expect(deploy?.body).not.toContain("Beta");
+    await close?.();
+
+    const down = await setup(["Alpha", "Beta"]);
+    await down.db.update(runners).set({ lastSeenAt: new Date(Date.now() - 20 * 86_400_000) });
+    down.up.clear();
+    down.launcherState.wanted = "down";
+    await down.watch.step();
+    down.advance(OFFLINE_REPORT_MS);
+    await down.watch.step();
+    expect(down.notes.filter((n) => n.level === "page")).toHaveLength(2);
   });
 });

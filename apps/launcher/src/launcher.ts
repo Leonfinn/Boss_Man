@@ -197,6 +197,24 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     },
 
     /**
+     * The companies this launcher means to keep running: a runner container exists, or a token file
+     * is left (the self-heal will make it again). Stop deletes the token and the container, so a
+     * stopped, removed or never-started company is not listed. The server's runner watch uses this
+     * to tell a runner that should be back from one that was set aside on purpose.
+     */
+    async wanted(): Promise<string[]> {
+      const slugs = new Set((await this.list()).map((r) => r.slug));
+      let dirs: string[] = [];
+      try {
+        dirs = readdirSync(path.join(cfg.dataRoot, "companies"));
+      } catch {
+        /* no company directory yet: nothing is wanted beyond what runs */
+      }
+      for (const d of dirs) if (SLUG.test(d) && existsSync(tokenFile(cfg, d))) slugs.add(d);
+      return [...slugs].sort();
+    },
+
+    /**
      * Makes sure every running runner has a running guard that started after it. A runner that
      * restarted on its own (a crash, Docker coming back) has a new network namespace the old
      * guard isn't in. Returns the companies whose guard it started again. Runs at start and then on a timer.
@@ -336,6 +354,10 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
       if (url.pathname === "/runners") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, await api.list());
+      }
+      if (url.pathname === "/wanted") {
+        if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
+        return send(200, await api.wanted());
       }
       const m = /^\/runners\/([^/]+)(\/restart|\/recreate|\/allow)?$/.exec(url.pathname);
       if (!m) throw new LauncherError(404, "Unknown call.");

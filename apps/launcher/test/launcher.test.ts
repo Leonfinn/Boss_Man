@@ -250,6 +250,20 @@ describe("the runner launcher (R55)", () => {
     expect(fake.containers.size).toBe(0);
   });
 
+  it("lists as wanted a runner that runs or has a token left, and not one the owner stopped", async () => {
+    const cfg = config();
+    const fake = fakeDocker();
+    const api = launcher(cfg, fake.docker);
+    expect(await api.wanted()).toEqual([]);
+    await api.put("app-co", TOKEN);
+    expect(await api.wanted()).toEqual(["app-co"]);
+    // Its container is gone but the token stays (guard failure): still wanted, the self-heal will make it again.
+    fake.containers.clear();
+    expect(await api.wanted()).toEqual(["app-co"]);
+    await api.remove("app-co");
+    expect(await api.wanted()).toEqual([]);
+  });
+
   it("makes a runner again after its guard failed, waiting longer after each failure, and not after an owner Stop", async () => {
     const cfg = config();
     const fake = fakeDocker();
