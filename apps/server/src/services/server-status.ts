@@ -28,6 +28,8 @@ export type ServerStatusDeps = {
   errors: ErrorBuffer;
   /** Event-loop stalls, GC pauses and memory (stall-monitor.ts, BOS-432). Server-wide; route patterns only, no ids. */
   stalls?: () => StallSummary;
+  /** The last hour of permission decisions for one company (permission-log.ts, BOS-306). */
+  permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
   commit: string;
@@ -159,6 +161,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // parameters or a stack. The buffer is server-wide, so lines with no company are counted,
         // not shown (security review round 2).
         errors: { count: deps.errors.count(companyId), recent: recentErrors, untagged: deps.errors.untagged() },
+        // Which rule decided each permission request in the last hour, and how many cards reached the CEO and the owner (BOS-306). Resets when the server restarts.
+        permissions: deps.permissions ? deps.permissions(companyId) : null,
         // The owner's own quota, so every company's CEO reads the same reading; the agents paid from
         // it are scoped to this company (see funding.syntheticUsage). A failed reading is unknown,
         // never an error, and never blocks this view.

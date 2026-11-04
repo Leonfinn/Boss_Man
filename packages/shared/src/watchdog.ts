@@ -28,6 +28,14 @@ export const WatchdogSettings = z.object({
   alertMinutes: z.number().int().min(5).max(24 * 60),
   /** Alerts handed to the CEO in a rolling hour; past it they go to the owner, so a loop can't keep starting CEO runs. */
   maxCeoAlertsPerHour: z.number().int().min(1).max(30),
+  /** The progress contract (BOS-314): runs that go quiet are asked for a status and flagged, reviews that stall move on. It works even while the watchdog is off. */
+  progressContract: z.boolean(),
+  /** A working run with no post on its ticket this long is sent a note asking for a status. */
+  silentSteerMinutes: z.number().int().min(5).max(24 * 60),
+  /** ...and flagged to the Scrum Master after this long. */
+  silentFlagMinutes: z.number().int().min(5).max(24 * 60),
+  /** An in-progress ticket whose note still says "likely / not proven" after this long goes to the CEO. */
+  unprovenHours: z.number().min(0.25).max(24 * 14),
 });
 export type WatchdogSettings = z.infer<typeof WatchdogSettings>;
 
@@ -46,6 +54,10 @@ export const DEFAULT_WATCHDOG: WatchdogSettings = {
   maxNudgesPerHour: 12,
   alertMinutes: 30,
   maxCeoAlertsPerHour: 6,
+  progressContract: true,
+  silentSteerMinutes: 30,
+  silentFlagMinutes: 60,
+  unprovenHours: 2,
 };
 
 /** Reads a stored value defensively: unknown or bad fields fall back to the defaults. */
