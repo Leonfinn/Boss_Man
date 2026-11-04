@@ -11,7 +11,7 @@ export async function runnerSocketRoutes(
   app: FastifyInstance,
   runners: Runners,
   secrets: ReturnType<typeof secretsService>,
-  opts: { heartbeatMs?: number; isLeader?: () => boolean } = {},
+  opts: { heartbeatMs?: number; isLeader?: () => boolean; checks?: Pick<ReturnType<typeof import("../services/check-dispatcher.js").checkDispatcher>, "onHello" | "onDone" | "onProgress"> } = {},
 ) {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
 
@@ -89,6 +89,7 @@ export async function runnerSocketRoutes(
               void runners.checkAddons(runner.id).catch((err) => app.log.warn({ err, runnerId: runner.id }, "add-on check failed"));
               // Verdicts that may have been lost in a dropped connection are sent again.
               if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "re-sending verdicts failed"));
+              await opts.checks?.onHello(runner.id, msg.checkJobs).catch((err) => app.log.error({ err, runnerId: runner.id }, "check queue hello failed"));
             });
             return;
           case "event":
@@ -102,6 +103,12 @@ export async function runnerSocketRoutes(
                 // No ack: the runner keeps the entry and resends it after reconnecting.
                 socket.close(1011, "ingest failed");
               });
+            return;
+          case "check.progress":
+            queue = queue.then(() => opts.checks?.onProgress(msg)).catch((err) => app.log.warn({ err, runnerId: runner.id }, "check progress failed"));
+            return;
+          case "check.done":
+            queue = queue.then(() => opts.checks?.onDone(runner.id, msg)).catch((err) => app.log.error({ err, runnerId: runner.id }, "check result failed"));
             return;
           case "reply":
             runners.resolveReply(msg);

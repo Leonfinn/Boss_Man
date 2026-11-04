@@ -115,14 +115,14 @@ export function checkQueue(db: Db) {
       );
   }
 
-  /** Give the free slots to the next jobs, marking them running on this runner. Returns what to start. */
-  async function claimNext(runnerId: string | null, now = new Date()): Promise<CheckJob[]> {
+  /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
+  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string): Promise<CheckJob[]> {
     const limit = await slots();
-    const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(eq(checkJobs.state, "running"))) as [{ n: number }];
+    const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(companyId ? and(eq(checkJobs.state, "running"), eq(checkJobs.companyId, companyId)) : eq(checkJobs.state, "running"))) as [{ n: number }];
     const free = limit - n;
     if (free <= 0) return [];
     const claimed: CheckJob[] = [];
-    for (const j of (await servable()).slice(0, free)) {
+    for (const j of (await servable()).filter((j) => !companyId || j.companyId === companyId).slice(0, free)) {
       // Guarded on state so two callers can't both start the same job.
       const [row] = await db
         .update(checkJobs)
@@ -173,6 +173,12 @@ export function checkQueue(db: Db) {
     return db.update(checkJobs).set({ state: "queued", runnerId: null, startedAt: null, reason: why }).where(cond).returning();
   }
 
+  /** One running job goes back in line, with the reason recorded. */
+  async function requeue(jobId: string, why: string): Promise<CheckJob | null> {
+    const [row] = await db.update(checkJobs).set({ state: "queued", runnerId: null, startedAt: null, reason: why }).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"))).returning();
+    return row ?? null;
+  }
+
   /** Running jobs that printed nothing for too long become stuck, each with its reason. */
   async function sweepStuck(now = new Date(), minutes = DEFAULT_NO_OUTPUT_MINUTES): Promise<CheckJob[]> {
     const cutoff = new Date(now.getTime() - minutes * 60_000);
@@ -207,5 +213,5 @@ export function checkQueue(db: Db) {
     return { mode: await mode(), slots: await slots(), running, queued, held, recent, main: mains.map((m) => ({ projectId: m.id, project: m.name, state: m.state, since: m.since, commit: m.commit })) };
   }
 
-  return { mode, slots, enqueue, claimNext, progress, complete, cancel, markStuck, requeueRunning, sweepStuck, setMainState, status };
+  return { mode, slots, enqueue, claimNext, progress, complete, cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
 }

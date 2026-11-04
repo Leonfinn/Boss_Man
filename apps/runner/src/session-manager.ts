@@ -55,6 +55,8 @@ export type SessionManagerOptions = {
   fence?: { level: FenceLevel; agentsRoot: string; pnpmStore?: string };
   /** The folder check-all.sh's queue and results share across sessions and the merge check (checkQueueEnv). */
   coordDir?: string;
+  /** Runs and stops server-queued check jobs (BOS-316). */
+  checkJobs?: import("./check-jobs.js").CheckJobs;
   log?: (msg: string) => void;
 };
 
@@ -260,6 +262,15 @@ export class SessionManager {
       case "run.start":
         this.starting.add(command.runId);
         void this.start(command).finally(() => this.starting.delete(command.runId));
+        return;
+      case "check.run":
+        this.opts.checkJobs?.run(command);
+        return;
+      case "check.cancel":
+        this.opts.checkJobs?.cancel(command.jobId);
+        return;
+      case "check.ack":
+        this.opts.checkJobs?.acknowledge(command.jobId);
         return;
       case "run.cancel": {
         const run = this.runs.get(command.runId);

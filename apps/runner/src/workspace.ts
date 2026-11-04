@@ -500,8 +500,37 @@ export class Workspaces {
     return this.runCheck(await this.reopen(spec), command, timeoutMs, queueMaxMs);
   }
 
+  /**
+   * Runs a server-queued check job (DR-003, BOS-316): a detached worktree of exactly this commit, a process group the runner
+   * owns, no lock files (the server holds the slots). Nothing here depends on an agent session. `cancel` is for the server only.
+   */
+  async runCommitCheck(
+    spec: { projectId: string; jobId: string; commit: string },
+    command: string,
+    timeoutMs: number,
+    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void } = {},
+  ): Promise<VerifyResult> {
+    const repo = this.repoDir(spec.projectId);
+    const dir = path.join(this.root, "check-jobs", spec.jobId);
+    rmSync(dir, { recursive: true, force: true });
+    await this.withRepoLock(spec.projectId, async () => {
+      await this.git(["worktree", "prune"], { cwd: repo });
+      mkdirSync(path.dirname(dir), { recursive: true });
+      await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
+    });
+    try {
+      return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart });
+    } finally {
+      await this.withRepoLock(spec.projectId, async () => {
+        await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
+        rmSync(dir, { recursive: true, force: true });
+        await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+      });
+    }
+  }
+
   /** One check command in a folder: its own process group, output kept to the last 8 KB. */
-  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS): Promise<VerifyResult> {
+  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void }): Promise<VerifyResult> {
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
       // Own process group, so a timeout can take down pnpm, tsc, vitest and their workers, not just the shell.
@@ -510,7 +539,7 @@ export class Workspaces {
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
         // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
-        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
+        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1" } : this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
       });
       const killGroup = (signal: NodeJS.Signals) => {
         try {
@@ -519,6 +548,11 @@ export class Workspaces {
           // group already gone
         }
       };
+      job?.onStart?.(() => {
+        timedOut = true;
+        killGroup("SIGTERM");
+        hardKill = setTimeout(() => finish(null), VERIFY_KILL_GRACE_MS);
+      });
       let tail = "";
       // While check-all.sh waits in its queue the clock is the (long) queue limit; it restarts at the full timeout once the checks really begin.
       // The queue limit is a no-progress limit (BOS-370): it restarts whenever the printed place changes.
@@ -527,6 +561,7 @@ export class Workspaces {
       let lastPlace = "";
       const onData = (chunk: string) => {
         tail = (tail + chunk).slice(-8192);
+        job?.onOutput?.(tail);
         if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
           slotTaken = true;
           arm(timeoutMs);

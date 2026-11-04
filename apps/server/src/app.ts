@@ -71,6 +71,7 @@ import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
+import { checkDispatcher } from "./services/check-dispatcher.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
@@ -232,7 +233,10 @@ export async function buildApp(opts: AppOptions) {
     const blocked = path.startsWith("/api/runner/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
     if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
   });
-  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader() });
+  // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
+  let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
+  const checks = checkDispatcher(db, { send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
+  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
   // The live commit each company's server runs (BOS-284): a deploy, a switch-back, a rollback or a
   // restart after a hand-apply wakes the Release Manager. Its deps are filled in further down.
   const releaseLog = releaseLogService(db, {
@@ -518,6 +522,7 @@ export async function buildApp(opts: AppOptions) {
     isLeader: () => leader.isLeader(),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
+  checkWake = (agentId, w) => scheduler.notify(agentId, w);
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
     // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
@@ -2420,5 +2425,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
 }

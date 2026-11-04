@@ -19,6 +19,10 @@ export type ConnectionOptions = {
   log?: (msg: string) => void;
   /** Permission requests still waiting for a verdict, re-asked on every (re)connect. */
   pendingPermissions?: () => Array<{ runId: string; requestId: string }>;
+  /** Check jobs running now (BOS-316), listed in hello. */
+  runningChecks?: () => string[];
+  /** Called after the server’s welcome: resend check results it may not have. */
+  onWelcome?: () => void;
 };
 
 export class RunnerConnection {
@@ -69,6 +73,11 @@ export class RunnerConnection {
     this.ws?.terminate();
   }
 
+  /** A message that is not journalled (BOS-316 check progress and results); the caller resends what matters on reconnect. */
+  sendDirect(m: RunnerMessage) {
+    this.send(m);
+  }
+
   private send(m: RunnerMessage) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
   }
@@ -81,7 +90,7 @@ export class RunnerConnection {
     ws.on("open", () => {
       this.attempt = 0;
       const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(pending.length ? { pending } : {}) });
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");
@@ -123,6 +132,7 @@ export class RunnerConnection {
             this.opts.log?.(`server has seq ${msg.lastSeq} but this runner compacted up to ${this.opts.journal.ackedUpTo}; some events can't be replayed`);
           }
           for (const entry of this.opts.journal.pending(msg.lastSeq)) this.send({ type: "event", entry });
+          this.opts.onWelcome?.();
           this.live = true;
           return;
         }

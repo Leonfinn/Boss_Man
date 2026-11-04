@@ -179,6 +179,15 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("models.probe"), requestId: z.string(), agentKind: z.enum(["claude", "codex", "opencode"]) }),
   /** Check the runner's add-ons (docs/12); answered with AddonReport[]. Sent only to runners with the "addons" feature. */
   z.object({ type: z.literal("addons.check"), requestId: z.string() }),
+  /**
+   * Run a queued check job (DR-003, BOS-316) in a process the runner owns, in its own detached worktree of this exact commit.
+   * It is not tied to any agent session. Answered with check.progress and check.done messages, not a reply.
+   */
+  z.object({ type: z.literal("check.run"), jobId: Uuid, projectId: Uuid, ticketId: Uuid, commit: z.string().min(7).max(64), command: z.string().min(1), timeoutMs: z.number().int().positive().optional() }),
+  /** Stop a check job. Only the server sends this; agents have no way to. */
+  z.object({ type: z.literal("check.cancel"), jobId: Uuid }),
+  /** The server has recorded this job’s result; the runner can stop re-sending it. */
+  z.object({ type: z.literal("check.ack"), jobId: Uuid }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /** Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current turn is stopped first. */
   z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(20_000), interrupt: z.boolean() }),
@@ -208,17 +217,24 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
     bootId: z.string().max(100).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
+    /** Check jobs this runner is running now (BOS-316): the server puts back in line any it thinks run here but are not listed. */
+    checkJobs: z.array(Uuid).max(100).optional(),
   }),
+
   z.object({ type: z.literal("event"), entry: JournalEntry }),
   z.object({ type: z.literal("ping") }),
   z.object({ type: z.literal("pong") }),
+  /** A running check job printed something: the log tail so far (BOS-316). */
+  z.object({ type: z.literal("check.progress"), jobId: Uuid, tail: z.string().max(20_000) }),
+  /** A check job ended (BOS-316). commit is the commit that was checked; the server ignores an answer for any other. */
+  z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000) }),
   /** An answer to a request command. Not journalled: it can always be asked for again. */
   z.object({ type: z.literal("reply"), requestId: z.string(), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() }),
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
 /** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence"] as const;
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [

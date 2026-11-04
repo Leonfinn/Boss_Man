@@ -5,6 +5,7 @@ import path from "node:path";
 import { checkClaude } from "./claude-check.js";
 import { runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
+import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
@@ -34,6 +35,7 @@ const sandbox = sandboxSelfTest();
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
 
 let connection: RunnerConnection;
+const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log);
 const sessions = new SessionManager({
   mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
   emit: (event) => connection.emit(event),
@@ -47,6 +49,7 @@ const sessions = new SessionManager({
   reply: (requestId, result) => connection.reply(requestId, result),
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,
+  checkJobs,
   fence: runnerFence(sandbox.level, dataDir, workspacesRoot),
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
@@ -66,6 +69,8 @@ connection = new RunnerConnection({
   log,
   onCommand: (command) => sessions.handle(command),
   pendingPermissions: () => sessions.pendingPermissions(),
+  runningChecks: () => checkJobs.running(),
+  onWelcome: () => checkJobs.resend(),
 });
 
 // Runs the previous process didn't finish go into the journal as interrupted before we connect (R42).
