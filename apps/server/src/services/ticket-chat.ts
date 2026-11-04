@@ -82,14 +82,15 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
         .where(and(eq(runs.ticketId, ticketId), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
         .orderBy(desc(runs.startedAt))
         .limit(1);
-      // Whether a new run could start now, or waits behind the target's other work: the ticket
-      // says which under the message, and so does the awaiting-reply marker (BOS-425).
+      // A target busy on another ticket has no free slot, so the message waits its turn (it is
+      // "queued" behind that work, which the ticket says under the message). Only another ticket
+      // counts: a live run on this one took the message already.
       const target = opts.agentId ?? t.assigneeAgentId;
-      const [targetRun] = target
+      const [busyElsewhere] = target
         ? await db
             .select({ id: runs.id })
             .from(runs)
-            .where(and(eq(runs.agentId, target), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
+            .where(and(eq(runs.agentId, target), isNull(runs.endedAt), ne(runs.ticketId, ticketId), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
             .limit(1)
         : [];
       let delivery: "live" | "woken" | "queued" | "unassigned" = "unassigned";
@@ -99,7 +100,7 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       const other = opts.agentId && opts.agentId !== (live ? live.agentId : t.assigneeAgentId) ? opts.agentId : null;
       if (other) {
         delivery = "woken";
-        if (targetRun) delivery = "queued";
+        if (busyElsewhere) delivery = "queued";
         agentId = other;
       } else if (live) {
         try {
@@ -113,7 +114,7 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
           throw err;
         }
       } else if (t.assigneeAgentId) {
-        delivery = targetRun ? "queued" : "woken";
+        delivery = busyElsewhere ? "queued" : "woken";
         agentId = t.assigneeAgentId;
       }
       // Stored before the wake, so the new run's prompt already carries it.
@@ -166,6 +167,9 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       const [r] = await db.select({ companyId: runs.companyId, ticketId: runs.ticketId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(eq(runs.id, runId));
       if (!r?.ticketId || r.purpose === "chat") return;
       await db.insert(ticketMessages).values({ companyId: r.companyId, ticketId: r.ticketId, author: "agent", agentId: r.agentId, runId, text: text.slice(0, MAX_TEXT), delivery: "end_of_run" });
+      // A closing message is the owner's answer too (the run ended saying it): it clears the marker,
+      // so a run that did answer is never woken again for silence (BOS-425).
+      await deps.replies?.clearOnReply({ ticketId: r.ticketId, agentId: r.agentId });
     },
 
   };

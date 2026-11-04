@@ -91,6 +91,16 @@ describe("an owner's message on a ticket waits for an answer (BOS-425)", () => {
     expect((await c().state(t.id))[0]!.replyReminders).toBe(1);
   });
 
+  it("counts a run's closing message as the answer, so it is not re-woken for silence", async () => {
+    const { t, runId } = await liveRunWithOwnerMessage();
+    await c().db.delete(wakes);
+    await c().ticketChat.onAgentMessage(runId, "Brand blue it is, the footer is done.");
+    expect(await c().open(t.id)).toEqual([]);
+    await c().db.update(runs).set({ endedAt: c().now() }).where(eq(runs.id, runId));
+    await c().ownerReplies.afterRunEnded(runId);
+    expect(await wakesFor(c().worker.id, t.id)).toEqual([]);
+  });
+
   it("clears the marker as soon as the agent replies, and does not re-wake it later", async () => {
     const { t, runId } = await liveRunWithOwnerMessage();
     await c().db.delete(wakes);
