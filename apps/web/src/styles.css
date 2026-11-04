@@ -74,6 +74,28 @@ p { margin: 0; }
 .app { min-height: 100vh; display: flex; flex-wrap: wrap; }
 .app > nav { flex: 1 1 232px; max-width: 100%; }
 .app > main { flex: 999 1 560px; min-width: 0; padding: 32px 40px 56px; display: flex; flex-direction: column; gap: 24px; }
+/* Pages that fill the window (Chat, BOS-270) pin the shell to the window height, so the panel can
+   take what the heading leaves. The menu sits beside the page on a desktop and above it on a phone;
+   either way `main` takes the height the menu does not use instead of a guessed offset. No other
+   page matches, so every other page keeps its layout and scrolls as before. */
+.app:has(> main > .chat-page > .messenger) { height: 100dvh; min-height: 0; align-content: stretch; }
+.app:has(> main > .chat-page > .messenger) > main { flex: 1 1 0; height: auto; min-height: 0; overflow: hidden; }
+/* Wide enough for the menu beside the page (the same 641px where the side menu starts sitting
+   beside it, BOS-289): one row, so `main`'s height is the window's; the menu keeps its own width and
+   never stretches to share the height (BOS-270). */
+@media (min-width: 641px) {
+  .app:has(> main > .chat-page > .messenger) { flex-wrap: nowrap; }
+  .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; height: auto; align-self: auto; }
+}
+/* A phone (below the 641px where the menu becomes a bar above the page) stacks the menu above the
+   chat: the bar keeps its full width and natural height, and the page takes what is left of the
+   window under it (BOS-270). */
+@media (max-width: 640px) {
+  .app:has(> main > .chat-page > .messenger) { flex-direction: column; flex-wrap: nowrap; }
+  .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; width: 100%; height: auto; }
+  .app:has(> main > .chat-page > .messenger) > nav.side { min-height: 0; }
+  .app:has(> main > .chat-page > .messenger) > main { flex: 1 1 auto; }
+}
 .page-head { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; }
 .page-head h1 { font-family: var(--display); font-weight: 800; font-size: 34px; line-height: 1.1; letter-spacing: -0.01em; }
 .page-head .sub { color: var(--muted); }
@@ -530,8 +552,13 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .wiki-list details > ul { padding-left: 14px; border-left: 1px solid var(--line); margin-left: 12px; }
 
 /* Chat as a messenger (R70) */
-.messenger { display: grid; grid-template-columns: 300px minmax(0, 1fr); padding: 0; overflow: hidden; height: min(72vh, 760px); min-height: 420px; }
-.messenger-list { border-right: 1px solid var(--line); overflow-y: auto; }
+/* The page fills the window under the heading (BOS-270): the panel takes the room left over instead
+   of stopping at a fixed height and leaving a blank band below it. The message list scrolls inside
+   the panel and the message box stays pinned under it, so the page itself does not scroll. */
+.chat-page { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 24px; }
+.messenger { flex: 1 1 auto; display: grid; grid-template-columns: 300px minmax(0, 1fr); padding: 0; overflow: hidden; min-height: 0; }
+.messenger-chat > .chat-log { min-height: 160px; }
+.messenger-list { border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
 .messenger-list ul { list-style: none; margin: 0; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
 .messenger-list a { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border-radius: 8px; color: var(--ink); text-decoration: none; }
 .messenger-list a:hover { background: var(--ground); }
@@ -576,9 +603,17 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
   .messenger-head .back { display: inline-grid; }
   /* An open thread fills the phone, so the message box is on screen: the page intro is only
      for the team list, and dvh keeps the box above the keyboard. */
-  .page-head:has(+ .messenger[data-picked="yes"]) .sub { display: none; }
-  .messenger[data-picked="yes"] { height: calc(100dvh - 76px); min-height: 320px; }
+  .chat-page > .page-head:has(+ .messenger[data-picked="yes"]) .sub { display: none; }
+  /* The page box already stops at the window (BOS-270), so the panel takes the room under the
+     heading rather than subtracting a guessed header height. */
+  .messenger[data-picked="yes"] { flex: 1 1 0; height: auto; min-height: 320px; }
   .messenger .chat-form { position: sticky; bottom: 0; background: var(--card); }
+}
+/* The team list fills the panel too, and scrolls inside it (BOS-270): a long list leaves no blank
+   band below it on a tall phone, and the page itself does not scroll. */
+@media (max-width: 760px) {
+  .chat-page > .page-head:has(+ .messenger[data-picked="no"]) .sub { display: none; }
+  .messenger[data-picked="no"] { flex: 1 1 0; height: auto; min-height: 240px; }
 }
 
 /* Dashboard (R74) */
@@ -792,9 +827,12 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .image-thumbs img { width: 120px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
 .file-chip { display: inline-block; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Wide enough for the menu to sit beside the page: it stays in view while the page scrolls, and scrolls on its own where it is taller than the window. */
-@media (min-width: 840px) {
-  .app > nav.side { position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
+/* Wherever the menu sits beside the page (a phone turns it into a bar above the page at 640px), it fills the window and stays in view while the page scrolls, scrolling on its own where it is taller than the window. 100dvh follows a mobile browser's address bar; 100vh is the fallback where dvh is unsupported. */
+@media (min-width: 641px) {
+  /* From just above the phone bar the menu keeps its own column beside the page, so it never wraps onto a full-width row that the full-height rule would then stretch over the whole screen. */
+  .app { flex-wrap: nowrap; }
+  .app > nav.side { flex: 0 0 232px; position: sticky; top: 0; align-self: flex-start; height: 100vh; height: 100dvh; min-height: 0; overflow-y: auto; }
+  .app > main { flex: 1 1 0; }
 }
 .related { display: flex; flex-direction: column; gap: 8px; }
 .related .section-label { margin: 6px 0 0; }
@@ -812,3 +850,30 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .own-answer::placeholder { color: var(--muted, #8a8f98); opacity: 0.7; }
 .use-suggestion { display: none; align-self: flex-start; background: none; border: 0; padding: 4px 0; color: var(--accent, #2563eb); text-decoration: underline; font: inherit; font-size: 13px; cursor: pointer; }
 @media (pointer: coarse), (max-width: 640px) { .use-suggestion { display: inline-block; } }
+
+/* A picture in a Markdown page opens enlarged over the page instead of in a new window (BOS-330).
+   The thumbnail keeps the old look; the overlay fills the window and the picture scrolls inside it. */
+.md-zoom { display: inline-block; padding: 0; border: 0; background: none; cursor: zoom-in; max-width: 100%; border-radius: 6px; }
+.md-zoom:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.lightbox { position: fixed; inset: 0; z-index: 60; display: flex; align-items: stretch; justify-content: center; background: rgb(0 0 0 / 0.72); }
+.lightbox-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; width: 100%; padding: 12px 16px 16px; gap: 8px; }
+.lightbox-bar { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex: none; }
+.lightbox-close { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding: 0 12px; font-size: 24px; line-height: 1; border-radius: 10px; border: 1px solid rgb(255 255 255 / 0.35); background: rgb(0 0 0 / 0.5); color: #fff; cursor: pointer; }
+.lightbox-close:hover { background: rgb(0 0 0 / 0.75); }
+.lightbox-close:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.lightbox-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; justify-content: safe center; align-items: flex-start; }
+/* Fit to the window: the whole picture is visible, keeping its proportions. */
+.lightbox-scroll img.fit { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; border-radius: 6px; }
+/* Actual size: at least the picture's natural width, scrolling on a window too small for it, so a 1080px diagram is readable. */
+.lightbox-scroll img.natural { width: auto; height: auto; max-width: none; max-height: none; border-radius: 6px; margin: 0 auto; }
+.lightbox-caption { flex: none; margin: 0; text-align: center; color: #f2f2f2; font-size: 14px; }
+/* A phone: less padding so the picture and its X keep the room, and the X stays a full 44px tap target. */
+@media (max-width: 640px) {
+  .lightbox-panel { padding: 8px 8px 12px; }
+}
+/* The thumbnail inside the button keeps the old inline look; the enlarged copy is never capped. */
+.md-zoom > img { display: block; max-width: min(100%, 360px); max-height: 260px; border-radius: 6px; border: 1px solid var(--line); }
+.lightbox-scroll img { border: 0; }
+/* The controls sit on their own strip above the picture, so they never float over the diagram. */
+.lightbox-bar { padding: 2px 0 4px; }
+.lightbox-panel { background: rgb(0 0 0 / 0.35); border-radius: 12px; }
