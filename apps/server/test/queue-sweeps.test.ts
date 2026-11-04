@@ -385,25 +385,117 @@ describe("stalled runs (R32)", () => {
     expect(ctx.commands.at(-1)).toEqual({ type: "run.cancel", runId });
   });
 
-  it("holds the never-started alert while the runner has only just reconnected (BOS-331)", async () => {
+  it("leaves a never-started run alone while the runner has only just reconnected (BOS-331)", async () => {
     ctx = await setup();
     await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
     await ctx.scheduler.tick();
     ctx.advance(6 * 60_000);
-    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    expect(await ctx.sweep()).toMatchObject({ stalledRuns: { raised: 0 }, neverStartedRuns: 0 });
     const status = (await ctx.serverStatus.status(ctx.company.id)) as { runner: { swapping: boolean } | null };
     expect(status.runner?.swapping).toBe(true);
   });
 
-  it("says when a run never started, and recommends cancelling it", async () => {
+  describe("runs that never start (BOS-480)", () => {
+  const starts = () => ctx.commands.filter((c): c is Extract<RunnerCommand, { type: "run.start" }> => c.type === "run.start");
+  const runRow = async (runId: string) => (await ctx.db.select().from(runs).where(eq(runs.id, runId)))[0]!;
+  /** A runner past its settling time, as after a restart some while ago, with a known boot. */
+  async function settled() {
     ctx = await setup();
+    await ctx.db.update(runners).set({ bootId: "boot-1" });
+    ctx.advance(11 * 60_000);
+  }
+
+  it("ends a never-started run on a connected, settled runner and queues its wake again within 4 minutes, with no card", async () => {
+    await settled();
+    const t = await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
+    await ctx.scheduler.tick();
+    const first = starts().at(-1)!;
+    const [original] = await ctx.db.select().from(wakes).where(eq(wakes.runId, first.runId));
+    ctx.advance(2 * 60_000);
+    expect((await ctx.sweep()).neverStartedRuns).toBe(0);
+    expect((await runRow(first.runId)).endedAt).toBeNull();
+    ctx.advance(60_000);
+    expect((await ctx.sweep()).neverStartedRuns).toBe(1);
+    expect(await runRow(first.runId)).toMatchObject({ outcome: "lost: never started", endedAt: expect.any(Date) });
+    // The runner is told to drop it, in case it is still setting it up.
+    expect(ctx.commands).toContainEqual({ type: "run.cancel", runId: first.runId });
+    const again = (await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id))).filter((w) => w.id !== original!.id && w.note?.includes("the earlier start never began"));
+    expect(again).toHaveLength(1);
+    expect(again[0]).toMatchObject({ ticketId: t.id, reason: original!.reason, priority: original!.priority, resumeRunId: original!.resumeRunId, causedByRunId: null });
+    expect(again[0]!.note).toBe(`${original!.note ? `${original!.note}\n\n` : ""}[Boss Man started this again: the earlier start never began (retry 1 of 2)]`);
+    expect(await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"))).toEqual([]);
+    // Nothing is asked of anyone, even well past the stall limit.
+    ctx.advance(10 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+  });
+
+  it("keeps a resumed run's resume link through the retry", async () => {
+    await settled();
+    const t = await ctx.ticket({ title: "Checkout error states" });
+    const [old] = await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: t.id, startedAt: ctx.clock(), endedAt: ctx.clock(), outcome: "interrupted" }).returning();
+    await ctx.scheduler.wake({ agentId: ctx.worker.id, ticketId: t.id, reason: "resume", priority: 3, note: "Picks up.", resumeRunId: old!.id });
+    await ctx.scheduler.tick();
+    const first = starts().at(-1)!;
+    ctx.advance(3 * 60_000);
+    await ctx.sweep();
+    const again = (await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.worker.id))).filter((w) => w.runId !== first.runId);
+    expect(again).toEqual([expect.objectContaining({ reason: "resume", priority: 3, resumeRunId: old!.id, note: "Picks up.\n\n[Boss Man started this again: the earlier start never began (retry 1 of 2)]" })]);
+  });
+
+  it("leaves alone a run the runner says is waiting for the repo lock", async () => {
+    await settled();
     await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
     await ctx.scheduler.tick();
-    ctx.advance(11 * 60_000);
-    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
-    const [row] = await ctx.queue();
-    expect(row).toMatchObject({ kind: "stalled_run", recommendedOption: "Cancel run" });
-    expect(row!.question).toBe(`CEO's run on "Checkout error states" never started: the runner hasn't reported it beginning in 11 minutes, probably because the runner restarted. Cancel it, then message CEO on the task to start again.`);
+    const { runId } = starts().at(-1)!;
+    await ctx.emit({ type: "runner.log", level: "info", message: `Run ${runId} is waiting for the repo lock before it can start; trying again until it frees.` });
+    ctx.advance(20 * 60_000);
+    expect((await ctx.sweep()).neverStartedRuns).toBe(0);
+    expect((await runRow(runId)).endedAt).toBeNull();
+  });
+
+  it("after two retries, the third failure is one CEO card per runner boot listing every agent, which never asks to cancel", async () => {
+    await settled();
+    const designer = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Designer" })).json() as { id: string };
+    await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.worker.id });
+    await ctx.ticket({ title: "Login page", assigneeAgentId: designer.id });
+    const card = async () => ctx.db.select().from(decisions).where(eq(decisions.dedupeKey, `runner-boot:${(await ctx.db.select().from(runners))[0]!.id}:boot-1`));
+    const live = async (agentId: string) => (await ctx.db.select().from(runs).where(and(eq(runs.agentId, agentId)))).filter((r) => !r.endedAt);
+    for (let round = 1; round <= 3; round++) {
+      await ctx.scheduler.tick();
+      expect(await live(ctx.worker.id)).toHaveLength(1);
+      expect(await live(designer.id)).toHaveLength(1);
+      expect(await card()).toEqual([]);
+      ctx.advance(3 * 60_000);
+      expect((await ctx.sweep()).neverStartedRuns).toBe(2);
+    }
+    const cards = await card();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.question).toBe(
+      `2 runs never started on the runner, even after Boss Man started each again 2 times: Engineer on "Checkout error states"; Designer on "Login page". Boss Man has stopped trying. Check the runner (Settings → Server and runner), then wake these agents again.`,
+    );
+    // Raised at the CEO (DR-017 A), and never a "Cancel it" card.
+    expect((cards[0]!.context as { ladder: { rung: string } }).ladder.rung).toBe("ceo");
+    expect(await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"))).toEqual([]);
+    // No fourth try.
+    await ctx.scheduler.tick();
+    expect(await live(ctx.worker.id)).toEqual([]);
+    expect(await live(designer.id)).toEqual([]);
+  });
+
+  it("a 'runner offline' launch failure raises no card, and the wake still starts once the runner is back", async () => {
+    ctx = await setup();
+    ctx.offline();
+    const t = await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.worker.id });
+    await ctx.scheduler.tick();
+    await ctx.scheduler.tick();
+    const [w] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(w).toMatchObject({ status: "queued", statusReason: "runner offline" });
+    expect(await ctx.db.select().from(decisions)).toEqual([]);
+    ctx.online();
+    await ctx.scheduler.tick();
+    expect(starts().filter((s) => s.agentId === ctx.worker.id)).toHaveLength(1);
+    expect(await ctx.db.select().from(decisions)).toEqual([]);
+  });
   });
 
   it("withdraws when the run speaks again, and says nothing more after keep waiting", async () => {
@@ -478,16 +570,6 @@ describe("stalled runs (R32)", () => {
     ctx.offline();
     const [off] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
     expect(off!.evidence.runner.connected).toBe(false);
-  });
-
-  it("attaches evidence to a run that never started: no events at all", async () => {
-    ctx = await setup();
-    await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
-    await ctx.scheduler.tick();
-    ctx.advance(11 * 60_000);
-    await ctx.sweep();
-    const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
-    expect(row!.evidence).toMatchObject({ lastEventAt: null, lastStep: null, ticket: "Checkout error states" });
   });
 
   it("doesn't flag a run that is waiting for a permission answer", async () => {
