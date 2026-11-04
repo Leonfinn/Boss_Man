@@ -129,6 +129,7 @@ describe("the runner launcher (R55)", () => {
     expect(parseCpus("2")).toBe(2);
     expect(parseCpus("0.5")).toBe(0.5);
     expect(() => parseCpus("-1")).toThrow();
+    expect(() => parseCpus("0.001")).toThrow();
     expect(() => parseCpus("many")).toThrow();
     const cfg = config();
     expect(() => containerSpec({ ...cfg, network: "host" }, "app-co")).toThrow();

@@ -60,9 +60,11 @@ describe("compose memory limits", () => {
     expect(String(runner.cpu_shares)).toContain("BOSSMAN_RUNNER_CPU_SHARES:-512");
     expect(String(runner.cpus)).toMatch(/^\$\{BOSSMAN_RUNNER_CPUS:-0\}$/);
     const bg = services("deploy/truenas-bluegreen.yml");
-    for (const [n, s] of [["db", main.db], ["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]], ["proxy", bg.proxy]] as const) {
-      expect(s!.cpu_shares, n).toBeGreaterThanOrEqual(1024);
+    // Unset = Docker default 1024, above the runner weight; only the proxy sets a value (2048). Setting 1024 on db/server would change their config for nothing.
+    for (const [n, s] of [["db", main.db], ["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]]] as const) {
+      expect(s!.cpu_shares ?? 1024, n).toBeGreaterThan(512);
     }
+    expect(bg.proxy!.cpu_shares).toBe(2048);
     // The launcher gets the same two settings, so both places a runner is defined agree.
     const launcherEnv = parse(readFileSync(path.join(root, "docker-compose.yml"), "utf8")).services.launcher.environment;
     expect(launcherEnv.BOSSMAN_RUNNER_CPU_SHARES).toContain("BOSSMAN_RUNNER_CPU_SHARES:-512");

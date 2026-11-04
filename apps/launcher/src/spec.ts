@@ -129,10 +129,11 @@ export function parseCpuShares(v: string | undefined, fallback = DEFAULT_CPU_SHA
 }
 
 /** A hard CPU cap such as 4 or 1.5, as in compose's cpus. Empty or 0 means no cap. */
+/** 0 or empty = no cap. Docker rejects less than 0.01 CPU, so that is refused up front. */
 export function parseCpus(v: string | undefined): number | undefined {
   if (!v || !v.trim()) return undefined;
   const n = Number(v.trim());
-  if (!/^\d+(\.\d+)?$/.test(v.trim()) || !Number.isFinite(n) || n > 1024) throw new Error(`BOSSMAN_RUNNER_CPUS should be a number of CPUs such as 4 or 1.5, not ${v}`);
+  if (!/^\d+(\.\d+)?$/.test(v.trim()) || !Number.isFinite(n) || n > 1024 || (n !== 0 && n < 0.01)) throw new Error(`BOSSMAN_RUNNER_CPUS should be a number of CPUs such as 4 or 1.5, not ${v}`);
   return n === 0 ? undefined : n;
 }
 

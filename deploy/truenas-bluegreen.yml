@@ -25,8 +25,7 @@ x-server: &server
     - master_key
   # Same limits and priority as the single server in docker-compose.yml.
   # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.
-  # Full CPU weight, as the single server (BOS-412).
-  cpu_shares: 1024
+  # CPU weight left at Docker's default 1024 (BOS-412); runners get 512.
   mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
   mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
   oom_score_adj: -500

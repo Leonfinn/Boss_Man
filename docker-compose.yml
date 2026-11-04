@@ -76,8 +76,7 @@ services:
       - db-data:/var/lib/postgresql/data
     # Memory limits (docs/00-first-time-install.md, "Memory limits"): the database is among the last things the kernel kills.
     # 0 = no cap: the db row of the owner's docker stats reading (BOS-405) was cut off, so 1g is unverified. Set BOSSMAN_DB_MEMORY to cap it.
-    # Full CPU weight (BOS-412): runners get 512, so the database wins on a busy host.
-    cpu_shares: 1024
+    # CPU weight is left at Docker's default 1024 (BOS-412): runners get 512, so the database wins on a busy host. Not set here on purpose: it would change the db config for nothing.
     mem_limit: ${BOSSMAN_DB_MEMORY:-0}
     mem_reservation: ${BOSSMAN_DB_MEMORY_RESERVED:-256m}
     oom_score_adj: -500
@@ -116,8 +115,7 @@ services:
     secrets:
       - master_key
     # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.
-    # Full CPU weight (BOS-412): runners get 512, so the server wins on a busy host.
-    cpu_shares: 1024
+    # CPU weight is left at Docker's default 1024 (BOS-412): runners get 512, so the server wins on a busy host.
     mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
     mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
     oom_score_adj: -500
