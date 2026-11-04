@@ -15,6 +15,11 @@ export type Notify = (agentId: string, input: { reason: string; note: string; pr
 export const REVIEW_REASON = "review requested";
 const SETTLED = ["approved", "overruled"];
 
+/** How the wake note names the ticket: "- <ticketId> ". The progress sweep matches on it to find a reviewer's runs (BOS-314); keep both in step by building and matching through here. */
+export const reviewAskPrefix = (ticketId: string) => `- ${ticketId} `;
+/** The SQL pattern matching `reviewAskPrefix` in a wake note. */
+export const reviewAskPattern = (ticketId: string) => `${reviewAskPrefix(ticketId)}%`;
+
 /** The rows of the ticket's newest round. */
 export async function latestRows(db: Db, ticketId: string): Promise<ReviewRow[]> {
   const [m] = await db.select({ n: max(reviewRequests.round) }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId));
@@ -47,7 +52,7 @@ export async function wakeReviewers(db: Db, t: Ticket, rows: ReviewRow[], notify
   for (const [agentId, mine] of Object.entries(byAgent)) {
     const asks = mine.map((r) => `  Your ${r.kind} review, round ${r.round}: look at ${KIND_FOCUS[r.kind as ReviewSlot]}.`).join("\n");
     const how = `  Read the changes with the review tool (action diff), then give your verdict with action submit${mine.length > 1 ? " and the kind of each review" : ""}.`;
-    await notify(agentId, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}\n${asks}\n${how}${checklist ? `\nAcceptance criteria:\n${checklist}` : ""}` });
+    await notify(agentId, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `${reviewAskPrefix(t.id)}"${t.title}": ${t.stateNote ?? "(no note)"}\n${asks}\n${how}${checklist ? `\nAcceptance criteria:\n${checklist}` : ""}` });
   }
 }
 

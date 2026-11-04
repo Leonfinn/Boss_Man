@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "./api";
+import { sharedGet } from "./shared-get";
 
 /** The part of the URL after "#", e.g. "/board/<projectId>", so the server only serves one page. */
 export function useRoute(): [string[], (to: string) => void] {
@@ -13,10 +14,18 @@ export function useRoute(): [string[], (to: string) => void] {
   return [parts, (to: string) => (window.location.hash = `#/${to}`)];
 }
 
+function hidden() {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
 /**
  * Loads data now and again every `everyMs`, plus whenever the tab comes back into view.
  * The browser only ever reads: all autonomy runs on the server (R43), so a slow or closed
  * tab can't hold an agent up.
+ *
+ * At most one chain runs per hook: a reload asked for mid-request is remembered and happens
+ * when that request comes back, never alongside it. Timers stop while the tab is hidden, and
+ * one reload runs on return.
  */
 export function usePoll<T>(load: (signal: AbortSignal) => Promise<T>, everyMs: number, key: string) {
   const [data, setData] = useState<T | null>(null);
@@ -32,29 +41,64 @@ export function usePoll<T>(load: (signal: AbortSignal) => Promise<T>, everyMs: n
   }, [key]);
 
   useEffect(() => {
-    const ctrl = new AbortController();
+    let live = true;
+    let running = false;
+    let again = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = undefined;
+      if (!live || hidden()) return;
+      timer = setTimeout(() => void run(), everyMs);
+    };
+
     const run = async () => {
+      if (!live) return;
+      if (running) {
+        // Already out: ask for one more when it comes back rather than start a second chain.
+        again = true;
+        return;
+      }
+      clearTimeout(timer);
+      timer = undefined;
+      if (hidden()) return;
+      running = true;
       try {
-        setData(await loadRef.current(ctrl.signal));
+        const next = await loadRef.current(new AbortController().signal);
+        if (!live) return;
+        setData(next);
         setError(null);
       } catch (err) {
-        if ((err as Error).name === "AbortError") return;
+        if (!live || (err as Error).name === "AbortError") return;
         setError(err instanceof ApiError ? err : new ApiError(0, String(err)));
+      } finally {
+        running = false;
       }
-      if (!ctrl.signal.aborted) timer = setTimeout(run, everyMs);
+      if (!live) return;
+      if (again) {
+        again = false;
+        void run();
+      } else schedule();
     };
-    void run();
-    const onVisible = () => {
-      if (document.visibilityState !== "visible") return;
-      clearTimeout(timer);
-      void run();
+
+    const onVisibility = () => {
+      if (hidden()) {
+        // Going away: stop the timer so nothing is sent while nobody is looking.
+        clearTimeout(timer);
+        timer = undefined;
+        return;
+      }
+      if (running) again = true;
+      else void run();
     };
-    document.addEventListener("visibilitychange", onVisible);
+
+    if (!hidden()) void run();
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      ctrl.abort();
+      live = false;
       clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [everyMs, key, tick]);
 
