@@ -74,6 +74,28 @@ p { margin: 0; }
 .app { min-height: 100vh; display: flex; flex-wrap: wrap; }
 .app > nav { flex: 1 1 232px; max-width: 100%; }
 .app > main { flex: 999 1 560px; min-width: 0; padding: 32px 40px 56px; display: flex; flex-direction: column; gap: 24px; }
+/* Pages that fill the window (Chat, BOS-270) pin the shell to the window height, so the panel can
+   take what the heading leaves. The menu sits beside the page on a desktop and above it on a phone;
+   either way `main` takes the height the menu does not use instead of a guessed offset. No other
+   page matches, so every other page keeps its layout and scrolls as before. */
+.app:has(> main > .chat-page > .messenger) { height: 100dvh; min-height: 0; align-content: stretch; }
+.app:has(> main > .chat-page > .messenger) > main { flex: 1 1 0; height: auto; min-height: 0; overflow: hidden; }
+/* Wide enough for the menu beside the page (the same 641px where the side menu starts sitting
+   beside it, BOS-289): one row, so `main`'s height is the window's; the menu keeps its own width and
+   never stretches to share the height (BOS-270). */
+@media (min-width: 641px) {
+  .app:has(> main > .chat-page > .messenger) { flex-wrap: nowrap; }
+  .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; height: auto; align-self: auto; }
+}
+/* A phone (below the 641px where the menu becomes a bar above the page) stacks the menu above the
+   chat: the bar keeps its full width and natural height, and the page takes what is left of the
+   window under it (BOS-270). */
+@media (max-width: 640px) {
+  .app:has(> main > .chat-page > .messenger) { flex-direction: column; flex-wrap: nowrap; }
+  .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; width: 100%; height: auto; }
+  .app:has(> main > .chat-page > .messenger) > nav.side { min-height: 0; }
+  .app:has(> main > .chat-page > .messenger) > main { flex: 1 1 auto; }
+}
 .page-head { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; }
 .page-head h1 { font-family: var(--display); font-weight: 800; font-size: 34px; line-height: 1.1; letter-spacing: -0.01em; }
 .page-head .sub { color: var(--muted); }
@@ -530,8 +552,13 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .wiki-list details > ul { padding-left: 14px; border-left: 1px solid var(--line); margin-left: 12px; }
 
 /* Chat as a messenger (R70) */
-.messenger { display: grid; grid-template-columns: 300px minmax(0, 1fr); padding: 0; overflow: hidden; height: min(72vh, 760px); min-height: 420px; }
-.messenger-list { border-right: 1px solid var(--line); overflow-y: auto; }
+/* The page fills the window under the heading (BOS-270): the panel takes the room left over instead
+   of stopping at a fixed height and leaving a blank band below it. The message list scrolls inside
+   the panel and the message box stays pinned under it, so the page itself does not scroll. */
+.chat-page { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 24px; }
+.messenger { flex: 1 1 auto; display: grid; grid-template-columns: 300px minmax(0, 1fr); padding: 0; overflow: hidden; min-height: 0; }
+.messenger-chat > .chat-log { min-height: 160px; }
+.messenger-list { border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
 .messenger-list ul { list-style: none; margin: 0; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
 .messenger-list a { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border-radius: 8px; color: var(--ink); text-decoration: none; }
 .messenger-list a:hover { background: var(--ground); }
@@ -576,9 +603,17 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
   .messenger-head .back { display: inline-grid; }
   /* An open thread fills the phone, so the message box is on screen: the page intro is only
      for the team list, and dvh keeps the box above the keyboard. */
-  .page-head:has(+ .messenger[data-picked="yes"]) .sub { display: none; }
-  .messenger[data-picked="yes"] { height: calc(100dvh - 76px); min-height: 320px; }
+  .chat-page > .page-head:has(+ .messenger[data-picked="yes"]) .sub { display: none; }
+  /* The page box already stops at the window (BOS-270), so the panel takes the room under the
+     heading rather than subtracting a guessed header height. */
+  .messenger[data-picked="yes"] { flex: 1 1 0; height: auto; min-height: 320px; }
   .messenger .chat-form { position: sticky; bottom: 0; background: var(--card); }
+}
+/* The team list fills the panel too, and scrolls inside it (BOS-270): a long list leaves no blank
+   band below it on a tall phone, and the page itself does not scroll. */
+@media (max-width: 760px) {
+  .chat-page > .page-head:has(+ .messenger[data-picked="no"]) .sub { display: none; }
+  .messenger[data-picked="no"] { flex: 1 1 0; height: auto; min-height: 240px; }
 }
 
 /* Dashboard (R74) */
