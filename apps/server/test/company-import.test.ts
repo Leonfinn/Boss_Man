@@ -79,6 +79,28 @@ describe("company import (docs/11, step 2)", () => {
     expect(decisions).toContain("Holiday Hours Copy was imported");
   });
 
+  // BOS-198: lists of reviewers survive the trip, and an older package's "marked" cells name its marked agent.
+  it("remaps reviewer lists and an older package's marked reviewers", async () => {
+    const { req } = await setup();
+    const { company } = (await req("POST", "/api/companies", { name: "Lists Co" })).json() as { company: { id: string } };
+    const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Ann", template: "engineer" })).json() as { id: string };
+    const policy = (await req("GET", `/api/companies/${company.id}/review-policy`)).json();
+    expect((await req("PUT", `/api/companies/${company.id}/review-policy`, { ...policy, medium: { ...policy.medium, kinds: { security: [worker.id] } } })).statusCode).toBe(200);
+    const files = unzipSync(new Uint8Array((await req("GET", `/api/companies/${company.id}/export`)).rawPayload));
+    // Make it look older: a list naming an agent the package lacks, a "marked" cell and the agent's mark.
+    const co = JSON.parse(strFromU8(files["company.json"]!));
+    co.reviewPolicy.medium.kinds = { security: [worker.id, "99999999-9999-4999-8999-999999999999"], infra: "marked" };
+    co.name = "Lists Copy";
+    files["company.json"] = strToU8(JSON.stringify(co));
+    const agentFile = Object.keys(files).find((k) => k.endsWith("agent.json") && strFromU8(files[k]!).includes('"Ann"'))!;
+    files[agentFile] = strToU8(JSON.stringify({ ...JSON.parse(strFromU8(files[agentFile]!)), reviewKind: "infra" }));
+    const res = await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(files)).toString("base64") });
+    expect(res.statusCode).toBe(201);
+    const { companyId } = res.json() as { companyId: string };
+    const ann = ((await req("GET", "/api/companies")).json() as Array<{ id: string; agents: Array<{ id: string; name: string }> }>).find((c) => c.id === companyId)!.agents.find((a) => a.name === "Ann")!;
+    expect((await req("GET", `/api/companies/${companyId}/review-policy`)).json().medium.kinds).toEqual({ security: [ann.id], infra: ann.id });
+  });
+
   it("refuses files that aren't a safe Boss Man package", async () => {
     const { req } = await setup();
     const send = (files: Record<string, string>) => req("POST", "/api/companies/import/preview", { zip: Buffer.from(zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])))).toString("base64") });

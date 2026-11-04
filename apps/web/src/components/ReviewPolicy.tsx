@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, REVIEW_KINDS, RISKS, type Agent, type ReviewKindName, type ReviewPolicy } from "../api";
+import { api, REVIEW_KINDS, RISKS, type Agent, type ReviewerRef, type ReviewKindName, type ReviewPolicy } from "../api";
 import { usePoll } from "../hooks";
 import { SaveButton, useSaveState } from "./SaveButton";
 
@@ -13,8 +13,49 @@ const DEFAULTS: ReviewPolicy = {
 };
 
 const cap = (r: string) => r[0]!.toUpperCase() + r.slice(1);
+const SEVERAL = "__several";
 
-/** The 5-row table: who approves the plan, who reviews the code, which extra reviews it needs, whether the owner signs off. */
+/**
+ * One reviewer cell: the select picks one choice (Off, CEO, Senior Developer or an agent); once an
+ * agent is picked, ticking more agents below makes it a list, and each review goes to one of them
+ * (BOS-198). The choices that aren't agents can't be mixed into a list. One agent is saved as its id,
+ * several as a list, so a single choice is stored exactly as before.
+ */
+function ReviewerCell({ label, id, value, onChange, team, off }: { label: string; id: string; value: ReviewerRef | undefined; onChange: (v: ReviewerRef | undefined) => void; team: Agent[]; off: boolean }) {
+  const ids = Array.isArray(value) ? value : value && team.some((a) => a.id === value) ? [value] : [];
+  const toggle = (agentId: string, on: boolean) => {
+    const next = on ? [...ids, agentId] : ids.filter((x) => x !== agentId);
+    if (next.length) onChange(next.length === 1 ? next[0]! : next);
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <select aria-label={label} id={id} value={ids.length > 1 ? SEVERAL : (value ?? "")} onChange={(e) => (e.target.value === SEVERAL ? undefined : onChange(e.target.value || undefined))}>
+        {off && <option value="">Off</option>}
+        {value === "marked" && <option value="marked">Marked agent (old setting)</option>}
+        <option value="ceo">CEO</option>
+        <option value="senior-dev">Senior Developer (when hired)</option>
+        {team.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name}{a.title ? ` (${a.title})` : ""}
+          </option>
+        ))}
+        {ids.length > 1 && <option value={SEVERAL}>{ids.map((x) => team.find((a) => a.id === x)?.name ?? "Unknown agent").join(", ")}</option>}
+      </select>
+      {ids.length > 0 && team.length > 1 && (
+        <fieldset style={{ border: 0, margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: "0.85em" }}>
+          <legend className="muted">Shared between (one each)</legend>
+          {team.map((a) => (
+            <label key={a.id} style={{ whiteSpace: "nowrap" }}>
+              <input type="checkbox" aria-label={`${label}: ${a.name}`} checked={ids.includes(a.id)} disabled={ids.length === 1 && ids[0] === a.id} onChange={(e) => toggle(a.id, e.target.checked)} /> {a.name}
+            </label>
+          ))}
+        </fieldset>
+      )}
+    </div>
+  );
+}
+
+/** The 5-row table: who approves the plan, who reviews the code, which extra reviews it needs, whether the owner signs off. The one place that says who reviews (BOS-198). */
 export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value: ReviewPolicy; onChange: (v: ReviewPolicy) => void; agents: Agent[]; idPrefix: string }) {
   const team = agents.filter((a) => a.role !== "ceo" && !a.duty);
   const set = (tier: (typeof RISKS)[number], patch: Partial<ReviewPolicy["low"]>) => onChange({ ...value, [tier]: { ...value[tier], ...patch } });
@@ -29,7 +70,7 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
       ))}
     </>
   );
-  const setKind = (tier: (typeof RISKS)[number], kind: ReviewKindName, ref: string) => {
+  const setKind = (tier: (typeof RISKS)[number], kind: ReviewKindName, ref: ReviewerRef | undefined) => {
     const { [kind]: _drop, ...rest } = value[tier].kinds ?? {};
     set(tier, { kinds: ref ? { ...rest, [kind]: ref } : rest });
   };
@@ -60,17 +101,11 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
               </select>
             </td>
             <td>
-              <select aria-label={`${cap(tier)}: code reviewed by`} id={`${idPrefix}-review-${tier}`} value={value[tier].reviewer} onChange={(e) => set(tier, { reviewer: e.target.value })}>
-                {people}
-              </select>
+              <ReviewerCell label={`${cap(tier)}: code reviewed by`} id={`${idPrefix}-review-${tier}`} value={value[tier].reviewer} onChange={(v) => v && set(tier, { reviewer: v })} team={team} off={false} />
             </td>
             {REVIEW_KINDS.map((k) => (
               <td key={k}>
-                <select aria-label={`${cap(tier)}: ${k} review by`} id={`${idPrefix}-${k}-${tier}`} value={value[tier].kinds?.[k] ?? ""} onChange={(e) => setKind(tier, k, e.target.value)}>
-                  <option value="">Off</option>
-                  <option value="marked">The agent marked as {k} reviewer</option>
-                  {people}
-                </select>
+                <ReviewerCell label={`${cap(tier)}: ${k} review by`} id={`${idPrefix}-${k}-${tier}`} value={value[tier].kinds?.[k]} onChange={(v) => setKind(tier, k, v)} team={team} off />
               </td>
             ))}
             <td>
