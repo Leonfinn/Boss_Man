@@ -1921,10 +1921,12 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       const rows = await db
         .update(tickets)
         // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, ...(sameState && state === "done" ? {} : { outcome: state === "done" ? (outcome ?? "completed") : null }), ...(state === "done" && !sameState ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null } : {}) })
+        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, ...(sameState && state === "done" ? {} : { outcome: state === "done" ? (outcome ?? "completed") : null }), ...(state === "done" && !sameState ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}) })
         // The version is checked in the same statement, so a change between read and write can't slip through (R81).
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
+      // A state note is a post: the run's silence is measured from it (BOS-314).
+      if (rows.length && summary?.trim() && scope.agentId) await db.update(runsTable).set({ lastPostAt: at }).where(eq(runsTable.id, scope.runId));
       if (!rows.length) {
         const [now] = await db
           .select({ state: tickets.systemState, version: tickets.version, changed: tickets.lastActivityAt, assignee: agents.name })
