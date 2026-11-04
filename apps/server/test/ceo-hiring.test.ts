@@ -139,6 +139,56 @@ describe("the CEO builds the team (R62)", () => {
     await client.close();
   });
 
+  it("refuses a model change whose model the account can't serve, and accepts a real move (BOS-477)", async () => {
+    const c = (ctx = await setup());
+    const client = await c.mcp(c.ceo.id);
+    const claude2 = (await c.req("POST", "/api/funding-sources", { name: "Claude Max 2", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    const synthetic = (await c.req("POST", "/api/funding-sources", { name: "Synthetic", kind: "subscription", provider: "synthetic" })).json() as { id: string };
+    const deepseek = "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017";
+    // Brian's setup before the incident: OpenCode on Ollama paying Synthetic.
+    await c.db.update(agents).set({ agentKind: "opencode", model: deepseek, fundingSourceId: synthetic.id }).where(eq(agents.id, c.worker.id));
+
+    // The Brian case: the same DeepSeek model moved onto a Claude account. Refused, and no card is raised.
+    const brian = await client.callTool({ name: "propose_model_change", arguments: { agent: "Engineer", provider: "anthropic", fundingSourceId: claude2.id, reason: "Move everyone off the exhausted account." } });
+    expect(brian).toMatchObject({ isError: true });
+    expect(textOf(brian)).toContain("Anthropic serves Claude models only");
+    expect(await c.db.select().from(decisions)).toEqual([]);
+
+    // A paid-from-only change keeps harness and model and is checked the same way.
+    const onlySource = await client.callTool({ name: "propose_model_change", arguments: { agent: "Engineer", fundingSourceId: claude2.id, reason: "Same setup, new account." } });
+    expect(onlySource).toMatchObject({ isError: true });
+    expect(textOf(onlySource)).toContain("Anthropic serves Claude models only");
+
+    // A real move — a Claude agent from Claude Max to Claude Max 2 — is accepted.
+    await c.db.update(agents).set({ agentKind: "claude", model: "claude-opus-4-5", fundingSourceId: c.funding.id }).where(eq(agents.id, c.worker.id));
+    expect(textOf(await client.callTool({ name: "propose_model_change", arguments: { agent: "Engineer", fundingSourceId: claude2.id, reason: "The first account is exhausted." } }))).toMatch(/waiting for the owner/);
+    const [d] = (await c.db.select().from(decisions)).filter((x) => (x.context as { type?: string }).type === "model_change");
+    expect((d!.context as { proposed: unknown }).proposed).toMatchObject({ harness: "claude", provider: "anthropic", model: "claude-opus-4-5", fundingSourceId: claude2.id, fundingSourceName: "Claude Max 2" });
+
+    // The owner's Edit dialog is checked the same way.
+    const edited = await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Edit", modelConfig: { harness: "opencode", provider: "anthropic", model: deepseek, fundingSourceId: claude2.id } });
+    expect(edited.statusCode).toBe(422);
+    expect(edited.json().message).toContain("Anthropic serves Claude models only");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("open");
+    await client.close();
+  });
+
+  it("lists every live agent's current setup so a change across the team can be checked (BOS-477)", async () => {
+    const c = (ctx = await setup());
+    const synthetic = (await c.req("POST", "/api/funding-sources", { name: "Synthetic", kind: "subscription", provider: "synthetic" })).json() as { id: string };
+    await c.db.update(agents).set({ agentKind: "opencode", model: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017", fundingSourceId: synthetic.id }).where(eq(agents.id, c.worker.id));
+    const client = await c.mcp(c.ceo.id);
+    const options = JSON.parse(textOf(await client.callTool({ name: "model_options", arguments: {} })));
+    const engineer = (options.current as Array<Record<string, unknown>>).find((a) => a.name === "Engineer");
+    expect(engineer).toMatchObject({ harness: "opencode", harnessLabel: "OpenCode", provider: "synthetic", providerLabel: "Synthetic", model: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017", fundingSourceId: synthetic.id, fundingSourceName: "Synthetic" });
+    expect((options.current as Array<Record<string, unknown>>).some((a) => a.role === "ceo")).toBe(true);
+    // A retired agent isn't in the list.
+    await c.req("POST", `/api/agents/${c.worker.id}/retire`, {});
+    const after = JSON.parse(textOf(await client.callTool({ name: "model_options", arguments: {} })));
+    expect((after.current as Array<{ name: string }>).some((a) => a.name === "Engineer")).toBe(false);
+    await client.close();
+  });
+
   it("keeps model-change and hire cards on the owner's queue, never the team's (BOS-128)", async () => {
     const c = (ctx = await setup());
     const client = await c.mcp(c.ceo.id);
