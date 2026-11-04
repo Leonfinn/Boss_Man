@@ -16,6 +16,7 @@ import type { AlertInput } from "./alert-ladder.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, evaluate, latestRows } from "./review-kinds.js";
+import { progressSweep } from "./progress.js";
 import { MISSED_REASON, REVIEW_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -62,7 +63,7 @@ const hhmm = (d: Date) => d.toISOString().slice(11, 16);
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; /** The runner connected only just now, so its queued runs are still starting (BOS-331). */ runnerSettling?: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -222,6 +223,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A finished ticket needs no alert about its run, and neither does one waiting on the owner.
       const eligible = !waiting.has(run.run.id) && !!run.runnerId && run.ticketState !== "done";
       if (!eligible || idle < limits.stallAfterMs) return { idle, stalled: false };
+      // A run that has said nothing yet, on a runner that has only just come back, is queued behind the others: wait.
+      if (!run.run.lastEventAt && opts.runnerSettling?.(run.runnerId!)) return { idle, stalled: false };
       if (!withBusyChecks) return { idle, stalled: true };
       const command = await busyInCommand(run.run.id);
       if (command) {
@@ -569,11 +572,13 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // While the update hold is on nothing can start, so an idle ticket is not forgotten work.
       const held = await getHold(db);
       const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
+      // Silent runs, reviews that end without a verdict, and causes left unproven (BOS-314): these run whether or not the watchdog is on.
+      const progress = held ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 } : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert });
       const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);
       const unmerged = held ? 0 : await unmergedApprovals(t);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
       const ticketless = held ? { raised: 0 } : await longTicketlessRuns(t);
-      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless };
+      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, progress };
     },
   };
 }

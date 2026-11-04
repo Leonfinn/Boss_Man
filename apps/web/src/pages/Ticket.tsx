@@ -15,6 +15,7 @@ import { usePoll } from "../hooks";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
+import { ago } from "./Dashboard";
 
 /** The mark for one verdict on a "Done when" checklist row. */
 const VERDICT_MARK: Record<string, string> = { pass: "✓ pass", fail: "✗ fail", none: "not reported" };
@@ -862,6 +863,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dd>{when(t.createdAt)}</dd>
             <dt>Last activity</dt>
             <dd>{when(t.lastActivityAt)}</dd>
+            {t.lastPostAt && (
+              <>
+                <dt>Last post</dt>
+                <dd>{ago(t.lastPostAt)}</dd>
+              </>
+            )}
           </dl>
           </div>
         </aside>
