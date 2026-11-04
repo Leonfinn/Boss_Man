@@ -27,22 +27,25 @@ async function setup() {
 describe("decision rules (R19)", () => {
   it("are checked company first, then for every company, then the defaults, in the owner's order", async () => {
     const c = await setup();
-    const test = (command: string, companyId = c.company.id) => c.req("POST", "/api/policy-rules/test", { companyId, command }).then((r) => r.json());
+    const test = (command: string, companyId = c.company.id, kind = "execute") => c.req("POST", "/api/policy-rules/test", { companyId, command, kind }).then((r) => r.json());
     // By default a docker restart is an ordinary command and runs.
-    expect(await test("docker restart web")).toMatchObject({ outcome: "allow", rule: "Other shell commands" });
+    expect(await test("docker restart web")).toEqual({ outcome: "allow", rule: "Other shell commands", row: 6 });
 
+    // A routing rule only fires for a request that would otherwise ask (BOS-307, DR-001), so these cases use a
+    // move (not a built-in allow) to show company-before-global and the owner's order.
     const global = (await c.req("POST", "/api/policy-rules", { companyId: null, name: "Container restarts go to the CEO", match: { commandPattern: "^docker\\s+restart\\b" }, outcome: "ceo" })).json();
-    expect(await test("docker restart web", c.other.id)).toMatchObject({ outcome: "ceo", rule: "Container restarts go to the CEO" });
+    expect(await test("docker restart web", c.other.id, "move")).toEqual({ outcome: "ceo", rule: "Container restarts go to the CEO", row: 7 });
     const mine = (await c.req("POST", "/api/policy-rules", { companyId: c.company.id, name: "Homelab may restart containers", match: { commandPattern: "^docker\\s+restart\\b" }, outcome: "allow" })).json();
-    expect(await test("docker restart web")).toMatchObject({ outcome: "allow", rule: "Homelab may restart containers" });
-    expect(await test("docker restart web", c.other.id)).toMatchObject({ outcome: "ceo" });
+    expect(await test("docker restart web", c.company.id, "move")).toEqual({ outcome: "allow", rule: "Homelab may restart containers", row: 5 });
+    expect(await test("docker restart web", c.other.id, "move")).toMatchObject({ outcome: "ceo" });
 
-    // Order within a scope decides between overlapping rules.
+    // DR-001 row 4: a company deny beats a company allow whatever the owner's order between them.
     const deny = (await c.req("POST", "/api/policy-rules", { companyId: c.company.id, name: "No restarting the database", match: { commandPattern: "restart\\s+db" }, outcome: "deny" })).json();
-    expect(await test("docker restart db")).toMatchObject({ rule: "Homelab may restart containers" });
-    const order = (await c.req("POST", "/api/policy-rules/order", { companyId: c.company.id, ids: [deny.id, mine.id] })).json();
-    expect(order.map((r: { name: string }) => r.name)).toEqual(["No restarting the database", "Homelab may restart containers"]);
-    expect(await test("docker restart db")).toMatchObject({ outcome: "deny", rule: "No restarting the database" });
+    expect(await test("docker restart db", c.company.id, "move")).toEqual({ outcome: "deny", rule: "No restarting the database", row: 4 });
+    // The owner's order still decides between two rules of the same kind: reorder so the allow is first, and it shows.
+    const order = (await c.req("POST", "/api/policy-rules/order", { companyId: c.company.id, ids: [mine.id, deny.id] })).json();
+    expect(order.map((r: { name: string }) => r.name)).toEqual(["Homelab may restart containers", "No restarting the database"]);
+    expect(await test("docker restart db", c.company.id, "move")).toEqual({ outcome: "deny", rule: "No restarting the database", row: 4 });
 
     const list = (await c.req("GET", `/api/policy-rules?companyId=${c.company.id}`)).json();
     expect(list.company).toHaveLength(2);
@@ -51,7 +54,7 @@ describe("decision rules (R19)", () => {
 
     expect((await c.req("PATCH", `/api/policy-rules/${global.id}`, { outcome: "owner" })).json()).toMatchObject({ outcome: "owner" });
     expect((await c.req("DELETE", `/api/policy-rules/${deny.id}`)).statusCode).toBe(204);
-    expect(await test("docker restart db")).toMatchObject({ outcome: "allow" });
+    expect(await test("docker restart db", c.company.id, "move")).toMatchObject({ outcome: "allow" });
   });
 
   it("refuses a rule that would match nothing or can't be read, and says why", async () => {

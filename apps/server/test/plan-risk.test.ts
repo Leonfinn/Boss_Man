@@ -164,9 +164,10 @@ describe("plan-first tickets (R40)", () => {
     await c.emit({ type: "run.permission_request", runId, requestId: "h1", title: "Approve Plan", kind: "switch_mode", rawInput: {}, optionKinds: ["allow_once"], detail: PLAN });
     const ceoRun = randomUUID();
     await c.db.insert(runs).values({ id: ceoRun, companyId: c.company.id, agentId: c.ceo.id });
-    // A rule that sends restarts to the CEO doesn't let the CEO approve its own.
-    await c.req("POST", "/api/policy-rules", { companyId: c.company.id, name: "Restarts go to the CEO", match: { commandPattern: "restart" }, outcome: "ceo" });
-    await c.emit({ type: "run.permission_request", runId: ceoRun, requestId: "c1", title: "docker restart web", kind: "execute", rawInput: { command: "docker restart web" }, optionKinds: ["allow_once"] });
+    // A rule that sends deletes to the CEO doesn't let the CEO approve its own. A delete is not a built-in
+    // allow, so the rule fires (BOS-307, DR-001); a plain command would be allowed and raise no card.
+    await c.req("POST", "/api/policy-rules", { companyId: c.company.id, name: "Deletes go to the CEO", match: { kinds: ["delete"], commandPattern: "restart" }, outcome: "ceo" });
+    await c.emit({ type: "run.permission_request", runId: ceoRun, requestId: "c1", title: "Remove the restart script", kind: "delete", rawInput: { command: "rm restart.sh" }, optionKinds: ["allow_once"] });
     const rows = await c.db.select().from(decisions);
     expect(rows.map((r) => r.tier)).toEqual(["owner", "owner"]);
   });
