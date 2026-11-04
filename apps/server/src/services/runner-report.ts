@@ -70,6 +70,8 @@ export function judgeUpdate(last: LastUpdate | null, live: Record<string, Runner
       still.push(`${l.slug}: still not connected`);
       continue;
     }
+    // A removal that raced another is not a failure once the runner is here: the rush was the other removal finishing.
+    if (/already in progress/i.test(l.message) && r?.connected) continue;
     still.push(l.slug ? `${l.slug}: ${l.message}` : l.message);
   }
   const faults = Object.entries(live)

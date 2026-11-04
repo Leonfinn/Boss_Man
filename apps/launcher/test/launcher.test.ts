@@ -58,6 +58,7 @@ function fakeDocker() {
     async remove(id) {
       calls.push(`remove ${id}`);
       for (const [name, c] of containers) if (c.id === id) containers.delete(name);
+      return "gone" as const;
     },
   };
   return { docker, containers, calls, image, fail };
@@ -400,6 +401,7 @@ describe("the runner launcher (R55)", () => {
         if (!settle.has(id)) return fake.docker.remove(id);
         await new Promise((r) => setTimeout(r, 1000));
         if (settle.get(id)) for (const [name, c] of fake.containers) if (c.id === id) fake.containers.delete(name);
+        return "racing" as const;
       },
       async inspect(name) {
         const c = fake.containers.get(name);
