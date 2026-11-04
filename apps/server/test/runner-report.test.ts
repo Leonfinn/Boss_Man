@@ -91,14 +91,30 @@ describe("Settings → Runner: the live state first, a past problem as history (
     expect(dev.update).toMatchObject({ state: "resolved", todo: null });
   });
 
-  it("a success reads as OK, and a later update supersedes a problem per company", async () => {
+  it("per company: a past problem whose runner is back reads resolved, and a company it doesn't name is not blamed", async () => {
     const c = (ctx = await setup());
     const id = await c.company("App Co", "app-co");
     await c.runnerHello(id, "202611040849", true);
-    await c.last({ at: "2026-11-04T10:00:00.000Z", startedAt: null, ok: false, title: "Runner update finished with problems", body: "app-co: has not reconnected", swapped: { "app-co": "2026-11-04T09:00:00.000Z" } });
+    await c.last({ at: "2026-11-04T10:00:00.000Z", startedAt: null, ok: false, title: "Runner update finished with problems", body: "app-co: has not reconnected" });
     const report = (await c.req("GET", `/api/companies/${id}/runner`)).json() as { report: { live: { ok: boolean; text: string }; last: { state: string } | null } };
     expect(report.report.live).toMatchObject({ ok: true });
     expect(report.report.live.text).toMatch(/Runner connected since \d\d:\d\d · image 202611040849/);
     expect(report.report.last).toMatchObject({ state: "resolved" });
+
+    // A different company isn't named in that problem's lines, so it has no history of its own.
+    const other = await c.company("Other Co", "other-co");
+    await c.runnerHello(other, "202611040849", true);
+    const others = (await c.req("GET", `/api/companies/${other}/runner`)).json() as { report: { last: unknown } };
+    expect(others.report.last).toBeNull();
+  });
+
+  it("a disconnected runner's live line says to start it again, even with no update history", async () => {
+    const c = (ctx = await setup());
+    const id = await c.company("App Co", "app-co");
+    await c.runnerHello(id, "202611040849", false);
+    const r = (await c.req("GET", `/api/companies/${id}/runner`)).json() as { report: { live: { ok: boolean; text: string } } };
+    expect(r.report.live.ok).toBe(false);
+    expect(r.report.live.text).toMatch(/Not connected/);
+    expect(r.report.live.text).toMatch(/start it again/i);
   });
 });

@@ -101,10 +101,12 @@ export function clock(iso: string): string {
 export function describeLive(r: RunnerLive | null): { ok: boolean; text: string } {
   if (!r || !r.registered) return { ok: false, text: "No runner is registered for this company yet." };
   if (r.connected) return { ok: true, text: `Runner connected${r.at ? ` since ${clock(r.at)}` : ""}${r.imageVersion ? ` · image ${r.imageVersion}` : ""}` };
-  return { ok: false, text: r.at ? `Not connected since ${clock(r.at)}` : "Not connected" };
+  // A runner that is down always says what to do, whether or not an update problem is also recorded.
+  const when = r.at ? ` since ${clock(r.at)}` : "";
+  return { ok: false, text: `Not connected${when} — start it again from Settings → Runner.` };
 }
 
-type MaintenanceLike = { status: () => Promise<{ last?: LastUpdate | null; swapped?: Record<string, string> }> };
+type MaintenanceLike = { status: () => Promise<{ last?: LastUpdate | null }> };
 
 export type RunnerReportDeps = {
   /** Whether this company's runner has an open socket (runnersService.isConnected). */
@@ -161,12 +163,10 @@ export function runnerReportService(db: Db, maintenance: MaintenanceLike, deps: 
       const [runner] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, companyId));
       const slug = (await slugs()).get(companyId);
       const live = await liveOne(companyId, runner ?? null);
-      const { last, swapped } = await maintenance.status();
-      const touched = slug ? swapped?.[slug] : undefined;
-      // A later update supersedes one a runner was swapped by; a company not named in a problem's lines gets no blame for it.
-      const superseded = touched && last && last.at < touched;
+      const { last } = await maintenance.status();
+      // A company a problem's lines don't name gets no blame for it; a named one is judged by what its runner is doing now.
       const named = !!last && !last.ok && !reportNames(last, slug) && !!slug;
-      return { live: describeLive(live), last: last && !superseded && !named ? judgeUpdate(last, slug ? { [slug]: live } : {}) : null };
+      return { live: describeLive(live), last: last && !named ? judgeUpdate(last, slug ? { [slug]: live } : {}) : null };
     },
   };
 }

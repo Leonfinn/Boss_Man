@@ -139,7 +139,8 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     if (!existsSync(path.join(netguardDir(cfg, slug), "allow"))) writeAllow(slug, []);
     const old = await ours(slug);
     if (old) await removeSettled(docker, old.Id);
-    const id = await docker.create(containerName(slug), containerSpec(cfg, slug));    await docker.start(id);
+    const id = await docker.create(containerName(slug), containerSpec(cfg, slug));
+    await docker.start(id);
     try {
       await guard(slug, id);
     } catch (err) {
