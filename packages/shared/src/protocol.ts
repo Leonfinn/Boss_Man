@@ -253,6 +253,8 @@ export type ServerMessage = z.infer<typeof ServerMessage>;
 export type WorkspaceDiff = {
   baseCommit: string;
   head: string;
+  /** The tree of head: two commits with one tree are the same code (check results are reused by it). */
+  tree?: string;
   /** Commits on the ticket's branch since the base, newest first. */
   commits: Array<{ sha: string; subject: string }>;
   /** Files changed, with line counts, including uncommitted and untracked work. */

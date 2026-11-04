@@ -198,10 +198,10 @@ export function checkQueue(db: Db) {
   }
 
   /** The queue as server_status shows it. */
-  async function status(now = new Date()) {
-    const rows = await db.select().from(checkJobs).orderBy(asc(checkJobs.queuedAt));
+  async function status(companyId: string, now = new Date()) {
+    const rows = await db.select().from(checkJobs).where(eq(checkJobs.companyId, companyId)).orderBy(asc(checkJobs.queuedAt));
     const running = rows.filter((j) => j.state === "running").map((j) => ({ id: j.id, ticketId: j.ticketId, kind: j.kind, scope: j.scope, ageMinutes: j.startedAt ? Math.round((now.getTime() - j.startedAt.getTime()) / 60_000) : 0 }));
-    const order = await servable();
+    const order = (await servable()).filter((j) => j.companyId === companyId);
     const queued = order.map((j, i) => ({ id: j.id, ticketId: j.ticketId, kind: j.kind, scope: j.scope, place: i + 1, fixesMain: j.fixesMain }));
     const held = rows.filter((j) => j.state === "queued" && !order.some((o) => o.id === j.id)).map((j) => ({ id: j.id, ticketId: j.ticketId, kind: j.kind, heldBy: "main is red" }));
     const recent = rows
@@ -209,7 +209,7 @@ export function checkQueue(db: Db) {
       .sort((a, b) => (b.endedAt?.getTime() ?? 0) - (a.endedAt?.getTime() ?? 0))
       .slice(0, 5)
       .map((j) => ({ id: j.id, ticketId: j.ticketId, kind: j.kind, state: j.state, reason: j.reason }));
-    const mains = await db.select({ id: projects.id, name: projects.name, state: projects.mainState, since: projects.mainStateSince, commit: projects.mainStateCommit }).from(projects);
+    const mains = await db.select({ id: projects.id, name: projects.name, state: projects.mainState, since: projects.mainStateSince, commit: projects.mainStateCommit }).from(projects).where(eq(projects.companyId, companyId));
     return { mode: await mode(), slots: await slots(), running, queued, held, recent, main: mains.map((m) => ({ projectId: m.id, project: m.name, state: m.state, since: m.since, commit: m.commit })) };
   }
 

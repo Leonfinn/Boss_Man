@@ -9,6 +9,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
+import { checkQueue } from "./check-queue.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 
 export type ServerStatusDeps = {
@@ -135,6 +136,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           checkedAt: available?.checkedAt ?? null,
         },
         maintenance: await deps.hold(),
+        // The check queue (DR-003): what runs, who waits and at which place, the last results, and whether main is red.
+        checks: await checkQueue(db).status(companyId, at),
         migration: await latestMigration(db),
         runner: runner
           ? {

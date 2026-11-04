@@ -392,7 +392,8 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", baseCommit], { cwd: dir, env });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      return { baseCommit, head, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
+      const tree = await this.git(["rev-parse", "HEAD^{tree}"], { cwd: dir });
+      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
     } finally {
       rmSync(index, { force: true });
     }

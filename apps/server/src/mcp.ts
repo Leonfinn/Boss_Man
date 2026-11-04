@@ -2,6 +2,7 @@
 // per-run bearer token that pins it to one company and agent, so an agent can only see and
 // change its own company's work. The tool set is kept small (R36); descriptions say when
 // to use each tool so Claude Code's tool search finds them.
+import { checkRequestService, CheckRequestError } from "./services/check-request.js";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
@@ -131,6 +132,8 @@ type Services = {
   alerts: ReturnType<typeof alertLadder>;
   retro: ReturnType<typeof retroService>;
   serverStatus: ReturnType<typeof serverStatusService>;
+  /** request_check (DR-003, BOS-316); absent where the queue is not wired. */
+  checkRequests?: ReturnType<typeof checkRequestService>;
 };
 
 /**
@@ -176,7 +179,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
  * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, checkRequests }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -406,6 +409,27 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         return text(`You will be woken on ticket ${ticketId} at ${u.monitorAt!.toISOString()} to re-check (check ${u.monitorAttempts + 1} of ${u.monitorMax}).`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "request_check",
+    {
+      description:
+        "Ask for a check of your ticket to be run for you by the runner, outside your session, so it survives the end of your run and nobody can stop it. ticketId; scope quick (default: the 2-5 minute check of what your branch changed) or full (only after the merge gate has bounced the ticket twice, or for a change to check-all.sh or the test setup). Commit first: the check runs on your latest commit. It queues behind merge checks. You are woken with the result: end your turn or do other work, and do not poll or run your own loop. Only the ticket's assignee can use it while the ticket is in progress or in review. The merge gate runs the one full check itself.",
+      inputSchema: { ticketId: z.string().uuid(), scope: z.enum(["quick", "full"]).optional() },
+    },
+    async ({ ticketId, scope: checkScope }) => {
+      if (!scope.agentId) return fail("Only an agent can ask for a check.");
+      if (!checkRequests) return fail("The check queue is not available on this server.");
+      try {
+        const msg = await checkRequests.request({ companyId: scope.companyId, agentId: scope.agentId, ticketId, scope: checkScope });
+        await noteRunTicket(ticketId);
+        return text(msg);
+      } catch (err) {
+        if (err instanceof CheckRequestError) return fail(err.message);
         throw err;
       }
     },

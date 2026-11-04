@@ -89,7 +89,7 @@ describe("check queue", () => {
     const old = (await s.req({ ticketId, tree: "old" })).job;
     const fresh = (await s.req({ ticketId, tree: "new" })).job;
     expect(fresh.id).not.toBe(old.id);
-    const status = await s.q.status();
+    const status = await s.q.status(s.companyId);
     expect(status.queued.map((j) => j.id)).toEqual([fresh.id]);
     expect(status.recent[0]).toMatchObject({ id: old.id, state: "cancelled" });
     expect(status.recent[0]!.reason).toMatch(/newer commit/);
@@ -107,7 +107,7 @@ describe("check queue", () => {
     expect((await s.q.claimNext(null))[0]!.id).toBe(pre.id);
     await s.q.complete(pre.id, { commit: pre.commit, exitCode: 0, logTail: "" });
     expect(await s.q.claimNext(null)).toEqual([]);
-    const held = await s.q.status();
+    const held = await s.q.status(s.companyId);
     expect(held.held.map((j) => j.id)).toEqual([other.id]);
     expect(held.main.find((m) => m.projectId === s.projectId)).toMatchObject({ state: "red", commit: "deadbeef" });
     expect((await s.q.setMainState(s.projectId, "green", "abc")).changed).toBe(true);
