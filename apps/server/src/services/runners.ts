@@ -14,6 +14,17 @@ const RESTART_PULL_MAX = 20;
 const RESTART_PULL_COOLDOWN_MS = 10 * 60_000;
 
 type Runner = typeof runners.$inferSelect;
+/**
+ * The runner a request went to has gone away (it disconnected or restarted), so no reply will ever come (DR-014).
+ * Callers that run long work on a runner treat this as the host being cut off, not the work failing.
+ */
+export class RunnerGone extends Error {
+  constructor(message = "The runner restarted while this was running.") {
+    super(message);
+    this.name = "RunnerGone";
+  }
+}
+
 export type CommandSender = (command: RunnerCommand) => boolean;
 
 export type PermissionHook = (runner: Runner, event: Extract<RunnerEvent, { type: "run.permission_request" }>) => Promise<unknown>;
@@ -30,7 +41,16 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   const resumeListeners: Array<(runner: Runner, pending: Array<{ runId: string; requestId: string }>) => unknown> = [];
   // shortcut: pending requests and live sockets belong to this process; lost on restart, harmless because runners reconnect and callers time out.
   /** Requests waiting for a runner's reply, by request id. */
-  const pending = new Map<string, { resolve: (data: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
+  const pending = new Map<string, { resolve: (data: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout; runnerId: string }>();
+  /** Fails every request still waiting on this runner at once, so nothing waits for a reply that can't come (DR-014). */
+  const failPending = (runnerId: string, reason: string) => {
+    for (const [id, p] of [...pending]) {
+      if (p.runnerId !== runnerId) continue;
+      clearTimeout(p.timer);
+      pending.delete(id);
+      p.reject(new RunnerGone(reason));
+    }
+  };
   // shortcut: live sockets belong to this process; lost on restart, harmless because runners reconnect.
   /** Live connections, so commands can reach a runner. */
   const connected = new Map<string, CommandSender>();
@@ -226,6 +246,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
      */
     async bootSeen(runner: Runner, bootId: string | undefined): Promise<number> {
       if (!bootId || bootId === runner.bootId) return 0;
+      failPending(runner.id, "The runner restarted while this was running.");
       const at = new Date();
       await db.update(runners).set({ bootId }).where(eq(runners.id, runner.id));
       if (runner.bootPulledAt && at.getTime() - runner.bootPulledAt.getTime() < RESTART_PULL_COOLDOWN_MS) return 0;
@@ -248,7 +269,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       features.set(runnerId, feats);
       for (const l of connectListeners) void Promise.resolve(l(runnerId)).catch(() => {});
       return () => {
-        if (connected.get(runnerId) === send) connected.delete(runnerId);
+        if (connected.get(runnerId) === send) {
+          connected.delete(runnerId);
+          failPending(runnerId, "The runner disconnected while this was running.");
+        }
       };
     },
 
@@ -277,11 +301,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
           pending.delete(requestId);
           reject(new Error("The runner didn't answer in time."));
         }, timeoutMs);
-        pending.set(requestId, { resolve: resolve as (d: unknown) => void, reject, timer });
+        pending.set(requestId, { resolve: resolve as (d: unknown) => void, reject, timer, runnerId });
         if (!connected.get(runnerId)?.(build(requestId))) {
           clearTimeout(timer);
           pending.delete(requestId);
-          reject(new Error("The company's runner is offline."));
+          reject(new RunnerGone("The company's runner is offline."));
         }
       });
     },
