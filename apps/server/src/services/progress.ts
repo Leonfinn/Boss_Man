@@ -120,7 +120,7 @@ export async function progressSweep(db: Db, t: Date, deps: ProgressDeps) {
       const [from] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, r.reviewerAgentId));
       const rule = ruleFor(await effectivePolicy(db, ticket), ticket.risk);
       const ref = r.kind === "code" ? rule.reviewer : rule.kinds?.[r.kind as Exclude<ReviewSlot, "code">];
-      const [to] = ref ? await otherReviewers(db, ticket.companyId, r.kind as ReviewSlot, ref, ticket.assigneeAgentId, [r.reviewerAgentId]) : [];
+      const [to] = ref ? await otherReviewers(db, ticket, r.kind as ReviewSlot, ref, [r.reviewerAgentId]) : [];
       const told = await deps.alert({
         companyId: ticket.companyId,
         kind: "question",
