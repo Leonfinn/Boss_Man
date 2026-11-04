@@ -242,7 +242,8 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
   it("a stuck review goes to the CEO first, and the owner only sees it if the CEO doesn't settle it", async () => {
     await ctx.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, ctx.ticket.id));
     const review = async (round = 1) => {
-      const [r] = await ctx.db.insert(reviewRequests).values({ ticketId: ctx.ticket.id, kind: "code", reviewerAgentId: ctx.dev.id, round, createdAt: new Date(ctx.now().getTime() - 2 * 3_600_000) }).returning();
+      // The round opened four hours ago, then went three wakes without a verdict (BOS-433 counts only this round's).
+      const [r] = await ctx.db.insert(reviewRequests).values({ ticketId: ctx.ticket.id, kind: "code", reviewerAgentId: ctx.dev.id, round, createdAt: new Date(ctx.now().getTime() - 4 * 3_600_000) }).returning();
       for (const hours of [3, 2, 1]) {
         await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: ctx.ticket.id, reason: "review requested", status: "launched", note: `- ${ctx.ticket.id} "Restart the API": still waiting for your code review`, createdAt: new Date(ctx.now().getTime() - hours * 3_600_000) });
       }
@@ -259,7 +260,7 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(await teamIds()).toContain(a!.id);
     expect(await ownerNotified(a!.id)).toEqual([]);
     // The CEO settles it: the owner never hears about it. A system card needs the CEO's reason (BOS-149).
-    expect(isError(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Got it", note: "I looked at the review and the reviewer is working through it." } }))).toBe(false);
+    expect(isError(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Leave it another hour", note: "I looked at the review and the reviewer is working through it." } }))).toBe(false);
     expect(await ownerNotified(a!.id)).toEqual([]);
 
     // A second stuck review the CEO leaves alone stays with the CEO (DR-017 A: a review is the CEO's work),
