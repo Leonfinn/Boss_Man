@@ -27,8 +27,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   attempts="${BOSSMAN_CHECK_ATTEMPTS:-3}"
   budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-1500}"  # Boss Man kills the merge check at 30 min; stay well inside it
   pause="${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
-  start=$SECONDS
-  log="$(mktemp)"; began_file="$(mktemp)"
+  log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
   trap 'rm -f "$log" "$began_file"' EXIT
 
   # Only a clean checkout has a tree hash that says what was checked.
@@ -44,6 +43,21 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   else
     key=""
   fi
+  # A signal ends the run with a visible trace: stop the child (which frees its queue place), write the line to the
+  # log and the result store, and exit non-zero. Without this a killed check just vanished and the agent waited for nothing.
+  child=""
+  on_signal() {
+    local name=$1
+    trap '' TERM INT HUP
+    if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi
+    sleep 0.2  # let tee drain before the line is added
+    echo "check-all: killed by signal $name" | tee -a "$log"
+    record killed "$((128 + $2))"
+    exit "$((128 + $2))"
+  }
+  trap 'on_signal TERM 15' TERM
+  trap 'on_signal INT 2' INT
+  trap 'on_signal HUP 1' HUP
   # record <status> <exit code>: keep the result and the full log; a pass is what later runs reuse.
   record() {
     [ -n "$key" ] || return 0
@@ -58,15 +72,25 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   }
   [ -z "$key" ] || echo "check-all: the result and log of this run will be kept in $STORE/$key.{json,log}"
   for ((n = 1; n <= attempts; n++)); do
+    # Test hook: a simulated queue wait, which the fixed budget ignores (check-all.test.sh retry-budget case).
+    [ "$n" -gt 1 ] || [ -z "${CHECK_ALL_QUEUE_TEST_SLEEP:-}" ] || sleep "$CHECK_ALL_QUEUE_TEST_SLEEP"
     rc=0; : >"$began_file"; attempt_start=$SECONDS
-    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
+    # The child runs in the background and we wait for it, so a signal reaches the trap at once instead of after the child.
+    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
+    child=$!
+    wait "$child" || rc=$?
+    wait 2>/dev/null || true  # let tee finish writing the log
     # Exit 75: nothing ran (gave up waiting for a slot), so there is no result to keep.
     if [ "$rc" -eq 0 ]; then record pass 0; exit 0; fi
     # Each retry re-runs everything, so only retry if another run of this length still fits the budget.
-    took=$((SECONDS - attempt_start)); began=$(cat "$began_file"); [ -z "$began" ] || took=$(($(date +%s) - began))
-    if [ "$n" -lt "$attempts" ] && [ $((SECONDS - start + took + pause)) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
+    # The budget counts from the slot-taken time (the first non-empty $began_file), not from before the queue wait:
+    # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
+    took=$((SECONDS - attempt_start)); began=$(cat "$began_file")
+    if [ -n "$began" ]; then [ -n "$slot_at" ] || slot_at=$began; took=$(($(date +%s) - began)); fi
+    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
-      sleep "$pause"
+      # Run the pause in the background and wait for it, so a signal reaches on_signal at once, not up to ${pause}s later.
+      sleep "$pause" & pause_pid=$!; wait "$pause_pid" 2>/dev/null || true
     else
       [ "$rc" -eq 75 ] || record fail "$rc"
       exit "$rc"
@@ -82,8 +106,10 @@ node --test scripts/*.test.mjs
 node scripts/lint-migrations.mjs
 # The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS checks (1 until a side-by-side pair has passed, then 2) run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
-# A waiter prints its place and an estimated wait and does not give up (hand-run checks) or gives up
-# after CHECK_ALL_LOCK_WAIT seconds (default 3 h, merge check only: exit 75, which Boss Man retries).
+# A waiter prints its place and an estimated wait. Hand-run checks never give up. A merge check keeps its place for as
+# long as the queue moves, and gives up (exit 75) only when it stands still: neither its place nor who holds a slot has
+# changed for CHECK_ALL_STUCK_AFTER seconds (default 1 h, longer than a check runs); it then says so ("made no progress").
+# CHECK_ALL_LOCK_WAIT, when set, is a hard cap on the whole wait for a merge check (exit 75, which Boss Man retries).
 # The merge check queues like the rest but goes ahead of waiting hand-run checks; one already running is never interrupted.
 # fd 9 is inherited by pnpm/vitest: if a timed-out check leaves children behind they keep the slot until
 # they exit (tracked in the runner-cleanup ticket). Skipped where flock is missing (macOS).
@@ -97,19 +123,29 @@ if command -v flock >/dev/null; then
   elif [ "${CHECK_ALL_SLOTS:-1}" -gt 1 ]; then echo "check-all: CHECK_ALL_SLOTS=$CHECK_ALL_SLOTS ignored, no passed side-by-side pair recorded in $PROOF; running one at a time"
   fi
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order
-  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-10800}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
+  WAIT=${CHECK_ALL_LOCK_WAIT:-0}; STUCK=0; prio=1
+  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then prio=0; STUCK=${CHECK_ALL_STUCK_AFTER:-3600}; fi
+  AGEREF="$LOCK.age.$$"  # an empty file dated 2 h ago, to tell stale queue entries by their modification time
   # An unreachable lock folder (for example outside a fenced session's grant) fails at once with a clear message,
   # never a silent wait: a slot file that cannot be opened would otherwise read as "busy" forever.
   lock_unusable() { echo "check-all: cannot use the check lock folder: $1 (set CHECK_ALL_LOCK to a writable path)" >&2; exit 2; }
   mkdir -p "$QDIR" 2>/dev/null || lock_unusable "cannot create $QDIR"
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
   { : >"$qfile"; } 2>/dev/null || lock_unusable "cannot write $qfile"
-  trap 'rm -f "$qfile"' EXIT
+  trap 'rm -f "$qfile" "$AGEREF"' EXIT
+  # Killed while waiting: leave the queue and free the place for the next one at once. The parent's TERM/INT/HUP
+  # trap (on_signal) then writes the "killed by signal" line and stops this child. Sleeping in the background and
+  # waiting on it makes a signal act immediately instead of after the sleep ends (up to CHECK_ALL_QUEUE_REPORT).
+  # A signal here runs the EXIT trap above, which removes the queue entry, then exits 143 so the parent records it.
+  wait_signal() { sleep "$1" & sleep_pid=$!; wait "$sleep_pid" 2>/dev/null || true; }
+  trap '[ -z "${BOSSMAN_CHECK_CHILD:-}" ] || exit 143' TERM INT HUP
   take_slot() {
     local k
     for ((k = 1; k <= SLOTS; k++)); do
       { exec 9>"$LOCK.slot.$k"; } 2>/dev/null || lock_unusable "cannot open $LOCK.slot.$k"
-      if flock -n 9; then return 0; fi
+      # Note who holds the slot in a file of its own (every waiter's open truncates the slot file): a waiter
+      # sees the queue move when this line changes. Best effort; a holder from an older script leaves none.
+      if flock -n 9; then echo "$$ $(date +%s)" >"$LOCK.holder.$k" 2>/dev/null || true; return 0; fi
     done
     exec 9>&-
     return 1
@@ -119,7 +155,10 @@ if command -v flock >/dev/null; then
   # took 13.6 s a pass with them), and only the first CHECK_ALL_QUEUE_SCAN entries in serving order count.
   # A waiter further back sees a place past the scan and keeps waiting.
   queue_place() {
-    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now; now=$(date +%s)
+    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now stale=0; now=$(date +%s)
+    # A live waiter touches its entry every report, so age is read from the file's modification time (a bash test,
+    # no subprocess per entry), not from the name: a check that has waited more than 2 h in a long queue keeps its place.
+    touch -d "@$((now - 7200))" "$AGEREF" 2>/dev/null && stale=1
     for f in "$QDIR"/*; do
       [ -e "$f" ] || continue
       # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is
@@ -129,7 +168,7 @@ if command -v flock >/dev/null; then
       base=${f##*/}
       if ! [[ $base =~ ^[01]-([0-9]{1,19})-([0-9]{1,9})$ ]]; then rm -f "$f"; continue; fi
       qts=$((10#${BASH_REMATCH[1]} / 1000000000)); qpid=$((10#${BASH_REMATCH[2]}))
-      if [ ! -d "/proc/$qpid" ] || [ $((now - qts)) -gt 7200 ] || [ $((qts - now)) -gt 60 ]; then rm -f "$f"; continue; fi
+      if [ ! -d "/proc/$qpid" ] || [ $((qts - now)) -gt 60 ] || { [ "$stale" = 1 ] && [ "$f" -ot "$AGEREF" ]; }; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
       if [ "$total" -ge "$scan" ]; then
         [ "$mine" -gt 0 ] || mine=$((scan + 1))
@@ -150,24 +189,39 @@ if command -v flock >/dev/null; then
     fi
     if [ "$n" -gt 0 ]; then echo $((sum / n)); else echo 600; fi
   }
-  waited_from=$SECONDS; last_said=-1000; got=no; typical=""
+  waited_from=$SECONDS; last_said=-1000; got=no; typical=""; stuck=no; seen=""; moved_at=$SECONDS
   while :; do
     read -r place total < <(queue_place)
     if [ "$place" -le 1 ] && take_slot; then got=yes; break; fi
     if [ "$WAIT" -gt 0 ] && [ $((SECONDS - waited_from)) -ge "$WAIT" ]; then break; fi
+    # The queue moves when my place changes or a slot gets a new holder; one that stands still too long is stuck.
+    if [ "$STUCK" -gt 0 ]; then
+      holders=""
+      for h in "$LOCK".holder.*; do
+        [ -f "$h" ] || continue
+        line=""; read -r line <"$h" 2>/dev/null || true
+        holders="$holders|$line"
+      done
+      if [ "$place|$holders" != "$seen" ]; then seen="$place|$holders"; moved_at=$SECONDS; fi
+      if [ $((SECONDS - moved_at)) -ge "$STUCK" ]; then stuck=yes; break; fi
+    fi
     if [ $((SECONDS - last_said)) -ge "${CHECK_ALL_QUEUE_REPORT:-30}" ]; then
+      { : >"$qfile"; } 2>/dev/null || true  # keep my queue entry fresh (and put it back if someone removed it)
       [ -n "$typical" ] || typical=$(typical_run)
       rounds=$(((place + SLOTS - 1) / SLOTS))
       echo "check-all: waiting for a free check slot (place $place of $total, $SLOTS run at once); about $(((rounds * typical + 59) / 60)) min to go"
       last_said=$SECONDS
     fi
-    sleep 1
+    wait_signal 1
   done
   if [ "$got" = no ]; then
     # Exit 75 (EX_TEMPFAIL) and this exact wording tell Boss Man nothing ran: it retries the merge instead of sending the ticket back.
+    if [ "$stuck" = yes ]; then
+      echo "check-all: gave up waiting for the heavy-phase lock $LOCK: the queue made no progress for $(((STUCK + 59) / 60)) min (place $place of $total; the check holding the slot has not changed)" >&2; exit 75
+    fi
     echo "check-all: gave up waiting for the heavy-phase lock $LOCK" >&2; exit 75
   fi
-  rm -f "$qfile"; trap - EXIT
+  rm -f "$qfile" "$AGEREF"; trap - EXIT
   echo "check-all: slot taken, running the checks"
 else
   echo "check-all: flock not found, running without the heavy-phase lock"

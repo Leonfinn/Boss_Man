@@ -7,7 +7,7 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "dr
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
@@ -30,6 +30,7 @@ import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -319,6 +320,8 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   decisionsSvc.setMaintenanceHook(maintenance);
+  const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
+  decisionsSvc.setPermissionLog(permLog);
   const serverStatus = serverStatusService(db, {
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
@@ -330,6 +333,7 @@ export async function buildApp(opts: AppOptions) {
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
     },
     errors: errorBuffer,
+    permissions: (companyId: string) => permLog.summary(companyId),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
     commit: process.env.BOSSMAN_COMMIT || "dev",
@@ -406,6 +410,8 @@ export async function buildApp(opts: AppOptions) {
       void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA relay failed"));
       void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "ticket reply failed"));
     }
+    // A tool call the agent says was refused (BOS-306).
+    if (event.type === "run.update" && (event.update as { refused?: unknown } | null)?.refused === true) void decisionsSvc.onRefusedCall(runner, event.runId, ((event.update as { title?: unknown }).title as string | null) ?? null).catch((err) => app.log.error({ err, companyId: runner.companyId }, "refused call log failed"));
     if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error, !!event.interrupted).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chat end failed"));
     if (event.type === "run.ended") void pa.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA fail-open failed"));
     // A subscription window set to run out before it resets: tell the owner once (R78).
@@ -738,7 +744,7 @@ export async function buildApp(opts: AppOptions) {
       const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, companyId));
       if (!c) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
       const names = new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(eq(agents.companyId, companyId))).map((a) => [a.id, a.name]));
-      const who = (ref: string) => (ref === "ceo" ? "the CEO" : ref === SENIOR_DEV ? "the Senior Developer (the CEO until one is hired)" : (names.get(ref) ?? "the CEO"));
+      const who = (ref: string | string[]): string => (Array.isArray(ref) ? ref.map((r) => names.get(r) ?? "the CEO").filter((n, i, all) => all.indexOf(n) === i).join(" or ") : ref === "ceo" ? "the CEO" : ref === SENIOR_DEV ? "the Senior Developer (the CEO until one is hired)" : (names.get(ref) ?? "the CEO"));
       return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, c.policy[tier].ownerSignoff, who(c.policy[tier].reviewer)) }));
     });
 
@@ -1793,13 +1799,16 @@ export async function buildApp(opts: AppOptions) {
       if (blockedUntilReason && !blockedUntil) throw new WorkError(422, "Give the date and time you are waiting for along with the reason.");
       if (blockedUntil && new Date(blockedUntil).getTime() <= Date.now()) throw new WorkError(422, "The blocked-until time must be in the future.");
       if (blockedUntil && new Date(blockedUntil).getTime() > Date.now() + BLOCKED_UNTIL_MAX_MS) throw new WorkError(422, `The blocked-until time can be at most ${BLOCKED_UNTIL_MAX_DAYS} days ahead.`);
+      // Moving a ticket to the state it is already in must not re-run what entering that state does (DR-010).
+      const [before] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
+      const sameState = before?.state === state;
       const moved = await work.updateTicket(id, { state, ...(state === "blocked" ? { blockedUntil: blockedUntil ? new Date(blockedUntil) : null, blockedUntilReason: blockedUntil ? blockedUntilReason || null : null } : {}) });
       const label = ({ backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" } as Record<string, string>)[state] ?? state;
       await record(db, { companyId: moved.companyId, ticketId: id, kind: "state", summary: `Owner moved it to ${label}`, at: new Date() });
       // Nobody should start work on a ticket the owner has parked or closed.
       if (state === "done" || state === "backlog" || state === "blocked")
         await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
-      if (state === "review") await scheduler.onTicketReview(id, null);
+      if (state === "review" && !sameState) await scheduler.onTicketReview(id, null);
       if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
       return moved;
     });
@@ -2096,20 +2105,17 @@ export async function buildApp(opts: AppOptions) {
     owner.patch("/api/agents/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z
-        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean(), reviewKind: z.enum(REVIEW_KINDS).nullable() })
+        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean() })
         .partial()
         .parse(req.body);
-      const { reviewKind, ...patch } = b;
+      // Who reviews what is set only in Settings > Reviews now (BOS-198); say so rather than drop it quietly.
+      if (req.body && typeof req.body === "object" && "reviewKind" in req.body) return reply.code(400).send({ error: "moved", message: "Reviewers are chosen in Settings > Reviews." });
+      const patch = b;
       const [before] = await db.select().from(agents).where(eq(agents.id, id));
       if (!before) return reply.code(404).send({ error: "not_found" });
       // An agent with a standing job starts with no model; it needs one before it can run (R73).
       if (b.paused === false && before.duty && !(b.model !== undefined ? b.model : before.model)) {
         return reply.code(409).send({ error: "needs_model", message: `Choose a model for ${before.name} before starting it.` });
-      }
-      // One reviewer per kind: marking this agent unmarks whoever had it.
-      if (reviewKind !== undefined) {
-        if (reviewKind) await db.update(agents).set({ reviewKind: null }).where(and(eq(agents.companyId, before.companyId), eq(agents.reviewKind, reviewKind)));
-        await db.update(agents).set({ reviewKind }).where(eq(agents.id, id));
       }
       return agentsSvc.update(id, patch).then((a) => {
         // Unpausing lets its waiting work start now rather than at the next tick.

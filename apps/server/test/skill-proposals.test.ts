@@ -1,3 +1,4 @@
+import { nameSecurityReviewer } from "./helpers.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -50,7 +51,7 @@ async function setup() {
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const reviewer = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Security Reviewer" })).json() as { id: string };
-  await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
+  await nameSecurityReviewer(db, reviewer.id);
   await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" });
   const svc = built.skillProposals;
   const mcp = async (agentId: string) => {
@@ -197,9 +198,30 @@ describe("review", () => {
 
   it("refuses a script draft when there is no Security Reviewer, and stores nothing", async () => {
     const c = (ctx = await setup());
-    await c.db.update(agents).set({ reviewKind: null }).where(eq(agents.id, c.reviewer.id));
+    await nameSecurityReviewer(c.db, c.reviewer.id, false);
     await expect(withScript(c)).rejects.toThrow(/no Security Reviewer/);
     expect(await c.svc.list(c.company.id)).toHaveLength(0);
+  });
+
+  // BOS-198: the Security Reviewer is whoever Settings > Reviews names for security, a list included.
+  it("gives the review to an available agent from the Security cell, and only listed agents may judge", async () => {
+    const c = (ctx = await setup());
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Second Reviewer" })).json() as { id: string };
+    const [co] = await c.db.select().from(companies).where(eq(companies.id, c.company.id));
+    await c.db.update(companies).set({ reviewPolicy: { ...co!.reviewPolicy, high: { ...co!.reviewPolicy.high, kinds: { security: [c.reviewer.id, second.id] } } } }).where(eq(companies.id, c.company.id));
+    await c.db.update(agents).set({ paused: true }).where(eq(agents.id, c.reviewer.id));
+    const p = await withScript(c);
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
+    expect(t!.assigneeAgentId).toBe(second.id);
+    const verdict = { bundleHash: p.bundleHash, verdict: "recommend" as const, summary: "Fine.", findings: [] };
+    await expect(c.svc.recordVerdict(c.company.id, c.worker.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
+    await expect(c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, verdict)).rejects.toThrow(/given to another reviewer/);
+    // The CEO proposes skills, so naming it in the list never makes it a Security Reviewer.
+    await c.db.update(companies).set({ reviewPolicy: { ...co!.reviewPolicy, critical: { ...co!.reviewPolicy.critical, kinds: { security: [c.ceo.id] } } } }).where(eq(companies.id, c.company.id));
+    await expect(c.svc.recordVerdict(c.company.id, c.ceo.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
+    // Taken off the list mid-review: no longer a Security Reviewer, so no verdict.
+    await c.db.update(companies).set({ reviewPolicy: co!.reviewPolicy }).where(eq(companies.id, c.company.id));
+    await expect(c.svc.recordVerdict(c.company.id, second.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
   });
 
   // BOS-220: the owner chose the Security Reviewer in Settings > Reviews, and the agent-page mark was gone.

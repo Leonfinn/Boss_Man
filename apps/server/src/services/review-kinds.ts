@@ -2,7 +2,7 @@
 // any security, infra or adversarial ones) is requested at once. The CEO may order them; each
 // verdict is kept; the ticket passes only when all approve or the CEO has overruled the rest.
 import { and, desc, eq, inArray, isNull, like, max, ne, or } from "drizzle-orm";
-import { KIND_FOCUS, REVIEW_KINDS, ruleFor, ticketRef, type ReviewSlot } from "@boss-man/shared";
+import { KIND_FOCUS, REVIEW_KINDS, ruleFor, slotRef, ticketRef, type ReviewerRefValue, type ReviewSlot } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -14,6 +14,11 @@ type Ticket = typeof tickets.$inferSelect;
 export type Notify = (agentId: string, input: { reason: string; note: string; priority: number; causedByRunId?: string | null }) => Promise<unknown>;
 export const REVIEW_REASON = "review requested";
 const SETTLED = ["approved", "overruled"];
+
+/** How the wake note names the ticket: "- <ticketId> ". The progress sweep matches on it to find a reviewer's runs (BOS-314); keep both in step by building and matching through here. */
+export const reviewAskPrefix = (ticketId: string) => `- ${ticketId} `;
+/** The SQL pattern matching `reviewAskPrefix` in a wake note. */
+export const reviewAskPattern = (ticketId: string) => `${reviewAskPrefix(ticketId)}%`;
 
 /** The rows of the ticket's newest round. */
 export async function latestRows(db: Db, ticketId: string): Promise<ReviewRow[]> {
@@ -47,7 +52,7 @@ export async function wakeReviewers(db: Db, t: Ticket, rows: ReviewRow[], notify
   for (const [agentId, mine] of Object.entries(byAgent)) {
     const asks = mine.map((r) => `  Your ${r.kind} review, round ${r.round}: look at ${KIND_FOCUS[r.kind as ReviewSlot]}.`).join("\n");
     const how = `  Read the changes with the review tool (action diff), then give your verdict with action submit${mine.length > 1 ? " and the kind of each review" : ""}.`;
-    await notify(agentId, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}\n${asks}\n${how}${checklist ? `\nAcceptance criteria:\n${checklist}` : ""}` });
+    await notify(agentId, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `${reviewAskPrefix(t.id)}"${t.title}": ${t.stateNote ?? "(no note)"}\n${asks}\n${how}${checklist ? `\nAcceptance criteria:\n${checklist}` : ""}` });
   }
 }
 
@@ -59,11 +64,11 @@ export async function requestReviews(db: Db, t: Ticket): Promise<ReviewRow[]> {
   const open = await latestRows(db, t.id);
   if (open.some((r) => r.status === "pending")) await skipPending(db, open);
   const rule = ruleFor(await effectivePolicy(db, t), t.risk);
-  const wanted: Array<[ReviewSlot, string]> = [["code", rule.reviewer], ...REVIEW_KINDS.flatMap((k): Array<[ReviewSlot, string]> => (rule.kinds?.[k] ? [[k, rule.kinds[k]!]] : []))];
+  const wanted: Array<[ReviewSlot, ReviewerRefValue]> = [["code", rule.reviewer], ...REVIEW_KINDS.flatMap((k): Array<[ReviewSlot, ReviewerRefValue]> => (rule.kinds?.[k] ? [[k, rule.kinds[k]!]] : []))];
   const round = (open[0]?.round ?? 0) + 1;
   const rows: ReviewRow[] = [];
   for (const [kind, ref] of wanted) {
-    const { agent, note } = await resolveKindReviewer(db, t.companyId, kind, ref, t.assigneeAgentId);
+    const { agent, note } = await resolveKindReviewer(db, t, kind, ref);
     if (note) await record(db, { companyId: t.companyId, kind: "review_fallback", summary: note, ticketId: t.id });
     const [row] = await db.insert(reviewRequests).values({ ticketId: t.id, kind, reviewerAgentId: agent?.id ?? null, round, seq: seqOf(t.reviewOrder, kind) }).returning();
     rows.push(row!);
@@ -153,8 +158,8 @@ export async function handOverReviews(db: Db, wake: { agentId: string; note: str
     const rule = ruleFor(await effectivePolicy(db, t), t.risk);
     const moved: ReviewRow[] = [];
     for (const r of mine) {
-      const ref = r.kind === "code" ? rule.reviewer : rule.kinds?.[r.kind as Exclude<ReviewSlot, "code">];
-      const [to] = ref ? (await otherReviewers(db, t.companyId, r.kind as ReviewSlot, ref, t.assigneeAgentId, [wake.agentId])).filter((a) => !isBusy(a.id)) : [];
+      const ref = slotRef(rule, r.kind as ReviewSlot);
+      const [to] = ref ? (await otherReviewers(db, t, r.kind as ReviewSlot, ref, [wake.agentId])).filter((a) => !isBusy(a.id)) : [];
       if (!to) continue;
       await db.update(reviewRequests).set({ reviewerAgentId: to.id }).where(eq(reviewRequests.id, r.id));
       await record(db, { companyId: t.companyId, agentId: wake.agentId, ticketId: t.id, kind: "review_handover", summary: `${from?.name ?? "The reviewer"} was busy for ${Math.round(waitedMs / 60_000)} minutes, so ${to.name} takes the ${r.kind} review` });

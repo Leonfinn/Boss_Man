@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq, ne } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agentChanges, agentSkills, agents, companies, decisions, retros, skillProposals, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
@@ -40,7 +41,8 @@ async function setup(opts: { pm?: boolean; reviewer?: boolean } = {}) {
   const eng = await hire("Eve", "engineer");
   const eng2 = await hire("Ed", "engineer");
   const reviewer = opts.reviewer === false ? null : await hire("Sam", "security-reviewer");
-  if (reviewer) await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
+  // Skill security reviewers come from the Security cells (BOS-198); name Sam at critical only, so no ticket here gains a review.
+  if (reviewer) await db.update(companies).set({ reviewPolicy: { ...DEFAULT_REVIEW_POLICY, critical: { ...DEFAULT_REVIEW_POLICY.critical, kinds: { security: reviewer.id } } } }).where(eq(companies.id, company.id));
   const clients: Client[] = [];
   const mcp = async (agentId: string) => {
     const token = await issueRunToken(pg, { companyId: company.id, agentId, runId: randomUUID() });

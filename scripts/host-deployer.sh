@@ -21,7 +21,8 @@
 #   RATE_LIMIT_SECONDS min gap between two runs of the same target (600)
 #   AVAILABLE_REFRESH_SECONDS  how often to look for a new commit on main (300); sooner when the server
 #                              leaves inbox/check ("Deploy latest" found nothing new; only its existence is read)
-#   SOAK_SECONDS       blue/green: how long the old colour stays up as a standby after a good swap (900)
+#   SOAK_SECONDS       blue/green: how long the old colour stays up as a standby after a good swap (900); also
+#                      published in available.json, so Boss Man's runner-update trial uses the same length
 #   SOAK_CHECK_SECONDS blue/green: how long a failing check during that window is retried before the automatic switch-back (60)
 #
 # Blue/green (docs/09-self-deploy.md, "Phase 3, part 2"): when COMPOSE_FILE (environment or the checkout's .env)
@@ -115,7 +116,7 @@ finish() { # result message [backup]: record the outcome, tell the owner, stop
   exit 0
 }
 
-# The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an older install's deploy key). Empty if unreachable.
+# The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an SSH remote with a read-only deploy key for a private one; docs/00 step 2). Empty if unreachable.
 remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }' || true; }
 
 # Tells the server what is waiting (when main is ahead of what runs), so it can raise the decision.
@@ -153,12 +154,17 @@ refresh_available() {
     if [[ $p =~ $RUNNER_PATHS ]]; then runner=true; fi
   done <"$paths"
   # What this install really looks like, so the owner's hand-apply steps never guess a folder (BOS-269).
-  local srcdir deployerdir bg=false colour=""
+  local srcdir deployerdir bg=false colour="" soak=""
   srcdir="$(cd "$REPO" 2>/dev/null && pwd)" || srcdir=""
   deployerdir="$(cd "$D" 2>/dev/null && pwd)" || deployerdir=""
   if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
-  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s}' \
-    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" >"$f.tmp"
+  # The standby window as this host really runs it (host.conf's SOAK_SECONDS), so the server's trial wording matches it.
+  # A fragment with its own separator and quoting, so the JSON stays valid whatever the setting; absent = not blue/green.
+  if [[ $bg == true ]]; then
+    if [[ $SOAK_SECONDS =~ ^[0-9]{1,6}$ ]]; then soak=", \"soakSeconds\": $SOAK_SECONDS"; else log "SOAK_SECONDS is not a whole number of seconds; not reporting the trial length."; fi
+  fi
+  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s%s}' \
+    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" "$soak" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 

@@ -22,7 +22,7 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 - TrueNAS SCALE 24.10 or later, with an apps pool chosen under Apps > Configuration > Choose Pool. The Docker service only runs once a pool is chosen.
 - A root shell on the NAS: TrueNAS UI > System > Shell, or `su -` over SSH. Every command in this guide is typed there, so none has `sudo` in front.
 - A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
-- A GitHub account that can create a fine-grained token for the repos the agents will work on, and access to the public repo `Leonfinn/Boss_Man`, which needs no key (the repo is public).
+- A GitHub account that can create a fine-grained token for the repos the agents will work on, and read access to the Boss Man repo from the NAS: a read-only deploy key if the repo is private, nothing if it is public (see [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host)).
 
 The commands below put Boss Man in `/mnt/NVME_Apps/Container_files/boss-man`, next to your other container apps on the mirrored NVMe pool. If you keep it somewhere else, change that path everywhere it appears. Replace `<nas-ip>` with the NAS's LAN address. Your router is at 192.168.68.1, so the NAS is most likely on 192.168.68.x. Check it in the TrueNAS UI under Network.
 
@@ -56,19 +56,18 @@ Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip
 cd /mnt/NVME_Apps/Container_files/boss-man
 ```
 
-The repo is public, so the NAS clones it over https with no key and no login:
+How the NAS reads the repo (a deploy key if it is private, https if it is public) is in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host). Use `$B` as `/mnt/NVME_Apps/Container_files/boss-man` there. For a public repo the clone is:
 
 ```sh
-git clone https://github.com/Leonfinn/Boss_Man.git src
+git clone <repo-https-url> src
 ```
 
-Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read it the same way, so there is nothing to set up.
+Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up.
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
-If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
+If the clone hangs, see the troubleshooting lines in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host).
 
-**Already installed with a deploy key?** Nothing to change. `src` keeps its `git@github.com:` address and the `core.sshCommand` setting, and updates keep working. To move to https later, run `git -C /mnt/NVME_Apps/Container_files/boss-man/src remote set-url origin https://github.com/Leonfinn/Boss_Man.git`; the old key can then be deleted from the repo's settings and the dataset.
 
 
 ## 3. Folders and ownership
@@ -134,6 +133,8 @@ chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
 - `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://<nas-ip>:3101` on your LAN. Once the Tailscale sidecar of section 10b is running (it sets `BOSSMAN_TRUSTED_PROXIES`), Boss Man decides per request: Secure on HTTPS through the sidecar, off on plain LAN http, whatever this line says, so you can leave it or remove it. Without the sidecar, removing it makes the cookie always Secure and plain http login fails.
 - Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
   - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
+
+Memory limits for the server, database, runners and tool servers are set from this file too: see [docs/00, "Memory limits"](00-first-time-install.md#memory-limits-so-one-container-cant-take-the-whole-host). Nothing to add on TrueNAS; the defaults apply.
 
 ## 5. Build the images and start the server
 
@@ -413,7 +414,7 @@ docker compose exec -T db psql -U bossman -d bossman -tA -c 'SELECT count(*) FRO
 
 If step 5's second command stops with an error, the new empty database is half filled: do not start the app. Repeat step 5 (it drops and recreates) with the same or an older backup.
 
-**Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps nothing GitHub-related to redo: the repo is cloned fresh over https (a deploy key from an older install, if you have one, stays in place). Check what's there first:
+**Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps nothing git-related to redo: the repo is cloned fresh (a deploy key, if you use one, stays in place). Check what's there first:
 
 ```sh
 ls -la /mnt/NVME_Apps/Container_files/boss-man
@@ -439,7 +440,7 @@ D=/mnt/NVME_Apps/Container_files/boss-man/deployer
 
 **Before you start**
 - `main` on GitHub should be branch-protected, so agents can only land reviewed PRs: Repo > Settings > Branches > add a rule for `main` that requires a pull request. The deployer treats the tip of `main` as approved code.
-- The `src` checkout must be on `main`, clean, and able to read GitHub over https (or the old deploy key, if you installed with one). Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
+- The `src` checkout must be on `main`, clean, and able to read the remote (https for a public repo, the deploy key for a private one). Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
 
   ```sh
   git -C /mnt/NVME_Apps/Container_files/boss-man/src ls-remote origin refs/heads/main
@@ -492,7 +493,7 @@ chown root:root $D/host.conf && chmod 600 $D/host.conf
 ```
 
 - `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
-- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`.
+- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`. The host publishes `SOAK_SECONDS` in `outbox/available.json` as `soakSeconds`, so Boss Man's runner-update trial uses the same length you set here (no second place to keep in step).
 - The script refuses to start if this file is not owned by the user running it with mode 600.
 - It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay or Home Assistant; that is untested.
 

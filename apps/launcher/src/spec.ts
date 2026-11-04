@@ -19,6 +19,8 @@ export const MOUNTS = [
   ["opencode", "/home/node/.local/share/opencode"],
 ] as const;
 export const TOKEN_TARGET = "/run/secrets/runner_token";
+/** Docker's default weight is 1024; runners get half, so the server and database win on a busy host. */
+export const DEFAULT_CPU_SHARES = 512;
 
 export type LauncherConfig = {
   /** BOSSMAN_DATA: the host folder, mounted at the same path in the launcher, so binds name real host paths. */
@@ -30,6 +32,10 @@ export type LauncherConfig = {
   memoryBytes: number;
   /** BOSSMAN_RUNNER_PIDS: process/thread ceiling per runner. */
   pidsLimit: number;
+  /** BOSSMAN_RUNNER_CPU_SHARES: CPU weight against the default 1024 of the server and database (default 512). Only matters when the host is busy. */
+  cpuShares?: number;
+  /** BOSSMAN_RUNNER_CPUS: optional hard cap in CPUs (e.g. 4 or 1.5), shared by everything in the runner. Unset = no cap. */
+  cpus?: number;
   /** BOSSMAN_NETGUARD: "auto" (default) guards every runner, and lets a host that can't run the guard go without; "enforce" refuses runners there; "off" never guards. */
   guardMode?: GuardMode;
   /** BOSSMAN_NETGUARD_ALLOW: extra host:port entries every runner may reach on the private networks. */
@@ -88,6 +94,12 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
       // An init as PID 1 reaps the zombies agents' tools leave, which would otherwise fill the pid limit.
       Init: true,
       Memory: cfg.memoryBytes,
+      // No swap on top of the limit, and the first to be killed if the host itself runs out (BOS-395).
+      MemorySwap: cfg.memoryBytes,
+      OomScoreAdj: 500,
+      // Priority, not a cap (BOS-412): when the host is busy the server and database win; when idle, runners use every core.
+      CpuShares: cfg.cpuShares ?? DEFAULT_CPU_SHARES,
+      ...(cfg.cpus ? { NanoCpus: Math.round(cfg.cpus * 1e9) } : {}),
       RestartPolicy: { Name: "unless-stopped" },
     },
   };
@@ -107,6 +119,22 @@ export function parsePids(v: string | undefined, fallback = 4096): number {
   if (!v) return fallback;
   if (!/^\d+$/.test(v.trim()) || Number(v) < 64) throw new Error(`BOSSMAN_RUNNER_PIDS should be a whole number of at least 64, not ${v}`);
   return Number(v);
+}
+
+/** A CPU weight from 2 to 262144, as in compose's cpu_shares. */
+export function parseCpuShares(v: string | undefined, fallback = DEFAULT_CPU_SHARES): number {
+  if (!v || !v.trim()) return fallback;
+  if (!/^\d+$/.test(v.trim()) || Number(v) < 2 || Number(v) > 262144) throw new Error(`BOSSMAN_RUNNER_CPU_SHARES should be a whole number from 2 to 262144, not ${v}`);
+  return Number(v);
+}
+
+/** A hard CPU cap such as 4 or 1.5, as in compose's cpus. Empty or 0 means no cap. */
+/** 0 or empty = no cap. Docker rejects less than 0.01 CPU, so that is refused up front. */
+export function parseCpus(v: string | undefined): number | undefined {
+  if (!v || !v.trim()) return undefined;
+  const n = Number(v.trim());
+  if (!/^\d+(\.\d+)?$/.test(v.trim()) || !Number.isFinite(n) || n > 1024 || (n !== 0 && n < 0.01)) throw new Error(`BOSSMAN_RUNNER_CPUS should be a number of CPUs such as 4 or 1.5, not ${v}`);
+  return n === 0 ? undefined : n;
 }
 
 /** host:port of the server in a runner URL such as ws://server:3100/api/runner/connect. */
