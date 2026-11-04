@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -64,6 +64,8 @@ export const companies = pgTable("companies", {
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
+  /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
+  permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -102,7 +104,11 @@ export const agents = pgTable(
     starred: boolean("starred").notNull().default(false),
     /** A standing job Boss Man gives the agent: "wiki" keeps the company wiki in order (R73). */
     duty: text("duty"),
-    /** Marks the agent as the company's reviewer of one kind (security, infra, adversarial); a review policy can name "the marked agent". */
+    /**
+     * Deprecated (BOS-198): the old agent-page mark as one kind's reviewer. Nothing writes it now;
+     * migration 0094 moved every use into the review policy, and it is read only for a leftover
+     * "marked" cell. Kept one release so a rollback has it; drop it after.
+     */
     reviewKind: text("review_kind"),
     /** Job title (e.g. "Scrum Master"), the template it was hired from, and its standing instructions (R62). */
     title: text("title"),
@@ -147,12 +153,21 @@ export const runners = pgTable("runners", {
   companyId: uuid("company_id").notNull().unique().references(() => companies.id, { onDelete: "cascade" }),
   tokenHash: text("token_hash").notNull(),
   imageVersion: text("image_version"),
+  /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
+  harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  /** The boot id from the runner's last hello (BOS-352); a different id means the runner restarted. */
+  bootId: text("boot_id"),
+  /** When a restart last pulled parked checks forward, so a restart loop doesn't do it again straight away. */
+  bootPulledAt: timestamp("boot_pulled_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
   diskCheckedAt: timestamp("disk_checked_at", { withTimezone: true }),
   /** The runner's last report on its add-ons (docs/12); null until it reports one. */
   addons: jsonb("addons").$type<AddonReport[]>(),
+  /** What the runner can fence agents with, from its start-up self-test (BOS-321); null until it reports. */
+  sandbox: jsonb("sandbox").$type<SandboxReport>(),
+  sandboxCheckedAt: timestamp("sandbox_checked_at", { withTimezone: true }),
   createdAt: createdAt(),
 });
 
@@ -280,6 +295,8 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
+    checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
     pullRequestUrl: text("pull_request_url"),
     pullRequestNumber: integer("pull_request_number"),
@@ -318,6 +335,8 @@ export const tickets = pgTable(
     monitorNote: text("monitor_note"),
     monitorAttempts: integer("monitor_attempts").notNull().default(0),
     monitorMax: integer("monitor_max").notNull().default(5),
+    /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
+    monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty strings), checked against at review; empty means none. */
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
@@ -330,6 +349,8 @@ export const tickets = pgTable(
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
     stateNote: text("state_note"),
     stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
+    /** When an agent last posted on this ticket, a reply or a state note (BOS-314). */
+    lastPostAt: timestamp("last_post_at", { withTimezone: true }),
     /** When an owner action made the state note possibly out of date (BOS-123). */
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
@@ -491,6 +512,8 @@ export const runTokens = pgTable("run_tokens", {
 
 export const runs = pgTable("runs", {
   id: id(),
+  /** The funding source this run was started on, when the scheduler chose one from the owner's list of subscriptions (BOS-383). */
+  fundingSourceId: uuid("funding_source_id").references(() => fundingSources.id, { onDelete: "set null" }),
   companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
   agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
   ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
@@ -524,6 +547,10 @@ export const runs = pgTable("runs", {
   outcome: text("outcome"),
   /** When the owner asked to stop the run; the sweep ends it if the runner never confirms. */
   cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  /** When the run last posted on its ticket (a reply or a state note); silence is measured from it (BOS-314). */
+  lastPostAt: timestamp("last_post_at", { withTimezone: true }),
+  /** When Boss Man asked the silent run for a status, so it is asked once (BOS-314). */
+  silentSteeredAt: timestamp("silent_steered_at", { withTimezone: true }),
 });
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
@@ -542,6 +569,8 @@ export const fundingSources = pgTable("funding_sources", {
   cycleAnchor: timestamp("cycle_anchor", { withTimezone: true }),
   /** The credential agents on this source use. */
   secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /** Position in the owner's ordered list of Claude subscriptions (1 = preferred). Null: not part of the list (BOS-383). */
+  fallbackRank: integer("fallback_rank"),
   /** Subscription utilisation at which routine work is held (0.8–1, default 0.95). */
   quotaHoldAt: real("quota_hold_at").notNull().default(0.95),
   /** Whether extra usage may be spent, and for which work: pause (default), urgent, or all. */

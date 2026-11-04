@@ -7,6 +7,7 @@ import type { Db } from "../db/client.js";
 import { agents, runs, skillProposals, ticketMessages, tickets } from "../db/schema.js";
 import { RunError, type runsService } from "./runs.js";
 import { record } from "./activity.js";
+import { stampPost } from "./progress.js";
 import { ownerActed } from "./stale-requests.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 
@@ -120,6 +121,8 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
         .values({ companyId: input.companyId, ticketId: input.ticketId, author: "agent", agentId: input.agentId, runId: input.runId, text: input.text.slice(0, MAX_TEXT) })
         .returning();
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "message", summary: `Replied: ${input.text}` });
+      // The run has posted: its silence is measured from now (BOS-314).
+      await stampPost(db, { runId: input.runId, ticketId: input.ticketId });
       return m!;
     },
 

@@ -15,7 +15,9 @@ import type { Ladder } from "../src/services/alert-ladder.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 const clients: Client[] = [];
-const CEO_RULE = "^systemctl\\s+restart\\b";
+// A routing rule only fires for a request that would otherwise ask (BOS-307, DR-001). A plain shell command is a
+// built-in allow, so the request here is a delete, which the built-ins leave to the owner; the rule moves it to the CEO.
+const CEO_RULE = "^rm\\s+/var/lib/api\\b";
 
 async function setup() {
   let clock = new Date();
@@ -37,17 +39,17 @@ async function setup() {
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
   built.runners.connect(runner!.id, (cmd) => (sent.push(cmd), true));
-  await req("POST", "/api/policy-rules", { companyId, name: "Service restarts go to the CEO", match: { commandPattern: CEO_RULE }, outcome: "ceo" });
+  await req("POST", "/api/policy-rules", { companyId, name: "API deletes go to the CEO", match: { kinds: ["delete"], commandPattern: CEO_RULE }, outcome: "ceo" });
   let seq = 0;
   const start = async (agentId = dev.id) => {
     const runId = randomUUID();
     await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.started", runId, agentId, acpSessionId: "s", model: null } });
     return runId;
   };
-  const ask = async (command = "systemctl restart api") => {
+  const ask = async (command = "rm /var/lib/api/cache") => {
     const runId = await start();
     const requestId = randomUUID();
-    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, title: "Restart the API", kind: "execute", rawInput: { command }, optionKinds: ["allow_once", "reject_once"] } });
+    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, title: "Delete the API cache", kind: "delete", rawInput: { command }, optionKinds: ["allow_once", "reject_once"] } });
     const [d] = await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
     return { d: d!, runId, requestId };
   };

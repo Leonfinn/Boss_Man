@@ -12,9 +12,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
+import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agentSkills, agents, decisions, skillProposals, skills, ticketReviews, tickets, workflowChanges } from "../src/db/schema.js";
+import { agentSkills, agents, companies, decisions, skillProposals, skills, ticketReviews, tickets, workflowChanges } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { SKILL_ADD } from "../src/services/decisions.js";
 import { reviewBody } from "../src/services/skill-proposals.js";
@@ -48,7 +49,8 @@ async function setup() {
   const eng = await hire("Eve", "engineer");
   const eng2 = await hire("Ed", "engineer");
   const reviewer = await hire("Sec", "engineer");
-  await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
+  // Skill security reviewers come from the Security cells (BOS-198); name Sec at critical only.
+  await db.update(companies).set({ reviewPolicy: { ...DEFAULT_REVIEW_POLICY, critical: { ...DEFAULT_REVIEW_POLICY.critical, kinds: { security: reviewer.id } } } }).where(eq(companies.id, company.id));
   const clients2: Client[] = [];
   const mcp = async (agentId: string) => {
     const token = await issueRunToken(db, { companyId: company.id, agentId, runId: randomUUID() });
