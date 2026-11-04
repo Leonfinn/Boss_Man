@@ -22,7 +22,8 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
-- **Internet access from the host** to [github.com/Leonfinn/Boss_Man](https://github.com/Leonfinn/Boss_Man), where the code is (step 2).
+- **Internet access from the host** to GitHub (port 22, for SSH), where the code is (step 2).
+- **Admin access to the Boss Man repository on GitHub.** The repository is private, and only an admin can add the deploy key in step 2.
 
 ## A note on commands
 
@@ -66,13 +67,41 @@ You should see the folder listed.
 
 ## 2. Get the code onto the host
 
-The code is public on GitHub, so you need no account or key to read it. Clone it into `<install-dir>/src`:
+The repository is private, so the host needs its own read-only deploy key. You need admin access to the repository to add one. Replace `OWNER/REPO` below with your repository.
+
+1. Make the key:
+
+   ```sh
+   ssh-keygen -t ed25519 -N "" -C "boss-man $(hostname)" -f "$B/deploy_key"
+   ```
+
+2. Print the public half:
+
+   ```sh
+   cat "$B/deploy_key.pub"
+   ```
+
+3. On GitHub, open the repository's **Settings > Deploy keys > Add deploy key**. Paste the line from step 2. Leave **Allow write access** unticked.
+
+4. Clone with that key into `<install-dir>/src`:
+
+   ```sh
+   GIT_SSH_COMMAND="ssh -i $B/deploy_key -o IdentitiesOnly=yes" git clone git@github.com:OWNER/REPO.git $B/src
+   ```
+
+5. Save the key in the checkout, so later `git fetch`, `scripts/deploy.sh` and the host deployer's `git ls-remote` use it too:
+
+   ```sh
+   git -C $B/src config core.sshCommand "ssh -i $B/deploy_key -o IdentitiesOnly=yes"
+   ```
+
+Check it worked. This prints a commit id and does not ask for a password:
 
 ```sh
-git clone https://github.com/Leonfinn/Boss_Man.git $B/src
+git -C $B/src ls-remote origin HEAD
 ```
 
-Check it worked:
+Then check the clone:
 
 ```sh
 git -C $B/src log --oneline -1
@@ -80,9 +109,7 @@ git -C $B/src log --oneline -1
 
 You should see one commit line.
 
-If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
-
-**Older install with a deploy key?** It keeps working; see [docs/06, step 2](06-install-truenas.md#2-get-the-code).
+If the clone says `Permission denied (publickey)`, the deploy key is not on the repository yet, or you pasted the wrong half. Add the contents of `deploy_key.pub` as in step 3. If it hangs, check that the host can reach github.com on port 22 (`ssh -T -i $B/deploy_key -o IdentitiesOnly=yes git@github.com` should greet you, then close).
 
 ## 3. Make the folders, the master key and the token file
 
@@ -179,10 +206,16 @@ Go to the repo folder. Every `docker compose` command must run from here.
 cd $B/src
 ```
 
-Build the server (it includes the web page) and the launcher:
+Build the server (it includes the web page), the launcher and netguard. The launcher starts netguard beside every runner, so it must be built too:
 
 ```sh
-docker compose build server launcher
+docker compose build server launcher netguard
+```
+
+Using the optional blue/green setup? Build both server copies instead:
+
+```sh
+docker compose build server-blue server-green launcher netguard
 ```
 
 Build the runner image. This builds it, runs a safety check (the "canary") with networking off and no credentials, and only then marks it ready. It then starts everything.
