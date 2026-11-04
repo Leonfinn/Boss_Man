@@ -122,6 +122,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/loop-guards.ts": { counts: { insert: 2, question: 1 }, why: "no raising agent, one option" },
   "src/services/maintenance.ts": { counts: { insert: 1 }, why: "kind approval: maintenance" },
   "src/services/policy-rules.ts": { counts: { insert: 1, question: 1 }, why: "type rule_proposal" },
+  "src/services/progress.ts": { counts: { question: 3 }, why: "status-check, review-silent and unproven-cause notices go through alerts (tier ceo, ladder), each with a ticketId and one option" },
   "src/services/retro.ts": { counts: { insert: 3, question: 1 }, why: "type lesson (and approvals: workflow_change, workflow_check)" },
   "src/services/review.ts": { counts: { insert: 4, question: 3 }, why: "check_stuck (no agent), lesson (tier ceo), risk_review (kind approval), carried (type carried, ticketId, blocker, one option)" },
   "src/services/runners.ts": { counts: { insert: 1 }, why: "kind budget" },
