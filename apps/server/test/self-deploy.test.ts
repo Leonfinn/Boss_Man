@@ -2,12 +2,12 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, parseStep } from "../src/services/steps.js";
-import { companies, decisions, notifications, projects, tickets, wakes } from "../src/db/schema.js";
+import { companies, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -44,6 +44,13 @@ async function setup(opts: { deployer?: boolean } = {}) {
 }
 
 describe("self-deploy (docs/09-self-deploy.md)", () => {
+  it("tells the owner a refused runner update is only a note, in plain words (BOS-364)", async () => {
+    const c = (ctx = await setup());
+    await c.status({ id: randomUUID(), target: "runner", result: "rejected", message: "The runners were not updated. Nothing is broken and nothing needs doing now.", to_commit: B, ended: "2026-10-20T12:03:00Z" });
+    await c.selfDeploy.sync();
+    expect((await c.db.select().from(notifications))[0]).toMatchObject({ level: "note", title: expect.stringContaining("Runner update not started") });
+  });
+
   it("does not offer again a commit the host just refused as no longer the tip, until the host rewrites the offer", async () => {
     const c = (ctx = await setup());
     await c.status({ id: randomUUID(), result: "rejected", message: "Rejected: not the tip of main.", to_commit: B, ended: "2026-10-20T12:03:00Z" });
@@ -469,5 +476,130 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: false, status: null });
     await c.selfDeploy.sync();
     expect(await c.open()).toHaveLength(0);
+  });
+
+  describe("runner update waits for the server update trial (BOS-368)", () => {
+    afterEach(() => vi.useRealTimers());
+    const target = (d: { context: unknown }) => d.context as { target: string; commit: string };
+
+    async function deployedInTrial() {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-03T01:00:00Z"));
+      const c = (ctx = await setup());
+      // A runner card from before the server update, for what ran then.
+      await c.available({ deployed: A, tip: A });
+      await c.req("POST", "/api/self-deploy/update-runners");
+      const [early] = await c.open();
+      await c.available({ runnerChanged: true });
+      await c.selfDeploy.sync();
+      const [server] = (await c.open()).filter((d) => target(d).target === "server");
+      await c.req("POST", `/api/decisions/${server!.id}/answer`, { answer: "Deploy" });
+      await rm(path.join(c.dir, "inbox", "request.json"));
+      await c.status({ id: server!.id, result: "deployed", message: "Switched in.", ended: "2026-11-03T01:01:00Z" });
+      await c.available({ deployed: B, tip: B, runnerChanged: true });
+      await c.selfDeploy.sync();
+      return { c, early: early!, server: server! };
+    }
+
+    it("holds the runner offer until the trial is over, and refuses the button and a runner card during it", async () => {
+      const { c, early } = await deployedInTrial();
+      expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(0);
+      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("15-minute trial");
+      const r = await c.req("POST", `/api/decisions/${early.id}/answer`, { answer: "Update runners" });
+      expect(r.statusCode).toBeGreaterThanOrEqual(400);
+      expect(r.json().message ?? r.body).toContain("15-minute trial");
+      // After the trial (900 s soak + 120 s margin), still on B: the runner card appears by itself.
+      vi.setSystemTime(new Date("2026-11-03T01:18:01Z"));
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(1);
+    });
+
+    it("withdraws runner cards and drops the held offer when the server is switched back", async () => {
+      const { c, server } = await deployedInTrial();
+      // Switched back two minutes in; the host may name the commits either way round.
+      await c.status({ id: server.id, result: "rolled_back", message: "Switched back.", from_commit: B, to_commit: A, ended: "2026-11-03T01:03:00Z" });
+      await c.available({ deployed: A, tip: B, runnerChanged: true });
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(0);
+      vi.setSystemTime(new Date("2026-11-03T01:30:00Z"));
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(0);
+      // The withdrawn card for A must not block a fresh runner offer for A (Freddy, round 6: dedupe key kept).
+      await c.req("POST", "/api/self-deploy/update-runners");
+      expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === A)).toHaveLength(1);
+    });
+
+    // BOS-384 (Dougal): the trial length is the host's own SOAK_SECONDS, published in available.json as soakSeconds.
+    it("takes the trial length from the host's setting, not a hard-coded 15 minutes", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-03T01:00:00Z"));
+      const c = (ctx = await setup());
+      await c.available({ runnerChanged: true, soakSeconds: 120 });
+      await c.selfDeploy.sync();
+      const [server] = await c.open();
+      await c.req("POST", `/api/decisions/${server!.id}/answer`, { answer: "Deploy" });
+      await rm(path.join(c.dir, "inbox", "request.json"));
+      await c.status({ id: server!.id, result: "deployed", message: "Switched in.", ended: "2026-11-03T01:01:00Z" });
+      await c.available({ deployed: B, tip: B, runnerChanged: true, soakSeconds: 120 });
+      await c.selfDeploy.sync();
+      // The message names the host's window, not a fixed 15 minutes.
+      const msg = (await c.req("POST", "/api/self-deploy/update-runners")).json().message;
+      expect(msg).toContain("2-minute trial");
+      expect(msg).not.toContain("15-minute");
+      // The hold ends at 120 s soak + 120 s margin, not at the old 900 s + 120 s.
+      vi.setSystemTime(new Date("2026-11-03T01:05:01Z"));
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(1);
+    });
+
+    it("falls back to 15 minutes when an older host reports no trial length", async () => {
+      const { c } = await deployedInTrial();
+      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("15-minute trial");
+    });
+
+    // BOS-384 (Freddy): a server-path withdraw frees its dedupe key, so a later offer for that commit is not dropped.
+    it("frees the dedupe key of a server card it withdraws once main is back on what runs", async () => {
+      const c = (ctx = await setup());
+      await c.available();
+      await c.selfDeploy.sync();
+      const [first] = await c.open();
+      // The host catches up by hand: what runs is now the offered commit, so the open question is withdrawn.
+      await c.available({ deployed: B, tip: B });
+      await c.selfDeploy.sync();
+      expect((await c.db.select().from(decisions).where(eq(decisions.id, first!.id)))[0]).toMatchObject({ status: "withdrawn", dedupeKey: null });
+      // Main moves on, then back to B: a fresh card is raised for B, not silently swallowed by the old key.
+      await c.available({ tip: C });
+      await c.selfDeploy.sync();
+      await c.available({ tip: B });
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => target(d).target === "server" && target(d).commit === B)).toHaveLength(1);
+    });
+
+    // BOS-384 (Freddy): the "seen" mark is saved after the notify and withdraws, so a crash between them loses nothing.
+    it("re-runs the notify and withdraws after a crash before the seen mark is saved", async () => {
+      const c = (ctx = await setup());
+      // A runner card from before the server update, for what ran then; the switch-back must withdraw it.
+      await c.available({ deployed: A, tip: A });
+      await c.req("POST", "/api/self-deploy/update-runners");
+      expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(1);
+      // The owner is told the switch-back happened, but the notify fails: the run dies before the seen mark is saved.
+      const notify = c.notes.notify;
+      (c.notes as { notify: unknown }).notify = vi.fn().mockRejectedValueOnce(new Error("crash"));
+      await c.status({ id: randomUUID(), result: "rolled_back", message: "Switched back.", from_commit: B, to_commit: A, ended: "2026-11-03T01:03:00Z" });
+      await expect(c.selfDeploy.sync()).rejects.toThrow("crash");
+      // Nothing was marked seen, and the card the crash left behind is still open.
+      expect(await c.db.select().from(settings).where(eq(settings.key, "self_deploy"))).toHaveLength(0);
+      (c.notes as { notify: unknown }).notify = notify;
+      // The next pass runs it all again, safely: the withdraw happens, and the owner gets exactly one note.
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(0);
+      const seen = (await c.db.select().from(settings).where(eq(settings.key, "self_deploy")))[0]!.value as { notified: string };
+      expect(seen.notified).toMatch(/:rolled_back:2026-11-03T01:03:00Z$/);
+      const told = (await c.db.select().from(notifications)).filter((n) => n.level !== "ask");
+      expect(told).toHaveLength(1);
+      // A further pass changes nothing: the mark now holds.
+      await c.selfDeploy.sync();
+      expect((await c.db.select().from(notifications)).filter((n) => n.level !== "ask")).toHaveLength(1);
+    });
   });
 });

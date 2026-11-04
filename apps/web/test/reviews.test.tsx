@@ -11,7 +11,7 @@ afterEach(() => {
 });
 
 const agent = (id: string, name: string, title: string, role: Agent["role"] = "worker") => ({ id, companyId: "c1", name, role, agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null, title }) as Agent;
-const AGENTS = [agent("a0", "Ada", "CEO", "ceo"), agent("a1", "Sam", "Senior Developer")];
+const AGENTS = [agent("a0", "Ada", "CEO", "ceo"), agent("a1", "Sam", "Senior Developer"), agent("a2", "Kim", "Security Reviewer")];
 const DEFAULTS = {
   trivial: { planApprover: "none", reviewer: "ceo", ownerSignoff: false },
   low: { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false },
@@ -42,9 +42,9 @@ describe("Settings > Reviews", () => {
     expect(medium.value).toBe("senior-dev");
     expect((screen.getByLabelText("Trivial: plan approved by") as HTMLSelectElement).value).toBe("none");
     expect((screen.getByLabelText("High: you sign off") as HTMLInputElement).checked).toBe(true);
-    expect([...medium.options].map((o) => o.text)).toEqual(["CEO", "Senior Developer (when hired)", "Sam (Senior Developer)"]);
+    expect([...medium.options].map((o) => o.text)).toEqual(["CEO", "Senior Developer (when hired)", "Sam (Senior Developer)", "Kim (Security Reviewer)"]);
     // "None" and "Owner" are plan-only.
-    expect([...(screen.getByLabelText("Low: plan approved by") as HTMLSelectElement).options].map((o) => o.value)).toEqual(["none", "owner", "ceo", "senior-dev", "a1"]);
+    expect([...(screen.getByLabelText("Low: plan approved by") as HTMLSelectElement).options].map((o) => o.value)).toEqual(["none", "owner", "ceo", "senior-dev", "a1", "a2"]);
 
     fireEvent.change(medium, { target: { value: "a1" } });
     fireEvent.click(screen.getByLabelText("Medium: you sign off"));
@@ -86,12 +86,13 @@ describe("review kinds", () => {
     const sec = (await screen.findByLabelText("High: security review by")) as HTMLSelectElement;
     for (const k of ["Security review", "Infra review", "Adversarial review"]) expect(screen.getByText(k)).toBeTruthy();
     expect(sec.value).toBe("");
-    expect([...sec.options].map((o) => o.text)).toEqual(["Off", "The agent marked as security reviewer", "CEO", "Senior Developer (when hired)", "Sam (Senior Developer)"]);
-    fireEvent.change(sec, { target: { value: "marked" } });
+    // No "marked agent" choice any more: Settings names the reviewers itself (BOS-198).
+    expect([...sec.options].map((o) => o.text)).toEqual(["Off", "CEO", "Senior Developer (when hired)", "Sam (Senior Developer)", "Kim (Security Reviewer)"]);
+    fireEvent.change(sec, { target: { value: "ceo" } });
     fireEvent.change(screen.getByLabelText("High: infra review by"), { target: { value: "a1" } });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(calls.find((c) => c.method === "PUT")).toBeTruthy());
-    expect(calls.find((c) => c.method === "PUT")!.body).toMatchObject({ high: { kinds: { security: "marked", infra: "a1" } }, low: {} });
+    expect(calls.find((c) => c.method === "PUT")!.body).toMatchObject({ high: { kinds: { security: "ceo", infra: "a1" } }, low: {} });
     fireEvent.change(screen.getByLabelText("High: security review by"), { target: { value: "" } });
     expect(((screen.getByLabelText("High: security review by")) as HTMLSelectElement).value).toBe("");
   });
@@ -100,6 +101,39 @@ describe("review kinds", () => {
     stub({ policy: { ...DEFAULTS, low: { ...DEFAULTS.low, kinds: { adversarial: "a1" } } } });
     render(<ProjectReviews projectId="p1" companyId="c1" agents={AGENTS} />);
     expect(((await screen.findByLabelText("Low: adversarial review by")) as HTMLSelectElement).value).toBe("a1");
+  });
+});
+
+describe("several reviewers per cell (BOS-198)", () => {
+  it("adds agents to a cell, saves a list, and back to one saves a single id", async () => {
+    const calls = stub();
+    render(<CompanyReviews companyId="c1" agents={AGENTS} />);
+    fireEvent.change(await screen.findByLabelText("High: security review by"), { target: { value: "a1" } });
+    // Once an agent is chosen the rest of the team can share it; the only one ticked can't be unticked.
+    expect((screen.getByLabelText("High: security review by: Sam") as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText("High: security review by: Kim"));
+    expect([...(screen.getByLabelText("High: security review by") as HTMLSelectElement).selectedOptions].map((o) => o.text)).toEqual(["Sam, Kim"]);
+    fireEvent.click(screen.getByLabelText("Medium: code reviewed by"));
+    fireEvent.change(screen.getByLabelText("Medium: code reviewed by"), { target: { value: "a2" } });
+    fireEvent.click(screen.getByLabelText("Medium: code reviewed by: Sam"));
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(calls.find((c) => c.method === "PUT")).toBeTruthy());
+    expect(calls.find((c) => c.method === "PUT")!.body).toMatchObject({ high: { kinds: { security: ["a1", "a2"] } }, medium: { reviewer: ["a2", "a1"] } });
+    fireEvent.click(screen.getByLabelText("High: security review by: Sam"));
+    expect((screen.getByLabelText("High: security review by") as HTMLSelectElement).value).toBe("a2");
+    // Choosing the CEO (not an agent) replaces the list: the two never mix.
+    fireEvent.change(screen.getByLabelText("Medium: code reviewed by"), { target: { value: "ceo" } });
+    expect(screen.queryByLabelText("Medium: code reviewed by: Sam")).toBeNull();
+  });
+
+  it("shows a saved list back, and an old marked value until it is changed", async () => {
+    stub({ policy: { ...DEFAULTS, low: { ...DEFAULTS.low, reviewer: ["a1", "a2"], kinds: { infra: "marked" } } } });
+    render(<ProjectReviews projectId="p1" companyId="c1" agents={AGENTS} />);
+    const code = (await screen.findByLabelText("Low: code reviewed by")) as HTMLSelectElement;
+    expect(code.selectedOptions[0]!.text).toBe("Sam, Kim");
+    expect((screen.getByLabelText("Low: code reviewed by: Kim") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText("Low: infra review by") as HTMLSelectElement).selectedOptions[0]!.text).toBe("Marked agent (old setting)");
+    expect([...(screen.getByLabelText("High: infra review by") as HTMLSelectElement).options].map((o) => o.value)).not.toContain("marked");
   });
 });
 
