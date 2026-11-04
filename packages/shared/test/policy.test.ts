@@ -854,7 +854,8 @@ describe("the ordered permission table (BOS-307)", () => {
   it("row 7: a routing rule still applies to a request that would ask", () => {
     const outside = { title: "mcp__other__thing", kind: "other", rawInput: {} };
     expect(decidePermission(outside, catchAll("ceo"))).toMatchObject({ outcome: "ceo", row: 7 });
-    expect(decidePermission(outside, [])).toMatchObject({ outcome: "owner", row: 8 });
+    // An unrecognised tool with no rule now falls to row 8 asking the CEO first (BOS-295).
+    expect(decidePermission(outside, [])).toMatchObject({ outcome: "ceo", rule: UNKNOWN_TOOL_RULE, row: 8 });
   });
 
   it("row 3 vs row 7: guards still ask, and routing changes who is asked", () => {
