@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, fundingSources, notifications, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
+import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -622,6 +622,56 @@ describe("scheduler", () => {
       await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
       await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
       expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    });
+
+    it("releases a wake parked while every account was full once another account has room (BOS-449)", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: b.id, claudeMeta: meta(0.99) });
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+      const [parked] = await ctx.db.select().from(wakes);
+      expect(parked!.notBefore!.getTime()).toBeGreaterThan(Date.now());
+      // The owner adds room: the second account's window resets (its sample is gone).
+      await ctx.db.delete(quotaSamples).where(eq(quotaSamples.fundingSourceId, b.id));
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+      expect((await lastRun()).fundingSourceId).toBe(b.id);
+    });
+
+    it("says which account was skipped for want of a login when holding", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.db.update(fundingSources).set({ secretId: null }).where(eq(fundingSources.id, b.id));
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      await ctx.req("POST", "/api/scheduler/tick");
+      expect((await ctx.db.select().from(wakes))[0]!.statusReason).toMatch(/Max two skipped: no login/);
+    });
+
+    it("sends an urgent wake to the second account when the first is at its limit (BOS-449)", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(1) });
+      const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: ctx.ceo.id })).json();
+      await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+      await ctx.db.delete(wakes);
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2, ticketId: urgent.id });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+      expect((await lastRun()).fundingSourceId).toBe(b.id);
+    });
+
+    it("ignores a reading whose window reset already passed, and warns when the agent's own account has no order", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { five_hour: { utilization: 0, resetsAt: Math.floor(Date.now() / 1000) - 86400 } } } } });
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+      expect((await lastRun()).fundingSourceId).toBe(a.id);
+      await ctx.db.update(runs).set({ endedAt: new Date() });
+      await ctx.db.delete(wakes);
+      await ctx.db.update(fundingSources).set({ fallbackRank: null }).where(eq(fundingSources.id, a.id));
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      await ctx.req("POST", "/api/scheduler/tick");
+      expect((await ctx.db.select().from(wakes))[0]!.statusReason).toMatch(/Max one has no order/);
+      expect(b.id).toBeTruthy();
     });
 
     it("refuses a ranked account that is not a Claude subscription", async () => {

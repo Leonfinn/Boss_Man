@@ -22,6 +22,7 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "decision answered": "waiting",
   "deploy approved": "waiting",
   "deploy rejected": "waiting",
+  "status check": "waiting",
   // Scheduled by Boss Man.
   "ticket watch": "scheduled",
   "tree stopped": "scheduled",
