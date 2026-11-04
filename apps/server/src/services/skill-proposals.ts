@@ -5,7 +5,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agentSkills, agents, decisions, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
 import { record } from "./activity.js";
-import { securityReviewers } from "./review-policy.js";
+import { byLoad, securityReviewers } from "./review-policy.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "./decisions.js";
 import { hashFiles, scriptFilesOf, sha256, unreadableFile } from "./skill-files.js";
 import { normalise, parseSkillMd, skillName, skillNameOf, SkillError, type SkillFile, type skillsService } from "./skills.js";
@@ -171,9 +171,10 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
     const open = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, `skill:${proposalId}`), eq(decisions.status, "open")));
     for (const d of open) await deps.withdrawDecision(d.id);
   };
-  /** The first available agent Settings > Reviews (or the old agent-page mark) names for security reviews; never the proposer. */
+  /** One of the agents Settings > Reviews names for security reviews, least loaded first; never the proposer. */
   async function securityReviewer(companyId: string, not: string | null) {
-    return (await securityReviewers(db, companyId)).find((a) => !a.paused && a.id !== not) ?? null;
+    const pool = (await securityReviewers(db, companyId)).filter((a) => !a.paused && a.id !== not);
+    return (await byLoad(db, pool))[0] ?? null;
   }
   async function reviewProject(companyId: string) {
     const [p] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.companyId, companyId), isNull(projects.archivedAt))).orderBy(asc(projects.createdAt));

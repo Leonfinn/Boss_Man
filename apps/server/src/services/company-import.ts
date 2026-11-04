@@ -5,7 +5,7 @@
 import { eq } from "drizzle-orm";
 import { strFromU8, unzipSync } from "fflate";
 import { z } from "zod";
-import { columnProblems, DEFAULT_REVIEW_POLICY, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewPolicy } from "@boss-man/shared";
+import { columnProblems, DEFAULT_REVIEW_POLICY, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
@@ -276,12 +276,24 @@ export async function previewPackage(db: Db, pkg: Package, name = pkg.company.na
   };
 }
 
-/** Swaps the package's agent ids in a review policy for the new ones; an id it can't place becomes the CEO. */
-function remapPolicy(policy: unknown, ids: Map<string, string>): ReviewPolicy {
+/**
+ * Swaps the package's agent ids in a review policy for the new ones; a single id it can't place
+ * becomes the CEO, and a list keeps the agents it can place (the CEO when none). A legacy "marked"
+ * cell becomes the package's agents marked for that kind (marks: their new ids).
+ */
+function remapPolicy(policy: unknown, ids: Map<string, string>, marks: Partial<Record<ReviewKind, string[]>>): ReviewPolicy {
   if (policy === undefined || policy === null) return DEFAULT_REVIEW_POLICY;
-  const swapped = JSON.parse(JSON.stringify(policy).replace(/"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/gi, (_m, id: string) => JSON.stringify(ids.get(id) ?? "ceo")));
-  const r = ReviewPolicySchema.safeParse(swapped);
-  return r.success ? r.data : DEFAULT_REVIEW_POLICY;
+  const swap = (v: unknown): unknown => {
+    if (Array.isArray(v)) {
+      const placed = [...new Set(v.flatMap((x) => (typeof x === "string" && ids.has(x) ? [ids.get(x)!] : [])))];
+      return placed.length ? placed : "ceo";
+    }
+    if (typeof v === "string" && UUID.test(v)) return ids.get(v) ?? "ceo";
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, swap(x)]));
+    return v;
+  };
+  const r = ReviewPolicySchema.safeParse(swap(policy));
+  return r.success ? normalisePolicyMarked(r.data, marks) : DEFAULT_REVIEW_POLICY;
 }
 
 /** Creates the package as a new company in one transaction. Every agent starts paused. */
@@ -313,14 +325,17 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     for (const a of pkg.agents) {
       const [row] = await tx
         .insert(agents)
-        .values({ companyId, name: a.name, role: a.role, title: a.title ?? null, template: a.template ?? null, duty: a.duty ?? null, reviewKind: a.reviewKind ?? null, agentKind: a.agentKind, model: a.model ?? null, thinking: a.thinking ?? null, instructions: a.instructions ?? null, fundingSourceId: opts.fundingSourceId ?? null, paused: true, avatarAt: a.avatar ? new Date() : null })
+        .values({ companyId, name: a.name, role: a.role, title: a.title ?? null, template: a.template ?? null, duty: a.duty ?? null, agentKind: a.agentKind, model: a.model ?? null, thinking: a.thinking ?? null, instructions: a.instructions ?? null, fundingSourceId: opts.fundingSourceId ?? null, paused: true, avatarAt: a.avatar ? new Date() : null })
         .returning();
       agentId.set(a.slug, row!.id);
       if (a.ref) agentRef.set(a.ref, row!.id);
       if (a.avatar) await tx.insert(agentAvatars).values({ agentId: row!.id, bytes: Buffer.from(a.avatar.bytes), type: a.avatar.type });
     }
     for (const a of pkg.agents) if (a.reportsTo && agentId.has(a.reportsTo)) await tx.update(agents).set({ reportsTo: agentId.get(a.reportsTo)! }).where(eq(agents.id, agentId.get(a.slug)!));
-    await tx.update(companies).set({ reviewPolicy: remapPolicy(pkg.company.reviewPolicy, agentRef) }).where(eq(companies.id, companyId));
+    // An older package marks reviewers on the agent; its "marked" cells name them instead (BOS-198).
+    const marks: Partial<Record<ReviewKind, string[]>> = {};
+    for (const a of pkg.agents) if (a.reviewKind && (REVIEW_KINDS as readonly string[]).includes(a.reviewKind)) (marks[a.reviewKind as ReviewKind] ??= []).push(agentId.get(a.slug)!);
+    await tx.update(companies).set({ reviewPolicy: remapPolicy(pkg.company.reviewPolicy, agentRef, marks) }).where(eq(companies.id, companyId));
 
     for (const s of pkg.skills) {
       const m = s.meta;
@@ -336,7 +351,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       const { slug, columns, reviewPolicy, ...fields } = p;
       const [row] = await tx
         .insert(projects)
-        .values({ companyId, ...fields, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : remapPolicy(reviewPolicy, agentRef) })
+        .values({ companyId, ...fields, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : remapPolicy(reviewPolicy, agentRef, marks) })
         .returning();
       projectId.set(slug, row!.id);
       columnsOf.set(row!.id, await tx.insert(workflowColumns).values(columns.map((col, i) => ({ projectId: row!.id, name: col.name, systemState: col.systemState, wipLimit: col.wipLimit ?? null, position: i }))).returning({ id: workflowColumns.id, systemState: workflowColumns.systemState }));

@@ -660,7 +660,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 @media (max-width: 760px) { .dash-lists { grid-template-columns: minmax(0, 1fr); } .dash-list li > span.muted { display: none; } }
 
 /* Company switcher and grouped navigation (R72, R75) */
-.side .nav-groups { display: flex; flex-direction: column; gap: 14px; }
+.side .nav-groups { display: flex; flex-direction: column; gap: 14px; flex: 1; }
 .side .nav-groups section + section { padding-top: 14px; border-top: 1px solid #2a3544; }
 .side .nav-groups h2 { padding: 0 10px 4px; }
 .side .menu-toggle { display: none; background: var(--side-raised); border: 1px solid #33404f; color: #fff; border-radius: 8px; min-height: 40px; padding: 8px 12px; text-align: left; font-size: 14px; }
@@ -765,8 +765,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 @media (max-width: 640px) {
   .ticket-props { order: 1; }
   .ticket-main { display: contents; }
-  .ticket-main > .review-card { order: 2; }
-  .ticket-main > .activity { order: 3; }
+  .ticket-main > .review-card { order: -2; }
+  .ticket-main > .activity { order: -1; }
   .activity-feed { max-height: none; overflow-y: visible; }
   .props-head { flex-wrap: wrap; }
   .props-glance { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

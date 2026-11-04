@@ -15,6 +15,7 @@ import { usePoll } from "../hooks";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
+import { ago } from "./Dashboard";
 
 /** The mark for one verdict on a "Done when" checklist row. */
 const VERDICT_MARK: Record<string, string> = { pass: "✓ pass", fail: "✗ fail", none: "not reported" };
@@ -195,6 +196,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const images = usePoll((signal) => api<TicketImage[]>(`/api/tickets/${id}/images`, { signal }), 30_000, `img-${id}`);
   const reviews = useTicketReviews(id);
   const t = ticket.data;
+  // Every link on this screen is built the same way: page names open in this company, ticket references
+  // by prefix, raw routes as written (BOS-358).
+  const ticketLinks = t ? { companyId: t.companyId, prefix: t.ref?.replace(/-[0-9]+$/, "") ?? null, selfId: t.id, tickets: t.number ? [{ id: t.id, number: t.number, prefix: t.ref?.replace(/-[0-9]+$/, "") ?? null }] : [] } : undefined;
   const img = useImageAttach(t?.companyId, id);
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
@@ -463,7 +467,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             {draft === null ? (
               t.body ? (
                 <div id="desc-body" className={longBody && !descOpen ? "clamp-8" : undefined}>
-                  <Markdown text={t.body} />
+                  <Markdown text={t.body} linkContext={ticketLinks} />
                 </div>
               ) : (
                 <p className="muted">No description yet. Say what should be done and what counts as finished.</p>
@@ -544,7 +548,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
           {t.plan && (
             <Fold title="Plan" hint={t.planApprovedAt ? `approved ${when(t.planApprovedAt)}` : "waiting for your approval"}>
-              <Markdown text={t.plan} />
+              <Markdown text={t.plan} linkContext={ticketLinks} />
               {!t.planApprovedAt && (
                 <p className="muted" style={{ fontSize: 14 }}>
                   Approve or send it back from <a href="#/decisions">Decisions</a>.
@@ -682,7 +686,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           )}
 
           <ScrumMasterLog companyId={t.companyId} ticketId={t.id} folded />
-          <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
+          <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} ticketNumber={t.number} prefix={t.ref?.replace(/-[0-9]+$/, "") ?? null} />
         </div>
 
         <aside className="card ticket-props" aria-label="Properties">
@@ -862,6 +866,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dd>{when(t.createdAt)}</dd>
             <dt>Last activity</dt>
             <dd>{when(t.lastActivityAt)}</dd>
+            {t.lastPostAt && (
+              <>
+                <dt>Last post</dt>
+                <dd>{ago(t.lastPostAt)}</dd>
+              </>
+            )}
           </dl>
           </div>
         </aside>

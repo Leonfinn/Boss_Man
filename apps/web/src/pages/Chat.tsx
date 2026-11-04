@@ -8,47 +8,31 @@ import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
+import { linkPieces, type LinkContext } from "../links";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
 type Chat = { agentId: string; items: Message[]; state: string };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
-/** A message can name a page with this company's id in front ([[<id>/<slug>]]); it's the same page, so drop the id. */
-const shortSlug = (slug: string, companyId?: string) => (companyId && slug.startsWith(companyId + "/") ? slug.slice(companyId.length + 1) : slug);
-/** True when a page name is prefixed with another company's id, which this screen can't show. */
-const otherCompany = (slug: string, companyId?: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\//.test(slug) && shortSlug(slug, companyId) === slug;
-
-/** Plain text with in-app links (#/tickets/<id> and the like, or [title](#/tickets/<id>)) made clickable. */
-export function linked(text: string, wikiCompanyId?: string): ReactNode {
-  const out: ReactNode[] = [];
-  let at = 0;
-  // [[slug]] and [[slug#Section]] link to the company's wiki page when the company is known. A full
-  // #/wiki/<company>/<slug> address keeps its page name too, since the wiki tool writes links that way.
-  for (const m of text.matchAll(/(!?)\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)|\[([^\]]+)\]\(((?:#[\/][a-z]+\/[0-9a-f-]{36}|#[\/]wiki\/[0-9a-f-]{36}\/[^\s)\]]*))\)|`?(#[\/][a-z]+(?:\/[0-9a-f-]{36})?(?:\/[^\s`]*?(?=[.,;:!?)\s\]]|$))?)`?|\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g)) {
-    // A pasted image shows as a thumbnail that opens full size.
-    if (m[3]) {
-      out.push(
-        <Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>,
-        m[1] ? (
-          <a key={`i${m.index}`} href={m[3]} target="_blank" rel="noreferrer" className="msg-img">
-            <img src={m[3]} alt={m[2] || "image"} loading="lazy" />
-          </a>
-        ) : (
-          <a key={`f${m.index}`} href={m[3]} download className="file-chip">
-            {m[2]}
-          </a>
-        ),
-      );
-      at = m.index + m[0].length;
-      continue;
-    }
-    if (m[7] && (!wikiCompanyId || otherCompany(m[7].trim(), wikiCompanyId))) continue;
-    const href = m[7] ? `#/wiki/${wikiCompanyId}/${shortSlug(m[7].trim(), wikiCompanyId)}` : (m[5] ?? m[6])!;
-    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[7] ? `${shortSlug(m[7].trim(), wikiCompanyId)}${m[8] ?? ""}` : (m[4] ?? (href.startsWith("#/tickets/") ? "task" : href.slice(2)))}</a>);
-    at = m.index + m[0].length;
-  }
-  out.push(<Fragment key="end">{text.slice(at)}</Fragment>);
-  return out;
+/** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
+export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = {}): ReactNode {
+  return linkPieces(text, { ...ctx, companyId: wikiCompanyId ?? ctx.companyId }).map((p, i) =>
+    p.kind === "text" ? (
+      <Fragment key={i}>{p.text}</Fragment>
+    ) : p.kind === "image" ? (
+      <a key={i} href={p.src} target="_blank" rel="noreferrer" className="msg-img">
+        <img src={p.src} alt={p.alt} loading="lazy" />
+      </a>
+    ) : p.kind === "file" ? (
+      <a key={i} href={p.href} download className="file-chip">
+        {p.text}
+      </a>
+    ) : (
+      <a key={i} href={p.href}>
+        {p.text}
+      </a>
+    ),
+  );
 }
 
 const ROLE: Record<Thread["role"], string> = { ceo: "CEO", manager: "Manager", worker: "Worker" };
