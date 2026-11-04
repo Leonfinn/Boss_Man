@@ -452,6 +452,20 @@ hasnt "$DL" "signal"; live_is green
 unset COMPOSE_FILE; "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without blue/green should fail"; has "$T/out" "does not use blue/green"
 export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
 
+# 30. A run that was cut off (status stuck on "running"): the next tick marks it failed, puts the checkout back on what answers,
+# drops a trial window for a version that is not running, and touches no container (BOS-494).
+reset_world blue "$P"; git -C "$T/src" fetch -q origin 2>/dev/null || true; git -C "$T/src" reset -q --hard "$b1"
+printf '{"id": "%s", "target": "server", "result": "running", "message": "Running", "from_commit": "%s", "to_commit": "%s", "started": "2026-11-04T23:05:00Z", "ended": "", "at": "2026-11-04T23:05:00Z", "backup": ""}\n' "11111111-1111-1111-1111-111111111111" "$P" "$b1" >"$D/outbox/status.json"
+printf 'old=blue new=green deadline=%s commit=%s prev=%s\n' "$(($(date +%s) + 900))" "$b1" "$P" >"$D/state/soak"
+: >"$DL"; bg
+[[ $(status result) == failed ]] || fail "interrupted run: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "cut off"
+[[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout not put back on the running commit"
+[[ ! -e $D/state/soak ]] || fail "soak for a version that is not running was kept"
+hasnt "$DL" "stopped"; hasnt "$DL" "signal"; live_is blue
+# Ticking again changes nothing more.
+bg; [[ $(status result) == failed ]] || fail "second tick changed the status"
+
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"
 out="$( (unset BOSSMAN_DEPLOYER; bash "$own/deployer/host-deployer.sh" --dry-run 2>&1) || true)"
