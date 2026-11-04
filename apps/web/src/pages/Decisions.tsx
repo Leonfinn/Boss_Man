@@ -493,7 +493,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           <h1>Decisions</h1>
           <p className="sub">
             {open.length === 1 ? "1 decision waiting" : `${open.length} decisions waiting`}
-            {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, ranked by what they unblock.
+            {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
           </p>
           {elsewhere.length > 0 && (
             <p className="sub">
@@ -584,8 +584,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         )
       ) : (
         <>
-          <div className="formula">
-            <p>Newest first. The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
+          <details className="formula">
+            <summary>How the ranking works</summary>
+            <p>The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
             <ul className="score-legend">
               <li>
                 <span className="swatch" style={{ background: "var(--accent)" }} /> what it holds up: tasks it blocks, or 5 when an agent is paused until you answer
@@ -597,7 +598,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                 <span className="swatch" style={{ background: "#8a94a3" }} /> how long it has waited: 1 a day, up to 7
               </li>
             </ul>
-          </div>
+          </details>
           <ol className="queue">
             {shown.map((d) => {
               const k = kindOf(d);
@@ -862,6 +863,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                 </label>
                               );
                             })}
+                            <small className="muted">A reviewer you hire does code, security, infra or adversarial reviews once you name them in Settings › Reviews.</small>
                           </fieldset>
                         )}
                         {d.recommendedOption && (
