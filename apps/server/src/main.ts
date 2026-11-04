@@ -21,7 +21,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
+const { app, memory, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -78,7 +78,11 @@ leader.onDemote(() => bg.stopBackground());
 process.on("SIGUSR1", () => void leader.demote());
 process.on("SIGUSR2", () => void leader.promote());
 
+// Memory logging runs on every process, leader or standby (BOS-410), so it is not background work.
+memory.start();
+
 const shutdown = async () => {
+  memory.stop();
   await leader.stop();
   await bg.stopBackground();
   await semantic.drain(); // embed queued wiki pages instead of dropping them
