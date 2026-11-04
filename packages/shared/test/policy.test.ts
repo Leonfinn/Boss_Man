@@ -39,6 +39,16 @@ describe("evaluatePermission defaults", () => {
     }
   });
 
+  it("does not take another server named bossman_… for Boss Man's own (BOS-301)", () => {
+    for (const title of ["mcp__bossman_crawl__fetch", "mcp_bossman_crawl_fetch", "mcp.bossman_crawl.fetch"]) {
+      expect(isBossmanTool(title), title).toBe(false);
+      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, title).toBe("owner");
+    }
+    const lookalike = { title: "mcp__bossman_crawl__fetch", kind: "other", rawInput: { url: "http://192.168.68.1" } };
+    expect(evaluatePermission(lookalike, [{ name: "Allow every bossman tool", match: { titlePattern: "^mcp__bossman" }, outcome: "allow" }]).outcome).toBe("deny");
+    for (const title of ["mcp__bossman__wiki", "mcp.bossman.wiki", "bossman_wiki", "Tool: bossman/wiki"]) expect(isBossmanTool(title), title).toBe(true);
+  });
+
   it("sends destructive commands to the owner", () => {
     for (const c of ["rm -rf /srv/precious", "rm -fr ../build", "rm --recursive --force /home/node", "rm -v -r /srv/x", "rm /srv/x -rf", "find /srv -delete", "find /srv -type f -exec rm {} +", "sudo mkfs.ext4 /dev/sda1", "docker system prune -a", "git push origin main --force", "zfs destroy tank/apps"]) {
       expect(evaluatePermission(exec(c), [])).toMatchObject({ outcome: "owner" });

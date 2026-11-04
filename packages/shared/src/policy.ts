@@ -46,7 +46,7 @@ export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to 
 
 // Boss Man's own tool server is named "bossman"; each harness spells the tool title its own way: Claude Code mcp__bossman__wiki,
 // Codex mcp.bossman.wiki or "Tool: bossman/wiki", OpenCode bossman_wiki, other adapters "bossman: wiki". Matched case-insensitively.
-export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2})?bossman(?:__|_|\.|:\s*|/|\s+-\s+)\S`;
+export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2}bossman(?:__|\.|:\s*|/|\s+-\s+)|bossman(?:__|_|\.|:\s*|/|\s+-\s+))\S`;
 const BOSSMAN_TOOL = new RegExp(BOSSMAN_TOOL_PATTERN, "i");
 
 /** True when a tool title names a tool of Boss Man's own server, in any harness's spelling. */
