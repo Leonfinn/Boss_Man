@@ -54,7 +54,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     // full for an hour so new runs go to the next account instead of failing there again (BOS-463). A
     // real reading from the account replaces this as soon as one arrives.
     if (ended?.fundingSourceId && outcome && /weekly limit/i.test(outcome)) {
-      await funding.recordQuota(ended.fundingSourceId, [{ window: "seven_day", utilization: 1, resetsAt: new Date(at.getTime() + 60 * 60_000), status: "rejected", overageInUse: false }], at);
+      await funding.recordQuota(ended.fundingSourceId, [{ provider: "anthropic", window: "seven_day", utilization: 1, resetsAt: new Date(at.getTime() + 60 * 60_000), status: "rejected", overageInUse: false }], at);
     }
     // A finished run's own questions are moot: its permission requests and stall alerts leave the
     // queue, and a stall alert says why it went (BOS-217): the run ended by itself.

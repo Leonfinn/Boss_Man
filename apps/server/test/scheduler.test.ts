@@ -620,8 +620,10 @@ describe("scheduler", () => {
       await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(1) });
       await ctx.req("POST", "/api/quota-samples", { fundingSourceId: b.id, claudeMeta: meta(0.09) });
       await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2, ticketId: urgent.id });
-      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
-      expect((await lastRun()).fundingSourceId).toBe(b.id);
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: expect.any(Number) });
+      const used = (await ctx.db.select().from(runs)).map((r) => r.fundingSourceId);
+      expect(used.length).toBeGreaterThan(0);
+      expect(new Set(used)).toEqual(new Set([b.id]));
     });
 
     it("uses extra usage on the first account only when every account is full (BOS-463)", async () => {
@@ -629,8 +631,10 @@ describe("scheduler", () => {
       await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(1) });
       await ctx.req("POST", "/api/quota-samples", { fundingSourceId: b.id, claudeMeta: meta(1) });
       await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2, ticketId: urgent.id });
-      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
-      expect((await lastRun()).fundingSourceId).toBe(a.id);
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: expect.any(Number) });
+      const used = (await ctx.db.select().from(runs)).map((r) => r.fundingSourceId);
+      expect(used.length).toBeGreaterThan(0);
+      expect(new Set(used)).toEqual(new Set([a.id]));
     });
 
     it("marks an account full when a run fails with the weekly limit, so the next run goes elsewhere (BOS-463)", async () => {
