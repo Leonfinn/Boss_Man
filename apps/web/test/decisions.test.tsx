@@ -83,8 +83,11 @@ describe("decision queue", () => {
     expect(screen.getByLabelText("Score 52")).toBeTruthy();
     expect(screen.getByRole("link", { name: "APP-3 Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
     expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
+    // The legend folds away behind one line (BOS-245), so it opens before it can be read.
+    fireEvent.click(screen.getByText("How the ranking works"));
     expect(screen.getByText(/what it holds up: tasks it blocks, or 5 when an agent is paused/)).toBeTruthy();
-    expect(screen.getByText(`1 decision waiting in ${company.name}, ranked by what they unblock.`, { exact: false })).toBeTruthy();
+    // The list really is newest first, so the subtitle says so rather than "ranked by what they unblock".
+    expect(screen.getByText(`1 decision waiting in ${company.name}, newest first.`, { exact: false })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Raise to $80" }));
     await waitFor(() => expect(screen.getByText("Answered: Raise to $80.")).toBeTruthy());
