@@ -10,7 +10,8 @@ describe("links to wiki pages from a ticket", () => {
   it("turns [[slug]] in an agent's message into a link to the company's wiki page", () => {
     render(<p>{linked("The full list is on [[backlog-review]], see [[backlog-review#Top 10]].", "c1")}</p>);
     expect(screen.getByRole("link", { name: "backlog-review" }).getAttribute("href")).toBe("#/wiki/c1/backlog-review");
-    expect(screen.getByRole("link", { name: "backlog-review#Top 10" }).getAttribute("href")).toBe("#/wiki/c1/backlog-review");
+    // Chat and Markdown now keep the section the same way, landing on that heading (BOS-358).
+    expect(screen.getByRole("link", { name: "backlog-review#Top 10" }).getAttribute("href")).toBe("#/wiki/c1/backlog-review#Top 10");
   });
 
   it("keeps the page name on a full #/wiki/<company>/<slug> link, the way the wiki tool writes it (BOS-356)", () => {

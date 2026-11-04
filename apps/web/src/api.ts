@@ -60,7 +60,7 @@ export async function apiOnce<T>(path: string, init: { method?: string; body?: u
 
 // ---------- Shapes the screens use ----------
 
-export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; reviewKind?: ReviewKindName | null; template?: string | null; avatarAt?: string | null };
+export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; template?: string | null; avatarAt?: string | null };
 export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
@@ -81,7 +81,9 @@ export type Project = {
 };
 
 /** Review routing per risk tier (step 1): "ceo", "senior-dev" or an agent id; the plan column also takes "owner" and "none". */
-export type ReviewRule = { planApprover: string; reviewer: string; ownerSignoff: boolean; /** Extra reviews: a kind that is missing is off; "marked" is the agent marked as that kind's reviewer. */ kinds?: Partial<Record<ReviewKindName, string>> };
+/** A reviewer cell: "ceo", "senior-dev", one agent id, or several agent ids (each review goes to one of them). */
+export type ReviewerRef = string | string[];
+export type ReviewRule = { planApprover: string; reviewer: ReviewerRef; ownerSignoff: boolean; /** Extra reviews: a kind that is missing is off; "marked" is a legacy value the migration replaced. */ kinds?: Partial<Record<ReviewKindName, ReviewerRef>> };
 export type ReviewKindName = "security" | "infra" | "adversarial";
 export const REVIEW_KINDS: ReviewKindName[] = ["security", "infra", "adversarial"];
 export type ReviewPolicy = Record<Risk, ReviewRule>;
