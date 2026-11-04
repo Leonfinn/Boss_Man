@@ -621,7 +621,21 @@
     {
       "idx": 88,
       "version": "7",
-      "when": 1793661500000,
+      "when": 1793690000000,
+      "tag": "0099_claude_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1793696000000,
+      "tag": "0089_progress_contract",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1793698000000,
       "tag": "0098_standing_rules",
       "breakpoints": true
     }

@@ -23,13 +23,14 @@ import { modelProbeService } from "./services/model-probe.js";
 import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
-import { secretGrants, watchdogActions } from "./db/schema.js";
+import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -320,6 +321,8 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   decisionsSvc.setMaintenanceHook(maintenance);
+  const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
+  decisionsSvc.setPermissionLog(permLog);
   const serverStatus = serverStatusService(db, {
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
@@ -331,6 +334,7 @@ export async function buildApp(opts: AppOptions) {
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
     },
     errors: errorBuffer,
+    permissions: (companyId: string) => permLog.summary(companyId),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
     commit: process.env.BOSSMAN_COMMIT || "dev",
@@ -407,6 +411,8 @@ export async function buildApp(opts: AppOptions) {
       void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA relay failed"));
       void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "ticket reply failed"));
     }
+    // A tool call the agent says was refused (BOS-306).
+    if (event.type === "run.update" && (event.update as { refused?: unknown } | null)?.refused === true) void decisionsSvc.onRefusedCall(runner, event.runId, ((event.update as { title?: unknown }).title as string | null) ?? null).catch((err) => app.log.error({ err, companyId: runner.companyId }, "refused call log failed"));
     if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error, !!event.interrupted).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chat end failed"));
     if (event.type === "run.ended") void pa.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA fail-open failed"));
     // A subscription window set to run out before it resets: tell the owner once (R78).
@@ -1071,6 +1077,8 @@ export async function buildApp(opts: AppOptions) {
       monthlyGrantUsd: z.number().nonnegative().optional(),
       cycleAnchor: z.coerce.date().optional(),
       secretId: Uuid.optional(),
+      /** Place in the owner's ordered list of Claude accounts (1 = first); null takes it out (BOS-383). */
+      fallbackRank: z.number().int().min(1).max(10).nullable().optional(),
       /** Hold routine work at this share of a subscription window (BOS-227). */
       quotaHoldAt: z.number().min(0.8).max(1).optional(),
       /** Whether extra usage may be spent: pause (default), urgent only, or all work. */
@@ -1083,8 +1091,19 @@ export async function buildApp(opts: AppOptions) {
       if (problem) ctx.addIssue({ code: "custom", path: ["provider"], message: problem });
     });
 
+    /** A ranked Claude account must be an Anthropic subscription, and its login a Claude setup-token secret (BOS-383). */
+    const rankProblem = async (kind: string, provider: string, rank: number | null | undefined, secretId: string | null | undefined) => {
+      if (rank == null) return null;
+      if (kind !== "subscription" || provider !== "anthropic") return "Only a Claude subscription can be put in the list of accounts.";
+      if (!secretId) return rank > 1 ? "Every account after the first needs its own Claude setup-token as its login." : null;
+      const [s] = await db.select({ kind: secretsTable.kind }).from(secretsTable).where(eq(secretsTable.id, secretId));
+      return s?.kind === "claude_oauth_token" ? null : "Pick a Claude setup-token secret as this account's login.";
+    };
+
     owner.post("/api/funding-sources", async (req, reply) => {
       const b = FundingInput.parse(req.body);
+      const bad = await rankProblem(b.kind, b.provider, b.fallbackRank, b.secretId);
+      if (bad) return reply.code(400).send({ error: "invalid_request", message: bad });
       const row = await funding.create({
         name: b.name,
         kind: b.kind,
@@ -1092,6 +1111,7 @@ export async function buildApp(opts: AppOptions) {
         monthlyGrantMicros: b.monthlyGrantUsd != null ? usdToMicros(b.monthlyGrantUsd) : null,
         cycleAnchor: b.cycleAnchor ?? null,
         secretId: b.secretId ?? null,
+        fallbackRank: b.fallbackRank ?? null,
         quotaHoldAt: b.quotaHoldAt ?? 0.95,
         quotaOverage: b.quotaOverage ?? "pause",
         quotaDisabledWindows: b.quotaDisabledWindows ?? [],
@@ -1111,6 +1131,8 @@ export async function buildApp(opts: AppOptions) {
       if (clash) return reply.code(409).send({ error: "already_exists", message: `There's already a funding source called ${b.name}.` });
       const problem = fundingComboError(b.kind ?? cur.kind, b.provider ?? cur.provider);
       if (problem) return reply.code(400).send({ error: "invalid_request", message: problem });
+      const badRank = await rankProblem(b.kind ?? cur.kind, b.provider ?? cur.provider, b.fallbackRank === undefined ? cur.fallbackRank : b.fallbackRank, b.secretId ?? cur.secretId);
+      if (badRank) return reply.code(400).send({ error: "invalid_request", message: badRank });
       const row = await funding.update(id, {
         name: b.name,
         kind: b.kind,
@@ -1118,6 +1140,7 @@ export async function buildApp(opts: AppOptions) {
         monthlyGrantMicros: b.monthlyGrantUsd != null ? usdToMicros(b.monthlyGrantUsd) : undefined,
         cycleAnchor: b.cycleAnchor,
         secretId: b.secretId,
+        fallbackRank: b.fallbackRank,
         quotaHoldAt: b.quotaHoldAt,
         quotaOverage: b.quotaOverage,
         quotaDisabledWindows: b.quotaDisabledWindows,
@@ -1815,13 +1838,16 @@ export async function buildApp(opts: AppOptions) {
       if (blockedUntilReason && !blockedUntil) throw new WorkError(422, "Give the date and time you are waiting for along with the reason.");
       if (blockedUntil && new Date(blockedUntil).getTime() <= Date.now()) throw new WorkError(422, "The blocked-until time must be in the future.");
       if (blockedUntil && new Date(blockedUntil).getTime() > Date.now() + BLOCKED_UNTIL_MAX_MS) throw new WorkError(422, `The blocked-until time can be at most ${BLOCKED_UNTIL_MAX_DAYS} days ahead.`);
+      // Moving a ticket to the state it is already in must not re-run what entering that state does (DR-010).
+      const [before] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
+      const sameState = before?.state === state;
       const moved = await work.updateTicket(id, { state, ...(state === "blocked" ? { blockedUntil: blockedUntil ? new Date(blockedUntil) : null, blockedUntilReason: blockedUntil ? blockedUntilReason || null : null } : {}) });
       const label = ({ backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" } as Record<string, string>)[state] ?? state;
       await record(db, { companyId: moved.companyId, ticketId: id, kind: "state", summary: `Owner moved it to ${label}`, at: new Date() });
       // Nobody should start work on a ticket the owner has parked or closed.
       if (state === "done" || state === "backlog" || state === "blocked")
         await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
-      if (state === "review") await scheduler.onTicketReview(id, null);
+      if (state === "review" && !sameState) await scheduler.onTicketReview(id, null);
       if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
       return moved;
     });
