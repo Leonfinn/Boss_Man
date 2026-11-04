@@ -181,3 +181,63 @@ describe("wiki and ticket outputs (R69)", () => {
     expect(c.starts().some((s) => s.agentId === c.worker.id)).toBe(false);
   });
 });
+
+describe("wiki shrink guard (BOS-430)", () => {
+  const long = ["## Releases", ...Array.from({ length: 30 }, (_, i) => `- v${i}: ${"x".repeat(100)}`), "## Cock-ups", "- 2026-11-03: an entry"].join("\n");
+
+  it("refuses a write that would wipe most of a page or a heading, and names what would go", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/wiki`;
+    await c.wiki.write(c.company.id, { title: "Index", body: long, agentId: c.worker.id, runId: null });
+    const wiped = await c.req("PUT", `${base}/index`, { title: "Index", body: "## Releases\n\n- v30: one entry" });
+    expect(wiped.statusCode).toBe(409);
+    expect(wiped.json().message).toContain("would replace a page of");
+    expect(wiped.json().message).toContain('"Cock-ups"');
+    expect(wiped.json().message).toContain("append");
+    // The page and its history are unchanged: the guard runs before the write.
+    const page = (await c.req("GET", `${base}/index`)).json();
+    expect(page.body).toBe(long);
+    expect(page.revisions).toHaveLength(1);
+  });
+
+  it("lets the same rewrite through with replace: true, and a small edit needs no flag", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/wiki`;
+    await c.wiki.write(c.company.id, { title: "Index", body: long, agentId: c.worker.id, runId: null });
+    // Dropping 200+ characters but no heading and under a quarter of the text is a normal edit.
+    const small = long.replace("- v0: ", "- v0 (edited): ");
+    expect((await c.req("PUT", `${base}/index`, { title: "Index", body: small })).statusCode).toBe(200);
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "t", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    const denied = textOf(await client.callTool({ name: "wiki", arguments: { action: "write", slug: "index", title: "Index", body: "## Releases\n\n- v30: one entry", ticketId: t.id } }));
+    expect(denied).toContain("would replace a page of");
+    const replaced = textOf(await client.callTool({ name: "wiki", arguments: { action: "write", slug: "index", title: "Index", body: "## Releases\n\n- v30: one entry", replace: true, ticketId: t.id } }));
+    expect(replaced).toContain("Updated");
+    await client.close();
+  });
+
+  it("refuses section and offset on write instead of ignoring them", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "t", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    await c.wiki.write(c.company.id, { title: "Log", body: "## Entries\n\n- one", agentId: c.worker.id, runId: null });
+    const withSection = textOf(await client.callTool({ name: "wiki", arguments: { action: "write", slug: "log", title: "Log", body: "- two", section: "Entries" } }));
+    expect(withSection).toContain("no section argument");
+    const withOffset = textOf(await client.callTool({ name: "wiki", arguments: { action: "write", slug: "log", title: "Log", body: "- two", offset: 0 } }));
+    expect(withOffset).toContain("no offset argument");
+    await client.close();
+    expect((await c.req("GET", `/api/companies/${c.company.id}/wiki/log`)).json().body).toBe("## Entries\n\n- one");
+  });
+
+  it("refuses a replace on another agent's page unless the caller is the CEO", async () => {
+    const c = (ctx = await setup());
+    // The worker created the page; a different agent may not replace it, but the CEO may.
+    await c.wiki.write(c.company.id, { title: "Index", body: long, agentId: c.worker.id, runId: null });
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Second" })).json() as { id: string };
+    await expect(c.wiki.write(c.company.id, { slug: "index", title: "Index", body: "## Releases\n\n- v30", replace: true, agentId: other.id, runId: null })).rejects.toThrow(/another agent created/);
+    const [ceo] = await c.db.select().from(agents).where(and(eqq(agents.companyId, c.company.id), eqq(agents.role, "ceo")));
+    await expect(c.wiki.write(c.company.id, { slug: "index", title: "Index", body: "## Releases\n\n- v30", replace: true, isCeo: true, agentId: ceo!.id, runId: null })).resolves.toMatchObject({ created: false });
+  });
+});

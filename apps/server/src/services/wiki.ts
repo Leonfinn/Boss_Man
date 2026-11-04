@@ -87,6 +87,35 @@ export function findSection(sections: Section[], wanted: string) {
   return sections.find((s) => s.path.toLowerCase() === w) ?? sections.find((s) => s.heading.toLowerCase() === w);
 }
 
+/** The headings a body has, in order, ignoring "intro" (text before the first heading). */
+export const headingsOf = (body: string) => splitSections(body).filter((s) => s.level > 0);
+
+/** How much of a page a rewrite may remove before it needs `replace: true` (BOS-430). */
+export const SHRINK_FRACTION = 0.25;
+
+/**
+ * Why a write that replaces a page's body is refused without `replace: true` (BOS-430): it would
+ * remove more than a quarter of the text, or drop a heading the page has now. Null when it's safe
+ * (a grown or barely-changed page, or a brand-new one). The message says the sizes and the headings,
+ * so an agent can fix the call instead of re-sending the whole page.
+ */
+export function shrinkRefusal(before: string, after: string): string | null {
+  if (after.length >= before.length) return null;
+  const removed = before.length - after.length;
+  const afterHeadings = new Set(headingsOf(after).map((h) => h.heading.trim().toLowerCase()));
+  const gone = headingsOf(before).filter((h) => !afterHeadings.has(h.heading.trim().toLowerCase()));
+  const tooSmall = removed > Math.max(200, before.length * SHRINK_FRACTION);
+  if (!tooSmall && !gone.length) return null;
+  const pct = before.length ? Math.round((removed / before.length) * 100) : 0;
+  const parts = [
+    `This write would replace a page of ${before.length.toLocaleString("en-GB")} characters with ${after.length.toLocaleString("en-GB")}`,
+    tooSmall ? ` (${removed.toLocaleString("en-GB")} characters, ${pct}%, removed)` : "",
+    gone.length ? `, and drop ${gone.length === 1 ? "the heading" : "these headings"}: ${gone.map((h) => `"${h.heading}"`).join(", ")}` : "",
+    ".",
+  ].join("");
+  return `${parts} To add to a long page, use append. If you really mean to replace it, an agent may send the whole new body with replace: true (only the CEO or the owner may do that on a page someone else created).`;
+}
+
 /** [[slug]] and [[slug#Section heading]] in a page body: the slugs it links to. */
 export const linkedSlugs = (body: string) => [...new Set([...body.matchAll(/\[\[([^\]#|]+?)(?:#[^\]]*)?\]\]/g)].map((m) => m[1]!.trim()))];
 
@@ -349,7 +378,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
      * updated; a folder that differs from the page's moves it, which changes its address. With
      * a ticket, the page is linked to it as something the ticket produced.
      */
-    async write(companyId: string, input: { slug?: string; folder?: string; title: string; body: string; ticketId?: string | null } & Author) {
+    async write(companyId: string, input: { slug?: string; folder?: string; title: string; body: string; ticketId?: string | null; replace?: boolean; isCeo?: boolean } & Author) {
       const title = input.title.trim();
       if (!title) throw new WikiError(400, "A page needs a title.");
       if (input.body.length > MAX_BODY) throw new WikiError(400, `A page can be at most ${MAX_BODY.toLocaleString("en-GB")} characters.`);
@@ -375,6 +404,23 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       // only change through a lesson decision, so any other rewrite of the brief passes over it.
       if (existing && /^brief-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existing.slug) && lessonsSection(existing.body) && lessonsSection(input.body) !== lessonsSection(existing.body))
         throw new WikiError(409, "The Lessons section of a project brief is owner-approved and can't be edited here; leave it exactly as it is.");
+      // (BOS-430) No agent write may wipe a long page or its headings by accident: a rewrite that
+      // removes a lot of text or any heading needs replace: true, and only the CEO or the owner may
+      // replace a page someone else created.
+      if (existing) {
+        const refusal = input.replace ? null : shrinkRefusal(existing.body, input.body);
+        if (refusal) throw new WikiError(409, refusal);
+        if (input.replace && !input.isCeo && input.agentId) {
+          const [first] = await db
+            .select({ agentId: wikiRevisions.agentId })
+            .from(wikiRevisions)
+            .where(eq(wikiRevisions.pageId, existing.id))
+            .orderBy(asc(wikiRevisions.createdAt))
+            .limit(1);
+          const creator = first?.agentId ?? null;
+          if (creator && creator !== input.agentId) throw new WikiError(403, "Only the CEO or the owner can replace a page another agent created. Add to it with append, or ask the CEO to replace it.");
+        }
+      }
       let p = existing;
       if (!p) {
         [p] = await db.insert(wikiPages).values({ companyId, slug, folder, title, body: input.body, ticketId: input.ticketId ?? null, updatedByAgentId: input.agentId }).returning();

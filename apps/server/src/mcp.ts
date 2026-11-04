@@ -1667,7 +1667,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "wiki",
     {
       description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). write always sets the whole page: it takes no section or offset (those are for read). A write to an existing page that would remove more than about a quarter of its text, or any of its headings, is refused unless you pass replace: true; only the CEO or the owner may replace a page another agent created. Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
       inputSchema: {
         action: z.enum(["list", "read", "write", "attach"]),
         q: z.string().max(200).optional(),
@@ -1681,6 +1681,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         url: z.string().max(2000).optional(),
         section: z.string().max(300).optional(),
         offset: z.number().int().min(0).optional(),
+        replace: z.boolean().optional(),
       },
     },
     async (input) => {
@@ -1725,11 +1726,15 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           }
           case "write": {
             if (!input.title || input.body === undefined) return fail("Give a title and a body.");
+            // section and offset are for read: write always sets the whole page, so ignore them at your peril (BOS-430).
+            if (input.section !== undefined) return fail("write has no section argument: it replaces the whole page. To add an entry under a heading, use append; to read one section, use read with section.");
+            if (input.offset !== undefined) return fail("write has no offset argument: it replaces the whole page. To read the page in parts, use read with offset.");
             if (input.ticketId) {
               const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, input.ticketId, scope.agentId);
               if (reviewWrite) return fail(reviewWrite);
             }
-            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, ...by });
+            const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, replace: input.replace, isCeo: me?.role === "ceo", ...by });
             const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
             return text(`${r.created ? "Created" : "Updated"} ${link}${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
           }
