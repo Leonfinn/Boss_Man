@@ -2,6 +2,7 @@
 // agents raise, engagement offers, stale blockers and stalled runs. Answering one resumes
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
 import { randomUUID } from "node:crypto";
+import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -288,6 +289,30 @@ export async function clearMergeCards(db: Db, ticketId: string, withdrawal: With
   }
   // An answered or withdrawn card keeps its key (the column is unique), which would swallow a fresh insert silently (BOS-362).
   await db.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, `merge-stuck:${ticketId}`), ne(decisions.status, "open")));
+  return cleared;
+}
+
+/**
+ * One open sign-off card per ticket (BOS-446): a new review round closes the older "Merge it, or send it back?"
+ * cards, and the ticket's wait on them. Returns how many were closed.
+ */
+export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Withdrawal) {
+  const rows = await db
+    .select()
+    .from(decisions)
+    .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`));
+  let cleared = 0;
+  for (const r of rows) {
+    const [done] = await db
+      .update(decisions)
+      .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(r.context as object), withdrawn: withdrawal } })
+      .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (done) {
+      cleared++;
+      await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, r.id));
+    }
+  }
   return cleared;
 }
 
@@ -613,6 +638,8 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
 }
 
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}, workspaceRoot?: string) {
+  // The record of permission decisions (BOS-306); app.ts swaps in one that writes log lines.
+  let permLog: PermissionLog = createPermissionLog();
   let wake: WakeHook | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
@@ -1146,17 +1173,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput };
       // The owner chat may use Boss Man's own (board) tools and nothing else.
-      const [asking] = await db.select({ purpose: runs.purpose }).from(runs).where(eq(runs.id, event.runId));
-      const { outcome, rule } =
+      const [asking] = await db.select({ purpose: runs.purpose, agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+      const { outcome, rule, position } =
         asking?.purpose === "chat"
           ? isBossmanCall(info)
-            ? { outcome: "allow" as const, rule: "The owner chat's board tools" }
-            : { outcome: "deny" as const, rule: "The owner chat has board tools only" }
+            ? { outcome: "allow" as const, rule: "The owner chat's board tools", position: 0 }
+            : { outcome: "deny" as const, rule: "The owner chat has board tools only", position: 0 }
           : evaluatePermission(info, await rulesFor(runner.companyId));
+      // tier is where a card ended up (the CEO's own requests, or a paused CEO, go to the owner); outcome is what the rule said.
+      const record = (decisionId: string | null, tier: string = outcome, ruleName: string = rule) =>
+        permLog.decision({ companyId: runner.companyId, runId: event.runId, agentId: asking?.agentId ?? null, ticketId: asking?.ticketId ?? null, title: event.title, kind: event.kind, rule: ruleName, position, outcome, tier, decisionId });
       // OpenCode asks twice for one shell command that reaches outside the checkout: first for the folder, then for the command. If the owner or CEO has already allowed this tool call, the second ask is not a new question. The rules still apply first, so a denial stands.
       if (outcome !== "allow" && outcome !== "deny" && event.toolCallId) {
         const earlier = await allowedSameToolCall(event);
-        if (earlier && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) return { outcome: "allow" as const, rule: `Same tool call as decision ${earlier}, already allowed`, decisionId: null };
+        if (earlier && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) {
+          record(null, "allow", `Same tool call as decision ${earlier}, already allowed`);
+          return { outcome: "allow" as const, rule: `Same tool call as decision ${earlier}, already allowed`, decisionId: null };
+        }
       }
       // BOS-376: the same tool call can come back as a new request (a harness retry, or a second run of the
       // same call). It is the same question: the Allow once this run already got settles it, and a Deny this
@@ -1176,16 +1209,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           const note = `The same request was asked again as request ${event.requestId}: one answer covers both.`;
           const question = waiting.question.includes(note) ? waiting.question : `${waiting.question}\n${note}`;
           await db.update(decisions).set({ context: { ...ctx, repeats }, question }).where(eq(decisions.id, waiting.id));
+          record(waiting.id, "ceo", "A repeat of a card already waiting");
           return { outcome: "ceo" as const, rule: "A repeat of a card already waiting", decisionId: waiting.id };
         }
         const decided = await repeatAnswer(event, fingerprint);
         if (decided.allow && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) {
           const [shown] = await db.select({ context: decisions.context }).from(decisions).where(eq(decisions.id, decided.allow));
           await db.update(decisions).set({ context: { ...(shown?.context as object), settledByRepeat: { sameAs: decided.allow, at: now().toISOString() } } as DecisionContext }).where(eq(decisions.id, decided.allow));
+          record(null, "allow", `Same request as decision ${decided.allow}, already allowed`);
           return { outcome: "allow" as const, rule: `Same request as decision ${decided.allow}, already allowed`, decisionId: null };
         }
       }
       if (outcome === "allow" || outcome === "deny") {
+        record(null);
         if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
         // The runner dropped off between sending the request and getting the verdict. The event
         // won't be applied again when it's resent, so keep the verdict as an answered row that
@@ -1317,6 +1353,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           `If you don't answer within ${CEO_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
         ].join("\n").slice(0, 4000));
       } else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
+      record(row?.id ?? null, tier);
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
@@ -1429,6 +1466,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setSelfDeployHook(hook: SelfDeployHook) {
       selfDeploy = hook;
+    },
+
+    setPermissionLog(l: PermissionLog) {
+      permLog = l;
+    },
+
+    /** A runner reported a tool call that failed with "User refused permission" (BOS-306): log it with the run, agent and ticket. */
+    async onRefusedCall(runner: { companyId: string }, runId: string, title: string | null) {
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
+      permLog.refusedCall({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
     },
 
     setMaintenanceHook(hook: MaintenanceHook) {
@@ -2136,6 +2183,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         const [permRun] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, ctx.runId));
         delivered = send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: allowed ? "allow" : "deny" });
+        const [asked] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, ctx.runId));
+        permLog.answer({ companyId: d.companyId, runId: ctx.runId, agentId: asked?.agentId ?? null, ticketId: asked?.ticketId ?? null, decisionId: id, answeredBy: extra.settledBy ? "ceo" : "owner", answer });
         if (!delivered && permRun?.endedAt) {
           // The agent has finished, so there is nothing to deliver to: record that and don't alarm the owner (BOS-342).
           await db.update(decisions).set({ context: { ...ctx, ...(repeatsNow ? { repeats: repeatsNow } : {}), delivered: "run_ended" } }).where(eq(decisions.id, id));
@@ -2267,6 +2316,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+        // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.
+        await clearMergeCards(db, ctx.ticketId, { by: "system", note: "The owner's sign-off was answered, so this retry card is no longer needed.", at: new Date().toISOString() });
         if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner");
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "check_stuck") {

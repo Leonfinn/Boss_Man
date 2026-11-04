@@ -1,0 +1,23 @@
+# EXAMPLE, OPTIONAL: memory limits for tool servers that run a headless browser (crawl4ai, scrapling, ...).
+# Boss Man does not ship or start these; you register them in Settings and run them yourself. A tool server
+# with no limit can take the whole host's memory (BOS-392). Copy the service you use into your own compose
+# file, or add this file to COMPOSE_FILE and replace the placeholder image with the one you run.
+# Each service must keep a mem_limit; apps/server/test/compose-memory-limits.test.ts checks that.
+#   BOSSMAN_TOOLSERVER_MEMORY   per tool server, default 2g
+#   BOSSMAN_TOOLSERVER_PIDS     processes and threads, default 512
+# Already running by hand? `docker update --memory 2g --memory-swap 2g --pids-limit 512 <container>`
+# applies a limit without recreating it (it does not survive a recreate: put it in compose).
+services:
+  tool-server-example:
+    image: ${BOSSMAN_TOOLSERVER_IMAGE:?Set BOSSMAN_TOOLSERVER_IMAGE to the tool server image you run}
+    restart: unless-stopped
+    profiles: ["tool-servers"]
+    mem_limit: ${BOSSMAN_TOOLSERVER_MEMORY:-2g}
+    memswap_limit: ${BOSSMAN_TOOLSERVER_MEMORY:-2g}
+    pids_limit: ${BOSSMAN_TOOLSERVER_PIDS:-512}
+    # Browsers need more than Docker's default 64m of shared memory.
+    shm_size: ${BOSSMAN_TOOLSERVER_SHM:-512m}
+    # If the host runs out anyway, this goes before the server, database and proxy.
+    oom_score_adj: 500
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]

@@ -176,14 +176,10 @@ describe("an identical repeat in the same run is settled by the Allow once (BOS-
   });
 });
 
-describe("a repeat never reuses an Allow once for a different address (BOS-376 security review)", () => {
-  // A company rule sends every web fetch to the owner, so a public fetch raises a card (otherwise the
-  // default policy allows reads/fetches outright and there is nothing to reuse). The home-network block is
-  // checked before any rule, so a private fetch is always a deny.
-  beforeEach(async () => {
-    await ctx.req("POST", "/api/policy-rules", { companyId: ctx.companyId, name: "Every fetch asks", match: { kinds: ["fetch"] }, outcome: "owner" });
-  });
-
+describe("a public fetch is a built-in allow while a private one is always denied (BOS-376, BOS-307)", () => {
+  // BOS-307 (DR-001): a company routing rule only fires for a request that would otherwise ask, so it can no
+  // longer put a card on an ordinary public fetch (a built-in allow). The home-network block is still row 1,
+  // checked before any rule, so a private fetch is always a deny however an earlier public fetch was answered.
   const fetchAsk = async (url: string) => {
     const requestId = randomUUID();
     await ctx.emit({ type: "run.permission_request", runId: ctx.runId, requestId, title: "crawl4ai", kind: "fetch", rawInput: { url }, optionKinds: ["allow_once", "reject_once"] });
@@ -191,30 +187,25 @@ describe("a repeat never reuses an Allow once for a different address (BOS-376 s
     return { d, requestId };
   };
 
-  it("a lone private-network fetch is denied", async () => {
-    const probe = await fetchAsk("http://192.168.68.67/admin");
-    expect(probe.d).toBeUndefined();
-    expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: probe.requestId, verdict: "deny" }));
-  });
-
-  it("a private-network fetch after an Allow once for a public fetch is denied, not allowed", async () => {
+  it("a public fetch is a built-in allow and a private one is still denied, not allowed", async () => {
     const pub = await fetchAsk("https://example.com/page");
-    expect(pub.d).toBeDefined();
-    await ctx.decisions.answer(pub.d!.id, "Allow once");
+    // A public fetch never raises a card now: the built-in allow covers it (row 6).
+    expect(pub.d).toBeUndefined();
+    expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: pub.requestId, verdict: "allow" }));
     ctx.sent.length = 0;
     const probe = await fetchAsk("http://192.168.68.67/admin");
+    expect(probe.d).toBeUndefined();
     expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: probe.requestId, verdict: "deny" }));
     expect(ctx.sent).not.toContainEqual(expect.objectContaining({ requestId: probe.requestId, verdict: "allow" }));
   });
 
-  it("a private-network fetch riding on an open public card is denied", async () => {
+  it("a private-network fetch is denied even while a public fetch was just allowed", async () => {
     const pub = await fetchAsk("https://example.com/page");
-    expect(pub.d).toBeDefined();
+    expect(pub.d).toBeUndefined();
     ctx.sent.length = 0;
-    // The private fetch arrives while the public card is still open: it must be its own deny, not ride on it.
+    // The private fetch arrives right after: it must be its own deny, never allowed by the public allow.
     const probe = await fetchAsk("http://192.168.68.67/admin");
     expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: probe.requestId, verdict: "deny" }));
-    await ctx.decisions.answer(pub.d!.id, "Allow once");
     expect(ctx.sent).not.toContainEqual(expect.objectContaining({ requestId: probe.requestId, verdict: "allow" }));
   });
 });
