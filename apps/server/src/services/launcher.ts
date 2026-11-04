@@ -4,7 +4,7 @@
 import { readFile } from "node:fs/promises";
 import { eq, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { companies, mcpServers, settings } from "../db/schema.js";
+import { companies, mcpServers, runners, settings } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
 export type LauncherOptions = { url: string; keyFile: string };
@@ -128,6 +128,8 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     async stop(companyId: string) {
       const slug = await slugFor(companyId);
       await call("DELETE", `/runners/${slug}`);
+      // A deliberate stop is not an outage: forget when it was last seen so the runner watch stays quiet.
+      await db.update(runners).set({ lastSeenAt: null }).where(eq(runners.companyId, companyId));
       return { slug };
     },
 

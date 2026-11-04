@@ -105,4 +105,15 @@ describe("runner watch (BOS-467)", () => {
     await h.watch.step();
     expect(h.notes.filter((n) => n.level === "page")).toHaveLength(0);
   });
+
+  it("stays quiet for a runner the owner stopped (lastSeenAt cleared), even after a restart", async () => {
+    const s = await setup(["Alpha", "Beta"]);
+    await s.watch.step();
+    s.up.delete(s.rows[1]!.id);
+    await s.db.update(runners).set({ lastSeenAt: null }).where(eq(runners.id, s.rows[1]!.id));
+    s.advance(OFFLINE_REPORT_MS * 3);
+    await s.watch.step();
+    expect(s.notes.filter((n) => n.level === "page")).toHaveLength(0);
+    expect(s.alertsRaised).toHaveLength(0);
+  });
 });

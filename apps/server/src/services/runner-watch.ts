@@ -32,6 +32,7 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
   // shortcut: lives in this process; a restart starts the clock again, which only delays a notice by a few minutes.
   const offlineSince = new Map<string, number>();
   const told = new Set<string>();
+  const swept = new Set<string>(); // connected runners whose old cards were already checked once
   let boot: { at: number; expected: Set<string>; done: boolean } | null = null;
 
   const steps = (name: string) => `Open Settings > Server and runner, find ${name}'s runner and click "Reconnect runner" (or "Start runner" if it is stopped). Do not use "Update runners" for this. If it goes offline again, tell the CEO what the page says.`;
@@ -61,11 +62,19 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
       for (const r of rows) {
         if (deps.isConnected(r.id)) {
           offlineSince.delete(r.id);
-          await clear(r.id, r.name);
+          if (told.has(r.id) || !swept.has(r.id)) await clear(r.id, r.name);
+          swept.add(r.id);
+          continue;
+        }
+        // Stopped on purpose (the launcher stop clears lastSeenAt): not an outage.
+        if (!r.lastSeenAt) {
+          offlineSince.delete(r.id);
+          swept.delete(r.id);
           continue;
         }
         // Never seen in the last day and not expected: a runner nobody started is not an outage.
         if (!boot.expected.has(r.id) && !offlineSince.has(r.id) && !(r.lastSeenAt && t - r.lastSeenAt.getTime() < RECENT_MS)) continue;
+        swept.delete(r.id);
         if (!offlineSince.has(r.id)) offlineSince.set(r.id, t);
         if (hold || told.has(r.id)) continue;
         const since = offlineSince.get(r.id)!;
@@ -87,7 +96,7 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
       // The deploy check: said once, 5 minutes after this server started.
       if (!boot.done && !hold && t - boot.at >= DEPLOY_HEALTHY_MS) {
         boot.done = true;
-        const missing = rows.filter((r) => boot!.expected.has(r.id) && !deps.isConnected(r.id)).map((r) => r.name);
+        const missing = rows.filter((r) => boot!.expected.has(r.id) && r.lastSeenAt && !deps.isConnected(r.id)).map((r) => r.name);
         if (boot.expected.size === 0) return;
         if (!missing.length) await deps.notify({ companyId: null, level: "note", title: "Deploy healthy: every runner is back", body: `All ${boot.expected.size} runner${boot.expected.size === 1 ? "" : "s"} reconnected after the server started.`, link: "#/settings" });
         else await deps.notify({ companyId: null, level: "page", title: "Deploy not healthy: runners still offline", body: `Not back after ${DEPLOY_HEALTHY_MS / 60_000} minutes: ${missing.join(", ")}. ${missing.map((n) => steps(n)).join(" ")}`, link: "#/settings" });
