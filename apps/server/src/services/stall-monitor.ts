@@ -72,6 +72,7 @@ export function createStallMonitor(opts: StallMonitorOptions = {}): StallMonitor
   const log = opts.log ?? (() => {});
   const since = new Date().toISOString();
 
+  // lost on restart, harmless because it only lists this process's own requests in flight (diagnostics, never shared state).
   const open = new Map<object, { route: string; startedAt: number }>();
   const recent: Stall[] = [];
   const gcTotals: StallSummary["gc"] = {};
