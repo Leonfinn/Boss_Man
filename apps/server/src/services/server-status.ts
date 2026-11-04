@@ -10,6 +10,7 @@ import type { Db } from "../db/client.js";
 import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
 import type { ErrorBuffer } from "./error-buffer.js";
+import type { MemorySampler } from "./memory-sampler.js";
 
 export type ServerStatusDeps = {
   /** "leader", "standby" or "single" (leader.ts). */
@@ -29,6 +30,8 @@ export type ServerStatusDeps = {
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
+  /** Where this process's memory sits, server-wide like commit (memory-sampler.ts, BOS-410). */
+  memory?: Pick<MemorySampler, "status">;
   commit: string;
   startedAt: Date;
   now?: () => Date;
@@ -123,6 +126,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           commit: short(deps.commit),
           startedAt: deps.startedAt.toISOString(),
           uptimeSeconds: ageSeconds(deps.startedAt, at),
+          // This process only (the colour that answered), in MiB; no company data (BOS-410).
+          memory: deps.memory ? deps.memory.status() : null,
         },
         deploy: {
           enabled: !!deploy?.enabled,
