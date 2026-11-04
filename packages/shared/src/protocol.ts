@@ -49,6 +49,8 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     optionKinds: z.array(z.string()),
     /** Text the agent attached to the request, e.g. the plan when it asks to leave plan mode (R40). */
     detail: z.string().max(20_000).optional(),
+    /** The agent's id for the tool call, so two requests for one call (OpenCode asks for a folder, then the command) can be told apart from a repeat. */
+    toolCallId: z.string().max(200).optional(),
   }),
   z.object({
     type: z.literal("run.cost"),
@@ -154,7 +156,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1) }),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -203,6 +205,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
+    /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
+    bootId: z.string().max(100).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
   }),
   z.object({ type: z.literal("event"), entry: JournalEntry }),
@@ -251,8 +255,14 @@ export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boo
  * the answer a minute longer than both.
  */
 export const VERIFY_TIMEOUT_MS = 30 * 60_000;
-export const VERIFY_QUEUE_MAX_MS = 3 * 60 * 60_000;
-export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_MAX_MS + VERIFY_TIMEOUT_MS + 60_000;
+export const VERIFY_QUEUE_MAX_MS = 90 * 60_000;
+/**
+ * VERIFY_QUEUE_MAX_MS is a no-progress limit (BOS-370): the runner restarts it every time the check's place in the queue
+ * changes, so a long queue that keeps moving never trips it; scripts/check-all.sh gives up sooner (an hour) on its own.
+ * The server's wait is only a ceiling for a queue that moves for a very long time.
+ */
+export const VERIFY_QUEUE_CEILING_MS = 24 * 60 * 60_000;
+export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_CEILING_MS + VERIFY_TIMEOUT_MS + 60_000;
 /** What scripts/check-all.sh prints while it waits for a slot, and when it gets one; the runner starts the 30-minute clock at the second. */
 export const CHECK_QUEUED_MARKER = "check-all: waiting for a free check slot";
 export const CHECK_STARTED_MARKER = "check-all: slot taken, running the checks";
@@ -268,12 +278,20 @@ export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools:
 
 /** The outcome of merging a ticket's branch (R46). */
 export type MergeResult =
-  | { status: "merged" | "already_merged"; commit: string }
+  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number } }
+  | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
-  | { status: "uncommitted"; files: string[] };
+  | { status: "uncommitted"; files: string[] }
+  /** The merged journal would make drizzle skip a migration (BOS-360); `problems` ends with what to do. */
+  | { status: "migration_journal"; problems: string[] }
+  /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
+  | { status: "check_failed"; command: string; result: VerifyResult }
+  /** The target kept moving while its merged result was checked; nothing was pushed, try again. */
+  | { status: "main_moved" };
 
 /** Another open ticket whose unmerged commits a ticket's branch carries (BOS-130). */
-export type CarriedTicket = { ticketId: string; branch: string };
+/** `contained`: this ticket's branch holds the other branch's whole tip, so merging this one lands it too (BOS-372). */
+export type CarriedTicket = { ticketId: string; branch: string; contained?: boolean };
 
 /** The answer to workspace.carried: the other tickets whose unmerged commits this branch has. */
 export type CarriedResult = { carried: CarriedTicket[] };

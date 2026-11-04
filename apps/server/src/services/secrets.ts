@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { checkSecretFormat, normaliseSecret, secretHint, type SecretKind } from "@boss-man/shared";
 import { decryptSecret, encryptSecret, type MasterKey } from "../crypto.js";
 import type { Db } from "../db/client.js";
-import { agents, companies, deploys, deployTargets, runs, secretAccessLog, secretGrantAgents, secretGrants, secrets } from "../db/schema.js";
+import { agents, companies, deploys, deployTargets, fundingSources, runs, secretAccessLog, secretGrantAgents, secretGrants, secrets } from "../db/schema.js";
 
 /** A live check against the provider, e.g. a cheap authenticated call. */
 export type LiveValidator = (kind: SecretKind, value: string) => Promise<{ ok: boolean; message: string } | null>;
@@ -193,6 +193,19 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
       const granted = runId ? rows.filter((r) => !limited.has(r.grantId) || (!!run?.agentId && limited.get(r.grantId)!.includes(run.agentId))) : rows;
       const env: Record<string, string> = {};
       for (const r of granted) env[r.envName] = decryptSecret(master, r);
+      // A run the scheduler placed on one of the owner's Claude subscriptions carries that account's login instead of the company's default (BOS-383). Never logged; sent only to the runner.
+      const [chosen] = runId
+        ? await db
+            .select({ id: secrets.id, ciphertext: secrets.ciphertext, wrappedKey: secrets.wrappedKey })
+            .from(runs)
+            .innerJoin(fundingSources, eq(fundingSources.id, runs.fundingSourceId))
+            .innerJoin(secrets, eq(secrets.id, fundingSources.secretId))
+            .where(and(eq(runs.id, runId), eq(runs.companyId, companyId), eq(fundingSources.provider, "anthropic"), eq(fundingSources.kind, "subscription")))
+        : [];
+      if (chosen) {
+        env.CLAUDE_CODE_OAUTH_TOKEN = decryptSecret(master, chosen);
+        await db.insert(secretAccessLog).values({ grantId: null, secretId: chosen.id, companyId, runId: runId ?? null, purpose: "claude_account" });
+      }
       if (granted.length > 0) {
         await db.insert(secretAccessLog).values(
           granted.map((r) => ({ grantId: r.grantId, secretId: r.secretId, companyId, runId: runId ?? null, purpose: r.deployTargetId ? "deploy" : purpose })),

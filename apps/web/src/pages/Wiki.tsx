@@ -76,6 +76,49 @@ function Editor({ initial, folders, onSave, onCancel, saveLabel }: { initial: Dr
   );
 }
 
+/** An address whose page doesn't exist: say so plainly and offer a search, rather than an empty wiki (BOS-356). */
+function NotFound({ companyId, slug, go }: { companyId: string; slug: string; go: (to: string) => void }) {
+  const [q, setQ] = useState("");
+  const hits = usePoll(
+    (signal) => (q.trim() ? api<PageRow[]>(`/api/companies/${companyId}/wiki?q=${encodeURIComponent(q.trim())}`, { signal }) : Promise.resolve([])),
+    30_000,
+    `not-found/${companyId}/${q}`,
+  );
+  const found = hits.data ?? [];
+  const name = decodeURIComponent(slug) || slug;
+  return (
+    <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <h2 style={{ fontSize: 22, fontWeight: 600 }}>Page not found</h2>
+      <p className="muted">
+        There's no wiki page at <code>{name}</code>. It may have been deleted or renamed, or the link may be from another company.
+      </p>
+      <div className="field">
+        <label htmlFor="wiki-missing-q">Search the wiki</label>
+        <input id="wiki-missing-q" type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Titles and text" />
+      </div>
+      {q.trim() ? (
+        found.length ? (
+          <ul>
+            {found.map((p) => (
+              <li key={p.id} style={{ fontSize: 14 }}>
+                <a href={`#/wiki/${companyId}/${p.slug}`}>{p.title}</a> <small className="muted">{p.slug}</small>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="muted">No page matches "{q.trim()}".</p>
+        )
+      ) : (
+        <p>
+          <a href={`#/wiki/${companyId}`} onClick={() => go(`wiki/${companyId}`)}>
+            See all pages
+          </a>
+        </p>
+      )}
+    </article>
+  );
+}
+
 function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere }: { companyId: string; slug: string; section?: string; folders: string[]; go: (to: string) => void; onChanged: () => void; onNewHere: (folder: string) => void }) {
   const page = usePoll((signal) => api<PageDetail>(`/api/companies/${companyId}/wiki/${slug}`, { signal }), 30_000, `${companyId}/${slug}`);
   const [editing, setEditing] = useState(false);
@@ -113,7 +156,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   };
   const showOld = async (id: string) => setOld(await api<OldVersion>(`/api/companies/${companyId}/wiki-revisions/${id}`));
 
-  if (page.error) return <p className="error" role="alert">{page.error.status === 404 ? "There's no such page. It may have been deleted or renamed." : page.error.message}</p>;
+  if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} go={go} /> : <p className="error" role="alert">{page.error.message}</p>;
   if (!p) return null;
   if (editing) return <Editor initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
   return (

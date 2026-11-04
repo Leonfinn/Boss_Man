@@ -1,6 +1,6 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { and, eq, inArray, isNotNull, isNull, like, max, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, like, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
@@ -9,10 +9,17 @@ import { record } from "./activity.js";
 import { costEvents, decisions, engagements, runnerEvents, runners, runs, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
+/** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
+const RESTART_PULL_MAX = 20;
+const RESTART_PULL_COOLDOWN_MS = 10 * 60_000;
+
 type Runner = typeof runners.$inferSelect;
 export type CommandSender = (command: RunnerCommand) => boolean;
 
 export type PermissionHook = (runner: Runner, event: Extract<RunnerEvent, { type: "run.permission_request" }>) => Promise<unknown>;
+
+/** How long after a runner connects its queued runs are still starting up. */
+export const RUNNER_SETTLE_MS = 10 * 60_000;
 
 export function runnersService(db: Db, funding: ReturnType<typeof fundingService>) {
   let onPermission: PermissionHook | null = null;
@@ -29,6 +36,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   const connected = new Map<string, CommandSender>();
   // shortcut: per live socket; lost on restart, harmless because a runner sends its features again in hello.
   const features = new Map<string, string[]>();
+  // shortcut: when each runner last connected; lost on a server restart, which only makes "settling" read false.
+  const connectedAt = new Map<string, number>();
 
   /** Marks a run ended and logs it. */
   async function markEnded(runId: string, at: Date, outcome: string | null, usage?: { inputTokens: number; outputTokens: number; cachedReadTokens: number; cachedWriteTokens: number }) {
@@ -53,7 +62,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     for (const d of stalledAlerts) await record(db, { companyId: d.companyId, kind: "decision_withdrawn", summary: `Boss Man closed "${d.question.slice(0, 120)}" by itself: ${note}`, at });
     await db
       .update(decisions)
-      .set({ status: "withdrawn", dedupeKey: null })
+      .set({
+        status: "withdrawn",
+        dedupeKey: null,
+        context: sql`jsonb_set(${decisions.context}, '{withdrawn}', ${JSON.stringify({ by: "system", note: "The agent finished before this was answered, so there is nothing left to approve. No action needed.", at: at.toISOString() })}::jsonb, true)`,
+      })
       .where(and(eq(decisions.status, "open"), eq(decisions.kind, "permission"), sql`${decisions.context}->>'runId' = ${runId}`));
     if (ended && ended.purpose !== "chat") await record(db, { companyId: ended.companyId, agentId: ended.agentId, ticketId: ended.ticketId, kind: "run_ended", summary: `Run ended: ${ended.outcome ?? "ended"}`, at });
     return ended;
@@ -205,8 +218,33 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
     },
 
+    /**
+     * A runner said hello with its boot id (BOS-352). A new id means the process restarted, which
+     * silently kills any background check an agent started, so the checks parked on a schedule_check
+     * are pulled forward to now, each with a note. Capped, and skipped when a restart pulled some
+     * minutes ago, so a restart loop can't flood wakes. A reconnect (same id) changes nothing.
+     */
+    async bootSeen(runner: Runner, bootId: string | undefined): Promise<number> {
+      if (!bootId || bootId === runner.bootId) return 0;
+      const at = new Date();
+      await db.update(runners).set({ bootId }).where(eq(runners.id, runner.id));
+      if (runner.bootPulledAt && at.getTime() - runner.bootPulledAt.getTime() < RESTART_PULL_COOLDOWN_MS) return 0;
+      const pending = await db
+        .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
+        .from(tickets)
+        .where(and(eq(tickets.companyId, runner.companyId), isNotNull(tickets.monitorAt), gt(tickets.monitorAt, at), isNotNull(tickets.assigneeAgentId)))
+        .orderBy(asc(tickets.monitorAt))
+        .limit(RESTART_PULL_MAX);
+      if (!pending.length) return 0;
+      await db.update(runners).set({ bootPulledAt: at }).where(eq(runners.id, runner.id));
+      await db.update(tickets).set({ monitorAt: at, monitorRestartAt: at }).where(inArray(tickets.id, pending.map((p) => p.id)));
+      for (const p of pending) await record(db, { companyId: runner.companyId, agentId: p.assigneeAgentId, ticketId: p.id, kind: "monitor", summary: "The runner restarted: the scheduled check was brought forward", at });
+      return pending.length;
+    },
+
     connect(runnerId: string, send: CommandSender, feats: string[] = []) {
       connected.set(runnerId, send);
+      connectedAt.set(runnerId, Date.now());
       features.set(runnerId, feats);
       for (const l of connectListeners) void Promise.resolve(l(runnerId)).catch(() => {});
       return () => {
@@ -222,6 +260,14 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     },
 
     isConnected: (runnerId: string) => connected.has(runnerId),
+
+    /**
+     * Whether the runner (re)connected in the last few minutes, so it is probably mid-swap: runs
+     * queued behind it are still being started and "never started" alerts can wait.
+     */
+    isSettling: (runnerId: string, at: Date = new Date()) => at.getTime() - (connectedAt.get(runnerId) ?? -Infinity) < RUNNER_SETTLE_MS,
+
+    connectedSince: (runnerId: string) => (connectedAt.has(runnerId) && connected.has(runnerId) ? new Date(connectedAt.get(runnerId)!) : null),
 
     /** Sends a request command and waits for the runner's reply. */
     request<T>(runnerId: string, build: (requestId: string) => RunnerCommand, timeoutMs = 15_000): Promise<T> {
