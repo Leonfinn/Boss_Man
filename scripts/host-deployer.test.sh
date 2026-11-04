@@ -388,6 +388,7 @@ FAKE_VERIFY_FAIL=green bg
 [[ $(status result) == failed ]] || fail "no old colour: $(cat "$D/outbox/status.json")"
 hasnt "$DL" "stopped green"; [[ -e $W/running.green ]] || fail "the new colour was stopped with nothing to go back to"
 has "$D/outbox/status.json" "docker compose kill -s USR2 server-green"
+has "$T/hook.out" '"result": "failed"'
 
 # 19. A failed smoke test on the idle colour: nobody is demoted, the idle colour is stopped, failure webhook.
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
