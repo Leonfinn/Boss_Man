@@ -116,4 +116,29 @@ describe("runner watch (BOS-467)", () => {
     expect(s.notes.filter((n) => n.level === "page")).toHaveLength(0);
     expect(s.alertsRaised).toHaveLength(0);
   });
+
+  it("alerts for a long-stable runner (lastSeenAt 3 days old) that drops, and counts it in the deploy check", async () => {
+    const s = await setup(["Alpha", "Beta"]);
+    const old = new Date(Date.now() - 3 * 86_400_000);
+    await s.db.update(runners).set({ lastSeenAt: old });
+    await s.watch.step();
+    s.up.delete(s.rows[1]!.id);
+    await s.watch.step();
+    s.advance(OFFLINE_REPORT_MS);
+    await s.watch.step();
+    expect(s.notes.filter((n) => n.level === "page").map((p) => p.title)).toEqual(["Beta's runner is offline"]);
+    s.advance(DEPLOY_HEALTHY_MS);
+    await s.watch.step();
+    expect(s.notes.some((n) => n.title === "Deploy not healthy: runners still offline" && n.body.includes("Beta"))).toBe(true);
+  });
+
+  it("after a server restart, an old-lastSeenAt runner that has not reconnected is counted as missing", async () => {
+    const s = await setup(["Alpha", "Beta"]);
+    await s.db.update(runners).set({ lastSeenAt: new Date(Date.now() - 3 * 86_400_000) });
+    s.up.delete(s.rows[1]!.id); // down at the very first step
+    await s.watch.step();
+    s.advance(DEPLOY_HEALTHY_MS);
+    await s.watch.step();
+    expect(s.notes.some((n) => n.title === "Deploy not healthy: runners still offline" && n.body.includes("Beta"))).toBe(true);
+  });
 });

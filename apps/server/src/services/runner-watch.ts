@@ -13,7 +13,6 @@ import type { NotifyInput } from "./notifications.js";
 export const OFFLINE_REPORT_MS = 3 * 60_000;
 /** After a server start, every runner that was connected before it should be back within this. */
 export const DEPLOY_HEALTHY_MS = 5 * 60_000;
-const RECENT_MS = 24 * 3_600_000;
 
 export const runnerOfflineKey = (runnerId: string) => `runner-offline:${runnerId}`;
 
@@ -55,8 +54,9 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
         .from(runners)
         .innerJoin(companies, eq(companies.id, runners.companyId));
       if (!boot) {
-        // The runners connected in the day before this server started are the ones that must come back.
-        boot = { at: t, expected: new Set(rows.filter((r) => r.lastSeenAt && t - r.lastSeenAt.getTime() < RECENT_MS).map((r) => r.id)), done: false };
+        // Every runner that has ever connected and was not stopped by the owner (Stop clears lastSeenAt) must come back.
+        // No age limit: lastSeenAt is only written on connect, so a long-stable runner has an old one.
+        boot = { at: t, expected: new Set(rows.filter((r) => r.lastSeenAt).map((r) => r.id)), done: false };
       }
       const hold = await deps.holdOn();
       for (const r of rows) {
@@ -72,8 +72,6 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
           swept.delete(r.id);
           continue;
         }
-        // Never seen in the last day and not expected: a runner nobody started is not an outage.
-        if (!boot.expected.has(r.id) && !offlineSince.has(r.id) && !(r.lastSeenAt && t - r.lastSeenAt.getTime() < RECENT_MS)) continue;
         swept.delete(r.id);
         if (!offlineSince.has(r.id)) offlineSince.set(r.id, t);
         if (hold || told.has(r.id)) continue;
