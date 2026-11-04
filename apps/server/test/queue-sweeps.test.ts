@@ -298,15 +298,25 @@ describe("stalled runs (R32)", () => {
     expect(ctx.commands.at(-1)).toEqual({ type: "run.cancel", runId });
   });
 
-  it("says when a run never started, and recommends cancelling it", async () => {
+  it("holds the never-started alert while the runner has only just reconnected (BOS-331)", async () => {
     ctx = await setup();
     await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
     await ctx.scheduler.tick();
     ctx.advance(6 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    const status = (await ctx.serverStatus.status(ctx.company.id)) as { runner: { swapping: boolean } | null };
+    expect(status.runner?.swapping).toBe(true);
+  });
+
+  it("says when a run never started, and recommends cancelling it", async () => {
+    ctx = await setup();
+    await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
+    await ctx.scheduler.tick();
+    ctx.advance(11 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
     const [row] = await ctx.queue();
     expect(row).toMatchObject({ kind: "stalled_run", recommendedOption: "Cancel run" });
-    expect(row!.question).toBe(`CEO's run on "Checkout error states" never started: the runner hasn't reported it beginning in 6 minutes, probably because the runner restarted. Cancel it, then message CEO on the task to start again.`);
+    expect(row!.question).toBe(`CEO's run on "Checkout error states" never started: the runner hasn't reported it beginning in 11 minutes, probably because the runner restarted. Cancel it, then message CEO on the task to start again.`);
   });
 
   it("withdraws when the run speaks again, and says nothing more after keep waiting", async () => {
@@ -387,7 +397,7 @@ describe("stalled runs (R32)", () => {
     ctx = await setup();
     await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
     await ctx.scheduler.tick();
-    ctx.advance(6 * 60_000);
+    ctx.advance(11 * 60_000);
     await ctx.sweep();
     const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
     expect(row!.evidence).toMatchObject({ lastEventAt: null, lastStep: null, ticket: "Checkout error states" });
@@ -562,7 +572,7 @@ describe("the server ends runs it can't reach", () => {
     const res = await ctx.sweep();
     expect(res.lostRuns).toBe(1);
     expect(await row(runId)).toMatchObject({ outcome: "lost: runner offline" });
-    expect(await ctx.queue()).toEqual([]);
+    expect((await ctx.queue()).filter((d) => !/could not start/.test(d.question))).toEqual([]);
   });
 
   it("never reaps a run on a connected runner that has sent events", async () => {

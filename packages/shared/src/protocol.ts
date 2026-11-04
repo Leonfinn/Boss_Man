@@ -11,9 +11,29 @@ export const HEARTBEAT_MS = 15_000;
 
 const Uuid = z.string().uuid();
 
+/**
+ * What a runner can fence agents with (DR-004, BOS-321), from its start-up self-test. full: Landlock
+ * ABI 6+; partial: ABI 2-5, files fenced but `missing` lists what isn't; unavailable: no usable
+ * Landlock (errno says why: ENOSYS not built or blocked, EOPNOTSUPP switched off at boot).
+ * probe: a fenced write outside its folder was refused and one inside worked (null if not tried).
+ */
+export const SandboxReport = z.object({
+  landlockAbi: z.number().int().nonnegative(),
+  errno: z.string().max(200).nullable(),
+  level: z.enum(["full", "partial", "unavailable"]),
+  missing: z.array(z.string().max(100)).max(10),
+  /** Unprivileged user namespaces (what bubblewrap needs); for information only. */
+  userns: z.boolean(),
+  probe: z.boolean().nullable(),
+});
+export type SandboxReport = z.infer<typeof SandboxReport>;
+
 export const RunnerEvent = z.discriminatedUnion("type", [
-  /** resumed: the run reopened the session it was asked to (resumeSessionId), rather than starting fresh. */
-  z.object({ type: z.literal("run.started"), runId: Uuid, agentId: Uuid.nullable(), acpSessionId: z.string(), model: z.string().nullable(), resumed: z.boolean().optional() }),
+  /**
+   * resumed: the run reopened the session it was asked to (resumeSessionId), rather than starting fresh.
+   * fenced: the agent runs inside the fence (run.start's fence, on a runner that can fence).
+   */
+  z.object({ type: z.literal("run.started"), runId: Uuid, agentId: Uuid.nullable(), acpSessionId: z.string(), model: z.string().nullable(), resumed: z.boolean().optional(), fenced: z.boolean().optional() }),
   /** How full the session's context is, in tokens (from ACP usage_update). */
   z.object({ type: z.literal("run.context"), runId: Uuid, used: z.number().int().nonnegative(), size: z.number().int().positive() }),
   z.object({ type: z.literal("run.update"), runId: Uuid, update: z.unknown() }),
@@ -29,6 +49,8 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     optionKinds: z.array(z.string()),
     /** Text the agent attached to the request, e.g. the plan when it asks to leave plan mode (R40). */
     detail: z.string().max(20_000).optional(),
+    /** The agent's id for the tool call, so two requests for one call (OpenCode asks for a folder, then the command) can be told apart from a repeat. */
+    toolCallId: z.string().max(200).optional(),
   }),
   z.object({
     type: z.literal("run.cost"),
@@ -67,6 +89,8 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     /** Ticket folders git no longer knew about, removed in this pass. */
     removed: z.array(z.string()),
   }),
+  // The runner's start-up self-test of the agent fence (BOS-321).
+  z.object({ type: z.literal("runner.sandbox"), report: SandboxReport }),
 ]);
 export type RunnerEvent = z.infer<typeof RunnerEvent>;
 export type DiskReport = Omit<Extract<RunnerEvent, { type: "runner.disk" }>, "type">;
@@ -113,6 +137,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
       .array(z.object({ name: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64), files: z.array(z.object({ path: z.string().min(1).max(500), content: z.string() })).max(1000) }))
       .max(100)
       .optional(),
+    /**
+     * Run the agent inside the fence (DR-004, BOS-321). A runner that can't fence runs it as before
+     * and says so (run.started's fenced); one without the "fence" feature ignores it.
+     */
+    fence: z.boolean().optional(),
   }),
   /** The ticket is finished with its worktree: save any uncommitted work and free it (R38). */
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
@@ -127,7 +156,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1) }),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -157,6 +186,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
 ]);
 export type RunnerCommand = z.infer<typeof RunnerCommand>;
 
+/** Harness name to exact version, e.g. { "claude-code": "2.1.0" }. */
+export const HarnessVersions = z.record(z.string().max(40), z.string().max(60));
+export type HarnessVersions = z.infer<typeof HarnessVersions>;
+
 /** Runner → server. */
 export const RunnerMessage = z.discriminatedUnion("type", [
   /**
@@ -168,8 +201,12 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
+    harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
+    /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
+    bootId: z.string().max(100).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
   }),
   z.object({ type: z.literal("event"), entry: JournalEntry }),
@@ -180,8 +217,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -212,27 +249,49 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
-/** How long the runner lets a ticket's check run (R47), and how long the server waits for its answer (a minute longer). */
+/**
+ * How long the runner lets a ticket's check run (R47), counted from when it actually starts. A check that is waiting
+ * in scripts/check-all.sh's queue is given up to VERIFY_QUEUE_MAX_MS to reach the front first; the server waits for
+ * the answer a minute longer than both.
+ */
 export const VERIFY_TIMEOUT_MS = 30 * 60_000;
-export const VERIFY_ASK_TIMEOUT_MS = VERIFY_TIMEOUT_MS + 60_000;
+export const VERIFY_QUEUE_MAX_MS = 90 * 60_000;
+/**
+ * VERIFY_QUEUE_MAX_MS is a no-progress limit (BOS-370): the runner restarts it every time the check's place in the queue
+ * changes, so a long queue that keeps moving never trips it; scripts/check-all.sh gives up sooner (an hour) on its own.
+ * The server's wait is only a ceiling for a queue that moves for a very long time.
+ */
+export const VERIFY_QUEUE_CEILING_MS = 24 * 60 * 60_000;
+export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_CEILING_MS + VERIFY_TIMEOUT_MS + 60_000;
+/** What scripts/check-all.sh prints while it waits for a slot, and when it gets one; the runner starts the 30-minute clock at the second. */
+export const CHECK_QUEUED_MARKER = "check-all: waiting for a free check slot";
+export const CHECK_STARTED_MARKER = "check-all: slot taken, running the checks";
 /**
  * How long an approved ticket can go without any activity before its merge is treated as stopped:
- * longer than the server waits for a merge check, so a check still running is never mistaken for one
- * that died. The unmerged-approvals sweep and the merge card's stale marker both use it.
+ * longer than a check runs, so a check still running is never mistaken for one that died. A check waiting
+ * in the queue beats every minute (whileActive), so it can wait for hours without tripping this. The unmerged-approvals sweep and the merge card's stale marker both use it.
  */
-export const MERGE_MISSED_AFTER_MS = VERIFY_ASK_TIMEOUT_MS + 5 * 60_000;
+export const MERGE_MISSED_AFTER_MS = VERIFY_TIMEOUT_MS + 60_000 + 5 * 60_000;
 
 /** Proposed merge checks, and which of CHECK_TOOLS the runner has (R57). */
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };
 
 /** The outcome of merging a ticket's branch (R46). */
 export type MergeResult =
-  | { status: "merged" | "already_merged"; commit: string }
+  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number } }
+  | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
-  | { status: "uncommitted"; files: string[] };
+  | { status: "uncommitted"; files: string[] }
+  /** The merged journal would make drizzle skip a migration (BOS-360); `problems` ends with what to do. */
+  | { status: "migration_journal"; problems: string[] }
+  /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
+  | { status: "check_failed"; command: string; result: VerifyResult }
+  /** The target kept moving while its merged result was checked; nothing was pushed, try again. */
+  | { status: "main_moved" };
 
 /** Another open ticket whose unmerged commits a ticket's branch carries (BOS-130). */
-export type CarriedTicket = { ticketId: string; branch: string };
+/** `contained`: this ticket's branch holds the other branch's whole tip, so merging this one lands it too (BOS-372). */
+export type CarriedTicket = { ticketId: string; branch: string; contained?: boolean };
 
 /** The answer to workspace.carried: the other tickets whose unmerged commits this branch has. */
 export type CarriedResult = { carried: CarriedTicket[] };

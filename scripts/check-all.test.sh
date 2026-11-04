@@ -9,7 +9,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 unset BOSSMAN_CHECK_CHILD BOSSMAN_CHECK_ATTEMPTS BOSSMAN_CHECK_BUDGET_SECONDS BOSSMAN_CHECK_BODY
 export BOSSMAN_CHECK_RETRY_SECONDS=0 BOSSMAN_CHECK_STORE=off
 # Also drop the merge gate's and user's settings, which would change what the cases below mean. check-all.sh sets CHILD for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
-unset BOSSMAN_CHECK_CHILD BOSSMAN_MERGE_CHECK BOSSMAN_CHECK_FORCE CHECK_ALL_SLOTS CHECK_ALL_LOCK_WAIT
+unset BOSSMAN_CHECK_CHILD BOSSMAN_MERGE_CHECK BOSSMAN_CHECK_FORCE CHECK_ALL_SLOTS CHECK_ALL_LOCK_WAIT CLAUDECODE BOSSMAN_AGENT_SESSION CHECK_ALL_FORCE
 runs() { grep -c . "$t/count" 2>/dev/null || true; }
 
 # run <expected rc> <expected runs> <label> <stub body> [dir] [command]
@@ -29,6 +29,14 @@ run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2
 run 3 1 "no retry when another run would blow the budget" 'echo x >>"$COUNT"; sleep 2; echo "Error: spawn EAGAIN"; exit 3' "$here/.." "env BOSSMAN_CHECK_BUDGET_SECONDS=1 ./scripts/check-all.sh"
 run 0 1 "relative path from scripts/" 'echo x >>"$COUNT"' "$here" ./check-all.sh
 run 0 1 "bash check-all.sh from scripts/" 'echo x >>"$COUNT"' "$here" "bash check-all.sh"
+
+# Agent sessions: a hand run is refused (exit 2, nothing runs) unless forced; the merge gate and humans are unaffected.
+agent_msg="Full check runs at the merge gate. Run scripts/check-quick.sh for your branch instead, or set CHECK_ALL_FORCE=1 if the CEO asked you to."
+run 2 0 "refused inside an agent session" 'echo x >>"$COUNT"' "$here/.." "env CLAUDECODE=1 ./scripts/check-all.sh"
+grep -qF "$agent_msg" "$t/out" || fail "agent refusal message missing: $(cat "$t/out")"
+run 2 0 "refused for the runner's session marker" 'echo x >>"$COUNT"' "$here/.." "env BOSSMAN_AGENT_SESSION=1 ./scripts/check-all.sh"
+run 0 1 "CHECK_ALL_FORCE=1 overrides in an agent session" 'echo x >>"$COUNT"' "$here/.." "env CLAUDECODE=1 CHECK_ALL_FORCE=1 ./scripts/check-all.sh"
+run 0 1 "merge gate runs even if the marker is set" 'echo x >>"$COUNT"' "$here/.." "env CLAUDECODE=1 BOSSMAN_MERGE_CHECK=1 ./scripts/check-all.sh"
 
 # The result store: a pass is kept and reused on identical content, the merge gate never reuses it, failures are not reused.
 # Needs a clean git checkout, so test in a scratch repo holding a copy of the script.
@@ -62,13 +70,39 @@ fi
 # The slots and queue (need flock). pnpm/node are stubbed and CHECK_ALL_STOP_AFTER_LOCK stops the child once a slot is held.
 if command -v flock >/dev/null; then
   mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
-  lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 "$@" ./scripts/check-all.sh 2>&1); }
+  lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" "$@" ./scripts/check-all.sh 2>&1); }
   hold() { ( exec 8>"$t/lock.slot.$1"; flock 8; sleep "$2" ) & }
 
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
 
-  # One slot by default: a busy slot makes a merge check give up. With CHECK_ALL_SLOTS=2 a second check runs.
+  # An unusable lock folder (outside a fenced session's grant, or a planted non-file slot) fails at once with a
+  # clear message instead of waiting forever as if the slot were busy (BOS-321, Freddy's hazard 2).
+  mkdir -p "$t/ro" "$t/bad.slot.1"; chmod 555 "$t/ro"
+  if [ ! -w "$t/ro" ]; then
+    rc=0; out=$(lock env CHECK_ALL_LOCK="$t/ro/lock" timeout 20) || rc=$?
+    [ "$rc" = 2 ] || fail "unwritable lock folder: expected exit 2, got $rc: $out"
+    grep -q "cannot use the check lock folder" <<<"$out" || fail "unwritable lock folder: no clear message: $out"
+  fi
+  chmod 755 "$t/ro"
+  rc=0; out=$(lock env CHECK_ALL_LOCK="$t/bad" timeout 20) || rc=$?
+  [ "$rc" = 2 ] || fail "unopenable slot: expected exit 2 at once, got $rc: $out"
+  grep -q "cannot open $t/bad.slot.1" <<<"$out" || fail "unopenable slot: no clear message: $out"
+  [ -z "$(ls "$t/bad.queue" 2>/dev/null)" ] || fail "unopenable slot: queue entry left behind"
+
+  # One slot until a side-by-side pair has passed: a busy slot makes a second check wait, and CHECK_ALL_SLOTS=2 alone is ignored.
+  hold 1 3; holder=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1 CHECK_ALL_SLOTS=2) || rc=$?
+  [ "$rc" = 75 ] || fail "no proof: expected exit 75, got $rc: $out"
+  grep -q "ignored" <<<"$out" || fail "no proof: no ignored message: $out"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  hold 1 3; holder=$!; sleep 0.3
+  out=$(lock env CHECK_ALL_PAIR_TRIAL=1) || fail "trial: expected success, got: $out"
+  grep -q "lock held" <<<"$out" || fail "trial: second slot not acquired"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  echo "A=600s B=640s no OOM" >"$t/proof"
+
+  # With a recorded pair, two slots: one busy slot does not stop a second check.
   hold 1 4; holder=$!; sleep 0.3
   out=$(lock env CHECK_ALL_SLOTS=2) || fail "second slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "second slot: not acquired"
@@ -80,14 +114,51 @@ if command -v flock >/dev/null; then
   [ "$rc" = 75 ] || fail "busy slots: expected exit 75, got $rc: $out"
   grep -q "place 1 of 1" <<<"$out" || fail "busy slots: no place message: $out"
   grep -q "gave up" <<<"$out" || fail "busy slots: messages missing: $out"
+  # A leading zero in a stored duration or in a queue name is read as base 10, not octal (09 would abort the wait).
+  mkdir "$t/zstore"; echo '{"status":"pass","duration_seconds":09}' >"$t/zstore/a.json"
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2 BOSSMAN_CHECK_STORE="$t/zstore") || rc=$?
+  [ "$rc" = 75 ] || fail "leading zero: expected exit 75, got $rc: $out"
+  grep -q "about 1 min" <<<"$out" || fail "leading zero: no estimate: $out"
   [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "gave-up check left its queue entry"
   kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
+
+  # BOS-370: a merge check with no CHECK_ALL_LOCK_WAIT keeps waiting while the queue moves (the slot's holder changes)...
+  hold 1 7; h1=$!; hold 2 7; h2=$!; sleep 0.3
+  ( for i in 1 2 3 4 5 6; do echo "$i $i" >"$t/lock.holder.1"; sleep 1; done ) & mover=$!
+  out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_STUCK_AFTER=3) || fail "moving queue: expected to keep waiting and get in, got: $out"
+  grep -q "lock held" <<<"$out" || fail "moving queue: lock not acquired: $out"
+  wait "$h1" "$h2" "$mover"
+  # ...and gives up, saying so, only when the same holder sits there past the bound (a dead holder that never lets go).
+  hold 1 8; h1=$!; hold 2 8; h2=$!; sleep 0.3
+  echo "999999 1" >"$t/lock.holder.1"
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_STUCK_AFTER=2) || rc=$?
+  [ "$rc" = 75 ] || fail "stuck queue: expected exit 75, got $rc: $out"
+  grep -q "gave up waiting for the heavy-phase lock.*made no progress for 1 min" <<<"$out" || fail "stuck queue: not said plainly: $out"
+  kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
+  rm -f "$t"/lock.holder.*
+
+  # A long wait does not cost a live check its place: an old entry is dropped only when nobody has touched it for 2 h.
+  mkdir -p "$t/lock.queue"
+  : >"$t/lock.queue/0-1000000000000000000-$$"                       # live pid, old name, fresh file: keeps its place
+  : >"$t/lock.queue/0-1000000000000000001-$$"; touch -d '3 hours ago' "$t/lock.queue/0-1000000000000000001-$$"  # untouched for 3 h: dropped
+  hold 1 4; h1=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2) || rc=$?
+  grep -q "place 2 of 2" <<<"$out" || fail "old live entry: expected place 2 of 2 (one entry kept, one dropped): $out"
+  rm -f "$t"/lock.queue/*
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
 
   # A hand-run check does not give up on its own: it waits past the time that stops a merge check, then gets in.
   hold 1 4; h1=$!; hold 2 4; h2=$!; sleep 0.3
   out=$(lock env CHECK_ALL_LOCK_WAIT=0) || fail "hand-run wait: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "hand-run wait: lock not acquired: $out"
   wait "$h1" "$h2"
+
+  # A merge check with no CHECK_ALL_LOCK_WAIT set waits its turn (the default is hours, not 10 minutes) and announces when its checks begin.
+  hold 1 3; h1=$!; sleep 0.3
+  out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_SLOTS=1) || fail "merge wait: expected success, got: $out"
+  grep -q "waiting for a free check slot" <<<"$out" || fail "merge wait: no queue message: $out"
+  grep -q "slot taken, running the checks" <<<"$out" || fail "merge wait: no start marker: $out"
+  wait "$h1"
 
   # Queue order: a merge check that arrives later goes ahead of a hand-run check; hand-run checks keep their order.
   hold 1 3; h1=$!; hold 2 3; h2=$!; sleep 0.3
@@ -110,14 +181,15 @@ if command -v flock >/dev/null; then
   grep -q "lock held" <<<"$out" || fail "dead waiter blocked the queue: $out"
   wait "$h1" "$h2"
 
-  # Default is one slot: with slot 1 busy a second check waits (merge check gives up), even though slot 2 is free.
+  # No recorded pair means one slot: with slot 1 busy a second check waits (merge check gives up), even though slot 2 is free.
+  rm -f "$t/proof"
   hold 1 3; h1=$!; sleep 0.3
   rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1) || rc=$?
   [ "$rc" = 75 ] || fail "default slots: expected one slot (exit 75), got $rc: $out"
   wait "$h1"
 
-  # A queue entry older than 2 h is dropped even when its pid is alive (a reused pid of a killed waiter).
-  mkdir -p "$t/lock.queue"; : >"$t/lock.queue/1-1000000000000000000-$$"
+  # A queue entry nobody has touched for 2 h is dropped even when its pid is alive (a reused pid of a killed waiter).
+  mkdir -p "$t/lock.queue"; : >"$t/lock.queue/1-1000000000000000000-$$"; touch -d "3 hours ago" "$t/lock.queue/1-1000000000000000000-$$"
   hold 1 2; h1=$!; sleep 0.3
   out=$(lock env) || fail "stale waiter: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "stale waiter blocked the queue: $out"
@@ -130,6 +202,48 @@ if command -v flock >/dev/null; then
   [ ! -e PWNED ] || { rm -f PWNED; fail "hostile queue entry name ran a command"; }
   [ ! -e "$hostile" ] || fail "hostile queue entry was not removed"
   wait "$h1"
+
+  # Agents can write the queue folder (BOS-321 review). A merge-priority entry dated an hour ahead, with a live pid,
+  # must not keep its place: a negative age used to pass the 2-hour prune and keep every hand-run check behind it.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  future="$t/lock.queue/0-$(($(date +%s) + 3600))000000000-$$"; : >"$future"
+  hold 1 2; h1=$!; sleep 0.3
+  rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=6) || rc=$?
+  [ "$rc" = 0 ] || fail "future-dated entry: a hand-run check expected to get in ahead of it, got $rc: $out"
+  [ ! -e "$future" ] || fail "future-dated queue entry was not removed"
+  wait "$h1"
+
+  # A flood of live-looking entries must not stall the queue: one pass over 5000 used to take 13.6 s.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  now_ns=$(date +%s%N)
+  for ((i = 0; i < 5000; i++)); do : >"$t/lock.queue/1-$((now_ns + i))-$$"; done
+  began=$SECONDS
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=5) || rc=$?
+  if [ "$rc" != 0 ] || ! grep -q "lock held" <<<"$out"; then fail "flooded queue: merge check didn't get in, got $rc: $out"; fi
+  [ $((SECONDS - began)) -le 3 ] || fail "flooded queue: took $((SECONDS - began)) s to get a free slot"
+  # A hand-run check behind the flood sees a place past the scan, and waits.
+  rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=2) || rc=$?
+  grep -q "place 201 of 200" <<<"$out" || fail "flooded queue: hand-run check's place: $out"
+  rm -rf "$t/lock.queue"
+
+  # A check inside an agent's fence (BOS-321) keeps another session's place: it can't signal that session
+  # (Landlock ABI 6 scoping), so a kill -0 test would wrongly drop the entry as dead and jump the queue.
+  fence="$here/../apps/runner/src/fence/landlock.pl"
+  if command -v perl >/dev/null && [ "$(perl "$fence" --probe | sed -n 's/.*"abi":\([0-9]*\).*/\1/p')" -ge 6 ]; then
+    rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+    sleep 10 & waiter=$!
+    : >"$t/lock.queue/0-$(date +%s%N)-$waiter"
+    hold 1 3; h1=$!; sleep 0.3
+    rc=0
+    out=$(perl "$fence" --ro / --rw "$t" --rwfile /dev/null -- bash -c 'cd "$1" && TMPDIR="$3" PATH="$2:$PATH" CHECK_ALL_LOCK="$3/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$3/proof" BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2 ./scripts/check-all.sh 2>&1' \
+      _ "$here/.." "$t/bin" "$t") || rc=$?
+    [ "$rc" = 75 ] || fail "fenced check: expected to wait behind the other session (exit 75), got $rc: $out"
+    grep -q "place 2 of 2" <<<"$out" || fail "fenced check: the other session's place was dropped: $out"
+    compgen -G "$t/lock.queue/0-*-$waiter" >/dev/null || fail "fenced check removed a live session's queue entry"
+    kill "$waiter" "$h1" 2>/dev/null || true; wait "$waiter" "$h1" 2>/dev/null || true
+  else
+    echo "check-all.test.sh: Landlock ABI 6 missing, fenced queue case skipped"
+  fi
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"
 fi
