@@ -28,6 +28,7 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "check due": "scheduled",
   "missed work": "scheduled",
   "urgent idle": "scheduled",
+  "status check": "scheduled",
   resume: "scheduled",
   watchdog: "scheduled",
   "watchdog re-wake": "scheduled",

@@ -238,6 +238,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/decisions.ts": NEVER_DROPPED + "; chased and engagement are " + DROP_RECORDED,
     "services/deploys.ts": NEVER_DROPPED,
     "services/engagements.ts": DROP_RECORDED,
+    "services/progress.ts": NEVER_DROPPED + " (a status check steers into the live silent run)",
     "services/recovery.ts": NEVER_DROPPED,
     "services/retro.ts": NEVER_DROPPED,
     "services/review.ts": DROP_RECORDED + " (ci passed is scheduled and never dropped)",
