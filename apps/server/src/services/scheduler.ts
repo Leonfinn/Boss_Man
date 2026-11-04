@@ -776,7 +776,7 @@ export function schedulerService(
         companyId: null,
         level: "note",
         title: `New runs now use ${now.name}`,
-        body: was ? `${was.name} is ${now.fallbackRank! < (was.fallbackRank ?? 0) ? "back under its limit again" : "at its limit"}, so new runs go to ${now.name}. Runs already going finish on the account they started on.` : `New runs go to ${now.name}.`,
+        body: was ? `${now.fallbackRank! < (was.fallbackRank ?? 0) ? `${now.name} is back under its limit again` : `${was.name} is at its limit`}, so new runs go to ${now.name}. Runs already going finish on the account they started on.` : `New runs go to ${now.name}.`,
         link: "#/funding",
       })
       .catch((err) => deps.log?.(`claude account notice failed: ${(err as Error).message}`));
@@ -1438,7 +1438,10 @@ export function schedulerService(
               // High-priority work that skips the hold still lands on a account with room, else the agent's own.
               const chosenId = (picked ?? source).id;
               onSource = chosenId;
-              await noteActiveAccount(chosenId, pool);
+              // Only ordinary work says which account new runs use. An urgent ticket may pass a
+              // threshold that holds everyone else, so it can land on a different account; letting it
+              // announce would flip the notice back and forth every pass (BOS-453).
+              if (!urgentTicket?.urgent && picked) await noteActiveAccount(chosenId, pool);
             }
           }
         }
