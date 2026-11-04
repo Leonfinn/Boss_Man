@@ -5,7 +5,7 @@
 // - missed work (R82): an assigned ticket that is ready to go but that nobody is working on;
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
-import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
 import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
@@ -17,7 +17,7 @@ import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, evaluate, latestRows } from "./review-kinds.js";
 import { progressSweep } from "./progress.js";
-import { MISSED_REASON, REVIEW_REASON, type WakeInput } from "./scheduler.js";
+import { MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
   staleAfterMs: number;
@@ -30,6 +30,8 @@ export type SweepLimits = {
    * that stopped.
    */
   mergeMissedAfterMs: number;
+  /** An urgent ticket in progress whose assignee has no live or queued run is woken after this long idle (BOS-346). */
+  urgentIdleAfterMs: number;
   /** An agent is nudged about the same ticket at most once per this long (R82). */
   missedEveryMs: number;
   /** "Keep waiting" holds a stall alert off for this long; if the run is still quiet it is raised again. */
@@ -48,6 +50,7 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   stallAfterMs: 5 * 60_000,
   missedAfterMs: 30 * 60_000,
   mergeMissedAfterMs: MERGE_MISSED_AFTER_MS,
+  urgentIdleAfterMs: 2 * 60_000,
   missedEveryMs: 4 * 3_600_000,
   keepWaitingMs: 30 * 60_000,
   lostAfterMs: 30 * 60_000,
@@ -76,25 +79,36 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   }
 
   async function staleBlockers(t: Date) {
+    // Only live dependencies: the blocked ticket isn't done and no decision stands in for the blocker.
     const deps = await db
       .select({ dep: ticketDependencies, blocked: tickets })
       .from(ticketDependencies)
-      .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId));
+      .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
+      .where(and(ne(tickets.systemState, "done"), isNull(ticketDependencies.blockerDecisionId)));
     const stale = new Map<string, { question: string; options: string[]; recommended: string; companyId: string; ctx: DecisionContext }>();
+
+    const ticketIds = [...new Set(deps.flatMap(({ dep }) => (dep.blockerTicketId ? [dep.blockerTicketId] : [])))];
+    const engagementIds = [...new Set(deps.flatMap(({ dep }) => (!dep.blockerTicketId && dep.blockerEngagementId ? [dep.blockerEngagementId] : [])))];
+    const blockers = new Map(
+      (ticketIds.length ? await db.select({ t: tickets, assignee: agents.name }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(inArray(tickets.id, ticketIds)) : []).map((r) => [r.t.id, r] as const),
+    );
+    const blockerEngagements = new Map((engagementIds.length ? await db.select().from(engagements).where(inArray(engagements.id, engagementIds)) : []).map((e) => [e.id, e] as const));
 
     // A ticket counts as active if it moved recently or an agent is reporting on it.
     const runActivity = new Map(
-      (await db.select({ ticketId: runs.ticketId, at: max(runs.lastEventAt) }).from(runs).groupBy(runs.ticketId)).flatMap((r) => (r.ticketId && r.at ? [[r.ticketId, r.at] as const] : [])),
+      (ticketIds.length ? await db.select({ ticketId: runs.ticketId, at: max(runs.lastEventAt) }).from(runs).where(inArray(runs.ticketId, ticketIds)).groupBy(runs.ticketId) : []).flatMap((r) => (r.ticketId && r.at ? [[r.ticketId, r.at] as const] : [])),
     );
     const msgActivity = new Map(
-      (await db.select({ id: engagementMessages.engagementId, at: max(engagementMessages.createdAt) }).from(engagementMessages).groupBy(engagementMessages.engagementId)).map((r) => [r.id, r.at]),
+      (engagementIds.length
+        ? await db.select({ id: engagementMessages.engagementId, at: max(engagementMessages.createdAt) }).from(engagementMessages).where(inArray(engagementMessages.engagementId, engagementIds)).groupBy(engagementMessages.engagementId)
+        : []
+      ).map((r) => [r.id, r.at]),
     );
 
     for (const { dep, blocked } of deps) {
-      if (blocked.systemState === "done" || dep.blockerDecisionId) continue; // decisions are already in the queue
       const ctx: DecisionContext = { type: "stale_blocker", dependencyId: dep.id, blockedTicketId: blocked.id, blockerTicketId: dep.blockerTicketId, blockerEngagementId: dep.blockerEngagementId };
       if (dep.blockerTicketId) {
-        const [b] = await db.select({ t: tickets, assignee: agents.name }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(eq(tickets.id, dep.blockerTicketId));
+        const b = blockers.get(dep.blockerTicketId);
         if (!b || b.t.systemState === "done") continue;
         const idle = t.getTime() - later(b.t.lastActivityAt, runActivity.get(b.t.id))!.getTime();
         if (idle < limits.staleAfterMs) continue;
@@ -108,7 +122,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           ctx,
         });
       } else if (dep.blockerEngagementId) {
-        const [e] = await db.select().from(engagements).where(eq(engagements.id, dep.blockerEngagementId));
+        const e = blockerEngagements.get(dep.blockerEngagementId);
         if (!e || e.status === "signed_off") continue;
         const idle = t.getTime() - later(e.createdAt, msgActivity.get(e.id))!.getTime();
         if (idle < limits.staleAfterMs) continue;
@@ -557,6 +571,66 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return result;
   }
 
+  /**
+   * An urgent ticket in progress whose assignee has no live or queued run (BOS-346): wake them now,
+   * not after the half hour missedWork waits. Scheduled by Boss Man, one wake per ticket at a time.
+   */
+  async function urgentIdle(t: Date) {
+    const rows = await db
+      .select({ ticket: tickets })
+      .from(tickets)
+      .innerJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(
+        and(
+          eq(tickets.urgent, true),
+          eq(tickets.systemState, "in_progress"),
+          eq(agents.paused, false),
+          isNull(agents.retiredAt),
+          eq(companies.paused, false),
+          or(eq(tickets.planFirst, false), isNotNull(tickets.planApprovedAt)),
+          lte(tickets.lastActivityAt, new Date(t.getTime() - limits.urgentIdleAfterMs)),
+          isNull(tickets.monitorAt),
+        ),
+      )
+      .orderBy(asc(tickets.lastActivityAt));
+    const busy = await busyAgents();
+    const result = { woken: 0 };
+    for (const { ticket } of rows) {
+      const agentId = ticket.assigneeAgentId!;
+      if (busy.has(agentId)) continue;
+      const deps = await db
+        .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
+        .from(ticketDependencies)
+        .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+        .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+        .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+        .where(eq(ticketDependencies.blockedTicketId, ticket.id));
+      if (deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) continue;
+      const ticketRuns = await db.select({ lastEventAt: runs.lastEventAt, endedAt: runs.endedAt }).from(runs).where(eq(runs.ticketId, ticket.id));
+      if (ticketRuns.some((r) => !r.endedAt)) continue;
+      const lastActive = ticketRuns.reduce<Date>((m, r) => later(later(m, r.lastEventAt), r.endedAt)!, ticket.lastActivityAt);
+      if (t.getTime() - lastActive.getTime() < limits.urgentIdleAfterMs) continue;
+      // One wake per ticket: a recent one (dropped ones too) holds off the next, so a refusal isn't retried every minute.
+      const [recent] = await db
+        .select({ id: wakes.id })
+        .from(wakes)
+        .where(and(eq(wakes.ticketId, ticket.id), eq(wakes.reason, URGENT_IDLE_REASON), gt(wakes.createdAt, new Date(t.getTime() - limits.missedEveryMs))))
+        .limit(1);
+      if (recent) continue;
+      await opts.wake({
+        agentId,
+        ticketId: ticket.id,
+        reason: URGENT_IDLE_REASON,
+        priority: 2,
+        note: `This ticket is urgent and nothing is running on it (last active ${ago(t.getTime() - lastActive.getTime())} ago). Pick it up now, or say why it's stuck.`,
+      });
+      busy.add(agentId);
+      result.woken++;
+    }
+    return result;
+  }
+
   return {
     limits,
     /** One pass of every sweep. Safe to call often. */
@@ -571,6 +645,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const stalled = await stalledRuns(t);
       // While the update hold is on nothing can start, so an idle ticket is not forgotten work.
       const held = await getHold(db);
+      const urgentIdleResult = held ? { woken: 0 } : await urgentIdle(t);
       const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
       // Silent runs, reviews that end without a verdict, and causes left unproven (BOS-314): these run whether or not the watchdog is on.
       const progress = held ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 } : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert });
@@ -578,7 +653,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const unmerged = held ? 0 : await unmergedApprovals(t);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
       const ticketless = held ? { raised: 0 } : await longTicketlessRuns(t);
-      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, progress };
+      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, progress };
     },
   };
 }

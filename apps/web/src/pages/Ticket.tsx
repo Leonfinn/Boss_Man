@@ -55,9 +55,9 @@ function DiffView({ diff }: { diff: WorkspaceDiff }) {
 }
 
 /** A section that folds away behind an arrow (R76); closed unless it's asked to start open. */
-function Fold({ title, hint, open, children }: { title: string; hint?: string; open?: boolean; children: React.ReactNode }) {
+function Fold({ title, hint, open, className, children }: { title: string; hint?: string; open?: boolean; className?: string; children: React.ReactNode }) {
   return (
-    <details className="card fold" open={open || undefined}>
+    <details className={`card fold${className ? ` ${className}` : ""}`} open={open || undefined}>
       <summary>
         <span className="fold-title">{title}</span>
         {hint && <small className="muted">{hint}</small>}
@@ -209,13 +209,13 @@ const inText = (ms: number) => (ms <= 0 ? "Due now" : ms < 3_600_000 ? `In ${Mat
 const localInput = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 
 const PROPS_KEY = "bossman.ticket.workCollapsed";
-/** The remembered choice; with none, narrow tablets (just above the stacking width) start collapsed. */
+/** The remembered choice; with none, phones and narrow tablets (just above the stacking width) start collapsed. */
 const readPropsCollapsed = () => {
   try {
     const saved = localStorage.getItem(PROPS_KEY);
     if (saved !== null) return saved === "1";
   } catch {}
-  return window.innerWidth > 900 && window.innerWidth < 1100;
+  return window.innerWidth <= 640 || (window.innerWidth > 900 && window.innerWidth < 1100);
 };
 
 export function Ticket({ id, companies }: { id: string; companies: Company[] }) {
@@ -243,6 +243,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const images = usePoll((signal) => api<TicketImage[]>(`/api/tickets/${id}/images`, { signal }), 30_000, `img-${id}`);
   const reviews = useTicketReviews(id);
   const t = ticket.data;
+  // Every link on this screen is built the same way: page names open in this company, ticket references
+  // by prefix, raw routes as written (BOS-358).
+  const ticketLinks = t ? { companyId: t.companyId, prefix: t.ref?.replace(/-[0-9]+$/, "") ?? null, selfId: t.id, tickets: t.number ? [{ id: t.id, number: t.number, prefix: t.ref?.replace(/-[0-9]+$/, "") ?? null }] : [] } : undefined;
   const img = useImageAttach(t?.companyId, id);
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
@@ -511,7 +514,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             {draft === null ? (
               t.body ? (
                 <div id="desc-body" className={longBody && !descOpen ? "clamp-8" : undefined}>
-                  <Markdown text={t.body} />
+                  <Markdown text={t.body} linkContext={ticketLinks} />
                 </div>
               ) : (
                 <p className="muted">No description yet. Say what should be done and what counts as finished.</p>
@@ -593,7 +596,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
           {t.plan && (
             <Fold title="Plan" hint={t.planApprovedAt ? `approved ${when(t.planApprovedAt)}` : "waiting for your approval"}>
-              <Markdown text={t.plan} />
+              <Markdown text={t.plan} linkContext={ticketLinks} />
               {!t.planApprovedAt && (
                 <p className="muted" style={{ fontSize: 14 }}>
                   Approve or send it back from <a href="#/decisions">Decisions</a>.
@@ -663,6 +666,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <TicketReviews reviews={reviews} />
           {t.systemState === "review" && (
             <Fold
+              className="review-card"
               title="Review"
               hint={
                 checking ? "checking and merging" :
@@ -730,12 +734,19 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           )}
 
           <ScrumMasterLog companyId={t.companyId} ticketId={t.id} folded />
-          <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
+          <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} ticketNumber={t.number} prefix={t.ref?.replace(/-[0-9]+$/, "") ?? null} />
         </div>
 
         <aside className="card ticket-props" aria-label="Properties">
           <div className="props-head">
             <h2 className="section-label">Work</h2>
+            {/* Folded on a phone, the heading says what the panel holds: one line instead of a whole card. */}
+            {propsCollapsed && (
+              <span className="props-glance muted">
+                · {t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}
+                {t.assignee ? ` · ${t.assignee}` : ""}
+              </span>
+            )}
             <button type="button" className="props-toggle" aria-expanded={!propsCollapsed} aria-controls="ticket-props-body" onClick={togglePanel}>
               {propsCollapsed ? "Show" : "Hide"}
             </button>

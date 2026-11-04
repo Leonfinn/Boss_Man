@@ -104,7 +104,11 @@ export const agents = pgTable(
     starred: boolean("starred").notNull().default(false),
     /** A standing job Boss Man gives the agent: "wiki" keeps the company wiki in order (R73). */
     duty: text("duty"),
-    /** Marks the agent as the company's reviewer of one kind (security, infra, adversarial); a review policy can name "the marked agent". */
+    /**
+     * Deprecated (BOS-198): the old agent-page mark as one kind's reviewer. Nothing writes it now;
+     * migration 0094 moved every use into the review policy, and it is read only for a leftover
+     * "marked" cell. Kept one release so a rollback has it; drop it after.
+     */
     reviewKind: text("review_kind"),
     /** Job title (e.g. "Scrum Master"), the template it was hired from, and its standing instructions (R62). */
     title: text("title"),

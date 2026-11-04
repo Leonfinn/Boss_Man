@@ -1,5 +1,6 @@
 // Regression tests for the adversarial findings on BOS-172 (retro playbooks through the add-a-skill flow).
 // Each test asserts the SAFE behaviour, so a failure means the attack got through.
+import { nameSecurityReviewer } from "./helpers.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -7,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agentSkills, agents, companies, decisions, skillProposals, skills, ticketReviews, tickets, workflowChanges } from "../src/db/schema.js";
+import { agentSkills, companies, decisions, skillProposals, skills, ticketReviews, tickets, workflowChanges } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { SKILL_ADD } from "../src/services/decisions.js";
 
@@ -40,7 +41,7 @@ async function setup() {
   const pm = await hire("Pat", "product-manager");
   const eng = await hire("Eve", "engineer");
   const reviewer = await hire("Sec", "engineer");
-  await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
+  await nameSecurityReviewer(db, reviewer.id);
   const mcp = async (agentId: string) => {
     const token = await issueRunToken(db, { companyId: company.id, agentId, runId: randomUUID() });
     const c = new Client({ name: "t", version: "0" });

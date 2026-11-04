@@ -2,7 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
-import { cleanupScope, explainCommand, readPush, tempCleanup } from "./explain.js";
+import { cleanupScope, explainCommand, readPush, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -46,7 +46,7 @@ export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to 
 
 // Boss Man's own tool server is named "bossman"; each harness spells the tool title its own way: Claude Code mcp__bossman__wiki,
 // Codex mcp.bossman.wiki or "Tool: bossman/wiki", OpenCode bossman_wiki, other adapters "bossman: wiki". Matched case-insensitively.
-export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2})?bossman(?:__|_|\.|:\s*|/|\s+-\s+)\S`;
+export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2}bossman(?:__|\.|:\s*|/|\s+-\s+)|bossman(?:__|_|\.|:\s*|/|\s+-\s+))\S`;
 const BOSSMAN_TOOL = new RegExp(BOSSMAN_TOOL_PATTERN, "i");
 
 /** True when a tool title names a tool of Boss Man's own server, in any harness's spelling. */
@@ -65,17 +65,41 @@ export function isBossmanCall(info: PermissionInfo): boolean {
   return isBossmanTool(info.title);
 }
 
-export const DEFAULT_POLICY: PolicyRuleSpec[] = [
-  { name: "Boss Man's own tools", match: { bossmanCall: true }, outcome: "allow" },
+/** Table row 3: the built-in guards. Checked before any company allow, so a broad allow cannot lift them (BOS-307, DR-001). */
+export const BUILTIN_GUARDS: PolicyRuleSpec[] = [
   // Before the owner rule: cleaning up /tmp is the CEO's call, and reaches the owner only if the CEO escalates it (BOS-111).
   { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, tempCleanupOnly: true }, outcome: "ceo" },
   // The same for plain relative paths in the agent's checkout; the server sends it to the owner when the run has no checkout (BOS-120).
   { name: WORKING_COPY_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, workingCopyOnly: true }, outcome: "ceo" },
   { name: "Destructive commands go to the owner", match: { commandPattern: DESTRUCTIVE }, outcome: "owner" },
   { name: "Pushing and publishing go to the owner", match: { commandPattern: PUSHING }, outcome: "owner" },
+];
+
+/** Table row 6: the built-in allows. Never reached by a request a guard caught, and company routing rules never apply to them. */
+export const BUILTIN_ALLOWS: PolicyRuleSpec[] = [
+  { name: "Boss Man's own tools", match: { bossmanCall: true }, outcome: "allow" },
   { name: "Reading, searching and editing the workspace", match: { kinds: ["read", "search", "edit", "think", "fetch"] }, outcome: "allow" },
   { name: "Other shell commands", match: { kinds: ["execute"] }, outcome: "allow" },
   // Anything else (delete, move, unknown tools) falls through to the owner.
+];
+
+/** Guards first, then allows: the old single list, shown on the Rules page. */
+export const DEFAULT_POLICY: PolicyRuleSpec[] = [...BUILTIN_GUARDS, ...BUILTIN_ALLOWS];
+
+/**
+ * The one ordered permission table (BOS-307, DR-001). The first row that decides wins. decidePermission is the only
+ * code that applies it, used by the live path and the Rules page's test screen.
+ */
+export const PERMISSION_TABLE: ReadonlyArray<{ row: number; name: string; why: string }> = [
+  { row: 1, name: "Network guard", why: "Fetching from the home network is denied; nothing may lift it." },
+  { row: 2, name: "Owner chat and plan approval", why: "Decided by the server before this table (chat: board tools only)." },
+  { row: 3, name: "Built-in guards", why: "Destructive, push and cleanup requests ask the owner or CEO. A company allow cannot lift them, except the owner's /tmp-only switch." },
+  { row: 4, name: "Company deny rules", why: "The owner's own denials beat every allow below the network guard." },
+  { row: 5, name: "Company allow rules", why: "In the owner's order, shared with row 7: the first matching allow or routing rule decides. They cannot lift a guard." },
+  { row: 6, name: "Built-in allows", why: "Boss Man's tools, reading, editing, plain shell." },
+  { row: 7, name: "Company routing rules", why: "To the CEO or owner. Only for requests the rows above leave asking, plus guarded ones; never for what is allowed." },
+  { row: 8, name: "Default", why: "Nothing matched: the owner is asked." },
+  { row: 9, name: "Tier adjustments", why: "The CEO's own request goes to the owner (server, after this table)." },
 ];
 
 /** ACP tool kinds a rule can match on. */
@@ -124,7 +148,9 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     if (new RegExp(`${DESTRUCTIVE}|${PUSHING}`, "i").test(cmd)) return false;
   }
   if (rule.scratchOnly) {
-    // shortcut: paths are checked as written, so a symlink inside /tmp pointing elsewhere isn't caught; resolving them needs the runner's filesystem.
+    // Paths are checked as written, so the note (scratchOnly in explain.ts) vouches only for
+    // programs that can't follow a symlink at their target: rm/rmdir/unlink/mkdir of one plain
+    // /tmp entry, no redirects (BOS-165).
     const scratch = explainCommand(commandOf(info.rawInput) ?? "").scratch;
     if (!scratch || scratch.unchecked.length) return false;
   }
@@ -179,23 +205,47 @@ export function reachesPrivateNetwork(info: PermissionInfo): boolean {
   });
 }
 
+export type PermissionDecision = { outcome: PolicyOutcome; rule: string; row: number };
+
+/** Applies PERMISSION_TABLE (rows 1 and 3 to 8) to one request. `rules` are the company's rules, then global ones, each in the owner's order. */
+export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): PermissionDecision {
+  // Row 1. Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
+  if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD, row: 1 };
+  // Row 3: the built-in guard that catches this request, if any.
+  const guard = BUILTIN_GUARDS.find((r) => matches(r.match, info));
+  // Row 4: company deny rules.
+  const deny = rules.find((r) => r.outcome === "deny" && matches(r.match, info));
+  if (deny) return { outcome: "deny", rule: deny.name, row: 4 };
+  // Rows 5 and 7 share the owner's order: the first company allow or routing rule that matches decides, so "ask me for ^x__delete" above "allow ^x__" still asks. A guarded request is lifted only by the owner's /tmp-only switch, which checks every path itself.
+  const isRoute = (r: PolicyRuleSpec) => r.outcome === "ceo" || r.outcome === "owner";
+  const first = rules.find((r) => ((r.outcome === "allow" && (!guard || r.match.scratchOnly)) || isRoute(r)) && matches(r.match, info));
+  if (first && first.outcome === "allow") return { outcome: "allow", rule: first.name, row: 5 };
+  // Row 7 may change who is asked about a guarded request, never turn it into an allow.
+  if (guard) return first ? { outcome: first.outcome, rule: first.name, row: 7 } : { outcome: guard.outcome, rule: guard.name, row: 3 };
+  // Row 6: built-in allows. Company routing never reaches a request they allow (BOS-307; this replaces BOS-292's skip list).
+  const builtin = BUILTIN_ALLOWS.find((r) => matches(r.match, info));
+  if (builtin) return { outcome: builtin.outcome, rule: builtin.name, row: 6 };
+  if (first) return { outcome: first.outcome, rule: first.name, row: 7 };
+  return { outcome: "owner", rule: "No rule matched", row: 8 };
+}
+
+/** Routing rules the built-in allows cover: they only fire for guarded requests now (BOS-307). Judged from the tool kinds alone: listed when it names no kinds, or when any kind it names is a built-in allow. */
+export function shadowedRoutingRules<T extends PolicyRuleSpec>(rules: T[]): T[] {
+  const covered = new Set(BUILTIN_ALLOWS.flatMap((r) => r.match.kinds ?? []));
+  return rules.filter((r) => (r.outcome === "ceo" || r.outcome === "owner") && (!r.match.kinds?.length || r.match.kinds.some((k) => covered.has(k))));
+}
+
+/** The table applied for callers that log the position or only read the outcome. `position` is the deciding row (0 when nothing in the table matched); it replaces the old list index BOS-306 logged. */
 export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string; position: number } {
-  // Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
-  if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD, position: 0 };
-  // Boss Man's own tools are checked per call by the server (role and company), so a broad company
-  // rule that routes requests to the CEO or the owner must not catch them (BOS-292): that sent every
-  // board-tool call to a card. A company rule can still deny one.
-  const ownTool = isBossmanCall(info);
-  const all = [...rules, ...DEFAULT_POLICY];
-  for (const [i, rule] of all.entries()) {
-    if (ownTool && rule.outcome !== "deny" && rule.outcome !== "allow" && i < rules.length) continue;
-    if (matches(rule.match, info)) return { outcome: rule.outcome, rule: rule.name, position: i + 1 };
-  }
-  return { outcome: "owner", rule: "No rule matched", position: 0 };
+  const { outcome, rule, row } = decidePermission(info, rules);
+  return { outcome, rule, position: outcome === "owner" && row === 8 ? 0 : row };
 }
 
 /** Build output directly in the agent's working folder (node_modules, dist…): one component only, no trailing slash. rm -rf NAME/ follows a symlink as if NAME were its target (BOS-150), and a deeper path such as dist/x still follows a symlinked dist, so `rm -rf dist` is the only shape vouched for. */
 const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:node_modules|dist|build|coverage|out|target))+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
+
+/** find -delete rooted at one plain /tmp entry: kept Allow as BOS-111 pinned it. Root must be one level, quoted patterns kept simple. */
+const FIND_TMP_DELETE = /^find\s+\/tmp\/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+(?:\s+-(?:name|iname|type|path|mindepth|maxdepth|mtime|mmin|newer|empty|print)(?:\s+(?:'[^']*'|[\w.*?-]+))?)*\s+-delete$/;
 
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
@@ -221,8 +271,15 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const scratch = explainCommand(cmd).scratch;
   if (scratch && !scratch.unchecked.length) return "allow";
   if (!hits.length) return "allow";
-  if (hits.some((h) => !/^rm\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
+  // A shell still runs $( ), backticks and <( ) inside double quotes, which `run` blanked out, so the pieces below can't be judged without seeing them (security round 2).
+  if (/\$\(|`|[<>]\(/.test(cmd)) return "deny";
+  if (hits.some((h) => !/^(?:rm|find)\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");
   const pieces = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
-  return pieces.every((s) => !destructive.test(s) || WORKSPACE_DELETE.test(s)) ? "allow" : "deny";
+  // A plain delete of one-level /tmp entries never makes the suggestion Deny, whatever else the
+  // command does (BOS-165, from BOS-153 finding 2). TEMP_DELETE accepts no trailing slash, deeper
+  // path, glob or redirect to a file, so /tmp/a/, /tmp/a/b and rm > /home/x stay Deny. A piece with
+  // no vouched delete is accepted only when it can't reach beyond /tmp either (writesBeyondTmp),
+  // so cp -t /home and a redirect into the home folder still pay Deny.
+  return pieces.every((s) => (destructive.test(s) ? WORKSPACE_DELETE.test(s) || TEMP_DELETE.test(s) || FIND_TMP_DELETE.test(s) : !writesBeyondTmp(s))) ? "allow" : "deny";
 }
