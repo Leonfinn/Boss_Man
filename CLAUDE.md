@@ -8,3 +8,13 @@ Boss Man runs the full check before it merges approved work, so anything it repo
 
 - Changed `apps/server/src/db/schema.ts`? Generate the migration with drizzle-kit and commit it.
 - Added a shell script? Add it to `scripts/check-shell.sh`. Added a `*.test.sh`? Add it to `scripts/test-shell.sh`.
+
+## Running a full check by hand
+
+Inside an agent session `check-all.sh` refuses to run: use `scripts/check-quick.sh` (above). When the CEO asks for a full run, set `CHECK_ALL_FORCE=1` and start it detached, never as a harness background task (the harness kills those when your run ends):
+
+```
+CHECK_ALL_FORCE=1 setsid nohup scripts/check-all.sh > "$(git rev-parse --git-dir)/check.log" 2>&1 &
+```
+
+Read that log for the `check-all: everything passed` line or a non-zero exit. A check that was signalled writes `check-all: killed by signal <name>` to the log and frees its queue place. Never kill another agent's process (no `pkill -f check-all.sh`, no `killall`): that kills their queued checks.
