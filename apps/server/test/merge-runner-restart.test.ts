@@ -162,6 +162,34 @@ describe("a runner restart fails what it was handling", () => {
     for (const id of ids) expect((await c.row(id)).systemState).toBe("done");
     expect(c.behave.maxRunning).toBeLessThanOrEqual(2);
   }, 60_000);
+
+  it("a runner that stays away longer than every retry pause: merges wait, then land in order, no card, two at a time", async () => {
+    const c = await setup();
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    let n = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // The first two checks die with the old runner; later ones finish when released.
+    c.behave.verify = () => (n++ < 2 ? never : gate);
+    const drop = c.connect();
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) ids.push((await c.ticket()).id);
+    const landings = ids.map((id) => c.built.review.landVisible(id, "the owner").catch((e: Error) => e));
+    await vi.waitFor(() => expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(2));
+    drop();
+    c.behave.running = 0;
+    // Away for far longer than all three retry pauses (1 + 2 + 4 ms): no try may be used up and no request sent meanwhile.
+    const before = c.sent.length;
+    await new Promise((r) => setTimeout(r, 400));
+    expect(c.sent.length).toBe(before);
+    c.connect();
+    await vi.waitFor(() => expect(c.behave.running).toBe(2), { timeout: 3000 });
+    release();
+    await Promise.all(landings);
+    for (const id of ids) expect((await c.row(id)).systemState).toBe("done");
+    expect(c.behave.maxRunning).toBeLessThanOrEqual(2);
+    expect(await c.db.query.decisions.findMany()).toHaveLength(0);
+  }, 60_000);
 });
 
 describe("merge state on card lists", () => {

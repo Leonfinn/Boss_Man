@@ -95,6 +95,8 @@ export const MERGE_WAIT_MS = 10 * 60_000;
 const CHECK_MERGED_KEY = "check_merged_result";
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
+/** How long a merge waits for a runner that is away (a swap: image pull, slow start) before it counts as a failed try. */
+export const RUNNER_WAIT_MS = 30 * 60_000;
 
 /** What the author hears when a ticket that needs code changes has none. */
 export const NOTHING_CHANGED = "Nothing in the repository changed. Make the change, or ask your CEO or a manager to mark the ticket as not needing code (update_ticket with noCode true) and say why.";
@@ -885,6 +887,17 @@ export function reviewService(
       if (!runner) throw new ReviewError(409, "The company has no runner.");
       const ask = async <T>(build: (requestId: string) => Parameters<typeof deps.runners.send>[1], timeoutMs: number) => {
         try {
+          // A runner that is away (a swap takes minutes) is waited for, not retried against: no try is used until a request is delivered.
+          // The wait sits inside the check gate's slot, so queued merges keep their order and never run out of the line.
+          if (!deps.runners.isConnected(runner.id)) {
+            const beat = setInterval(() => void touch().catch(() => undefined), MERGE_ACTIVITY_MS);
+            beat.unref?.();
+            try {
+              if (!(await deps.runners.waitConnected(runner.id, RUNNER_WAIT_MS))) throw new RunnerGone("The company's runner stayed offline.");
+            } finally {
+              clearInterval(beat);
+            }
+          }
           return await deps.runners.request<T>(runner.id, build, timeoutMs);
         } catch (err) {
           // The runner went away: land() runs the merge again by itself instead of raising a card (DR-014).
@@ -979,7 +992,11 @@ export function reviewService(
             phases.set(ticketId, "queued");
             return gate.run(checkPriority(t), alone, () => {
               phases.set(ticketId, "checking");
-              return ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS).catch((err: Error): VerifyResult & { noAnswer: true } => ({ ok: false, exitCode: null, timedOut: false, output: err.message, ms: 0, noAnswer: true }));
+              return ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS).catch((err: Error): VerifyResult & { noAnswer: true } => {
+                // The runner went away mid-check: land() runs the merge again once it is back, without using the check retries.
+                if (err instanceof RunnerGone) throw err;
+                return { ok: false, exitCode: null, timedOut: false, output: err.message, ms: 0, noAnswer: true };
+              });
             });
           });
         let v = await runCheck(false);

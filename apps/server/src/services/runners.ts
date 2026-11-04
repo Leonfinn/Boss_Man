@@ -267,7 +267,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       connected.set(runnerId, send);
       connectedAt.set(runnerId, Date.now());
       features.set(runnerId, feats);
-      for (const l of connectListeners) void Promise.resolve(l(runnerId)).catch(() => {});
+      for (const l of [...connectListeners]) void Promise.resolve(l(runnerId)).catch(() => {});
       return () => {
         if (connected.get(runnerId) === send) {
           connected.delete(runnerId);
@@ -292,6 +292,27 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     isSettling: (runnerId: string, at: Date = new Date()) => at.getTime() - (connectedAt.get(runnerId) ?? -Infinity) < RUNNER_SETTLE_MS,
 
     connectedSince: (runnerId: string) => (connectedAt.has(runnerId) && connected.has(runnerId) ? new Date(connectedAt.get(runnerId)!) : null),
+
+    /**
+     * Resolves true once the runner is connected (at once if it already is), false after maxMs.
+     * A runner swap takes minutes; callers wait here instead of using up their retries (DR-014).
+     */
+    waitConnected(runnerId: string, maxMs: number): Promise<boolean> {
+      if (connected.has(runnerId)) return Promise.resolve(true);
+      return new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => {
+          connectListeners.splice(connectListeners.indexOf(listener), 1);
+          resolve(false);
+        }, maxMs);
+        const listener = (id: string) => {
+          if (id !== runnerId) return;
+          clearTimeout(timer);
+          connectListeners.splice(connectListeners.indexOf(listener), 1);
+          resolve(true);
+        };
+        connectListeners.push(listener);
+      });
+    },
 
     /** Sends a request command and waits for the runner's reply. */
     request<T>(runnerId: string, build: (requestId: string) => RunnerCommand, timeoutMs = 15_000): Promise<T> {
