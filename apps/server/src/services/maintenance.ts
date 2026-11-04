@@ -31,7 +31,12 @@ export type Hold = {
   swapped?: Record<string, string>;
   /** slug -> why its runner could not be recreated. */
   failed?: Record<string, string>;
+  /** slug -> failed recreate tries so far and when the last was; a recreate is tried up to RECREATE_TRIES times before it counts as failed. */
+  tries?: Record<string, { n: number; at: string }>;
 };
+
+export const RECREATE_TRIES = 3;
+const RECREATE_RETRY_MS = 30_000;
 
 export async function getHold(db: Db): Promise<Hold | null> {
   const [row] = await db.select().from(settings).where(eq(settings.key, MAINTENANCE_KEY));
@@ -184,9 +189,11 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
       const failed = { ...h.failed };
       const swapped = { ...h.swapped };
+      const tries = { ...h.tries };
       for (const r of fleet) {
         if (r.current || failed[r.slug]) continue;
         if (swapped[r.slug] && t.getTime() - new Date(swapped[r.slug]!).getTime() < 60_000) continue;
+        if (tries[r.slug] && t.getTime() - new Date(tries[r.slug]!.at).getTime() < RECREATE_RETRY_MS) continue;
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
         await deps.settled();
@@ -195,12 +202,15 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         try {
           await deps.recreate(r.slug); // leader-only
           swapped[r.slug] = now().toISOString();
+          delete tries[r.slug];
         } catch (err) {
-          failed[r.slug] = (err as Error).message;
-          deps.log?.(`drain: could not recreate ${r.slug}: ${(err as Error).message}`);
+          const n = (tries[r.slug]?.n ?? 0) + 1;
+          tries[r.slug] = { n, at: now().toISOString() };
+          deps.log?.(`drain: could not recreate ${r.slug} (try ${n} of ${RECREATE_TRIES}): ${(err as Error).message}`);
+          if (n >= RECREATE_TRIES) failed[r.slug] = (err as Error).message;
         }
       }
-      h = { ...h, swapped, failed };
+      h = { ...h, swapped, failed, tries };
       await save(h);
 
       if (fleet.some((r) => !r.current && !failed[r.slug] && !swapped[r.slug])) return; // still waiting for an idle company

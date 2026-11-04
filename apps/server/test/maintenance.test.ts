@@ -247,9 +247,13 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     c.fake.broken.add("broken-co");
     await c.maintenance.start();
     await c.maintenance.step();
-    expect(await getHold(c.db)).not.toBeNull(); // Silent Co has been given time to dial in
-    c.advance(5_000);
+    expect(await getHold(c.db)).not.toBeNull(); // Silent Co has been given time to dial in; Broken Co is tried again, not given up on
+    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
+    c.advance(31_000);
     await c.maintenance.step();
+    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
+    c.advance(31_000);
+    await c.maintenance.step(); // third failed try: now it counts as failed
     expect(await getHold(c.db)).toBeNull();
     const page = (await c.db.select().from(notifications)).find((n) => n.title === "Runner update finished with problems");
     expect(page).toMatchObject({ level: "page" });
