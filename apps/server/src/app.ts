@@ -46,7 +46,7 @@ import { recoveryService } from "./services/recovery.js";
 import { isSignoffPending, ReviewError, reviewService } from "./services/review.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
-import { signoffState } from "./services/signoff.js";
+import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { record } from "./services/activity.js";
 import { workService, WorkError } from "./services/work.js";
@@ -493,6 +493,9 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (runnerId) => runners.isConnected(runnerId),
     runnerSettling: (runnerId) => runners.isSettling(runnerId, (opts.now ?? (() => new Date()))()),
     endRun: (runId, outcome, at) => runners.endRun(runId, outcome, at),
+    // A never-started run's retry (BOS-480) is a wake of its own, not merged into a waiting one, so it keeps its resume and retry count.
+    requeue: (input) => scheduler.wake(input),
+    cancelOnRunner: (runnerId, runId) => runners.send(runnerId, { type: "run.cancel", runId }),
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
@@ -1505,7 +1508,8 @@ export async function buildApp(opts: AppOptions) {
       }
       // Where it stands on the owner's sign-off, in one word for the page (BOS-503), so nobody guesses from a state note.
       const signoffNow = (await signoffState(db, row.t)).state;
-      const signoff = signoffNow === "waiting";
+      // signoffWaiting keeps its BOS-471 meaning: a card is open for the button to settle.
+      const signoff = !!(await openSignoffCard(db, row.t.id));
       return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow };
     });
 

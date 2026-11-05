@@ -11,7 +11,7 @@ import { z } from "zod";
 import { AGENT_TEMPLATES, FEATURE_STATUSES, FUNDING_PROVIDERS, HARNESSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, tickets as ticketsTable, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
@@ -37,7 +37,7 @@ import { AgentError, type agentsService } from "./services/agents.js";
 import { describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
 import { resolveReviewer, securityReviewers } from "./services/review-policy.js";
 import { latestRows } from "./services/review-kinds.js";
-import { restoreSignoffCard, signoffLine, signoffState } from "./services/signoff.js";
+import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
 import type { alertLadder } from "./services/alert-ladder.js";
@@ -991,11 +991,15 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
                   // Merge state, server-built (DR-014): an open sign-off card can sit beside a merge already running, so say which.
                   const mergeTicket = ctx.type === "risk_review" || ctx.type === "check_stuck" ? (r.context as { ticketId?: string }).ticketId : undefined;
                   const merge = mergeTicket ? await review.mergeState(mergeTicket) : null;
+                  // Where the sign-off stands, worked out from the reviews and the recorded sign-off (BOS-503, DR-021).
+                  const [signoffTicket] = ctx.type === "risk_review" && mergeTicket ? await db.select().from(ticketsTable).where(eq(ticketsTable.id, mergeTicket)) : [];
+                  const signoff = signoffTicket ? signoffLine(await signoffState(db, signoffTicket)) : null;
                   return [
                     `${r.id}: ${ctx.tempCleanup ? "TEMP-FILE CLEANUP: " : ctx.workingCopy ? "WORKING-COPY CLEANUP: " : ""}[${r.kind}/${r.tier}]`,
                     `Question: ${untrusted("decision card", r.question)}`,
                     `Ticket: ${tickets.join(", ") || "none"} · Raised by: ${r.agentName ?? "Boss Man"} · Age: ${ago(r.createdAt)} · Score: ${Math.round(r.score)}`,
                     ...(merge ? [`Merge state: ${merge}`] : []),
+                    ...(signoff ? [signoff] : []),
                     ...(r.reasons?.length ? [`Why it ranks here: ${r.reasons.join("; ")}`] : []),
                     `Options: ${(r.options as string[]).join(" | ") || "none"} (recommended: ${r.recommendedOption ?? "none"})`,
                     ...(ctx.explain?.command ? [`Command: ${untrusted("decision card command", ctx.explain.command)}`] : []),
@@ -1301,7 +1305,8 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const t = row.t;
       const note = stateNoteLine(t, new Date());
       // The sign-off in plain words, from the decisions themselves (BOS-503): agents can't see decision state otherwise.
-      const signoff = signoffLine(await signoffState(db, t));
+      const signoff = t.systemState === "review" ? signoffLine(await signoffState(db, t)) : null;
+      const signoffLog = await signoffHistory(db, ticketId);
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
       return text(
         [
@@ -1309,6 +1314,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
           ...(note ? [note] : []),
           ...(signoff ? [signoff] : []),
+          ...(signoffLog ? [signoffLog] : []),
           ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
           ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
           t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",

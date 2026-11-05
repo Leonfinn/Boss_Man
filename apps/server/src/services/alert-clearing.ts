@@ -5,8 +5,9 @@
 // a person.
 import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { decisions, runners, runs, tickets, wakes } from "../db/schema.js";
+import { decisions, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
+import { signoffClearedReason } from "./signoff.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
 export type ClearWhen =
@@ -23,7 +24,12 @@ export type ClearWhen =
    * A revoked key or an empty credit balance leaves the quota windows untouched, so "room again" is true
    * at once; only a clean run proves the credential is fixed (BOS-469, security review).
    */
-  | { kind: "accountRanOk"; fundingSourceId: string };
+  | { kind: "accountRanOk"; fundingSourceId: string }
+  /**
+   * The owner's sign-off card (DR-021): the ticket no longer waits on the sign-off. It was signed off, merged,
+   * cancelled or moved out of review, a new review round started, or its risk no longer needs the owner.
+   */
+  | { kind: "signoffNotWaiting"; ticketId: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -56,6 +62,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "accountRanOk":
         if (typeof c.fundingSourceId === "string") out.push({ kind: "accountRanOk", fundingSourceId: c.fundingSourceId });
+        break;
+      case "signoffNotWaiting":
+        if (typeof c.ticketId === "string") out.push({ kind: "signoffNotWaiting", ticketId: c.ticketId });
         break;
       default:
         break;
@@ -133,6 +142,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
           .limit(1);
         return clean?.endedAt ? `a run on the account succeeded at ${hhmm(clean.endedAt)}` : null;
       }
+      case "signoffNotWaiting":
+        return signoffClearedReason(db, c.ticketId);
       default:
         return null;
     }
@@ -172,6 +183,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         .where(and(eq(decisions.id, row.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id, question: decisions.question });
       if (!done) continue;
+      // A sign-off card holds its ticket: the hold goes with it, or the ticket would stay blocked on a closed card.
+      if ((row.context as { type?: string } | null)?.type === "risk_review") await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, row.id));
       closed++;
       await record(db, { companyId: row.companyId, kind: "decision_withdrawn", summary: `Boss Man closed "${done.question.slice(0, 120)}" by itself: ${note}`, at: t });
     }

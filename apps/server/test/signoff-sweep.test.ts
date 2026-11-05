@@ -67,7 +67,23 @@ async function setup() {
   const cards = (ticketId: string, status?: "open" | "answered" | "withdrawn") =>
     db.select().from(decisions).where(and(sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`, ...(status ? [eq(decisions.status, status)] : [])));
   const merges = () => sent.filter((x) => x.type === "workspace.merge").length;
-  return { ...built, db, req, company, ceo, senior: senior!, worker, row, mcp, approvedHighRisk, cards, merges };
+  /** The ticket as the board shows it. */
+  const boardCard = async (ticketId: string) => {
+    const found: Array<Record<string, unknown>> = [];
+    const walk = (x: unknown) => {
+      if (Array.isArray(x)) x.forEach(walk);
+      else if (x && typeof x === "object") {
+        if ((x as { id?: unknown }).id === ticketId && "waitingOnOwner" in x) found.push(x as Record<string, unknown>);
+        Object.values(x).forEach(walk);
+      }
+    };
+    walk((await req("GET", `/api/projects/${project.id}/board`)).json());
+    return found[0]!;
+  };
+  /** An owner sign-off on the card, recorded for a commit (DR-013), as the Decisions answer writes it. */
+  const signedOffCard = (ticketId: string, head: string) =>
+    db.insert(decisions).values({ companyId: company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", status: "answered", answer: "Approve and merge", answeredAt: new Date(Date.now() - 3_600_000), context: { type: "risk_review", ticketId, reviewer: "Sam", head, risk: "high", signedOff: { head, risk: "high", at: new Date(Date.now() - 3_600_000).toISOString(), by: "owner" } } });
+  return { ...built, db, req, company, ceo, senior: senior!, worker, row, mcp, approvedHighRisk, cards, merges, boardCard, signedOffCard };
 }
 
 describe("owner sign-off cards (BOS-503)", () => {
@@ -99,7 +115,7 @@ describe("owner sign-off cards (BOS-503)", () => {
 
     // The page and the tools say where it stands.
     expect((await c.req("GET", `/api/tickets/${t.id}`)).json()).toMatchObject({ signoff: "waiting", signoffWaiting: true });
-    expect(textOf(await (await c.mcp(c.worker.id)).callTool({ name: "tickets", arguments: { action: "read", ticketId: t.id } }))).toContain(`Owner sign-off: waiting on the owner (card ${open[0]!.id}`);
+    expect(textOf(await (await c.mcp(c.worker.id)).callTool({ name: "tickets", arguments: { action: "read", ticketId: t.id } }))).toMatch(new RegExp(`Owner sign-off: waiting on the owner since .* \\(card ${open[0]!.id}`));
   });
 
   it("refuses a merge retry for a ticket whose card is missing, and raises the card instead", async () => {
@@ -155,6 +171,83 @@ describe("owner sign-off cards (BOS-503)", () => {
     // A second ask finds the card and adds nothing.
     const again = textOf(await (await c.mcp(c.worker.id)).callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please review it." } }));
     expect(again).not.toContain("raise_decision");
+    expect(await c.cards(t.id, "open")).toHaveLength(1);
+  });
+
+  it("shows a ticket waiting on sign-off in Your review even with no card (DR-021)", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    expect(await c.cards(t.id)).toHaveLength(0);
+    expect(await c.boardCard(t.id)).toMatchObject({ waitingOnOwner: true, approvedBy: "Sam", noReviewer: false });
+  });
+
+  it("refuses a merge whose recorded sign-off is for another commit, in plain sight (DR-013, DR-021)", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    // Signed off an hour ago for commit d…; the runner says b… would merge now.
+    await c.signedOffCard(t.id, "d".repeat(40));
+    await expect(c.review.land(t.id, "Boss Man")).rejects.toThrow(/signed off commit dddddddd, but the branch is now at bbbbbbbb/);
+    expect(c.merges()).toBe(0);
+    expect((await c.row(t.id)).systemState).toBe("review");
+    // In plain sight: the merge card says why and lets the owner send it back; no sign-off card for unreviewed code.
+    const stuck = await c.db.select().from(decisions).where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'check_stuck'`));
+    expect(stuck).toHaveLength(1);
+    expect(await c.cards(t.id, "open")).toHaveLength(0);
+  });
+
+  it("merges when the recorded sign-off covers the commit being merged, with no card raised", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    await c.signedOffCard(t.id, "b".repeat(40));
+    await c.review.land(t.id, "Boss Man");
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    expect(c.merges()).toBe(1);
+    expect(await c.cards(t.id, "open")).toHaveLength(0);
+  });
+
+  it("the sweep never retries a merge for a ticket waiting on sign-off, card or not", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    await c.sweeps.run();
+    // Card open, merge window long past: still not retried.
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 0, signoffCards: 0 });
+    expect(c.merges()).toBe(0);
+    expect((await c.row(t.id)).systemState).toBe("review");
+  });
+
+  it("the card closes itself when a new review round starts, and no second card is raised meanwhile", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    await c.sweeps.run();
+    const [card] = await c.cards(t.id, "open");
+    await c.db.insert(reviewRequests).values({ ticketId: t.id, kind: "code", reviewerAgentId: c.senior.id, round: 2, seq: 0, status: "pending" });
+    await c.sweeps.run();
+    expect(await c.cards(t.id, "open")).toHaveLength(0);
+    const [gone] = await c.db.select().from(decisions).where(eq(decisions.id, card!.id));
+    expect(gone).toMatchObject({ status: "withdrawn" });
+    expect((gone!.context as { withdrawn?: { note?: string } }).withdrawn?.note).toContain("new review round");
+    // Its hold went with it.
+    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, card!.id))).toHaveLength(0);
+  });
+
+  it("the card closes itself when the ticket leaves review (cancelled or merged elsewhere)", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    await c.sweeps.run();
+    await c.db.update(tickets).set({ systemState: "done", outcome: "cancelled" }).where(eq(tickets.id, t.id));
+    await c.sweeps.run();
+    expect(await c.cards(t.id, "open")).toHaveLength(0);
+    expect(await c.cards(t.id, "withdrawn")).toHaveLength(1);
+  });
+
+  it("raising the card twice still leaves one open card", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    const { restoreSignoffCard } = await import("../src/services/signoff.js");
+    const row = await c.row(t.id);
+    const [a, b] = await Promise.all([restoreSignoffCard(c.db, row, "test"), restoreSignoffCard(c.db, row, "test")]);
+    expect(a ?? b).toBeTruthy();
+    await c.sweeps.run();
     expect(await c.cards(t.id, "open")).toHaveLength(1);
   });
 
