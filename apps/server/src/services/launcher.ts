@@ -46,7 +46,6 @@ export function toolServerAddress(url: string): string | null {
   }
 }
 
-/** host:port of a project's git remote (http 80, https 443, ssh 22 unless it names a port), or null for a local path or anything the guard can't allow. */
 /** The launcher's own check for an allow entry (apps/launcher/src/spec.ts): one bad entry makes it refuse the whole list, so never send one it would refuse. */
 const LAUNCHER_ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
 function sendable(addr: string | null): string | null {
@@ -55,6 +54,7 @@ function sendable(addr: string | null): string | null {
   return port >= 1 && port <= 65535 && !host.endsWith(".") ? addr : null;
 }
 
+/** host:port of a project's git remote (http 80, https 443, ssh 22 unless it names a port), or null for a local path or anything the guard or launcher can't allow. */
 export function gitHostAddress(repoUrl: string): string | null {
   return sendable(rawGitHostAddress(repoUrl));
 }
@@ -119,7 +119,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     const rows = await db.select({ url: mcpServers.url }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
     // The company's own git remotes: each project's host and port only, so its runner can clone and fetch from a LAN git server.
     const repos = await db.select({ url: projects.repoUrl }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
-    return [...new Set([...rows.map((r) => toolServerAddress(r.url)), ...repos.map((r) => gitHostAddress(r.url!))].filter((a): a is string => !!a))];
+    return [...new Set([...rows.map((r) => sendable(toolServerAddress(r.url))), ...repos.map((r) => gitHostAddress(r.url!))].filter((a): a is string => !!a))];
   }
 
   return {
