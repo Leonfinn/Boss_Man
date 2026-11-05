@@ -25,6 +25,8 @@ export type MemorySample = {
   cpuCores: number | null;
   /** Cheap counters for the suspects (open sockets, their unsent bytes, runner events waiting to be stored). */
   extra: Record<string, number>;
+  /** What the native part is made of (native-memory.ts, BOS-410 step 2): threads, smaps by kind, V8 malloc, handles. */
+  native?: Record<string, number>;
 };
 
 export type MemorySamplerDeps = {
@@ -36,6 +38,8 @@ export type MemorySamplerDeps = {
   cpuUsage?: () => NodeJS.CpuUsage;
   uptime?: () => number;
   extra?: () => Record<string, number>;
+  /** Slower native breakdown, read once per sample after the cheap figures; its failure never stops the line. */
+  native?: () => Promise<Record<string, number>>;
   /** How many samples to keep (default 24: two hours at five minutes). */
   keep?: number;
 };
@@ -91,12 +95,27 @@ export function createMemorySampler(deps: MemorySamplerDeps) {
     return sample;
   }
 
-  function tick() {
+  const log = (sample: MemorySample) => {
     try {
-      deps.log(read(true));
+      deps.log(sample);
     } catch {
       // logging must never take the server down
     }
+  };
+
+  /** Returns a promise only when a native reader is wired, so the line waits for its breakdown. */
+  function tick(): Promise<void> | void {
+    let sample: MemorySample;
+    try {
+      sample = read(true);
+    } catch {
+      return;
+    }
+    if (!deps.native) return log(sample);
+    return deps
+      .native()
+      .then((d) => { sample.native = d; }, () => undefined)
+      .then(() => log(sample));
   }
 
   return {
@@ -105,8 +124,8 @@ export function createMemorySampler(deps: MemorySamplerDeps) {
     /** First sample at once, then every everyMs. The timer never keeps the process alive. */
     start() {
       if (timer) return;
-      tick();
-      timer = setInterval(tick, everyMs);
+      void tick();
+      timer = setInterval(() => void tick(), everyMs);
       timer.unref();
     },
     stop() {
@@ -131,7 +150,7 @@ export function createMemorySampler(deps: MemorySamplerDeps) {
               nativeOther: last.nativeOther - first.nativeOther,
             }
           : null;
-      return { unit: "MiB", everySeconds: Math.round(everyMs / 1000), current, lastCpuCores: last?.cpuCores ?? null, trend, samples: ring.length };
+      return { unit: "MiB", everySeconds: Math.round(everyMs / 1000), current, lastCpuCores: last?.cpuCores ?? null, lastNative: last?.native ?? null, trend, samples: ring.length };
     },
   };
 }

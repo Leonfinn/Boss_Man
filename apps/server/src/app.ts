@@ -76,6 +76,7 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { createMemorySampler } from "./services/memory-sampler.js";
+import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
@@ -341,6 +342,8 @@ export async function buildApp(opts: AppOptions) {
   const memory = createMemorySampler({
     everyMs: Number(process.env.BOSSMAN_MEMORY_LOG_MS ?? 0) || undefined,
     log: (sample) => app.log.info({ memory: sample }, "memory"),
+    // What the off-heap part is made of (BOS-410 step 2: 15 GiB native with a 100 MiB heap on 5 Nov).
+    native: () => readNativeDetail(),
     extra: () => {
       let sockets = 0;
       let socketBuffered = 0;

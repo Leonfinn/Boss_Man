@@ -7,7 +7,7 @@ import type { secretsService } from "../services/secrets.js";
 
 type Runners = ReturnType<typeof runnersService>;
 
-// Runner events received but not yet stored, across every socket on this process (BOS-410). A
+// Runner events received and not yet stored (the one being stored included), across every socket on this process (BOS-410). A
 // slow database makes these pile up in memory; the memory sampler logs the count.
 let ingestWaiting = 0;
 export const runnerIngestWaiting = () => ingestWaiting;
@@ -100,7 +100,6 @@ export async function runnerSocketRoutes(
             ingestWaiting++;
             queue = queue
               .then(async () => {
-                ingestWaiting--;
                 await runners.ingest(runner, msg.entry);
                 send({ type: "ack", upTo: msg.entry.seq });
               })
@@ -108,6 +107,10 @@ export async function runnerSocketRoutes(
                 app.log.error({ err, runnerId: runner.id, seq: msg.entry.seq, companyId: runner.companyId }, "runner event failed");
                 // No ack: the runner keeps the entry and resends it after reconnecting.
                 socket.close(1011, "ingest failed");
+              })
+              // Counted down however the event ends, a failed hello ahead of it included (Jane, BOS-472).
+              .finally(() => {
+                ingestWaiting--;
               });
             return;
           case "reply":
