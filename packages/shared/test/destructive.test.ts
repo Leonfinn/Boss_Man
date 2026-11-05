@@ -294,6 +294,31 @@ describe("destructive commands, however they're written (BOS-116)", () => {
     expect(evaluatePermission(exec("echo 'git push --force' > a.sh; sh a.sh"), []).outcome).toBe("owner");
   });
 
+  // Round 25 (Freddy): package runners launch rm the way pnpm exec does.
+  it.each([
+    "npm exec -- rm -rf x",
+    "npm exec rm -- -rf x",
+    "npm x -- rm -rf x",
+    "npm exec -c 'rm -rf x'",
+    "npx rm -rf x",
+    "npx -y rm -rf x",
+    "npx --yes rm -rf x",
+    "npx --no-install rm -rf x",
+    "npx -p rimraf rm -rf x",
+    "bunx rm -rf x",
+    "bun x rm -rf x",
+    "pnpm dlx rm -rf x",
+    "yarn dlx rm -rf x",
+  ])("unwraps the package runner in %s", (c) => {
+    expect(destroys(c)).toBe(true);
+  });
+
+  it("leaves ordinary package-runner use alone", () => {
+    for (const c of ["npx tsc --noEmit", "npm exec -- vitest run", "bunx prettier --check .", "npx -y create-vite app", "npm test"]) {
+      expect(commandRisks(c), c).toEqual([]);
+    }
+  });
+
   it("finds pushes however they're written", () => {
     for (const c of ['"git" push', "g\\it push origin main", "sudo npm publish", "pnpm -r publish", "bash -c 'git push'", "docker image push x"]) {
       expect(evaluatePermission(exec(c), []), c).toEqual({ outcome: "owner", rule: "Pushing and publishing go to the owner", position: 3 });

@@ -514,6 +514,23 @@ export function commandRisks(command: string | string[]): Risk[] {
           wrapped = true;
           continue;
         }
+        // npm exec / npm x / npx / bunx / bun x run a package's program, like pnpm exec.
+        const npmSub = prog === "npm" || prog === "bun" ? args.findIndex((a) => a.text === "exec" || a.text === "x") : -1;
+        if (prog === "npx" || prog === "bunx" || npmSub >= 0) {
+          const rest = npmSub >= 0 ? args.slice(npmSub + 1) : args;
+          const call = rest.findIndex((a) => /^(-c|--call)$/.test(a.text) || a.text.startsWith("--call="));
+          if (call >= 0) {
+            const a = rest[call]!;
+            const script = a.text.includes("=") ? { ...a, text: a.text.slice(a.text.indexOf("=") + 1) } : rest[call + 1];
+            if (script?.dynamic) return destroys("runs a script only known when it runs");
+            return script ? readScript(script.text, depth + 1) : undefined;
+          }
+          w = afterOptions(rest, ["-p", "--package", "-w", "--workspace"]);
+          // npm's option parser swallows a later "--", so `npx rm -- -rf x` hands rm "-rf x".
+          if (prog !== "bunx" && prog !== "bun") w = w.filter((a, i) => i === 0 || a.text !== "--");
+          wrapped = true;
+          continue;
+        }
         const scriptOption = SCRIPT_OPTION[prog];
         if (scriptOption) {
           const at = args.findIndex((a) => /^(-[a-zA-Z]*c|--command|--call)$/.test(a.text) || /^--(command|call)=/.test(a.text));
