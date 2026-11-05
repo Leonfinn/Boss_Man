@@ -101,6 +101,7 @@ export const LINK_LOOKUPS = 20;
  * reading at most LINK_SCAN_CHARS characters of it.
  */
 export function wikilinkSlugs(text: string, max = LINK_LOOKUPS): string[] {
+  // not state: local to this call, dropped when it returns
   const seen = new Set<string>();
   const out: string[] = [];
   for (const m of text.slice(0, LINK_SCAN_CHARS).matchAll(/\[\[([^\]#|]*)(?:#[^\]]*)?\]\]/g)) {

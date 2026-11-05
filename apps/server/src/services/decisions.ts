@@ -343,7 +343,8 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
       recommendedOption: CHECK_AGAIN,
       tier: "owner",
       dedupeKey: `merge-stuck:${t.id}`,
-      context: { type: "check_stuck", ticketId: t.id, command: "", output: why },
+      // The one closer, on any tier: a retry card goes once its ticket finishes (DR-016, BOS-470).
+      context: { type: "check_stuck", ticketId: t.id, command: "", output: why, clearWhen: [{ kind: "ticketDone", ticketId: t.id }] },
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
