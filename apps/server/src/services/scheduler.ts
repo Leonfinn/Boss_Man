@@ -32,6 +32,7 @@ import { conversationLines } from "./ticket-chat.js";
 import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
+import type { ClearWhen } from "./alert-clearing.js";
 import { AGE_STEP_MS, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
@@ -247,6 +248,19 @@ export function schedulerService(
     if (!urgent) return false;
     if (source.quotaOverage === "urgent") return true;
     return !full.some((s) => s.utilization >= 1) && !samples.some((s) => s.overageInUse);
+  }
+
+  /**
+   * Whether an account has room for a new run again, by the same test a run launch uses (BOS-383,
+   * BOS-227). The one closer asks this for usage-limit cards, so the card and the scheduler never
+   * disagree about what "back under the limit" means.
+   */
+  async function hasRoom(fundingSourceId: string): Promise<boolean> {
+    const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, fundingSourceId));
+    if (!source) return false;
+    const samples = await latestQuotaWindows(source.id);
+    if (samples.length === 0) return false;
+    return holdingWindows(source, samples, now()).length === 0;
   }
 
   /** For the hold notice: when no other Claude account can take over, how to swap by hand (BOS-383). */
@@ -751,7 +765,9 @@ export function schedulerService(
     if (open) return;
     const [agent] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
     const [t] = w.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
-    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}` });
+    // A "could not start" card closes itself once the runner is back and this wake has started (DR-017 E, BOS-475).
+    const clearWhen: ClearWhen[] = /runner offline/i.test(reason) ? [{ kind: "runnerConnected", companyId: w.companyId, wakeId: w.id }] : [];
+    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}`, clearWhen });
   }
 
   /** The owner's ranked Claude subscriptions in order, when this source is one of them (BOS-383). */
@@ -919,6 +935,7 @@ export function schedulerService(
 
   const self = {
     limits,
+    hasRoom,
 
     /** Queues a wake, or drops it (and tells the owner) if it looks like a loop. */
     async wake(input: WakeInput) {
@@ -926,11 +943,16 @@ export function schedulerService(
       if (!agent) throw new Error("No such agent.");
       let depth = 0;
       let causedByAgentId: string | null = null;
-      if (input.causedByRunId) {
-        const [parent] = await db.select({ depth: wakes.causationDepth }).from(wakes).where(eq(wakes.runId, input.causedByRunId));
-        const [run] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, input.causedByRunId));
-        depth = (parent?.depth ?? 0) + 1;
-        causedByAgentId = run?.agentId ?? null;
+      // Boss Man's own wakes (a resume after a restart, a watchdog sweep) are not an agent waking
+      // itself or another agent: they keep the wake depth of the run they pick up and are left out
+      // of the self-wake count, so a mass restart can't trip the loop brakes (BOS-479).
+      const cls = wakeClassOf(input);
+      const parentRunId = input.causedByRunId ?? (cls === "scheduled" ? input.resumeRunId : null);
+      if (parentRunId) {
+        const [parent] = await db.select({ depth: wakes.causationDepth }).from(wakes).where(eq(wakes.runId, parentRunId));
+        const [run] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, parentRunId));
+        depth = (parent?.depth ?? 0) + (cls === "scheduled" ? 0 : 1);
+        causedByAgentId = input.causedByRunId ? (run?.agentId ?? null) : null;
       }
       // An urgent ticket's wake takes no wait at all (BOS-253) and is never treated as routine: the
       // flag skips quiet hours and batching, but the priority is kept as given, so tick() still runs
@@ -952,7 +974,6 @@ export function schedulerService(
 
       // Someone waiting on this wake is never dropped for looking like a loop (DR-002): the loop
       // limits raise their alert and the wake goes ahead, so a card can't be lost to a loop guard.
-      const cls = wakeClassOf(input);
       const keep = cls === "waiting";
       if (depth > limits.maxDepth) {
         const loopAlert = () =>
@@ -970,12 +991,13 @@ export function schedulerService(
         }
         await loopAlert();
       }
-      if (causedByAgentId === agent.id) {
+      if (causedByAgentId === agent.id && cls !== "scheduled") {
         const since = new Date(now().getTime() - 10 * 60_000);
+        const scheduledReasons = reasonsOfClass("scheduled").map((r) => sql`${r}`);
         const recent = await db
           .select({ n: sql<number>`count(*)::int` })
           .from(wakes)
-          .where(and(eq(wakes.agentId, agent.id), eq(wakes.causedByAgentId, agent.id), gt(wakes.createdAt, since)));
+          .where(and(eq(wakes.agentId, agent.id), eq(wakes.causedByAgentId, agent.id), gt(wakes.createdAt, since), sql`${wakes.reason} not in (${sql.join(scheduledReasons, sql`, `)})`));
         if ((recent[0]?.n ?? 0) >= limits.selfWakesPer10Min) {
           const selfAlert = () =>
             deps.alert(agent.companyId, `${agent.name} keeps waking itself (more than ${limits.selfWakesPer10Min} times in 10 minutes). New self-wakes are ${keep ? "still going through when someone is waiting on them, but look into it" : "being dropped"}.`, { ticketId: base.ticketId, about: [agent.id], dedupeKey: `alert:self:${agent.id}` });
