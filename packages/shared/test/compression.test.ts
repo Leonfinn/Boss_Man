@@ -45,4 +45,22 @@ describe("the blue/green Caddyfile compresses at the front door", () => {
     // The include the host deployer rewrites is imported from its own file, so this one cannot carry encode.
     expect(caddyfile).toContain("import /etc/caddy-active/active.caddy");
   });
+
+  // Caddy decodes {$VAR:default} when it loads the file: a bare `{args[...]}` in a comment is fine, but a
+  // misspelt or unbraced placeholder outside one stops `caddy validate` (the deployer's reload) dead.
+  it("every {$VAR:default} placeholder in the Caddyfile is well-formed, and what the deployer's environment supplies is declared with a default", () => {
+    const code = caddyfile
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+    // Caddy's placeholders are `{name}` and `{name.args}`; an environment variable is `{$NAME}` or `{$NAME:default}`.
+    const placeholders = code.match(/\{[^{}]*\}/g) ?? [];
+    for (const placeholder of placeholders) {
+      if (!placeholder.startsWith("{$")) continue;
+      expect(placeholder, `${placeholder} is not {$NAME} or {$NAME:default}`).toMatch(/^\{\$[A-Za-z_][A-Za-z0-9_]*:[^{}]*\}$/);
+    }
+    // BOSSMAN_CADDY_TRUSTED_PROXIES is expanded by the deployer's compose file, not by Caddy, so the file
+    // must keep a default: a missing default leaves an empty `trusted_proxies static` and validation fails.
+    expect(code).toContain("{$BOSSMAN_CADDY_TRUSTED_PROXIES:127.255.255.254/32}");
+  });
 });
