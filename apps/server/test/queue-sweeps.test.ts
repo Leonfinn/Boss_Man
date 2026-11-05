@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq, getTableName } from "drizzle-orm";
+import { and, eq, getTableName, sql } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite, type Db } from "../src/db/client.js";
@@ -68,9 +68,13 @@ async function setup() {
   const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: clock().toISOString(), event });
   const ticket = async (body: Record<string, unknown>) => (await req("POST", `/api/projects/${project.id}/tickets`, body)).json() as { id: string };
   const queue = async () => (await req("GET", "/api/decisions")).json() as Row[];
+  // A stalled-run card climbs the alert ladder now (DR-017): it belongs to the Scrum Master/CEO, never the
+  // owner's queue unless it is an owner kind. These tests read the card itself, whatever rung holds it, in
+  // the CEO's own view (which carries the same evidence and reasons the owner's queue shows).
+  const alerts = async () => (await built.decisions.queue({ includeAll: true, companyId: company.id })) as unknown as Row[];
   const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
-  return { ...built, db, reads, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
+  return { ...built, db, reads, close, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, sweep, advance, clock, offline, online };
 }
 
 describe("ranked decision queue (R20)", () => {
@@ -376,7 +380,7 @@ describe("stalled runs (R32)", () => {
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
     ctx.advance(2 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
-    const [row] = await ctx.queue();
+    const [row] = await ctx.alerts();
     expect(row).toMatchObject({ kind: "stalled_run", recommendedOption: "Keep waiting" });
     expect(row!.question).toBe('CEO has sent nothing for 6 minutes while working on "Checkout error states". It may be stuck, or busy with a long command.');
     expect(ctx.commands.some((c) => c.type === "run.cancel")).toBe(false);
@@ -401,7 +405,7 @@ describe("stalled runs (R32)", () => {
     await ctx.scheduler.tick();
     ctx.advance(11 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
-    const [row] = await ctx.queue();
+    const [row] = await ctx.alerts();
     expect(row).toMatchObject({ kind: "stalled_run", recommendedOption: "Cancel run" });
     expect(row!.question).toBe(`CEO's run on "Checkout error states" never started: the runner hasn't reported it beginning in 11 minutes, probably because the runner restarted. Cancel it, then message CEO on the task to start again.`);
   });
@@ -413,11 +417,11 @@ describe("stalled runs (R32)", () => {
     await ctx.sweep();
     await ctx.emit({ type: "run.update", runId, update: { sessionUpdate: "agent_message_chunk" } } as RunnerEvent);
     await ctx.sweep();
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
 
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    const [row] = await ctx.queue();
+    const [row] = await ctx.alerts();
     await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Keep waiting" });
     ctx.advance(10 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
@@ -428,14 +432,14 @@ describe("stalled runs (R32)", () => {
     await launch();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    const [row] = await ctx.queue();
+    const [row] = await ctx.alerts();
     await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Keep waiting" });
     ctx.advance(29 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
     ctx.advance(2 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
   });
 
   it("closes the alert when the run's ticket is already done", async () => {
@@ -443,10 +447,10 @@ describe("stalled runs (R32)", () => {
     const { ticket } = await launch();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, ticket.id));
     await ctx.sweep();
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
   });
 
   it("links a stall notice to its run and a stale blocker to the blocked ticket", async () => {
@@ -459,6 +463,9 @@ describe("stalled runs (R32)", () => {
     await ctx.req("POST", `/api/tickets/${tls.id}/dependencies`, { ticketId: domain.id });
     ctx.advance(25 * HOUR);
     await ctx.sweep();
+    // A stall notice stops at the CEO now (DR-017), so put it where the owner would see it (as the ladder does on
+    // a timeout or the CEO's escalate) to check the link it carries. The chain is unchanged.
+    await ctx.db.update(decisions).set({ tier: "owner", context: sql`jsonb_set(${decisions.context}, '{ladder,rung}', '"owner"')` }).where(eq(decisions.kind, "stalled_run"));
     await ctx.notes.syncDecisions();
     const links = Object.fromEntries((await ctx.db.select({ k: decisions.kind, l: notifications.link }).from(notifications).innerJoin(decisions, eq(decisions.id, notifications.decisionId))).map((r) => [r.k, r.l]));
     expect(links).toMatchObject({ stalled_run: `#/runs/${runId}`, stale_blocker: `#/tickets/${tls.id}` });
@@ -471,12 +478,12 @@ describe("stalled runs (R32)", () => {
     await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run npm test", status: "completed" } } as unknown as RunnerEvent);
     ctx.advance(14 * 60_000);
     await ctx.sweep();
-    const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
+    const [row] = (await ctx.alerts()) as Array<Row & { evidence: Record<string, any> }>;
     expect(row!.evidence).toMatchObject({ runId, agent: "CEO", ticketId: ticket.id, ticket: "Checkout error states", runner: { connected: true }, waitingOnOwner: false });
     expect(row!.evidence.lastStep).toMatchObject({ type: "run.update", event: { update: { title: "Run npm test" } } });
     expect(new Date(row!.evidence.lastEventAt).getTime()).toBeLessThan(Date.now() + 1000);
     ctx.offline();
-    const [off] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
+    const [off] = (await ctx.alerts()) as Array<Row & { evidence: Record<string, any> }>;
     expect(off!.evidence.runner.connected).toBe(false);
   });
 
@@ -486,7 +493,7 @@ describe("stalled runs (R32)", () => {
     await ctx.scheduler.tick();
     ctx.advance(11 * 60_000);
     await ctx.sweep();
-    const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
+    const [row] = (await ctx.alerts()) as Array<Row & { evidence: Record<string, any> }>;
     expect(row!.evidence).toMatchObject({ lastEventAt: null, lastStep: null, ticket: "Checkout error states" });
   });
 
@@ -499,7 +506,7 @@ describe("stalled runs (R32)", () => {
     ctx.advance(30 * 60_000);
     expect((await ctx.sweep()).stalledRuns.open).toBe(0);
     // The paused agent outranks other rows.
-    expect((await ctx.queue())[0]!.reasons[0]).toBe("An agent is paused until you answer");
+    expect((await ctx.alerts())[0]!.reasons[0]).toBe("An agent is paused until you answer");
   });
 
   it("closes the alert by itself, with the reason, when the run ends after it was raised (BOS-217)", async () => {
@@ -507,11 +514,11 @@ describe("stalled runs (R32)", () => {
     const { runId } = await launch();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     const endedAt = ctx.clock();
     await ctx.emit({ type: "run.ended", runId, stopReason: "end_turn", error: null });
     // No sweep: the event alone closes it.
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
     expect(d).toMatchObject({ status: "withdrawn", dedupeKey: null, context: { withdrawn: { by: "system", note: `the run ended normally at ${endedAt.toISOString().slice(11, 16)}` } } });
     expect((await ctx.db.select().from(activity)).some((a) => a.kind === "decision_withdrawn" && a.summary.includes('CEO has sent nothing') && a.summary.includes('ended normally'))).toBe(true);
@@ -522,10 +529,10 @@ describe("stalled runs (R32)", () => {
     const { runId } = await launch();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     // No sweep: the event alone closes it.
     await ctx.emit({ type: "run.update", runId, update: { kind: "agent_message_chunk" } } as RunnerEvent);
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
     expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system", note: "the run is active again" } } });
   });
@@ -540,7 +547,7 @@ describe("stalled runs (R32)", () => {
     ctx.advance(35 * 60_000);
     const res = await ctx.sweep();
     expect(res.lostRuns).toBe(1);
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
     expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system" } } });
   });
@@ -551,10 +558,10 @@ describe("stalled runs (R32)", () => {
     await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "pnpm check-all", status: "in_progress" } } as unknown as RunnerEvent);
     ctx.advance(10 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     ctx.advance(6 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
-    const [row] = await ctx.queue();
+    const [row] = await ctx.alerts();
     expect(row!.question).toContain("has sent nothing for 16 minutes");
     expect(row!.question).toContain("It is still inside pnpm check-all, so it may just be a long command.");
   });
@@ -576,9 +583,9 @@ describe("stalled runs (R32)", () => {
     ctx = await setup();
     const { runId } = await launch();
     await ctx.emit({ type: "run.permission_request", runId, requestId: "r1", title: "git push", kind: "execute", rawInput: { command: "git push origin main" }, options: [] } as unknown as RunnerEvent);
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     await ctx.emit({ type: "run.ended", runId, stopReason: "cancelled", error: null });
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "permission"));
     expect(d!.status).toBe("withdrawn");
   });
@@ -608,7 +615,7 @@ describe("the server ends runs it can't reach", () => {
     const { runId } = await launched();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    const [d] = await ctx.queue();
+    const [d] = await ctx.alerts();
     ctx.offline();
     expect((await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Cancel run" })).json()).toMatchObject({ delivered: false, endedHere: true });
     expect((await row(runId)).outcome).toBe("stopped: runner offline");
@@ -651,7 +658,7 @@ describe("the server ends runs it can't reach", () => {
     const { runId } = await launched();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     ctx.offline();
     ctx.advance(28 * 60_000);
     expect((await ctx.sweep()).lostRuns).toBe(0); // 34 minutes in: not yet 30 past the 5-minute limit
@@ -659,7 +666,7 @@ describe("the server ends runs it can't reach", () => {
     const res = await ctx.sweep();
     expect(res.lostRuns).toBe(1);
     expect(await row(runId)).toMatchObject({ outcome: "lost: runner offline" });
-    expect((await ctx.queue()).filter((d) => !/could not start/.test(d.question))).toEqual([]);
+    expect((await ctx.alerts()).filter((d) => !/could not start/.test(d.question))).toEqual([]);
   });
 
   it("never reaps a run on a connected runner that has sent events", async () => {
