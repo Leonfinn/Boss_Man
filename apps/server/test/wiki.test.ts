@@ -393,6 +393,61 @@ describe("wiki append, history and restore (BOS-430)", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
     await expect(c.wiki.append(c.company.id, { slug: "log", entry: "x".repeat(20_001), agentId: c.worker.id, runId: null })).rejects.toThrow(/at most/);
   });
+
+  it("appends sent at the same moment all land, none silently lost", async () => {
+    // Adversarial round 2: five parallel appends all said success but only the last entry was saved.
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { title: "Log", body: "# Log\n\n## Entries\n\n- a\n", agentId: c.worker.id, runId: null });
+    const entries = ["e0", "e1", "e2", "e3", "e4"];
+    const results = await Promise.all(entries.map((e) => c.wiki.append(c.company.id, { slug: "log", entry: `- ${e}`, heading: "Entries", agentId: c.worker.id, runId: null })));
+    expect(results).toHaveLength(5);
+    const body = (await c.wiki.get(c.company.id, "log")).body;
+    for (const e of entries) expect(body).toContain(`- ${e}`);
+    expect((await c.wiki.history(c.company.id, "log")).revisions).toHaveLength(6);
+  });
+
+  it("a series of small cuts can't add up to a wipe: the guard compares against recent versions", async () => {
+    // Adversarial round 2: ten writes each cutting 24% passed, and a 4,000-char page ended at 256.
+    const c = (ctx = await setup());
+    const page = `## Log\n\n${Array.from({ length: 40 }, (_, i) => `- entry ${i}: ${"x".repeat(95)}`).join("\n")}`;
+    await c.wiki.write(c.company.id, { title: "Log", body: page, agentId: c.worker.id, runId: null });
+    // Each step is 24% off the text now (under the quarter rule on its own), but the page ends far smaller.
+    let body = page;
+    let refused = 0;
+    for (let i = 0; i < 10; i++) {
+      const next = body.slice(0, Math.max("## Log\n".length, Math.floor(body.length * 0.76))).trimEnd() + "\n";
+      try {
+        await c.wiki.write(c.company.id, { slug: "log", title: "Log", body: next, agentId: c.worker.id, runId: null });
+        body = next;
+      } catch {
+        refused++;
+        break;
+      }
+    }
+    // The guard stops the runaway at once: a cut below a quarter of the page's largest size is refused,
+    // so small steps can't add up to a wipe.
+    expect(refused).toBe(1);
+    expect(body.length).toBeGreaterThan(page.length * 0.7);
+  });
+
+  it("a short page with no headings can't be emptied either", async () => {
+    // Adversarial round 2: a headingless page under 200 chars was emptied because the floor was 200.
+    const c = (ctx = await setup());
+    const status = "All systems normal since 2026-11-05 06:00 UTC. Next check 07:00.";
+    await c.wiki.write(c.company.id, { title: "Status", body: status, agentId: c.worker.id, runId: null });
+    await expect(c.wiki.write(c.company.id, { slug: "status", title: "Status", body: "", agentId: c.worker.id, runId: null })).rejects.toThrow(/would replace a page of/);
+    expect((await c.wiki.get(c.company.id, "status")).body).toBe(status);
+    // A small edit still works.
+    expect((await c.wiki.write(c.company.id, { slug: "status", title: "Status", body: status.replace("07:00", "08:00"), agentId: c.worker.id, runId: null })).created).toBe(false);
+  });
+
+  it("the append reply names the end, not the top, for oldest with no heading", async () => {
+    // Adversarial round 2 minor: position "oldest" with no heading said "at the top".
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { title: "Log", body: log, agentId: c.worker.id, runId: null });
+    const r = await c.wiki.append(c.company.id, { slug: "log", entry: "End", position: "oldest", agentId: c.worker.id, runId: null });
+    expect(r.where).toBe(" at the end");
+  });
 });
 
 describe("wiki history is never lost by import (BOS-430)", () => {

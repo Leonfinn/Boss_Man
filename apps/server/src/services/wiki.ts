@@ -97,22 +97,40 @@ export const headingsOf = (body: string) => splitSections(body).filter((s) => s.
 export const SHRINK_FRACTION = 0.25;
 
 /**
+ * The smallest cut the guard tolerates before flagging a write: a typo fix on a short page (a status
+ * line, a one-row table) must still work, but a headingless page under 200 characters could otherwise
+ * be emptied outright (BOS-430, adversarial round 2). The quarter rule covers anything longer.
+ */
+export const MIN_SHRINK = 40;
+
+/**
  * Why a write that replaces a page's body is refused without `replace: true` (BOS-430): it would
  * remove more than a quarter of the text, or drop a heading the page has now. Null when it's safe
  * (a grown or barely-changed page, or a brand-new one). The message says the sizes and the headings,
  * so an agent can fix the call instead of re-sending the whole page.
+ *
+ * `largest` is the biggest the page has ever been (any version, or the text now): ten writes that each
+ * cut 24% pass the per-write rule but end with the page emptied, so the guard measures against what the
+ * page has held, not only what it holds now (BOS-430, adversarial round 2). It defaults to the text now.
  */
 export function shrinkRefusal(before: string, after: string): string | null {
-  if (after.length >= before.length) return null;
-  const removed = before.length - after.length;
+  return shrinkRefusalAgainst(before, before.length, after);
+}
+
+/** The guard, measured against `largest` (the biggest the page has been) while `before` is what it holds now. */
+export function shrinkRefusalAgainst(before: string, largest: number, after: string): string | null {
+  // Compare against whichever is bigger: a page that just grew and is now being cut back also matters.
+  const baseline = Math.max(largest, before.length);
+  if (after.length >= baseline) return null;
+  const removed = baseline - after.length;
   const afterHeadings = new Set(headingsOf(after).map((h) => h.heading.trim().toLowerCase()));
   const gone = headingsOf(before).filter((h) => !afterHeadings.has(h.heading.trim().toLowerCase()));
-  const tooSmall = removed > Math.max(200, before.length * SHRINK_FRACTION);
+  const tooSmall = removed > Math.max(MIN_SHRINK, baseline * SHRINK_FRACTION);
   if (!tooSmall && !gone.length) return null;
-  const pct = before.length ? Math.round((removed / before.length) * 100) : 0;
+  const pct = baseline ? Math.round((removed / baseline) * 100) : 0;
   const parts = [
-    `This write would replace a page of ${before.length.toLocaleString("en-GB")} characters with ${after.length.toLocaleString("en-GB")}`,
-    tooSmall ? ` (${removed.toLocaleString("en-GB")} characters, ${pct}%, removed)` : "",
+    `This write would replace a page of ${baseline.toLocaleString("en-GB")} characters with ${after.length.toLocaleString("en-GB")}`,
+    tooSmall ? ` (${removed.toLocaleString("en-GB")} characters, ${pct}%, removed${baseline > before.length ? `; the page has been ${baseline.toLocaleString("en-GB")} characters before and can't be cut this far by small steps` : ""})` : "",
     gone.length ? `, and drop ${gone.length === 1 ? "the heading" : "these headings"}: ${gone.map((h) => `"${h.heading}"`).join(", ")}` : "",
     ".",
   ].join("");
@@ -307,9 +325,12 @@ export type SectionHit = { slug: string; title: string; path: string; snippet: s
 
 type Author = { agentId: string | null; runId: string | null };
 
+/** What `write` saves. Shared by `write`, `writeWithin` and `append`, which all reach the same save (BOS-430). */
+export type WriteInput = { slug?: string; folder?: string; title: string; body: string; ticketId?: string | null; replace?: boolean; isCeo?: boolean; fromRestore?: boolean } & Author;
+
 export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "similar">) {
-  async function ownTicket(companyId: string, ticketId: string) {
-    const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId)));
+  async function ownTicket(conn: Db, companyId: string, ticketId: string) {
+    const [t] = await conn.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId)));
     if (!t) throw new WikiError(404, "No ticket with that ID in this company.");
   }
 
@@ -317,6 +338,19 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
     const [p] = await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug)));
     if (!p) throw new WikiError(404, "There's no wiki page with that name.");
     return p;
+  }
+
+  /**
+   * The biggest this page has ever been (the longest of all its version bodies, or its body now): the
+   * baseline the shrink guard measures a rewrite against, so repeated small cuts can't add up to a wipe
+   * (BOS-430, adversarial round 2). A length aggregate, so no old body is sent to the server.
+   */
+  async function largestEver(conn: Db, pageId: string, now: number): Promise<number> {
+    const [row] = await conn
+      .select({ longest: sql<number>`coalesce(max(length(${wikiRevisions.body})), 0)` })
+      .from(wikiRevisions)
+      .where(eq(wikiRevisions.pageId, pageId));
+    return Math.max(now, Number(row?.longest ?? 0));
   }
 
   const ftsExpr = sql`to_tsvector('english', ${wikiPages.title} || ' ' || ${wikiPages.body})`;
@@ -450,19 +484,30 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
      * Creates or updates a page and keeps the old text as a revision. A slug that exists is
      * updated; a folder that differs from the page's moves it, which changes its address. With
      * a ticket, the page is linked to it as something the ticket produced.
+     *
+     * The body of this lives in `writeWithin`, which takes the database handle to use: a caller that
+     * has read the page and must save it unchanged (append) passes its transaction, so the read and
+     * the save can't interleave with another writer (BOS-430, adversarial round 2).
      */
-    async write(companyId: string, input: { slug?: string; folder?: string; title: string; body: string; ticketId?: string | null; replace?: boolean; isCeo?: boolean; fromRestore?: boolean } & Author) {
+    async write(companyId: string, input: WriteInput) {
+      const r = await this.writeWithin(db, companyId, input);
+      if (input.ticketId) await record(db, { companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "artifact", summary: `Wrote wiki page "${input.title.trim()}"` });
+      return r;
+    },
+
+    /** `write`, through `conn`: the transaction a caller already holds, or the database itself. */
+    async writeWithin(conn: Db, companyId: string, input: WriteInput) {
       const title = input.title.trim();
       if (!title) throw new WikiError(400, "A page needs a title.");
       if (input.body.length > MAX_BODY) throw new WikiError(400, `A page can be at most ${MAX_BODY.toLocaleString("en-GB")} characters.`);
       if (input.ticketId) {
-        await ownTicket(companyId, input.ticketId);
+        await ownTicket(conn, companyId, input.ticketId);
         // The skill-review guard lives here, not only in the tools, so every path that links a page to a
         // ticket is covered: write, append, restore and anything added later (BOS-430, security round 1).
-        const refusal = await reviewTicketWriteRefusal(db, companyId, input.ticketId, input.agentId ?? null);
+        const refusal = await reviewTicketWriteRefusal(conn, companyId, input.ticketId, input.agentId ?? null);
         if (refusal) throw new WikiError(403, refusal);
       }
-      const bySlug = async (slug: string) => (await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))))[0];
+      const bySlug = async (slug: string) => (await conn.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))))[0];
       const given = input.slug?.trim() ? input.slug.split("/").map(slugify).join("/") : null;
       let existing = given ? await bySlug(given) : undefined;
       const folder = input.folder !== undefined ? cleanFolder(input.folder) : (existing?.folder ?? (given ? folderOf(given) : ""));
@@ -487,10 +532,10 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       // removes a lot of text or any heading needs replace: true, and only the CEO or the owner may
       // replace a page someone else created.
       if (existing) {
-        const refusal = input.replace ? null : shrinkRefusal(existing.body, input.body);
+        const refusal = input.replace ? null : shrinkRefusalAgainst(existing.body, await largestEver(conn, existing.id, existing.body.length), input.body);
         if (refusal) throw new WikiError(409, refusal);
         if (input.replace && !input.isCeo && input.agentId) {
-          const [first] = await db
+          const [first] = await conn
             .select({ agentId: wikiRevisions.agentId })
             .from(wikiRevisions)
             .where(eq(wikiRevisions.pageId, existing.id))
@@ -505,17 +550,16 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       }
       let p = existing;
       if (!p) {
-        [p] = await db.insert(wikiPages).values({ companyId, slug, folder, title, body: input.body, ticketId: input.ticketId ?? null, updatedByAgentId: input.agentId }).returning();
+        [p] = await conn.insert(wikiPages).values({ companyId, slug, folder, title, body: input.body, ticketId: input.ticketId ?? null, updatedByAgentId: input.agentId }).returning();
       } else if (changed || slug !== p.slug) {
-        [p] = await db.update(wikiPages).set({ slug, folder, title, body: input.body, updatedByAgentId: input.agentId, updatedAt: new Date() }).where(eq(wikiPages.id, p.id)).returning();
+        [p] = await conn.update(wikiPages).set({ slug, folder, title, body: input.body, updatedByAgentId: input.agentId, updatedAt: new Date() }).where(eq(wikiPages.id, p.id)).returning();
       }
-      if (changed) await db.insert(wikiRevisions).values({ pageId: p!.id, title, body: input.body, agentId: input.agentId, runId: input.runId });
+      if (changed) await conn.insert(wikiRevisions).values({ pageId: p!.id, title, body: input.body, agentId: input.agentId, runId: input.runId });
       if (input.ticketId) {
-        await db
+        await conn
           .insert(ticketArtifacts)
           .values({ companyId, ticketId: input.ticketId, kind: "wiki_page", title, wikiPageId: p!.id, agentId: input.agentId, runId: input.runId })
           .onConflictDoNothing();
-        await record(db, { companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "artifact", summary: `Wrote wiki page "${title}"` });
       }
       if (changed) semantic?.enqueue(companyId, p!.id);
       return { page: p!, created: !existing };
@@ -526,18 +570,29 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
      * meant to grow: the page is read here, the entry inserted with appendToBody, and the result saved as
      * an ordinary write (so it keeps a version and the Lessons and shrink rules still apply). Throws when
      * the page or the named heading is missing, rather than creating a partial page.
+     *
+     * The read and the save run in one transaction with the page row locked, so two agents appending at
+     * the same moment both land: without the lock the last save overwrote the other's entry, and both
+     * callers were told it worked (BOS-430, adversarial round 2).
      */
     async append(companyId: string, input: { slug: string; entry: string; heading?: string; position?: AppendPosition; title?: string; ticketId?: string | null; isCeo?: boolean } & Author) {
-      const p = await page(companyId, input.slug);
       if (!input.entry.trim()) throw new WikiError(400, "Give the entry to add.");
       if (input.entry.length > MAX_ENTRY) throw new WikiError(400, `An entry can be at most ${MAX_ENTRY.toLocaleString("en-GB")} characters; a log entry is usually a line or two.`);
+      const slug = input.slug.split("/").map(slugify).join("/");
       const position = input.position ?? "top";
-      const body = appendToBody(p.body, input.entry, input.heading, position);
-      const title = input.title?.trim() || p.title;
-      // An append only adds text, so it never trips the shrink guard; it keeps a version like any save.
-      const r = await this.write(companyId, { slug: p.slug, folder: p.folder, title, body, ticketId: input.ticketId ?? null, isCeo: !!input.isCeo, agentId: input.agentId, runId: input.runId });
-      const where = input.heading ? ` under "${input.heading}"` : position === "bottom" ? " at the end" : " at the top";
-      return { ...r, size: body.length, where };
+      const r = await db.transaction(async (tx) => {
+        // SELECT … FOR UPDATE: another append to this page waits here and then reads the row it saved.
+        const [p] = await tx.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))).for("update");
+        if (!p) throw new WikiError(404, "There's no wiki page with that name.");
+        const body = appendToBody(p.body, input.entry, input.heading, position);
+        const title = input.title?.trim() || p.title;
+        // An append only adds text, so it never trips the shrink guard; it keeps a version like any save.
+        return this.writeWithin(tx, companyId, { slug: p.slug, folder: p.folder, title, body, ticketId: input.ticketId ?? null, isCeo: !!input.isCeo, agentId: input.agentId, runId: input.runId });
+      });
+      if (input.ticketId) await record(db, { companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "artifact", summary: `Wrote wiki page "${input.title?.trim() || r.page.title}"` });
+      // With no heading, "oldest" means the end of the page, so the reply must say so too.
+      const where = input.heading ? ` under "${input.heading}"` : position === "top" ? " at the top" : " at the end";
+      return { ...r, size: r.page.body.length, where };
     },
 
     async remove(companyId: string, slug: string) {
@@ -582,7 +637,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
 
     /** Links a repo file or a web address to a ticket as something it produced. */
     async attach(companyId: string, input: { ticketId: string; title: string; path?: string | null; ref?: string | null; url?: string | null } & Author) {
-      await ownTicket(companyId, input.ticketId);
+      await ownTicket(db, companyId, input.ticketId);
       if (!input.path === !input.url) throw new WikiError(400, "Give either a file path in the repo or a web address.");
       if (input.url && !/^https?:\/\//i.test(input.url)) throw new WikiError(400, "A web address must start with http:// or https://.");
       const [a] = await db
