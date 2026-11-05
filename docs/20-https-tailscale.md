@@ -44,7 +44,8 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    ```sh
    cp .env .env.bak
    sed -i "s#^COMPOSE_FILE=.*#&:deploy/tailscale.yml#" .env
-   echo "TS_AUTHKEY=tskey-auth-PASTE-YOUR-KEY" >> .env
+   # the leading space keeps this line out of shell history in most shells (or edit .env in an editor instead)
+    echo "TS_AUTHKEY=tskey-auth-PASTE-YOUR-KEY" >> .env
    chmod 600 .env
    ```
 
@@ -54,7 +55,7 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 
    **Remove the key from `.env` once it is logged in:** delete the `TS_AUTHKEY=` line (`sed -i '/^TS_AUTHKEY=/d' .env`), then `docker compose up -d tailscale`. The login is kept in the state folder, so an empty key is fine. A spent one-time key does no harm, but it should not sit in a file.
 
-5a. Check it is stable. Run these from the Boss Man folder (the one with `docker-compose.yml`); they need no shell variables. `RestartCount` must stay at 0 (or stop growing), `BackendState` must say `"Running"` (not `"NeedsLogin"`), and the state file must be well over 1000 bytes (a login that never completed leaves about 120 bytes):
+5a. Check it is stable. Run these from the Boss Man folder (the one with `docker-compose.yml`); they need nothing from your `.env` (the first line only sets a helper variable). `RestartCount` must stay at 0 (or stop growing), `BackendState` must say `"Running"` (not `"NeedsLogin"`), and the state file must be well over 1000 bytes (a login that never completed leaves about 120 bytes):
 
    ```sh
    C=$(docker compose ps -q tailscale)
