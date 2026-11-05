@@ -205,6 +205,33 @@ front_ready() { # colour
   compose exec -T proxy wget -q -T 3 -O /dev/null "http://server-$1-front:3100/api/ready" >>"$LOG" 2>&1
 }
 
+# True when the compose files declare the front network for this colour (its -front name is in the resolved config).
+front_declared() { # colour
+  compose config 2>>"$LOG" | grep -q "server-$1-front"
+}
+
+# Sets INCLUDE_FORM (front or old) for a colour. The check is retried, because one failed exec or wget is not proof the
+# network is missing. If the compose files declare the front network but the check still fails, the include keeps the
+# form it has now (never a silent downgrade); the reason goes to the log and to a note beside the status file.
+FRONT_TRIES="${FRONT_TRIES:-4}" FRONT_WAIT="${FRONT_WAIT:-3}"
+INCLUDE_FORM=old
+choose_include_form() { # colour
+  local i cur=old
+  for ((i = 1; i <= FRONT_TRIES; i++)); do
+    if front_ready "$1"; then INCLUDE_FORM=front; return 0; fi
+    if ((i < FRONT_TRIES)); then sleep "$FRONT_WAIT"; fi
+  done
+  if grep -qs "reverse_proxy server-[a-z]*-front:" "$INCLUDE"; then cur=front; fi
+  INCLUDE_FORM=$cur
+  if front_declared "$1"; then
+    log "WARNING: the front network check for $1 failed $FRONT_TRIES times but the compose files declare it; keeping the $cur include form."
+    if ! ((DRY)); then printf '%s: the front network check for %s failed %s times though the compose files declare it; the proxy include keeps the %s form.\n' "$(now)" "$1" "$FRONT_TRIES" "$cur" >"$OUTBOX/proxy-include-note.txt"; fi
+  else
+    INCLUDE_FORM=old
+    log "The compose files have no front network for $1; writing the old include form."
+  fi
+}
+
 # Rewrites the include for a colour: made in the root-only state folder, then renamed over the old one.
 write_include() { # colour
   local dir="$D/proxy" tmp
@@ -218,7 +245,8 @@ write_include() { # colour
   # With the private "front" network (deploy/truenas-bluegreen.yml) the proxy reaches the colour at server-<colour>-front and
   # tells it the one client address Caddy resolved. Without it (compose files not updated yet) the old form is written,
   # so a new copy of this script can never break a swap or a rollback on a host that has not moved yet.
-  if front_ready "$1"; then
+  choose_include_form "$1"
+  if [[ $INCLUDE_FORM == front ]]; then
     cat >"$tmp" <<INC
 # Written by host-deployer.sh. Do not edit. Live colour: $1
 (active) {
