@@ -6,7 +6,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite, type Db } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
-import { activity, agents, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, notifications, runs, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -689,5 +689,73 @@ describe("the server ends runs it can't reach", () => {
     await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "wiki upkeep", startedAt: new Date(ctx.clock().getTime() - 5 * 60_000) });
     await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: null, purpose: "chat", origin: "owner_chat", startedAt: new Date(ctx.clock().getTime() - 30 * 60_000) });
     expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
+  });
+});
+
+// BOS-413: the queue reads only what its open cards reach, and a feed read never writes.
+describe("queue reads only what the open cards reach (BOS-413)", () => {
+  /** What the queue read, by table, for one GET /api/decisions. */
+  async function measureQueue() {
+    ctx.reads.queries = 0;
+    ctx.reads.rows = 0;
+    ctx.reads.byTable = {};
+    ctx.reads.on = true;
+    const q = (await ctx.req("GET", "/api/decisions")).json() as Row[];
+    ctx.reads.on = false;
+    return { q, queries: ctx.reads.queries, byTable: ctx.reads.byTable };
+  }
+
+  it("does not read dependency rows, or tickets below a finished ticket, that no card reaches", async () => {
+    ctx = await setup();
+    const chain = async () => {
+      const a = await ctx.ticket({ title: "A" });
+      const b = await ctx.ticket({ title: "B", state: "blocked" });
+      const c = await ctx.ticket({ title: "C", state: "blocked" });
+      await ctx.req("POST", `/api/tickets/${b.id}/dependencies`, { ticketId: a.id });
+      await ctx.req("POST", `/api/tickets/${c.id}/dependencies`, { ticketId: b.id });
+      return { a, b, c };
+    };
+    const live = await chain();
+    const held = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: live.a.id });
+    // A chain below a finished ticket, and loose live work no card points at.
+    const done = await chain();
+    await ctx.req("PATCH", `/api/tickets/${done.a.id}`, { state: "done" });
+    const loose = await chain();
+    ctx.advance(HOUR);
+    await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+
+    const { q, byTable } = await measureQueue();
+    // Same output as before, still down the chain from what the card holds.
+    expect(q.find((r) => r.id === held.id)!.blocks).toEqual([
+      expect.objectContaining({ ticketId: live.a.id, depth: 1 }),
+      expect.objectContaining({ ticketId: live.b.id, depth: 2 }),
+      expect.objectContaining({ ticketId: live.c.id, depth: 3 }),
+    ]);
+    // Only the rows that name an open card, then the chain's own edges: the done chain below `done.a`
+    // and the loose chain are never read.
+    const deps = await ctx.db.select().from(ticketDependencies);
+    expect(byTable["ticket_dependencies"] ?? 0).toBeLessThan(deps.length);
+    expect(q.every((r) => r.blocks.every((b) => b.ticketId !== done.b.id && b.ticketId !== done.c.id))).toBe(true);
+    expect(q.some((r) => r.blocks.some((b) => b.ticketId === loose.a.id || b.ticketId === loose.b.id || b.ticketId === loose.c.id))).toBe(false);
+  });
+
+  it("marks a card's notification read when it is answered, without the feed read writing", async () => {
+    ctx = await setup();
+    const d = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship the beta?", options: ["Yes", "No"], recommended: "Yes" });
+    const other = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Rename the app?", options: ["Yes", "No"], recommended: "No" });
+    await ctx.notes.syncDecisions();
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(2);
+
+    // Answering marks that card read at once: the feed is right before any sweep runs.
+    expect((await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Yes" })).statusCode).toBe(200);
+    const [note] = await ctx.db.select().from(notifications).where(eq(notifications.decisionId, d.id));
+    expect(note!.readAt).not.toBeNull();
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(1);
+
+    // A close made elsewhere still shows once it settles, but a read never writes: it takes the sweep.
+    await ctx.db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, other.id));
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(1);
+    await ctx.notes.markAnsweredRead();
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(0);
   });
 });

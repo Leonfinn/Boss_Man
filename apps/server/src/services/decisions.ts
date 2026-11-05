@@ -44,7 +44,7 @@ import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from 
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -284,7 +284,10 @@ export async function clearMergeCards(db: Db, ticketId: string, withdrawal: With
       .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(r.context as object), withdrawn: withdrawal } })
       .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
       .returning({ id: decisions.id });
-    if (done) cleared++;
+    if (done) {
+      cleared++;
+      await markDecisionNotificationRead(db, r.id, new Date(withdrawal.at));
+    }
   }
   // An answered or withdrawn card keeps its key (the column is unique), which would swallow a fresh insert silently (BOS-362).
   await db.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, `merge-stuck:${ticketId}`), ne(decisions.status, "open")));
@@ -309,6 +312,7 @@ export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Wi
       .returning({ id: decisions.id });
     if (done) {
       cleared++;
+      await markDecisionNotificationRead(db, r.id, new Date(withdrawal.at));
       await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, r.id));
     }
   }
@@ -372,6 +376,15 @@ export async function raiseOwnerTodo(
   return row ?? null;
 }
 
+/**
+ * Marks a settled card's notification read at the moment it is answered or withdrawn (BOS-413), so the
+ * owner's feed is right without the GET path having to sweep every notification on every poll. A
+ * background sweep is kept as a safety net for cards closed outside these helpers.
+ */
+export async function markDecisionNotificationRead(db: Db, decisionId: string, at: Date = new Date()) {
+  await db.update(notifications).set({ readAt: at }).where(and(eq(notifications.decisionId, decisionId), isNull(notifications.readAt)));
+}
+
 /** Closes the open owner to-do for a key once the owner's step is confirmed done (BOS-122), e.g. by the live commit changing. */
 export async function clearOwnerTodo(db: Db, key: string, summary: string) {
   const [row] = await db
@@ -380,6 +393,7 @@ export async function clearOwnerTodo(db: Db, key: string, summary: string) {
     .where(and(eq(decisions.dedupeKey, key), eq(decisions.status, "open")))
     .returning({ id: decisions.id, companyId: decisions.companyId });
   if (row) await record(db, { companyId: row.companyId, kind: "decision_answered", summary, at: new Date() });
+  if (row) await markDecisionNotificationRead(db, row.id);
   return row ?? null;
 }
 
@@ -1505,7 +1519,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     /** Takes a skill decision off the owner's queue when the proposal ended some other way. */
     async withdrawSkill(id: string) {
-      await db.update(decisions).set({ status: "withdrawn", dedupeKey: null, answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      const [done] = await db.update(decisions).set({ status: "withdrawn", dedupeKey: null, answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
+      if (done) await markDecisionNotificationRead(db, id, now());
     },
 
     setLoopHooks(hooks: LoopHooks) {
@@ -1618,12 +1633,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null }];
         }),
       );
-      const deps = await db.select().from(ticketDependencies);
-      const dependents = new Map<string, string[]>();
-      for (const dep of deps) {
-        if (!dep.blockerTicketId) continue;
-        dependents.set(dep.blockerTicketId, [...(dependents.get(dep.blockerTicketId) ?? []), dep.blockedTicketId]);
-      }
+      // (BOS-413) Read only what the open cards point at, never every dependency row: the rows that name
+      // an open card, then the chain below the tickets those reach.
+      const openIds = open.map(({ d }) => d.id);
+      const directDeps = await db.select().from(ticketDependencies).where(inArray(ticketDependencies.blockerDecisionId, openIds));
 
       // Tickets a decision holds up directly, by kind.
       const runIds = open.flatMap(({ d }) => {
@@ -1635,6 +1648,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const deployTickets = new Map(
         deployIds.length ? (await db.select({ id: deploys.id, ticketId: deploys.ticketId }).from(deploys).where(inArray(deploys.id, deployIds))).map((r) => [r.id, r.ticketId]) : [],
       );
+      const engagementTicketIds = [...new Set(open.flatMap(({ d }) => {
+        const c = d.context as DecisionContext;
+        return c.type === "engagement" ? [c.engagementId] : [];
+      }))];
+      const engagementDeps = engagementTicketIds.length
+        ? await db.select({ engagementId: ticketDependencies.blockerEngagementId, blockedTicketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(inArray(ticketDependencies.blockerEngagementId, engagementTicketIds))
+        : [];
       const direct = (d: typeof decisions.$inferSelect): string[] => {
         const c = d.context as DecisionContext;
         switch (c.type) {
@@ -1653,9 +1673,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             return id ? [id] : [];
           }
           case "engagement":
-            return deps.filter((x) => x.blockerEngagementId === c.engagementId).map((x) => x.blockedTicketId);
+            return engagementDeps.filter((x) => x.engagementId === c.engagementId).map((x) => x.blockedTicketId);
           default:
-            return deps.filter((x) => x.blockerDecisionId === d.id).map((x) => x.blockedTicketId);
+            return directDeps.filter((x) => x.blockerDecisionId === d.id).map((x) => x.blockedTicketId);
         }
       };
 
@@ -1681,6 +1701,27 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             .where(inArray(tickets.id, wantedAbout))
         : [];
       const aboutInfo = new Map(aboutRows.map((r) => [r.id, r]));
+
+      // The dependents map, filled from the whole chain (BOS-413): every ticket found while walking down
+      // is read, and the next level's edges come from that. Nothing outside the chain is read.
+      const dependents = new Map<string, string[]>();
+      const addDependents = async (ids: string[]) => {
+        const wanted = ids.filter((id) => !dependents.has(id));
+        if (!wanted.length) return;
+        for (const id of wanted) dependents.set(id, []);
+        const rows = await db
+          .select({ blocker: ticketDependencies.blockerTicketId, blocked: ticketDependencies.blockedTicketId })
+          .from(ticketDependencies)
+          .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
+          .where(and(inArray(ticketDependencies.blockerTicketId, wanted), ne(tickets.systemState, "done")));
+        for (const r of rows) if (r.blocker) dependents.get(r.blocker)!.push(r.blocked);
+      };
+      // A dependent that is missing from `info` (a done or deleted ticket) is skipped, as before.
+      let level = [...new Set(open.flatMap(({ d }) => direct(d)))].filter((id) => info.has(id));
+      for (let depth = 0; depth <= 10 && level.length && depth <= 10; depth++) {
+        await addDependents(level);
+        level = [...new Set(level.flatMap((id) => dependents.get(id) ?? []))].filter((id) => info.has(id));
+      }
 
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
@@ -1851,6 +1892,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           return true;
         });
         if (!made) return null;
+        // The card was withdrawn in the transaction above; its notification is read now (BOS-413).
+        await markDecisionNotificationRead(db, d.id, now());
         const [held] = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, newId));
         await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held?.ticketId, kind: "decision_reissued", summary: `CEO reissued "${d.question}" with more detail${via}`, at: now() });
         return { outcome: "reissue" as const, id: newId, inPlace: false };
@@ -1943,6 +1986,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id });
       if (!closed) return null;
+      await markDecisionNotificationRead(db, d.id, now());
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
       // A withdrawn card must never be left holding a ticket (BOS-149): move its hold to an identical
       // open card when there is one, so the owner's surviving question still holds it, and drop it
@@ -2119,6 +2163,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.update(decisions).set({ context: { ...ctx, repeats: repeatsNow } as DecisionContext }).where(eq(decisions.id, id));
       }
       if (!closed) return null;
+      // The card is settled, so its notification is read now rather than on the next feed poll (BOS-413).
+      await markDecisionNotificationRead(db, id, now());
 
       // Whatever else we told the owner about these tickets may now be out of date (BOS-123).
       // A permission click allowed a command; it isn't the owner doing the thing the note asked about.
@@ -2374,6 +2420,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (d.kind !== "question" || type !== "question") throw new AnswerError("Only a question card you raised with raise_decision can be withdrawn; this card belongs to another flow and has to be answered.");
       const [closed] = await db.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
       if (!closed) return null;
+      await markDecisionNotificationRead(db, id, now());
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
       await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
       for (const f of freed) await releaseIfFree(f.ticketId, false);
