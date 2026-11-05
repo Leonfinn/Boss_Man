@@ -6,9 +6,12 @@ import { and, asc, desc, eq, ilike, inArray, like, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, ticketArtifacts, tickets, wikiPages, wikiRevisions } from "../db/schema.js";
 import { record } from "./activity.js";
+import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import type { WikiSemantic } from "./wiki-semantic.js";
 
 export const MAX_BODY = 200_000;
+/** One appended entry: a log line, not a page. Keeps a single append cheap (BOS-430). */
+export const MAX_ENTRY = 20_000;
 
 export class WikiError extends Error {
   constructor(
@@ -119,9 +122,9 @@ export function shrinkRefusal(before: string, after: string): string | null {
 /** The lines that make up an entry, trimmed: a line starting "- " or "* " is a list item, so it sits on its own. */
 const entryLines = (entry: string) =>
   entry
-    .replace(/\s+$/g, "")
+    .trimEnd()
     .split("\n")
-    .map((l) => l.replace(/\s+$/, ""));
+    .map((l) => l.trimEnd());
 /** Space between an entry and the text around it: a blank line, or just the list's own break when both are list items. */
 const GLUE = "\n\n";
 
@@ -154,7 +157,7 @@ export function appendToBody(body: string, entry: string, heading: string | unde
     const secs = splitSections(body);
     const last = secs.at(-1);
     const end = last && last.level > 0 ? last.ownEnd : body.length;
-    const before = body.slice(0, end).replace(/\s+$/g, "");
+    const before = body.slice(0, end).trimEnd();
     const after = body.slice(end).replace(/^\s+/g, "");
     if (after) return `${before}\n${text}\n\n${after}`;
     const joins = isList(lines[0]!) && isList(before.split("\n").at(-1) ?? "");
@@ -169,7 +172,7 @@ export function appendToBody(body: string, entry: string, heading: string | unde
   // Oldest: at the end of the section's own text, before its sub-headings, so an entry never lands inside one.
   if (position === "oldest") {
     // At the end of the section's own text (its sub-headings, if any, come after the entry), so it joins the list.
-    const before = body.slice(0, s.ownEnd).replace(/\s+$/g, "");
+    const before = body.slice(0, s.ownEnd).trimEnd();
     const after = body.slice(s.ownEnd).replace(/^\s+/g, "");
     const joins = isList(lines[0]!) && isList(before.split("\n").at(-1) ?? "");
     return `${before}${joins ? "\n" : GLUE}${text}\n${after ? `\n${after}` : ""}`;
@@ -448,11 +451,17 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
      * updated; a folder that differs from the page's moves it, which changes its address. With
      * a ticket, the page is linked to it as something the ticket produced.
      */
-    async write(companyId: string, input: { slug?: string; folder?: string; title: string; body: string; ticketId?: string | null; replace?: boolean; isCeo?: boolean } & Author) {
+    async write(companyId: string, input: { slug?: string; folder?: string; title: string; body: string; ticketId?: string | null; replace?: boolean; isCeo?: boolean; fromRestore?: boolean } & Author) {
       const title = input.title.trim();
       if (!title) throw new WikiError(400, "A page needs a title.");
       if (input.body.length > MAX_BODY) throw new WikiError(400, `A page can be at most ${MAX_BODY.toLocaleString("en-GB")} characters.`);
-      if (input.ticketId) await ownTicket(companyId, input.ticketId);
+      if (input.ticketId) {
+        await ownTicket(companyId, input.ticketId);
+        // The skill-review guard lives here, not only in the tools, so every path that links a page to a
+        // ticket is covered: write, append, restore and anything added later (BOS-430, security round 1).
+        const refusal = await reviewTicketWriteRefusal(db, companyId, input.ticketId, input.agentId ?? null);
+        if (refusal) throw new WikiError(403, refusal);
+      }
       const bySlug = async (slug: string) => (await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))))[0];
       const given = input.slug?.trim() ? input.slug.split("/").map(slugify).join("/") : null;
       let existing = given ? await bySlug(given) : undefined;
@@ -487,8 +496,11 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
             .where(eq(wikiRevisions.pageId, existing.id))
             .orderBy(asc(wikiRevisions.createdAt))
             .limit(1);
+          // No revision row (or a first version with no agent) means the owner made the page, so an
+          // ordinary agent may not replace it either. Only the CEO may (BOS-430, security round 1).
+          // A restore is the exception: it has already checked that this agent is the page's last writer.
           const creator = first?.agentId ?? null;
-          if (creator && creator !== input.agentId) throw new WikiError(403, "Only the CEO or the owner can replace a page another agent created. Add to it with append, or ask the CEO to replace it.");
+          if (creator !== input.agentId && !input.fromRestore) throw new WikiError(403, "Only the CEO or the owner can replace a page another agent created. Add to it with append, or ask the CEO to replace it.");
         }
       }
       let p = existing;
@@ -518,6 +530,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
     async append(companyId: string, input: { slug: string; entry: string; heading?: string; position?: AppendPosition; title?: string; ticketId?: string | null; isCeo?: boolean } & Author) {
       const p = await page(companyId, input.slug);
       if (!input.entry.trim()) throw new WikiError(400, "Give the entry to add.");
+      if (input.entry.length > MAX_ENTRY) throw new WikiError(400, `An entry can be at most ${MAX_ENTRY.toLocaleString("en-GB")} characters; a log entry is usually a line or two.`);
       const position = input.position ?? "top";
       const body = appendToBody(p.body, input.entry, input.heading, position);
       const title = input.title?.trim() || p.title;
@@ -563,7 +576,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       const mine = !!input.agentId && lastWriter === input.agentId;
       if (!isCeo && !mine)
         throw new WikiError(403, "Only the CEO or the page's last writer can put an old version back. Ask the CEO, or the agent who last wrote it.");
-      const r = await this.write(companyId, { slug: p.slug, folder: p.folder, title: rev.title, body: rev.body, replace: true, isCeo, agentId: input.agentId, runId: input.runId });
+      const r = await this.write(companyId, { slug: p.slug, folder: p.folder, title: rev.title, body: rev.body, replace: true, fromRestore: true, isCeo, agentId: input.agentId, runId: input.runId });
       return { ...r, size: rev.body.length };
     },
 

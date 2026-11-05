@@ -136,7 +136,8 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   }, [p?.id, section]);
 
   const save = async (v: Draft) => {
-    const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: v });
+    // The owner is replacing the page they just edited, so the agent shrink guard never blocks their own save.
+    const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: { ...v, replace: true } });
     setEditing(false);
     setOld(null);
     onChanged();

@@ -1686,6 +1686,8 @@ export async function buildApp(opts: AppOptions) {
     // A page's address can hold folders ("research/agent-landscape"), so it's the rest of the path.
     const SlugParams = z.object({ id: Uuid, "*": z.string().min(1).max(500) }).transform((p) => ({ id: p.id, slug: p["*"] }));
     const PageBody = z.object({ title: z.string().trim().min(1).max(200), body: z.string().max(MAX_BODY), folder: z.string().max(400).optional() });
+    // The owner's own editor may replace a page outright; the shrink guard is for agents (BOS-430).
+    const OwnerPageBody = PageBody.extend({ replace: z.boolean().optional() });
     // The CEO-style brief, built when asked and never stored as a page (R84).
     owner.get("/api/companies/:id/brief", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1713,7 +1715,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.put("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
-      return wiki.write(id, { ...PageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
+      return wiki.write(id, { ...OwnerPageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
     });
     owner.delete("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
