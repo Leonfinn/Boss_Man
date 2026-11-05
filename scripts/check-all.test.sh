@@ -16,7 +16,8 @@ runs() { grep -c . "$t/count" 2>/dev/null || true; }
 run() {
   local want_rc=$1 want_runs=$2 label=$3 body=$4 dir=${5:-$here/..} cmd=${6:-./scripts/check-all.sh} rc=0
   : >"$t/count"; export COUNT="$t/count"
-  (cd "$dir" && BOSSMAN_CHECK_BODY="$body" $cmd >"$t/out" 2>&1) || rc=$?
+  # Each case uses its own lock so the tests never wait on another agent's real check (the stub takes a slot now).
+  (cd "$dir" && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BODY="$body" $cmd >"$t/out" 2>&1) || rc=$?
   [ "$rc" -eq "$want_rc" ] || fail "$label: rc $rc, want $want_rc: $(cat "$t/out")"
   [ "$(runs)" -eq "$want_runs" ] || fail "$label: ran $(runs) times, want $want_runs"
 }
@@ -48,7 +49,7 @@ if command -v git >/dev/null; then
   cached() { # cached <expected rc> <expected runs> <label> <stub body> [env VAR=value ...]
     local want_rc=$1 want_runs=$2 label=$3 body=$4 rc=0; shift 4
     : >"$t/count"; export COUNT="$t/count"
-    (cd "$repo" && env BOSSMAN_CHECK_STORE="$store" BOSSMAN_CHECK_BODY="$body" "$@" ./scripts/check-all.sh >"$t/out" 2>&1) || rc=$?
+    (cd "$repo" && env CHECK_ALL_LOCK="$t/clock" CHECK_ALL_PAIR_PROOF="$t/cproof" BOSSMAN_CHECK_STORE="$store" BOSSMAN_CHECK_BODY="$body" "$@" ./scripts/check-all.sh >"$t/out" 2>&1) || rc=$?
     [ "$rc" -eq "$want_rc" ] || fail "$label: rc $rc, want $want_rc: $(cat "$t/out")"
     [ "$(runs)" -eq "$want_runs" ] || fail "$label: ran $(runs) times, want $want_runs"
   }
@@ -243,6 +244,40 @@ if command -v flock >/dev/null; then
     kill "$waiter" "$h1" 2>/dev/null || true; wait "$waiter" "$h1" 2>/dev/null || true
   else
     echo "check-all.test.sh: Landlock ABI 6 missing, fenced queue case skipped"
+  fi
+
+  # The retry budget counts from the slot-taken time, not from before the queue wait (P13 Q4). A check that waits
+  # longer than the budget, then hits EAGAIN, is still retried; measured from before the wait it was never retried.
+  : >"$t/count"; export COUNT="$t/count"
+  rc=0; ( cd "$here/.." && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BUDGET_SECONDS=2 CHECK_ALL_QUEUE_TEST_SLEEP=3 BOSSMAN_CHECK_BODY='echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3' ./scripts/check-all.sh >"$t/budget.out" 2>&1 ) || rc=$?
+  [ "$rc" -eq 3 ] || fail "budget after queue wait: rc $rc, want 3: $(cat "$t/budget.out")"
+  [ "$(runs)" -eq 3 ] || fail "budget after queue wait: ran $(runs) times, want 3 (a long wait must not use up the retry budget)"
+  # A signal leaves a trace and frees the queue place: the output, the stored log and the result store get "killed by signal <name>",
+  # the exit is non-zero, and the check's queue entry is gone (before, a signalled check vanished without a word).
+  if command -v git >/dev/null; then
+    git -C "$repo" checkout -q -- .  # a clean tree, so a result is stored
+    for sig in TERM INT HUP; do
+      # Hold the slot until we kill the holder, not for a fixed few seconds: under load the check can take longer
+      # than the hold to reach its wait loop (the first "waiting" line comes after a slot scan), and a hold that
+      # expired would let the check take the slot and run, so the signal arrived too late and the check died on its
+      # own missing-file error instead of the trap (BOS-345 merge check, 2 Nov).
+      rm -rf "$t/ksto" "$t/lock.queue" "$t/kill.out" "$t/kill.pid"; hold 1 3600; h1=$!; sleep 0.3
+      ( cd "$repo" && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/none" BOSSMAN_CHECK_STORE="$t/ksto" \
+          setsid bash -c 'echo $$ >"$1"; exec ./scripts/check-all.sh' _ "$t/kill.pid" >"$t/kill.out" 2>&1 ) & k=$!
+      # The queue entry is written before the wait loop, so wait on it (not on the printed line, which the slot
+      # scan can delay); then require the "waiting" line before signalling, so the check is provably waiting.
+      for _ in $(seq 150); do [ -n "$(ls "$t/lock.queue" 2>/dev/null)" ] && grep -q "waiting for a free check slot" "$t/kill.out" 2>/dev/null && break; sleep 0.2; done
+      [ -n "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "kill $sig: check never queued: $(cat "$t/kill.out")"
+      grep -q "waiting for a free check slot" "$t/kill.out" || fail "kill $sig: check never reached its wait loop: $(cat "$t/kill.out")"
+      kill -s "$sig" "$(cat "$t/kill.pid")"
+      rc=0; wait "$k" || rc=$?
+      [ "$rc" -ne 0 ] || fail "kill $sig: exit 0"
+      grep -q "killed by signal $sig" "$t/kill.out" || fail "kill $sig: no line in the output: $(cat "$t/kill.out")"
+      grep -q "killed by signal $sig" "$t"/ksto/*.log || fail "kill $sig: no line in the stored log"
+      grep -q '"status":"killed"' "$t"/ksto/*.json || fail "kill $sig: no result recorded"
+      [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "kill $sig: queue place not freed: $(ls "$t/lock.queue")"
+      kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
+    done
   fi
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"

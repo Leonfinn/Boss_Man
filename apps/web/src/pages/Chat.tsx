@@ -3,7 +3,7 @@
 // directly. On a phone the list and the conversation take turns.
 import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { api, type Company } from "../api";
-import { usePoll } from "../hooks";
+import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
@@ -115,7 +115,10 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
       (err: Error) => setError(err.message),
     );
   };
+  // A phone keyboard has no Shift, so there Return adds a line and Send sends.
+  const coarse = useCoarsePointer();
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (coarse) return;
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       send();
@@ -124,7 +127,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
   const unread = (t: Thread) => !!t.last && t.last.role !== "owner" && t.id !== current?.id && (!seen[t.id] || seen[t.id]! < t.last.createdAt);
 
   return (
-    <>
+    <div className="chat-page">
       <header className="page-head">
         <div>
           <h1>Chat</h1>
@@ -198,7 +201,17 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
                 <label htmlFor="chat-text" className="sr-only">
                   Message to {current.name}
                 </label>
-                <textarea id="chat-text" rows={2} maxLength={4000} placeholder={`Message ${current.name}. Enter sends, Shift+Enter adds a line.`} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey} onPaste={img.onPaste} />
+                <textarea
+                  id="chat-text"
+                  rows={2}
+                  maxLength={4000}
+                  enterKeyHint={NEWLINE_KEY_HINT}
+                  placeholder={coarse ? `Message ${current.name}` : `Message ${current.name}. Enter sends, Shift+Enter adds a line.`}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  onKeyDown={onKey}
+                  onPaste={img.onPaste}
+                />
                 {img.button}
                 {current.duty === "assistant" && ceo && (
                   <button className="btn" type="button" disabled={!text.trim()} onClick={() => send(undefined, ceo)}>
@@ -226,6 +239,6 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
           )}
         </section>
       )}
-    </>
+    </div>
   );
 }
