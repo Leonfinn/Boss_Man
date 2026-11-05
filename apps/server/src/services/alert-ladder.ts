@@ -99,6 +99,8 @@ export function alertLadder(
      * Left out, the CEO is taken to be able to run.
      */
     ceoCanRun?: (companyId: string) => Promise<boolean>;
+    /** The one closer for Boss Man's own cards (DR-016, BOS-469 point 2): closes a card whose cause is gone, on any tier. */
+    clearExpired?: () => Promise<number>;
     now?: () => Date;
   },
 ) {
@@ -444,6 +446,8 @@ export function alertLadder(
 
     /** Moves alerts that sat on a rung past the time limit up one rung. Run on the leader's timer. */
     async sweep() {
+      // Cards whose cause has gone close themselves first, on any tier, with a logged reason (DR-016, BOS-469 point 2).
+      if (deps.clearExpired) await deps.clearExpired();
       const open = await db
         .select({ d: decisions, watchdog: companies.watchdog })
         .from(decisions)

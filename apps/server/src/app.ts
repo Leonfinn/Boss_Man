@@ -36,6 +36,7 @@ import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
+import { alertClearing } from "./services/alert-clearing.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
 import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { DeployError, deploysService } from "./services/deploys.js";
@@ -516,7 +517,22 @@ export async function buildApp(opts: AppOptions) {
   // Workflow retros (docs/19): the leader's timer starts them (main.ts), the retro agent's MCP tools fill them, and decisions apply the changes.
   const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, skillProposals, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setRetroHook(retro);
-  const alerts = alertLadder(db, { notify: (agentId, input) => scheduler.notify(agentId, input), answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra), watchdog, nudge: (input) => scheduler.nudge(input), ceoCanRun: (companyId) => scheduler.ceoCanRun(companyId), now: opts.now });
+  // One closer for Boss Man's own cards (DR-016, BOS-470's shape; BOS-469 point 2 closes the account and
+  // loop alerts on it). It runs at the start of the ladder's sweep, so any tier closes, the owner's included.
+  const clearing = alertClearing(db, { hasRoom: (id) => scheduler.hasRoom(id), isConnected: (id) => runners.isConnected(id), now: opts.now });
+  const alerts = alertLadder(db, {
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
+    watchdog,
+    nudge: (input) => scheduler.nudge(input),
+    ceoCanRun: (companyId) => scheduler.ceoCanRun(companyId),
+    clearExpired: async () => {
+      const n = await clearing.check();
+      if (n) await notes.syncDecisions();
+      return n;
+    },
+    now: opts.now,
+  });
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
   const review = reviewService(db, {

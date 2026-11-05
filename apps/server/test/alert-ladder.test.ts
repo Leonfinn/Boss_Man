@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, notifications, runs, tickets, wakes, watchdogActions } from "../src/db/schema.js";
+import { activity, agents, decisions, notifications, quotaSamples, runs, tickets, wakes, watchdogActions } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { alertLadder, type Ladder } from "../src/services/alert-ladder.js";
 
@@ -352,7 +352,10 @@ describe("the alert ladder (BOS-64)", () => {
   it("a CEO-ceiling alert at the CEO's hourly cap parks with the CEO and never reaches the owner, and is offered again once the cap frees (BOS-469 point 7)", async () => {
     for (let i = 0; i < 6; i++) await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "alert_hop", targetAgentId: ctx.ceo.id, reason: "x", createdAt: ctx.now() });
     // A stalled run is CEO-ceiling: past the cap it must not jump to the owner, which is what happened on 4 Nov at 21:40.
-    const d = (await ctx.alerts.raise({ companyId: ctx.companyId, kind: "stalled_run", question: "A run went quiet", options: ["Keep waiting", "Cancel it"], ticketId: ctx.ticket.id, about: [ctx.dev.id], cause: { runId: randomUUID() } }))!;
+    // A real, live run, so the closer finds it still active and the card stays open.
+    const runId = randomUUID();
+    await ctx.db.insert(runs).values({ id: runId, companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: ctx.ticket.id, startedAt: ctx.now(), lastEventAt: ctx.now() });
+    const d = (await ctx.alerts.raise({ companyId: ctx.companyId, kind: "stalled_run", question: "A run went quiet", options: ["Keep waiting", "Cancel it"], ticketId: ctx.ticket.id, about: [ctx.dev.id], cause: { runId } }))!;
     expect(d.rung).toBe("ceo");
     let row = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
     expect(row).toMatchObject({ tier: "ceo", forAgentId: null });
@@ -468,6 +471,8 @@ describe("the alert ladder (BOS-64)", () => {
   it("usage-limit failures on one account within the hour fold into one card naming the agents, not one per run (BOS-469 point 3)", async () => {
     const fs = (await ctx.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
     await ctx.db.update(agents).set({ fundingSourceId: fs.id });
+    // The account is out of room right now, so the card holds while the failures are grouped.
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: fs.id, window: "five_hour", utilization: 1, resetsAt: new Date(ctx.now().getTime() + 3_600_000), observedAt: ctx.now() });
     for (const agentId of [ctx.sm.id, ctx.dev.id, ctx.qa.id]) {
       for (let i = 0; i < 3; i++) await ctx.loops.failure({ companyId: ctx.companyId, ticketId: ctx.ticket.id, agentId, text: "Error: 429 weekly limit reached on Claude Max", what: "An agent run" });
     }
@@ -478,10 +483,36 @@ describe("the alert ladder (BOS-64)", () => {
     expect(card.question).toMatch(/Claude Max/);
     expect(card.question).toMatch(/3 agents/);
     expect((card.context as { ladder: Ladder }).ladder).toMatchObject({ groupBy: `account:${fs.id}:account_limit`, topRung: "owner" });
-    // Once it has gone up the ladder, an account card reaches the owner, which is the point of DR-015 D.
-    await ctx.db.update(agents).set({ paused: true }).where(and(eq(agents.companyId, ctx.companyId), eq(agents.duty, "scrum_master")));
-    ctx.advance(31);
-    expect((await ctx.alerts.sweep()).moved).toBe(1);
-    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, card.id)))[0]).toMatchObject({ tier: "owner" });
+    // Point 2: once the account has room again (a fresh sample under the hold threshold), the sweep closes the
+    // card by itself, on its rung, with the reason. The card is with the Scrum Master, and it still closes.
+    await ctx.db.delete(quotaSamples).where(eq(quotaSamples.fundingSourceId, fs.id));
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: fs.id, window: "five_hour", utilization: 0.1, resetsAt: new Date(ctx.now().getTime() + 3_600_000), observedAt: ctx.now() });
+    await ctx.alerts.sweep();
+    const gone = (await ctx.db.select().from(decisions).where(eq(decisions.id, card.id)))[0]!;
+    expect(gone.status).toBe("withdrawn");
+    expect((gone.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/room again/);
+  });
+
+  it("a repeated failure alert closes itself once the agent finishes a clean run, on any tier (BOS-469 point 2)", async () => {
+    const ladder = alertLadder(ctx.db, {
+      notify: async () => ({ id: randomUUID(), status: "queued" }),
+      answer: (id, answer) => ctx.decisions.answer(id, answer),
+      watchdog: ctx.watchdog,
+      now: ctx.now,
+    });
+    const d = (await ladder.raise({ companyId: ctx.companyId, kind: "self_wake", question: "Zippy keeps waking itself", ticketId: ctx.ticket.id, about: [ctx.dev.id], dedupeKey: `alert:self:${ctx.dev.id}`, cause: { agents: [ctx.dev.id] } }))!;
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
+    // No clean run yet: the card holds.
+    ctx.advance(5);
+    await ctx.alerts.sweep();
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
+    // A clean run since the card: it closes by itself with the reason.
+    const started = new Date(ctx.now().getTime() + 1000);
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.dev.id, purpose: null, ticketId: ctx.ticket.id, startedAt: started, endedAt: new Date(started.getTime() + 60_000), outcome: "end_turn" });
+    ctx.advance(5);
+    await ctx.alerts.sweep();
+    const after = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
+    expect(after.status).toBe("withdrawn");
+    expect((after.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/clean run/);
   });
 });
