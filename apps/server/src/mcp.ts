@@ -1223,17 +1223,20 @@ function registerViewImage(server: McpServer, images: Services["images"], scope:
   server.registerTool(
     "open_attachment",
     {
-      description: "Open something the owner attached. In a task, a message or the chat, a picture appears as ![name](/api/ticket-images/<id>) and a file as [📎 name](/api/ticket-images/<id>); open each one with this tool (pass the id) before you act on it. Pictures come back as images, text files as text, PDFs as a document.",
-      inputSchema: { id: z.string().uuid() },
+      description: "Open something the owner attached. In a task, a message or the chat, a picture appears as ![name](/api/ticket-images/<id>) and a file as [📎 name](/api/ticket-images/<id>); open each one with this tool (pass the id) before you act on it. Pictures come back as images, text files as text, PDFs as a document. Long text comes in parts; pass offset to read the rest.",
+      inputSchema: { id: z.string().uuid(), offset: z.number().int().min(0).optional() },
     },
-    async ({ id }) => {
+    async ({ id, offset }) => {
       const a = await images.forCompany(id, scope.companyId);
       if (!a) return fail("No attachment with that id in your company.");
       const bytes = Buffer.from(a.bytes);
       const label = a.caption ? `${a.name}: ${a.caption}` : a.name;
       if (a.type.startsWith("image/")) return { content: [{ type: "image" as const, data: bytes.toString("base64"), mimeType: a.type }, { type: "text" as const, text: label }] };
-      // shortcut: long text is cut at 200,000 characters; page through it if owners attach bigger files.
-      if (a.type === "text/plain") return text(`${label}\n\n${bytes.toString("utf8").slice(0, 200_000)}`);
+      // Text comes in parts so a long log reaches the agent whole, never silently cut.
+      if (a.type === "text/plain") {
+        const body = bytes.toString("utf8");
+        return text(`${label}\n\n${cut(body, CAP, (m) => `continue with open_attachment id=${id} offset=${m}`, offset)}`);
+      }
       if (a.type === "application/pdf") return { content: [{ type: "resource" as const, resource: { uri: `bossman:attachment/${id}`, mimeType: a.type, blob: bytes.toString("base64") } }, { type: "text" as const, text: `${label} (PDF)` }] };
       return text(`${label} is a ${a.type} file of ${bytes.length} bytes that can't be shown as text or a picture. Ask the owner what's in it, or for a PDF or text copy.`);
     },
@@ -1290,33 +1293,31 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const pics = await db.select({ id: ticketImages.id, name: ticketImages.name, caption: ticketImages.caption }).from(ticketImages).where(and(eq(ticketImages.ticketId, ticketId), eq(ticketImages.companyId, scope.companyId), sql`${ticketImages.type} like 'image/%'`)).orderBy(asc(ticketImages.createdAt));
       const t = row.t;
       const note = stateNoteLine(t, new Date());
-      return text(
-        [
-          `# ${t.title}`,
-          `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
-          ...(note ? [note] : []),
-          ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
-          t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
-          "",
-          "## Description",
-          t.body ? cut(t.body, CAP, (m) => `continue with tickets read ticketId=${t.id} offset=${m}`, offset) : "(none)",
-          ...(t.acceptanceCriteria?.length
-            ? [
-                "",
-                "## Acceptance criteria",
-                ...readVerdicts(t.acceptanceCriteria, t.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`),
-              ]
-            : []),
-          ...(t.plan && t.planApprovedAt ? ["", "## Approved plan", cut(t.plan, CAP, () => "the rest isn't shown here")] : []), // shortcut: plans over 40000 chars aren't paged; add an offset if one ever is
-          "",
-          "## What it produced",
-          ...(made.length ? made.map((m) => (m.kind === "wiki_page" ? `- wiki page ${m.slug} (read it with wiki read)` : m.kind === "url" ? `- link ${m.url}` : `- repo file ${m.path}${m.ref ? ` at ${m.ref}` : ""} (read it with tickets file)`)) : ["(nothing attached)"]),
-          "",
-          ...(pics.length ? ["## Images (put one in a wiki page with the Markdown shown)", ...pics.map((i) => `- ${imageMarkdown((i.caption || i.name).replace(/[\][()\n\r]/g, ""), i.id)}`), ""] : []),
-          "## Recent conversation",
-          ...(talk.length ? talk : ["(none)"]),
-        ].join("\n"),
-      );
+      // One page covers the whole thing, description through conversation, so a long owner message is
+      // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
+      const head = [
+        `# ${t.title}`,
+        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
+        ...(note ? [note] : []),
+        ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
+        t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
+        "",
+        "## Description",
+        t.body || "(none)",
+        ...(t.acceptanceCriteria?.length
+          ? ["", "## Acceptance criteria", ...readVerdicts(t.acceptanceCriteria, t.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`)]
+          : []),
+        ...(t.plan && t.planApprovedAt ? ["", "## Approved plan", t.plan] : []),
+        "",
+        "## What it produced",
+        ...(made.length ? made.map((m) => (m.kind === "wiki_page" ? `- wiki page ${m.slug} (read it with wiki read)` : m.kind === "url" ? `- link ${m.url}` : `- repo file ${m.path}${m.ref ? ` at ${m.ref}` : ""} (read it with tickets file)`)) : ["(nothing attached)"]),
+        "",
+        ...(pics.length ? ["## Images (put one in a wiki page with the Markdown shown)", ...pics.map((i) => `- ${imageMarkdown((i.caption || i.name).replace(/[\][()\n\r]/g, ""), i.id)}`), ""] : []),
+        "## Recent conversation",
+        ...(talk.length ? talk : ["(none)"]),
+      ];
+      const full = head.join("\n");
+      return text(cut(full, CAP, (m) => `continue with tickets read ticketId=${t.id} offset=${m}`, offset));
     },
   );
 

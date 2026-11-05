@@ -4,6 +4,7 @@ import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type 
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
+import { OwnerMessageBox, tooLong } from "../components/OwnerMessageBox";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
@@ -284,6 +285,17 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     img.clear();
     setDraft(null);
   };
+  // Too long for a description: put the text in a .txt file, link it in the description, so the agent can open it.
+  const saveDraftAsFile = async (long: string) => {
+    try {
+      const markdown = await img.uploadText(long, "description.txt");
+      await patch({ body: withAttachments("The text was too long for the description box, so it's in this file:\n\n", [markdown]).trim() });
+      img.clear();
+      setDraft(null);
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
   const assign = (value: string) =>
     patch(value === "owner" ? { assigneeAgentId: null, assignedToOwner: true } : { assigneeAgentId: value || null, assignedToOwner: false });
   const [range, setRange] = useState<"base" | "last_turn">("base");
@@ -550,29 +562,25 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               )
             ) : (
               <>
-                <label htmlFor="t-body" className="sr-only">
-                  Description, in Markdown
-                </label>
-                <textarea
+                <OwnerMessageBox
                   id="t-body"
+                  label="Description, in Markdown"
                   rows={12}
-                  maxLength={20_000}
                   autoFocus
                   placeholder="What should be done, and what counts as finished."
                   value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
+                  onChange={setDraft}
                   onPaste={img.onPaste}
-                  style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
-                />
-                <ImagePreviews attached={img.attached} onRemove={img.remove} />
-                {img.error && (
-                  <p className="error" role="alert">
-                    {img.error}
-                  </p>
-                )}
+                  onSendAsFile={saveDraftAsFile}
+                  attaching={img.busy}
+                  error={img.error}
+                  textareaStyle={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
+                >
+                  {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+                </OwnerMessageBox>
                 <div style={{ display: "flex", gap: 8 }}>
                   {img.button}
-                  <button type="button" className="btn primary" disabled={draft === (t.body ?? "") && !img.attached.length} onClick={() => void saveDraft()}>
+                  <button type="button" className="btn primary" disabled={(draft === (t.body ?? "") && !img.attached.length) || tooLong(draft)} onClick={() => void saveDraft()}>
                     Save description
                   </button>
                   <button type="button" className="btn" onClick={() => { img.clear(); setDraft(null); }}>

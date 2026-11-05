@@ -13,6 +13,9 @@ import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 
 /** How many recent messages a run's prompt carries. */
 export const PROMPT_HISTORY = 12;
+/** How much of an agent-written line a run's prompt shows. The owner's own lines are never cut (BOS-502). */
+export const PROMPT_TEXT_MAX = 1500;
+/** How much of an agent's own reply is kept. Agents' replies stay limited; BOS-502 is about the owner's text. */
 const MAX_TEXT = 8000;
 
 export class TicketChatError extends Error {
@@ -156,7 +159,9 @@ export async function conversationLines(db: Db, ticketId: string) {
   const reviewing = !!review;
   return rows.reverse().map((m) => {
     const who = m.author === "owner" ? "Owner" : m.author === "agent" ? (m.agent ?? "An agent") : systemAuthor(m.delivery);
-    const text = m.text.length > 1500 ? `${m.text.slice(0, 1500)}…` : m.text;
+    // The owner's text reaches the agent whole: a pasted log must not arrive cut. Agent replies keep
+    // their own limit, and the untrusted wrapper a review ticket puts around them is never sliced apart.
+    const text = m.author === "owner" || m.text.length <= PROMPT_TEXT_MAX ? m.text : `${m.text.slice(0, PROMPT_TEXT_MAX)}…`;
     return `${who}: ${m.author === "agent" && reviewing ? untrusted(`agent ${m.agent ?? "an agent"} on a skill review ticket`, text) : text}`;
   });
 }

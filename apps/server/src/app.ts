@@ -11,6 +11,7 @@ import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRE
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
+import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -187,7 +188,9 @@ async function serveWeb(app: FastifyInstance, root: string) {
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
   // Trust only the exact proxy addresses given (the Tailscale Serve hop), never every hop.
-  const app = Fastify({ logger: opts.logger ?? false, trustProxy: opts.trustedProxies?.length ? opts.trustedProxies : false });
+  // An owner's message can be a whole log (up to OWNER_MESSAGE_MAX characters, more once JSON-encoded and
+  // with attachments added); the default 1 MiB body limit would refuse it before validation ever ran.
+  const app = Fastify({ logger: opts.logger ?? false, trustProxy: opts.trustedProxies?.length ? opts.trustedProxies : false, bodyLimit: 4 * 1024 * 1024 });
   // Keep recent server errors for the CEO's server_status tool (BOS-224), redacted.
   const errorBuffer = createErrorBuffer();
   const logError = app.log.error.bind(app.log);
@@ -197,7 +200,9 @@ export async function buildApp(opts: AppOptions) {
     return logError(...(args as Parameters<typeof logError>));
   }) as typeof app.log.error;
   await app.register(cookie);
-  await app.register(websocket);
+  // A long owner message (up to OWNER_MESSAGE_MAX, plus the prompt around it) travels over the runner socket;
+  // the default 1 MiB frame limit could cut it off, so allow room for it.
+  await app.register(websocket, { options: { maxPayload: 4 * 1024 * 1024 } });
 
   // Event-loop stalls and GC pauses, with memory and what was in flight (BOS-432): logged, and shown in server_status.
   const stalls = createStallMonitor({ runnerSockets: () => app.websocketServer?.clients.size ?? 0, log: (line) => app.log.warn(line) });
@@ -1243,7 +1248,8 @@ export async function buildApp(opts: AppOptions) {
     const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
     const TicketFields = z.object({
       title: z.string().trim().min(1).max(200),
-      body: z.string().max(20_000).nullable(),
+      // The description is an owner message box too: a pasted log goes in whole (BOS-502).
+      body: z.string().max(OWNER_MESSAGE_MAX).nullable(),
       columnId: Uuid,
       state: State,
       outcome: z.enum(["completed", "cancelled"]),
@@ -1551,7 +1557,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/tickets/:id/messages", async (req, reply) => ticketChat.list(IdParam.parse(req.params).id).catch(ticketChatErrors(reply)));
     owner.post("/api/tickets/:id/messages", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { text, interrupt, agentId } = z.object({ text: z.string().trim().min(1).max(4000), interrupt: z.boolean().optional(), agentId: z.string().uuid().optional() }).parse(req.body);
+      const { text, interrupt, agentId } = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional(), agentId: z.string().uuid().optional() }).parse(req.body);
       return ticketChat
         .ownerSays(id, text, { interrupt, agentId })
         .then((m) => reply.code(201).send(m))
@@ -2098,7 +2104,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.post("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { text, agentId } = z.object({ text: z.string().trim().min(1).max(4000), agentId: Uuid.optional() }).parse(req.body);
+      const { text, agentId } = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), agentId: Uuid.optional() }).parse(req.body);
       return chat.send(id, text, agentId).then((m) => reply.code(201).send(m), chatErrors(reply));
     });
 
@@ -2350,7 +2356,7 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig } = z
         .object({
-          answer: z.string().trim().min(1).max(4000),
+          answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
           note: z.string().trim().max(2000).optional(),
           reasonLink: z.string().trim().max(400).optional(),
@@ -2538,7 +2544,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/runs", async (req) => runsSvc.active(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
     owner.post("/api/runs/:id/message", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ text: z.string().trim().min(1).max(20_000), interrupt: z.boolean().optional() }).parse(req.body);
+      const b = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional() }).parse(req.body);
       return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
     });
     owner.get("/api/runs/recent", async (req) => {
