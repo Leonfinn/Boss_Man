@@ -6,6 +6,7 @@ import type { WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { runners, tickets } from "../db/schema.js";
 import { checkQueue, type CheckScope } from "./check-queue.js";
+import { checkPriority } from "./check-gate.js";
 
 export class CheckRequestError extends Error {}
 
@@ -13,7 +14,7 @@ export type CheckRequestDeps = {
   /** Ask the company's runner for the ticket's diff (workspace.diff). */
   diff: (runnerId: string, projectId: string, ticketId: string) => Promise<WorkspaceDiff>;
   /** Commands per scope, from the project's settings; a missing one falls back to the runner's default. */
-  command?: (scope: CheckScope) => string | null;
+  command?: (scope: CheckScope, projectId: string) => Promise<string | null>;
 };
 
 export function checkRequestService(db: Db, deps: CheckRequestDeps) {
@@ -46,8 +47,8 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
         scope,
         commit: d.head,
         tree: d.tree,
-        command: deps.command?.(scope) ?? null,
-        priority: t.urgent ? 2 : 1,
+        command: (await deps.command?.(scope, t.projectId)) ?? null,
+        priority: checkPriority(t),
         requestedBy: input.agentId,
       });
       const uncommitted = d.files.length && d.head ? " Anything you have not committed is not in this check." : "";

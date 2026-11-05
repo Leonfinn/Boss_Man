@@ -39,6 +39,20 @@ describe("request_check", () => {
     await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
     expect(await s.db.select().from(checkJobs)).toHaveLength(1);
   });
+  it("an urgent ticket's check gets the urgent priority (0), ahead of a normal one", async () => {
+    const s = await setup();
+    await s.db.update(tickets).set({ urgent: true } as never);
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    const [job] = await s.db.select().from(checkJobs);
+    expect(job!.priority).toBe(0);
+  });
+  it("a full request carries the full command, never the quick script", async () => {
+    const s = await setup();
+    const svc = checkRequestService(s.db, { diff: async () => diff(), command: async (scope) => (scope === "full" ? "pnpm run full-check" : "scripts/check-quick.sh") });
+    await svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket, scope: "full" });
+    const [job] = await s.db.select().from(checkJobs);
+    expect(job).toMatchObject({ scope: "full", command: "pnpm run full-check" });
+  });
   it("refuses while the queue is off, for another agent, and with nothing committed", async () => {
     const off = await setup(diff(), "legacy");
     await expect(off.svc.request({ companyId: off.co, agentId: off.agent, ticketId: off.ticket })).rejects.toThrow(/not switched on/);

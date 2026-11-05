@@ -50,7 +50,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
           projectId: job.projectId,
           ticketId: job.ticketId,
           commit: job.commit,
-          command: job.command ?? deps.defaultCommand?.(job) ?? "scripts/check-quick.sh",
+          command: job.command ?? deps.defaultCommand?.(job) ?? (job.scope === "full" ? "scripts/check-all.sh" : "scripts/check-quick.sh"),
           timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT,
         });
         if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
