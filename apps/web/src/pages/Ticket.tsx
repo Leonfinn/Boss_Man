@@ -457,7 +457,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       {/* One press (BOS-471): with a sign-off card open, this button is that card's answer too. */}
       <p className="muted" style={{ fontSize: 14 }}>
         {approves}
-        {t.signoffWaiting ? " This is also your sign-off: one press approves, signs off and merges." : ""}
+        {t.signoffWaiting || t.signoff === "missing" ? " This is also your sign-off: one press approves, signs off and merges." : ""}
       </p>
       {sendingBack ? (
                 <>
@@ -701,6 +701,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 staleCheck ? "the merge check looks stuck; you can try again" :
                 t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" :
                 open.length ? `waiting for ${who}${t.ownerSignoff ? ", then you" : ""}` :
+                // Said from the decisions themselves (BOS-503), not guessed from the policy.
+                t.signoff === "waiting" || t.signoff === "missing" ? "waiting for your sign-off" :
+                t.signoff === "signed_off" ? "you signed it off; it merges next" :
                 "waiting for you"
               }
             >

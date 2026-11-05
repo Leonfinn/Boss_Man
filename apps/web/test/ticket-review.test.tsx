@@ -59,6 +59,15 @@ describe("ticket in review", () => {
     expect(screen.getByText("Approving runs `pnpm test` and, if it passes, merges bm/fix-typo into main of Leonfinn/customer-app. The change is under Changes above.")).toBeTruthy();
   });
 
+  it("says plainly that it waits on your sign-off, from the server's word, even while its card is being raised again (BOS-503)", async () => {
+    show({ risk: "high", ownerSignoff: true, signoff: "missing" }, [review("approved")]);
+    expect(await screen.findByText("waiting for your sign-off")).toBeTruthy();
+    expect(screen.getByText(/This is also your sign-off: one press approves, signs off and merges\./)).toBeTruthy();
+    cleanup();
+    show({ risk: "high", ownerSignoff: true, signoff: "signed_off" }, [review("approved")]);
+    expect(await screen.findByText("you signed it off; it merges next")).toBeTruthy();
+  });
+
   it("when no agent can review it, the review is yours: no 'reviewer' to wait for, the buttons show straight away", async () => {
     show({}, [{ ...review("pending"), reviewer: null }]);
     expect(await screen.findByText("waiting for you")).toBeTruthy();

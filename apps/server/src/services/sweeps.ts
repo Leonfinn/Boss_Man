@@ -16,6 +16,7 @@ import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, evaluate, latestRows } from "./review-kinds.js";
+import { signoffState, sweepMissingSignoffs } from "./signoff.js";
 import { progressSweep } from "./progress.js";
 import { MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
@@ -72,6 +73,12 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
 
   async function withdraw(ids: string[]) {
     if (ids.length) await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(inArray(decisions.id, ids));
+  }
+
+  /** Tells the company's CEO once, as a ticketless decision wake (one per raised card). */
+  async function tellCeo(companyId: string, note: string) {
+    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+    if (ceo) await opts.wake({ agentId: ceo.id, ticketId: null, reason: "decision", note });
   }
 
   async function openOfKind(kind: "stale_blocker" | "stalled_run") {
@@ -445,6 +452,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
         .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open")));
       if (signoff) continue;
+      // Owed the owner's sign-off with its card lost: never retried as a merge; the sign-off sweep raises the card (BOS-503).
+      const [full] = await db.select().from(tickets).where(eq(tickets.id, ticket.id));
+      if (full && (await signoffState(db, full)).state === "missing") continue;
       // Only an open card counts: an answered or withdrawn one must not stop the sweep (BOS-362).
       const [asked] = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, `merge-stuck:${ticket.id}`), eq(decisions.status, "open")));
       if (asked) continue;
@@ -633,10 +643,14 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // Silent runs, reviews that end without a verdict, and causes left unproven (BOS-314): these run whether or not the watchdog is on.
       const progress = held ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 } : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert });
       const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);
+      // A ticket that waits on the owner's sign-off always has its card (BOS-503): raised before the merge
+      // sweep, so a lost card is put back rather than the ticket being merged or forgotten. Runs while held too:
+      // it only raises a card, it starts no work.
+      const signoffCards = await sweepMissingSignoffs(db, tellCeo);
       const unmerged = held ? 0 : await unmergedApprovals(t);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
       const ticketless = held ? { raised: 0 } : await longTicketlessRuns(t);
-      return { goalChecks, closedCards, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, progress };
+      return { goalChecks, closedCards, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, progress };
     },
   };
 }

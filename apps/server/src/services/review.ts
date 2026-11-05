@@ -12,7 +12,8 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, supersedeSignoffs } from "./decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck } from "./decisions.js";
+import { openSignoffCard, raiseSignoffCard, restoreSignoffCard, signoffState } from "./signoff.js";
 import { checkGate, checkPriority } from "./check-gate.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
@@ -305,8 +306,10 @@ export function reviewService(
    * land it too. Anything less (still in review rounds, sent back, awaiting the owner) stays a refusal.
    */
   async function approvedAndWaiting(ticketId: string): Promise<boolean> {
-    const [c] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+    const [c] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
     if (!c || c.systemState !== "review") return false;
+    // Still owed the owner's sign-off (its card lost): not approved yet (BOS-503).
+    if ((await signoffState(db, c)).state === "missing") return false;
     const rows = await latestRows(db, ticketId);
     if (!rows.length || evaluate(rows) !== "passed") return false;
     const [signoff] = await db
@@ -443,12 +446,7 @@ export function reviewService(
 
   /** True while the owner's "Merge it, or send it back?" sign-off card for this ticket is open (BOS-471). */
   async function ownerSignoffOpen(ticketId: string): Promise<boolean> {
-    const [signoff] = await db
-      .select({ id: decisions.id })
-      .from(decisions)
-      .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`))
-      .limit(1);
-    return !!signoff;
+    return !!(await openSignoffCard(db, ticketId));
   }
 
   return {
@@ -639,23 +637,8 @@ export function reviewService(
       // Where the review policy says the owner signs off, an agent's approval asks them (R48).
       if (o.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
         // One open sign-off card per ticket: this round replaces any older one (BOS-446).
-        await supersedeSignoffs(db, ticketId, { by: "system", note: "Replaced by a newer sign-off card after a new review round.", at: new Date().toISOString() });
-        const [d] = await db
-          .insert(decisions)
-          .values({
-            companyId: t.companyId,
-            kind: "approval",
-            question: `${o.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?`,
-            options: ["Approve and merge", "Send it back"],
-            recommendedOption: "Approve and merge",
-            raisedByAgentId: o.reviewerAgentId,
-            tier: "owner",
-            dedupeKey: `risk-review:${ticketId}:${Date.now()}`,
-            context: { type: "risk_review", ticketId, reviewer: o.reviewer },
-          })
-          .returning({ id: decisions.id });
-        await addTicketDependency(db, { companyId: t.companyId, blockedTicketId: ticketId, blockerDecisionId: d!.id, actor: { type: "system" } });
-        return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${d!.id}` };
+        const id = await raiseSignoffCard(db, t, { reviewer: o.reviewer, reviewerAgentId: o.reviewerAgentId });
+        return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${id}` };
       }
       if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
       return { verdict: "approved" as const, ...(await this.landVisible(ticketId, o.reviewer, o.causedByRunId)) };
@@ -856,6 +839,9 @@ export function reviewService(
       // A retry must not merge past the owner's sign-off (BOS-149): if a "Merge it, or send it back?"
       // card is still open, this ticket waits for the owner, whatever answered the merge card.
       if (await ownerSignoffOpen(ticketId)) throw new SignoffPendingError();
+      // Nor past a sign-off whose card is missing (BOS-503): a lost card used to let the unmerged-approvals
+      // retry merge a high-risk ticket the owner never saw. Raise the card again and wait for the answer.
+      if (await restoreSignoffCard(db, t, "a merge was about to start without it")) throw new SignoffPendingError();
       // A merge under way is activity: the unmerged-approvals sweep waits for it rather than asking again.
       const touch = () => beatNow(ticketId);
       await touch();
