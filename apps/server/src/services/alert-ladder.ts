@@ -20,6 +20,7 @@ import { agents, companies, decisions, runs, watchdogActions } from "../db/schem
 import { record } from "./activity.js";
 import type { ClearWhen } from "./alert-clearing.js";
 import { CANCEL_RUN, checkAsk } from "./decisions.js";
+import type { HostFacts } from "./steps.js";
 import { type AlertCause, type AlertKind, type AlertRung, isAlertKind, kindCeiling, kindRow, kindStart } from "./alert-kinds.js";
 import { ALERT_REASON, SCRUM_MASTER_DUTY, WATCHDOG_REWAKE_REASON, WatchdogError, watchdogPausedUntil, type watchdogService } from "./watchdog.js";
 
@@ -145,6 +146,8 @@ export function alertLadder(
     ceoCanRun?: (companyId: string) => Promise<boolean>;
     /** The one closer for Boss Man's own cards (DR-016, BOS-469 point 2): closes a card whose cause is gone, on any tier. */
     clearExpired?: () => Promise<number>;
+    /** The host facts Boss Man recorded (BOS-427), for R6 on a CEO escalation with owner steps. Absent: only the host/account check runs. */
+    hosts?: () => Promise<HostFacts[]>;
     now?: () => Date;
   },
 ) {
@@ -587,7 +590,7 @@ export function alertLadder(
       if (!ceo) throw new WatchdogError(403, "Only the CEO passes alerts to the owner.");
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
-      const ask = checkAsk({ ...input, byCeo: true });
+      const ask = checkAsk({ ...input, byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
       // card may reach the owner (DR-017 A), so the ceiling doesn't apply to a deliberate escalation.

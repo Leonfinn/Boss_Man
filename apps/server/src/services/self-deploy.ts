@@ -13,7 +13,7 @@ import { companies, decisions, owners, settings, tickets } from "../db/schema.js
 import { record } from "./activity.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
-import { sh, step } from "./steps.js";
+import { sh, step, type HostFacts } from "./steps.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
@@ -56,7 +56,7 @@ const isSha = (s: string) => /^[0-9a-f]{7,64}$/.test(s);
 /** The ladder: success is a note, a refusal a flag, anything half-done or broken a page. */
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -155,8 +155,14 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const shaOk = isSha(commit) && isSha(fromCommit);
     const bg = a?.bluegreen;
     const colour = a?.liveColour === "blue" || a?.liveColour === "green" ? a.liveColour : null;
+    // The machine's recorded name (BOS-427): every command's block says "on <host>, as root". Without it the
+    // card can't say where a command runs, so no command is shown (never a guessed name).
+    const host = (await deps.hosts?.())?.[0]?.name ?? null;
+    /** A command for a hand-apply card: always on the recorded host, as root (the deployer and deploy.sh run as root). */
+    const cmd = (c: string) => sh(c, { host: host!, as: "root" });
     // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
     const noSrc = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
+    const noHost = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
     const handSteps: string[] = [];
     if (infra) {
       handSteps.push(
@@ -168,39 +174,49 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       );
       handSteps.push(
         src && shaOk
-          ? step(`On the machine that runs Boss Man, pin the approved commit ${commit} with this command. The last line it prints must be exactly that commit; if it prints anything else, stop and tell us.`, sh(`cd ${src} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD`))
+          ? host
+            ? step(`On the machine that runs Boss Man, pin the approved commit ${commit} with this command. The last line it prints must be exactly that commit; if it prints anything else, stop and tell us.`, cmd(`cd ${src} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD`))
+            : noHost
           : noSrc,
       );
       if (bg !== undefined)
         handSteps.push(
           src && shaOk
-            ? bg
-              ? step("Apply it with this command, on the same machine:", sh(`cd ${src} && scripts/rebuild-live.sh`))
-              : step(`Apply it with this command, on the same machine (it deploys exactly ${short(commit)}):`, sh(`cd ${src} && scripts/deploy.sh --commit ${commit}`))
+            ? host
+              ? bg
+                ? step("Apply it with this command, on the same machine:", cmd(`cd ${src} && scripts/rebuild-live.sh`))
+                : step(`Apply it with this command, on the same machine (it deploys exactly ${short(commit)}):`, cmd(`cd ${src} && scripts/deploy.sh --commit ${commit}`))
+              : noHost
             : noSrc,
         );
       handSteps.push(
         hostDeployerChanged
           ? src && deployer
-            ? step("Copy the changed host-deployer script into the deployer folder with this command, on the same machine:", sh(`cp ${src}/scripts/host-deployer.sh ${deployer}/host-deployer.sh && chown root:root ${deployer}/host-deployer.sh && chmod 750 ${deployer}/host-deployer.sh`))
+            ? host
+              ? step("Copy the changed host-deployer script into the deployer folder with this command, on the same machine:", cmd(`cp ${src}/scripts/host-deployer.sh ${deployer}/host-deployer.sh && chown root:root ${deployer}/host-deployer.sh && chmod 750 ${deployer}/host-deployer.sh`))
+              : noHost
             : "host-deployer.sh changed and has to be copied into the deployer folder, but Boss Man can't tell where the install or deployer folder is, so no command is shown. Ask us on this ticket."
           : "host-deployer.sh didn't change; no copy needed.",
       );
       if (launcherChanged)
         handSteps.push(
           src
-            ? step("Rebuild the launcher with this command, on the same machine. Runners keep their old limits until the next runner update.", sh(`cd ${src} && docker compose build launcher && docker compose up -d --no-deps launcher`))
+            ? host
+              ? step("Rebuild the launcher with this command, on the same machine. Runners keep their old limits until the next runner update.", cmd(`cd ${src} && docker compose build launcher && docker compose up -d --no-deps launcher`))
+              : `The launcher changed and has to be rebuilt, but ${noHost}`
             : `The launcher changed and has to be rebuilt, but ${noSrc}`,
         );
       if (bg === true)
         handSteps.push(
           src && colour
-            ? step(
-                `Check the new server has taken charge. Run this on the same machine; it asks the live copy (${colour}) whether it is ready:`,
-                sh(`cd ${src} && docker compose exec -T server-${colour} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`),
-                "If it says standby, run this next:",
-                sh(`cd ${src} && docker compose kill -s SIGUSR2 server-${colour}`),
-              )
+            ? host
+              ? step(
+                  `Check the new server has taken charge. Run this on the same machine; it asks the live copy (${colour}) whether it is ready:`,
+                  cmd(`cd ${src} && docker compose exec -T server-${colour} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`),
+                  "If it says standby, run this next:",
+                  cmd(`cd ${src} && docker compose kill -s SIGUSR2 server-${colour}`),
+                )
+              : noHost
             : "Check the new server has taken charge. Boss Man can't tell which copy is live or where it is installed, so no command is shown. Open Settings → Server and runner → Server and ask us on this ticket.",
         );
       // Only when the runner's files changed: the same flag drives the summary line on the card.
@@ -210,11 +226,13 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const rollbackNote = "Database restore isn't a fallback yet.";
     const rollback = infra
       ? src && shaOk && bg !== undefined
-        ? step(
-            bg ? "To go back, run this on the machine that runs Boss Man:" : "To go back, run this on the machine that runs Boss Man (code only, never the database):",
-            sh(bg ? `cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh` : `cd ${src} && scripts/deploy.sh --rollback`),
-            rollbackNote,
-          )
+        ? host
+          ? step(
+              bg ? "To go back, run this on the machine that runs Boss Man:" : "To go back, run this on the machine that runs Boss Man (code only, never the database):",
+              cmd(bg ? `cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh` : `cd ${src} && scripts/deploy.sh --rollback`),
+              rollbackNote,
+            )
+          : `To go back, ${noHost} ${rollbackNote}`
         : `To go back, Boss Man needs to know the install folder and layout, which it can't tell, so no command is shown. Ask us on this ticket. ${rollbackNote}`
       : undefined;
     const n = a?.paths.length ?? 0;

@@ -1,4 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -13,6 +16,8 @@ import { lintOwnerSteps, sh, step, type CardLint } from "../src/services/steps.j
 
 const TRIED = "Checked the host from the runner; agents have no access to the owner's machine.";
 const rules = (steps: string[]) => lintOwnerSteps(steps).refuse.map((f) => `${f.step}:${f.rule}`);
+/** Every command block says where and as whom (BOS-427, R6); these tests are about the other rules. */
+const H = { host: "nas01", as: "root" as const };
 
 describe("lintOwnerSteps", () => {
   it("refuses a step that points to another document (the 14:45 card)", () => {
@@ -22,24 +27,24 @@ describe("lintOwnerSteps", () => {
   });
 
   it("refuses a variable no step up to there sets (the $BOSSMAN_HOME card)", () => {
-    expect(rules([step("Go to the install folder:", sh("cd $BOSSMAN_HOME"))])).toEqual(["1:R2"]);
-    expect(rules([step("Go there:", sh("cd ${BOSSMAN_HOME}/src"))])).toEqual(["1:R2"]);
+    expect(rules([step("Go to the install folder:", sh("cd $BOSSMAN_HOME", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go there:", sh("cd ${BOSSMAN_HOME}/src", H))])).toEqual(["1:R2"]);
     // Unfenced, in a sentence, it is still a command the owner will paste.
     expect(rules(["Run sudo ls $BOSSMAN_HOME on the new host."])).toEqual(["1:R2"]);
     // Set later is set too late.
-    expect(rules([step("Go:", sh("cd $DIR")), step("Set it:", sh("DIR=/srv/bm"))])).toEqual(["1:R2"]);
+    expect(rules([step("Go:", sh("cd $DIR", H)), step("Set it:", sh("DIR=/srv/bm", H))])).toEqual(["1:R2"]);
   });
 
   it("accepts variables the card sets, inline assignments, and shell text that isn't a variable", () => {
     const ok = [
-      step("Set the folder:", sh("export DIR=/srv/bm")),
-      step("Go there:", sh("cd $DIR/src && ls")),
-      step("Build with a flag set just for this command:", sh("DOCKER_BUILDKIT=1 docker compose build")),
-      step("Same command, inline:", sh("COMPOSE_FILE=a.yml docker compose ps && echo $COMPOSE_FILE")),
-      step("Print the second column:", sh("docker ps | awk '{print $2}'")),
-      step("Count:", sh("for f in a b; do echo $f; done")),
-      step("Show home, the exit code and a default:", sh('echo "$HOME $? ${PORT:-3100} $(date) $1"')),
-      step("Ask for it:", sh("read -r NAME && echo $NAME")),
+      step("Set the folder:", sh("export DIR=/srv/bm", H)),
+      step("Go there:", sh("cd $DIR/src && ls", H)),
+      step("Build with a flag set just for this command:", sh("DOCKER_BUILDKIT=1 docker compose build", H)),
+      step("Same command, inline:", sh("COMPOSE_FILE=a.yml docker compose ps && echo $COMPOSE_FILE", H)),
+      step("Print the second column:", sh("docker ps | awk '{print $2}'", H)),
+      step("Count:", sh("for f in a b; do echo $f; done", H)),
+      step("Show home, the exit code and a default:", sh('echo "$HOME $? ${PORT:-3100} $(date) $1"', H)),
+      step("Ask for it:", sh("read -r NAME && echo $NAME", H)),
       "Open Settings → Server and runner → Updates and press Build and update runners. It costs $5 a month.",
       "Follow the instructions on the screen to sign in.",
     ];
@@ -47,21 +52,80 @@ describe("lintOwnerSteps", () => {
   });
 
   it("refuses a command the owner would have to edit, and an unfilled {{token}}", () => {
-    expect(rules(["Run this:\n\n```sh\nssh root@<host-ip>\n```"])).toEqual(["1:R3"]);
+    const F = '```sh host="nas01" as="root"\n';
+    expect(rules([`Run this:\n\n${F}ssh root@<host-ip>\n\`\`\``])).toEqual(["1:R3"]);
     expect(rules(["Run `scp YOUR_KEY root@nas:/x` on the old host."])).toEqual(["1:R3"]);
-    expect(rules(["Run this:\n\n```sh\n$ ls\n```"])).toEqual(["1:R3"]);
-    expect(rules(["Go there:\n\n```sh\ncd {{host.srcDir}}\n```"])).toEqual(["1:R4"]);
+    expect(rules([`Run this:\n\n${F}$ ls\n\`\`\``])).toEqual(["1:R3"]);
+    expect(rules([`Go there:\n\n${F}cd {{host.srcDir}}\n\`\`\``])).toEqual(["1:R4"]);
   });
 
   it("only warns about links, several commands in one step, hedging and long cards", () => {
     const r = lintOwnerSteps([
       "Background is on BOS-276; open Settings → Server and runner.",
-      step("Check it:", sh("docker ps"), "Then:", sh("docker logs server-blue")),
-      step("It should be green by now:", sh("docker ps")),
+      step("Check it:", sh("docker ps", H), "Then:", sh("docker logs server-blue", H)),
+      step("It should be green by now:", sh("docker ps", H)),
     ]);
     expect(r.refuse).toEqual([]);
     expect(r.warn.map((f) => f.step)).toEqual([1, 2, 3]);
     expect(lintOwnerSteps(Array.from({ length: 13 }, () => "Open Settings.")).warn).toHaveLength(1);
+  });
+});
+
+describe("R6: where a command runs and as whom (BOS-427)", () => {
+  const HOSTS = [
+    {
+      name: "nas01",
+      ownership: [
+        { path: "/mnt/bm", owner: "root", group: "root", mode: "755" },
+        { path: "/mnt/backups", owner: "root", group: "root", mode: "700" },
+        { path: "/mnt/bm/data", owner: "1000", group: "1000", mode: "700" },
+      ],
+    },
+  ];
+  const refuse = (steps: string[]) => lintOwnerSteps(steps, HOSTS).refuse.filter((f) => f.rule === "R6");
+  const warn = (steps: string[]) => lintOwnerSteps(steps, HOSTS).warn;
+
+  it("refuses a block that names neither host nor account (older cards), even without recorded facts", () => {
+    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm/src"))]).refuse.filter((x) => x.rule === "R6");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.problem).toMatch(/doesn't say where it runs/);
+    // The same card with a host and account passes.
+    expect(refuse([step("Go:", sh("cd /mnt/bm/src", { host: "nas01", as: "root" }))])).toEqual([]);
+  });
+
+  it("refuses a host Boss Man hasn't recorded, and says so", () => {
+    const f = refuse([step("Go:", sh("cd /mnt/bm", { host: "orange", as: "root" }))]);
+    expect(f).toHaveLength(1);
+    expect(f[0]!.problem).toMatch(/hasn't recorded/);
+  });
+
+  it("refuses a login-run block that reads a folder the login can't read, and passes it once an earlier block staged a copy", () => {
+    const read = step("Open the backups folder:", sh("ls -l /mnt/backups", { host: "nas01", as: "login" }));
+    const f = refuse([read]);
+    expect(f).toHaveLength(1);
+    expect(f[0]!.problem).toMatch(/runs as the login on nas01 and reads \/mnt\/backups, which the login can't read/);
+    // A root block can read it.
+    expect(refuse([step("Open the backups folder:", sh("ls -l /mnt/backups", { host: "nas01", as: "root" }))])).toEqual([]);
+    // A sudo command inside a login block reads as root, so it is allowed.
+    expect(refuse([step("Look, using sudo:", sh("sudo ls -l /mnt/backups", { host: "nas01", as: "login" }))])).toEqual([]);
+    // An earlier step makes a copy for the login (world-unreadable, but readable by its owner), and the listing passes.
+    const staged = [step("Copy the backup for your account:", sh("sudo install -o leon -m 700 -D /mnt/backups/bossman.sql.gz /mnt/bm/mine.sql.gz", { host: "nas01", as: "root" })), step("Read your copy:", sh("cat /mnt/bm/mine.sql.gz", { host: "nas01", as: "login" }))];
+    expect(refuse(staged)).toEqual([]);
+    // The copy has to land in the folder that was opened; a copy elsewhere doesn't make the backups readable.
+    const elsewhere = [step("Copy it:", sh("sudo install -o leon -m 700 -D /mnt/backups/bossman.sql.gz /tmp/x", { host: "nas01", as: "root" })), step("Read the backups:", sh("ls /mnt/backups", { host: "nas01", as: "login" }))];
+    expect(refuse(elsewhere)).toHaveLength(1);
+  });
+
+  it("never makes backups world-readable", () => {
+    expect(refuse([step("Make it readable:", sh("chmod 755 /mnt/backups", { host: "nas01", as: "root" }))])).toHaveLength(1);
+    expect(refuse([step("Copy it in readable:", sh("install -m 644 /mnt/bm/x /mnt/backups/x", { host: "nas01", as: "root" }))])).toHaveLength(1);
+    // A mode that keeps it closed passes.
+    expect(refuse([step("Keep it closed:", sh("chmod 700 /mnt/backups", { host: "nas01", as: "root" }))])).toEqual([]);
+  });
+
+  it("warns when a copy step touches a path with no recorded ownership", () => {
+    const w = warn([step("Copy it:", sh("cp /mnt/bm/x /srv/somewhere/x", { host: "nas01", as: "root" }))]);
+    expect(w.some((f) => f.rule === "warn" && /no recorded ownership/.test(f.problem))).toBe(true);
   });
 });
 
@@ -93,12 +157,17 @@ afterEach(async () => {
   ctx?.clients.forEach((c) => void c.close());
   await ctx?.app.close();
   await ctx?.close();
+  if (ctx?.dir) await rm(ctx.dir, { recursive: true, force: true });
   ctx = undefined;
 });
 
 async function setup() {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
+  // What the host recorded about itself (BOS-427): host nas01, with a root-only backups folder.
+  const dir = await mkdtemp(path.join(tmpdir(), "bm-lint-"));
+  await mkdir(path.join(dir, "outbox"), { recursive: true });
+  await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-11-05T00:00:00Z", ownership: [{ path: "/mnt/backups", owner: "root", group: "root", mode: "700" }] }));
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", deployerDir: dir });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -114,7 +183,7 @@ async function setup() {
     clients.push(c);
     return c;
   };
-  return { ...built, db, close, company, ceo, worker, mcp, clients };
+  return { ...built, db, close, dir, company, ceo, worker, mcp, clients };
 }
 
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
@@ -129,7 +198,7 @@ describe("raise_decision checks the owner's steps", () => {
     const doc = await m.callTool({ name: "raise_decision", arguments: card(["Follow docs/06 with changes on the new host."]) });
     expect(isError(doc)).toBe(true);
     expect(textOf(doc)).toMatch(/Step 1: points to a doc/);
-    const unset = await m.callTool({ name: "raise_decision", arguments: card([step("Copy the backups:", sh("sudo cp -a $BOSSMAN_HOME/backups /mnt/new"))]) });
+    const unset = await m.callTool({ name: "raise_decision", arguments: card([step("Copy the backups:", sh("sudo cp -a $BOSSMAN_HOME/backups /mnt/new", H))]) });
     expect(isError(unset)).toBe(true);
     expect(textOf(unset)).toMatch(/\$BOSSMAN_HOME, which no step up to here sets/);
     // An agent that isn't the CEO can't override.
@@ -141,7 +210,7 @@ describe("raise_decision checks the owner's steps", () => {
   it("raises a good card with its warnings stored, and a CEO override with its reason", async () => {
     const c = (ctx = await setup());
     const w = await c.mcp(c.worker.id);
-    const ok = await w.callTool({ name: "raise_decision", arguments: card([step("On the new host, list the containers (background on BOS-276):", sh("DOCKER_HOST=unix:///run/docker.sock docker ps"))]) });
+    const ok = await w.callTool({ name: "raise_decision", arguments: card([step("On the new host, list the containers (background on BOS-276):", sh("DOCKER_HOST=unix:///run/docker.sock docker ps", H))]) });
     expect(isError(ok)).toBe(false);
     const ceo = await c.mcp(c.ceo.id);
     const over = await ceo.callTool({ name: "raise_decision", arguments: card(["Follow docs/06 on the new host."], { question: "Install on the new host?", lintOverride: "The owner asked to be pointed at the guide." }) });
@@ -154,5 +223,16 @@ describe("raise_decision checks the owner's steps", () => {
     const list = textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list" } }));
     expect(list).toMatch(/Boss Man flagged its steps/);
     expect(list).toMatch(/Lint overridden by the CEO: [\s\S]*The owner asked to be pointed at the guide\./);
+  });
+
+  it("refuses a card whose login step reads a root-only folder, using the host facts (BOS-427)", async () => {
+    const c = (ctx = await setup());
+    const m = await c.mcp(c.worker.id);
+    const loginRead = await m.callTool({ name: "raise_decision", arguments: card([step("Look at the backups:", sh("ls -l /mnt/backups", { host: "nas01", as: "login" }))]) });
+    expect(isError(loginRead)).toBe(true);
+    expect(textOf(loginRead)).toMatch(/Step 1: runs as the login on nas01 and reads \/mnt\/backups, which the login can't read/);
+    // A root block on the same folder is fine, and reaches the owner.
+    const rootRead = await m.callTool({ name: "raise_decision", arguments: card([step("Look at the backups:", sh("ls -l /mnt/backups", { host: "nas01", as: "root" }))], { question: "Check the backups folder?" }) });
+    expect(isError(rootRead)).toBe(false);
   });
 });
