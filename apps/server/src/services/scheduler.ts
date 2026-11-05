@@ -17,7 +17,7 @@ export { TREE_REASON };
 import { record } from "./activity.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
-import { handOverReviews, REVIEW_REASON, requestReviews, wakeReviewers } from "./review-kinds.js";
+import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
@@ -719,9 +719,6 @@ export function schedulerService(
     return null;
   }
 
-  /** The tickets a review wake's note lists, in the order it lists them. */
-  const reviewTicketsOf = (note: string | null | undefined) => [...(note ?? "").matchAll(/^- ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) /gm)].map((m) => m[1]!);
-
   /**
    * The one ticket a wake is about when it isn't formally on one (BOS-268): a review wake that
    * lists a single ticket, or any other wake whose note names exactly one existing ticket. A wake
@@ -1165,6 +1162,22 @@ export function schedulerService(
      * Boss Man sets a check to carry on in CARRY_ON_MS, and says so on the ticket. A run that made
      * no progress gets nothing: the missed-work sweep handles that, so an idle agent is never polled.
      */
+    /**
+     * A review run that ended (BOS-433, fix B): when its wake listed several tickets and it gave only some
+     * of them a verdict, the tickets still missing one are re-queued at once, one wake per ticket, so the
+     * reviewer finishes the job rather than the stall sweep noticing an hour later. Chat runs and runs cut
+     * off by a restart are left alone; so is a wake that named a single ticket (the sweep handles those).
+     */
+    async afterReviewRun(runId: string) {
+      const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+      if (run?.origin !== REVIEW_REASON || !run.agentId) return [];
+      if (!endedNormally(run.outcome)) return [];
+      const [w] = await db.select({ note: wakes.note }).from(wakes).where(eq(wakes.runId, runId));
+      const listed = reviewTicketsOf(w?.note);
+      if (listed.length < 2) return [];
+      return requeueUnansweredReviews(db, { reviewerAgentId: run.agentId, ticketIds: listed, causedByRunId: runId }, (agentId, i) => this.notify(agentId, i));
+    },
+
     async afterTicketRun(runId: string) {
       const [run] = await db.select().from(runs).where(eq(runs.id, runId));
       if (!run?.ticketId || !run.agentId || run.purpose === "chat") return;
