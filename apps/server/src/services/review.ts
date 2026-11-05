@@ -1053,6 +1053,8 @@ export function reviewService(
         for (const command of checks) await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: checkedSha, kind: kindOf(command), passed: true, detail: null });
       }
       await db.update(tickets).set({ mergeCommit: m.commit, ...(checkedSha ? { checkedCommit: checkedSha } : {}) }).where(eq(tickets.id, ticketId));
+      // BOS-316: what was pushed is exactly the tree a merge job just passed, so main passes its check (P11a).
+      if (serverChecks && m.status === "merged") await queue.setMainState(t.projectId, "green", m.commit);
       await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
       for (const c of together) {
         await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, c.ticketId));
