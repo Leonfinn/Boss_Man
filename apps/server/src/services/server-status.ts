@@ -11,6 +11,7 @@ import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
+import type { StallSummary } from "./stall-monitor.js";
 
 export type ServerStatusDeps = {
   /** "leader", "standby" or "single" (leader.ts). */
@@ -26,6 +27,8 @@ export type ServerStatusDeps = {
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
   errors: ErrorBuffer;
+  /** Event-loop stalls, GC pauses and memory (stall-monitor.ts, BOS-432). Server-wide; route patterns only, no ids. */
+  stalls?: () => StallSummary;
   /** The last hour of permission decisions for one company (permission-log.ts, BOS-306). */
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
@@ -129,6 +132,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           // This process only (the colour that answered), in MiB; no company data (BOS-410).
           memory: deps.memory ? deps.memory.status() : null,
         },
+        // Freezes over 1 s with memory, GC and requests in flight (BOS-432), plus the memory reading now.
+        stalls: deps.stalls?.() ?? null,
         deploy: {
           enabled: !!deploy?.enabled,
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),

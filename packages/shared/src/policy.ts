@@ -191,6 +191,19 @@ function urlsIn(rawInput: unknown, depth = 0): string[] {
 }
 
 const LAN_GUARD = "Fetching from your home network or this machine is blocked";
+const NOT_A_TOOL = "The tool name is a folder path, not a tool (call read, list or bash)";
+
+/**
+ * BOS-495: a request whose "tool" is a folder path and that has no command. OpenCode names an
+ * external_directory ask after its folder when it has no description or command, so this is an
+ * agent reaching outside its checkout by a route Boss Man has no card for. Refused outright, never a card.
+ * Only kinds "other" or none: for execute the title is the command, and read/edit titles are file paths.
+ */
+export function titleIsPath(info: PermissionInfo): boolean {
+  const title = info.title?.trim();
+  if (!title || (info.kind && info.kind !== "other") || commandOf(info.rawInput)) return false;
+  return /^(\/|~(\/|$)|\.{1,2}\/|[A-Za-z]:[\\/])/.test(title);
+}
 
 /** True when a fetch, or a call to an outside tool server, aims at a private address. Unparseable addresses count as private. */
 export function reachesPrivateNetwork(info: PermissionInfo): boolean {
@@ -211,6 +224,8 @@ export type PermissionDecision = { outcome: PolicyOutcome; rule: string; row: nu
 export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): PermissionDecision {
   // Row 1. Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
   if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD, row: 1 };
+  // Not a tool at all (BOS-495): refused before any rule, so no allow rule can turn it into a card or an allow.
+  if (titleIsPath(info)) return { outcome: "deny", rule: NOT_A_TOOL, row: 1 };
   // Row 3: the built-in guard that catches this request, if any.
   const guard = BUILTIN_GUARDS.find((r) => matches(r.match, info));
   // Row 4: company deny rules.
