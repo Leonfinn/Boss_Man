@@ -441,6 +441,28 @@ describe("wiki append, history and restore (BOS-430)", () => {
     expect((await c.wiki.write(c.company.id, { slug: "status", title: "Status", body: status.replace("07:00", "08:00"), agentId: c.worker.id, runId: null })).created).toBe(false);
   });
 
+  it("a page trimmed on purpose can still be grown and appended to: the guard only bounds a write that shrinks it", async () => {
+    // Adversarial round 3: measuring every write against the largest the page ever was locked the page
+    // after the CEO deliberately trimmed it, and refused even appends. The history baseline now applies
+    // only to a write that cuts the page from what it holds now.
+    const c = (ctx = await setup());
+    const [ceo] = await c.db.select().from(agents).where(and(eqq(agents.companyId, c.company.id), eqq(agents.role, "ceo")));
+    const long = `## Log\n\n${Array.from({ length: 40 }, (_, i) => `- entry ${i}: ${"x".repeat(95)}`).join("\n")}`;
+    await c.wiki.write(c.company.id, { title: "Log", body: long, agentId: ceo!.id, runId: null });
+    // The CEO trims it on purpose from ~4,000 to ~600 characters.
+    const short = "## Log\n\n- entry 0: the rest was archived.\n";
+    await c.wiki.write(c.company.id, { slug: "log", title: "Log", body: short, replace: true, isCeo: true, agentId: ceo!.id, runId: null });
+    // An append still lands (it grows the page), and the rest of the page is untouched.
+    const r = await c.wiki.append(c.company.id, { slug: "log", entry: "- new", heading: "Log", agentId: c.worker.id, runId: null });
+    expect(r.page.body).toContain("- new");
+    expect(r.page.body).toContain("the rest was archived");
+    // A plain write that grows or keeps the trimmed page also goes through without replace.
+    const grown = (await c.wiki.get(c.company.id, "log")).body + "- another\n";
+    await expect(c.wiki.write(c.company.id, { slug: "log", title: "Log", body: grown, agentId: c.worker.id, runId: null })).resolves.toBeTruthy();
+    // And a cut back below the quarter of what it holds now is still refused.
+    await expect(c.wiki.write(c.company.id, { slug: "log", title: "Log", body: "## Log\n\n", agentId: c.worker.id, runId: null })).rejects.toThrow(/would replace a page of/);
+  });
+
   it("the append reply names the end, not the top, for oldest with no heading", async () => {
     // Adversarial round 2 minor: position "oldest" with no heading said "at the top".
     const c = (ctx = await setup());

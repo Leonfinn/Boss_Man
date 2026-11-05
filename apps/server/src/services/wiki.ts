@@ -109,9 +109,11 @@ export const MIN_SHRINK = 40;
  * (a grown or barely-changed page, or a brand-new one). The message says the sizes and the headings,
  * so an agent can fix the call instead of re-sending the whole page.
  *
- * `largest` is the biggest the page has ever been (any version, or the text now): ten writes that each
- * cut 24% pass the per-write rule but end with the page emptied, so the guard measures against what the
- * page has held, not only what it holds now (BOS-430, adversarial round 2). It defaults to the text now.
+ * `largest` is the biggest the page has held since it was last deliberately replaced: ten writes that
+ * each cut 24% pass the per-write rule but end with the page emptied, so the guard measures against what
+ * the page has held, not only what it holds now (BOS-430, adversarial round 2). Callers pass it only
+ * for a write that shrinks the page from its current text, so a growing write is never refused and an
+ * append after a deliberate trim still works (adversarial round 3). It defaults to the text now.
  */
 export function shrinkRefusal(before: string, after: string): string | null {
   return shrinkRefusalAgainst(before, before.length, after);
@@ -532,7 +534,12 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       // removes a lot of text or any heading needs replace: true, and only the CEO or the owner may
       // replace a page someone else created.
       if (existing) {
-        const refusal = input.replace ? null : shrinkRefusalAgainst(existing.body, await largestEver(conn, existing.id, existing.body.length), input.body);
+        // The history baseline only matters to a write that cuts the page from what it holds now. A
+        // write that grows the page (or an append) can't be a wipe in progress, so after a deliberate
+        // trim (replace: true) the page is editable again instead of staying locked at its old peak
+        // (BOS-430, adversarial round 3).
+        const baseline = input.body.length < existing.body.length ? await largestEver(conn, existing.id, existing.body.length) : existing.body.length;
+        const refusal = input.replace ? null : shrinkRefusalAgainst(existing.body, baseline, input.body);
         if (refusal) throw new WikiError(409, refusal);
         if (input.replace && !input.isCeo && input.agentId) {
           const [first] = await conn
