@@ -62,7 +62,10 @@ export function splitSections(body: string): Section[] {
   const stack: Section[] = [];
   let fence: string | null = null;
   let pos = 0;
-  for (const line of body.split("\n")) {
+  // A page pasted with Windows (CRLF) line endings still has headings; the trailing "\r" would stop the
+  // heading regex from matching (adversarial round 6). Offsets still count in the original body.
+  for (const raw of body.split("\n")) {
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     const f = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]?.[0];
     if (f) fence = fence === null ? f : fence === f ? null : fence;
     const m = fence === null && !f ? /^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/.exec(line) : null;
@@ -73,7 +76,7 @@ export function splitSections(body: string): Section[] {
       out.push(s);
       stack.push(s);
     }
-    pos += line.length + 1;
+    pos += raw.length + 1;
   }
   out.forEach((s, i) => {
     s.ownEnd = out[i + 1]?.start ?? body.length;
@@ -158,55 +161,70 @@ export type AppendPosition = "top" | "bottom" | "oldest";
  * heading isn't on the page, so an append never silently lands somewhere unexpected.
  */
 export function appendToBody(body: string, entry: string, heading: string | undefined, position: AppendPosition): string {
+  // Use the page's own line ending for the entry and the glue, so a Windows (CRLF) page gains no mixed
+  // endings around the entry (adversarial round 6).
+  const nl = body.includes("\r\n") ? "\r\n" : "\n";
+  const glue = nl + nl;
   const lines = entryLines(entry);
-  const text = lines.join("\n");
-  const isList = (l: string) => /^[-*] /.test(l);
+  const text = lines.join(nl);
+  // An odd number of fence lines means the entry's last code block never closes: it would swallow the
+  // page's later headings (adversarial round 6), so refuse it rather than corrupt the page silently.
+  if (lines.filter((l) => /^ {0,3}(`{3,}|~{3,})/.test(l)).length % 2) throw new WikiError(400, "This entry has a code fence (```) that it never closes. Close it, so the page after the entry isn't read as code.");
+  const isList = (l: string | undefined) => /^[-*] /.test(l ?? "");
+  const bare = (l: string | undefined) => (l ?? "").replace(/\r$/, "");
+  const lastLine = (t: string) => bare(t.split("\n").at(-1));
+  const stripLead = (t: string) => t.replace(/^[ \t\r\n]+/, "");
   // A list entry that opens a list sits straight after its heading; one that joins a list needs no blank line.
-  const glueAfterHeading = (firstLineAfter: string | undefined) => (isList(lines[0]!) && !isList(firstLineAfter ?? "") ? "\n" : GLUE);
+  const glueAfterHeading = (firstLineAfter: string | undefined) => (isList(lines[0]) && !isList(firstLineAfter) ? nl : glue);
   if (!heading) {
     if (position === "top") {
       // Keep a page's leading "# Title" heading first: an entry never lands above it.
-      const title = /^# [^\n]*\n/.exec(body)?.[0];
-      if (!title) return `${text}${GLUE}${body}`;
-      const rest = body.slice(title.length);
-      const first = rest.replace(/^\s+/, "").split("\n")[0];
-      if (isList(lines[0]!) && !isList(first ?? "")) return `${title}${text}\n${rest.replace(/^\s+/, "")}`;
-      return `${title.trimEnd()}${GLUE}${text}${GLUE}${rest.replace(/^\s+/, "")}`;
+      const title = /^# [^\n]*\r?\n/.exec(body)?.[0];
+      if (!title) return `${text}${glue}${body}`;
+      const rest = stripLead(body.slice(title.length));
+      const first = rest.split("\n")[0];
+      if (isList(lines[0]) && !isList(bare(first))) return `${title}${text}${nl}${rest}`;
+      return `${title.trimEnd()}${glue}${text}${glue}${rest}`;
     }
     // The very end of the page: after the last section's own text, so an entry never lands under another heading.
     const secs = splitSections(body);
     const last = secs.at(-1);
     const end = last && last.level > 0 ? last.ownEnd : body.length;
     const before = body.slice(0, end).trimEnd();
-    const after = body.slice(end).replace(/^\s+/g, "");
-    if (after) return `${before}\n${text}\n\n${after}`;
-    const joins = isList(lines[0]!) && isList(before.split("\n").at(-1) ?? "");
-    return body ? `${before}${joins ? "\n" : GLUE}${text}\n` : `${text}\n`;
+    const after = stripLead(body.slice(end));
+    if (after) return `${before}${nl}${text}${glue}${after}`;
+    const joins = isList(lines[0]) && isList(lastLine(before));
+    return body ? `${before}${joins ? nl : glue}${text}${nl}` : `${text}${nl}`;
   }
   const sections = splitSections(body);
-  const s = findSection(sections, heading);
-  if (!s) {
+  const found = findSection(sections, heading);
+  // "intro" is the text before the first heading, not a heading line: it has no heading to sit under,
+  // and inserting "newest first" against it glues the entry onto the next heading (BOS-430, adversarial
+  // round 6). It is never offered in the heading list; refuse it plainly, as with a missing heading.
+  if (!found || found.level === 0) {
     const choices = headingsOf(body).map((h) => `"${h.path}"`);
     throw new WikiError(404, `There's no heading "${heading}" on that page. Its headings are: ${choices.length ? choices.join(", ") : "(none)"}.`);
   }
+  const s = found;
   // Oldest: at the end of the section's own text, before its sub-headings, so an entry never lands inside one.
   if (position === "oldest") {
     // At the end of the section's own text (its sub-headings, if any, come after the entry), so it joins the list.
     const before = body.slice(0, s.ownEnd).trimEnd();
-    const after = body.slice(s.ownEnd).replace(/^\s+/g, "");
-    const joins = isList(lines[0]!) && isList(before.split("\n").at(-1) ?? "");
-    return `${before}${joins ? "\n" : GLUE}${text}\n${after ? `\n${after}` : ""}`;
+    const after = stripLead(body.slice(s.ownEnd));
+    const joins = isList(lines[0]) && isList(lastLine(before));
+    return `${before}${joins ? nl : glue}${text}${nl}${after ? `${nl}${after}` : ""}`;
   }
   // Newest first: the entry goes first at the top of the section, keeping the heading's own blank line above it.
   const headingLineEnd = body.indexOf("\n", s.start);
-  if (headingLineEnd === -1) return `${body}${GLUE}${text}\n`;
+  if (headingLineEnd === -1) return `${body}${glue}${text}${nl}`;
   const lineEnd = (s.end > s.start ? body.lastIndexOf("\n", s.end - 1) : -1) + 1 || body.length;
-  const headingLine = body.slice(s.start, headingLineEnd);
-  const afterHeading = body.slice(headingLineEnd + 1, lineEnd).replace(/^\s+/, "");
+  // headingLine keeps the heading text only; the gap supplies the line ending, so a CRLF heading doesn't double its "\r".
+  const headingLine = body.slice(s.start, headingLineEnd).replace(/\r$/, "");
+  const afterHeading = stripLead(body.slice(headingLineEnd + 1, lineEnd));
   const first = afterHeading.split("\n")[0];
   const gap = glueAfterHeading(first);
   const rest = afterHeading ? `${gap}${afterHeading}` : "";
-  return `${body.slice(0, s.start)}${headingLine}${gap}${text}${rest ? `${gap}${afterHeading}` : ""}${body.slice(lineEnd)}`;
+  return `${body.slice(0, s.start)}${headingLine}${gap}${text}${rest}${body.slice(lineEnd)}`;
 }
 
 /** [[slug]] and [[slug#Section heading]] in a page body: the slugs it links to. */
