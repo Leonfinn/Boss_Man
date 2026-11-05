@@ -68,6 +68,29 @@ describe("one closer for Boss Man's own cards (DR-016, BOS-470)", () => {
     expect(t.id).toBeTruthy();
   });
 
+  it("closes when any one condition is true, not only when all of them are", async () => {
+    ctx = await setup();
+    const t = await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
+    await ctx.scheduler.tick();
+    const start = ctx.commands.find((c) => c.type === "run.start") as Extract<RunnerCommand, { type: "run.start" }>;
+    await ctx.emit({ type: "run.started", runId: start.runId, agentId: ctx.ceo.id, acpSessionId: "s1", model: null });
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    // Two conditions: the run stirring, or the ticket finishing. The ticket is NOT done here.
+    expect((card!.context as { clearWhen?: unknown[] }).clearWhen).toHaveLength(2);
+    const [before] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(before!.systemState).not.toBe("done");
+
+    // Only the first is true (the run speaks again): the card still closes, so "any one" is meant.
+    ctx.advance(30_000);
+    await ctx.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message_chunk" } } as RunnerEvent);
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, card!.id));
+    expect(after!.status).toBe("withdrawn");
+    expect((after!.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/active again/i);
+    expect((after!.context as { withdrawn?: { note: string } }).withdrawn?.note).not.toMatch(/finished/i);
+  });
+
   it("closes a usage-limit card once the account has room again", async () => {
     ctx = await setup();
     const [source] = await ctx.db
