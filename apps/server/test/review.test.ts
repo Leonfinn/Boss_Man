@@ -707,8 +707,15 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git", verifyCommand: "pnpm test"  });
     await c.db.update((await import("../src/db/schema.js")).projects).set({ deepVerifyCommand: "pnpm test:e2e" });
     const other = await otherTicket(c, "Inner work", "high");
-    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved", decidedAt: new Date(Date.now() - 60_000) });
     c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
+    // High risk is owed the owner's sign-off: never signed off, it can't ride along on this merge (BOS-503).
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "carried" });
+    // Signed off, it lands with this one, and the deeper check its risk needs still runs.
+    const t = (await c.db.select().from(tickets).where(eq(tickets.id, other.id)))[0]!;
+    await c.db.insert(decisions).values({ companyId: t.companyId, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", status: "answered", answer: "Approve and merge", answeredAt: new Date(), context: { type: "risk_review", ticketId: other.id, reviewer: "the CEO" } });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
+    await c.db.update(tickets).set({ systemState: "review", pullRequestNote: null }).where(eq(tickets.id, c.ticket.id));
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
     expect(c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command)).toEqual(["pnpm test", "pnpm test:e2e"]);
   });
