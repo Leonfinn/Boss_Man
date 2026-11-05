@@ -113,7 +113,7 @@ describe("approve and merge", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
-        if (url === "/api/tickets/t1/review" && init?.method === "POST") {
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST") {
           landing = { state: "running", startedAt: new Date().toISOString(), command: "pnpm test" };
           return json({ verdict: "approved", outcome: "landing", landing }, 202);
         }
@@ -254,7 +254,7 @@ describe("review card during a merge", () => {
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
         if (url === "/api/tickets/t1/landing") return json({ landing: landing() });
-        if (url === "/api/tickets/t1/review" && init?.method === "POST" && onReview) return onReview();
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST" && onReview) return onReview();
         if (url === "/api/tickets/t1") return json(ticket);
         if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
         if (url.includes("/features")) return json({ features: [] });

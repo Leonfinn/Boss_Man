@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq, like } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { RunnerCommand } from "@boss-man/shared";
@@ -242,7 +242,8 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
   it("a stuck review goes to the CEO first, and the owner only sees it if the CEO doesn't settle it", async () => {
     await ctx.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, ctx.ticket.id));
     const review = async (round = 1) => {
-      const [r] = await ctx.db.insert(reviewRequests).values({ ticketId: ctx.ticket.id, kind: "code", reviewerAgentId: ctx.dev.id, round, createdAt: new Date(ctx.now().getTime() - 2 * 3_600_000) }).returning();
+      // The round opened four hours ago, then went three wakes without a verdict (BOS-433 counts only this round's).
+      const [r] = await ctx.db.insert(reviewRequests).values({ ticketId: ctx.ticket.id, kind: "code", reviewerAgentId: ctx.dev.id, round, createdAt: new Date(ctx.now().getTime() - 4 * 3_600_000) }).returning();
       for (const hours of [3, 2, 1]) {
         await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: ctx.ticket.id, reason: "review requested", status: "launched", note: `- ${ctx.ticket.id} "Restart the API": still waiting for your code review`, createdAt: new Date(ctx.now().getTime() - hours * 3_600_000) });
       }
@@ -259,21 +260,56 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(await teamIds()).toContain(a!.id);
     expect(await ownerNotified(a!.id)).toEqual([]);
     // The CEO settles it: the owner never hears about it. A system card needs the CEO's reason (BOS-149).
-    expect(isError(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Got it", note: "I looked at the review and the reviewer is working through it." } }))).toBe(false);
+    expect(isError(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Leave it another hour", note: "I looked at the review and the reviewer is working through it." } }))).toBe(false);
     expect(await ownerNotified(a!.id)).toEqual([]);
 
-    // A second stuck review the CEO leaves alone reaches the owner with what was tried.
+    // A second stuck review the CEO leaves alone stays with the CEO (DR-017 A: a review is the CEO's work),
+    // with its clock stopped, and never falls through to the owner's queue on its own.
     await ctx.db.update(reviewRequests).set({ status: "approved" }).where(eq(reviewRequests.id, first.id));
     await review(2);
     expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
     const open = (await stalled()).find((d) => d.id !== a!.id)!;
-    ctx.advance(31);
-    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    ctx.advance(600);
+    await ctx.alerts.sweep();
+    const held = await reload(open.id);
+    expect(held.tier).toBe("ceo");
+    expect((held.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo", topRung: "ceo" });
+    expect(await queueIds()).not.toContain(open.id);
+    expect((await ownerNotified(open.id)).length).toBe(0);
+    // Only the CEO sending it on (escalate) puts it in front of the owner, with what was tried.
+    const esc = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "escalate", id: open.id, triedFirst: "Checked the reviewer and moved the review on; nobody else is free to take it", steps: ["Move the review to another agent in Settings → Reviews"] } });
+    expect(isError(esc)).toBe(false);
     const owner = await reload(open.id);
     expect(owner.tier).toBe("owner");
-    expect((owner.context as { triedFirst?: string }).triedFirst).toMatch(/the CEO/);
+    expect((owner.context as { triedFirst?: string }).triedFirst).toMatch(/moved the review on/);
     expect(await queueIds()).toContain(open.id);
-    expect((await ownerNotified(open.id)).length).toBe(1);
+  });
+
+  // BOS-433 fix B, Rex round 4 must-fix: answering "Leave it another hour" must actually hold the
+  // card off for the quiet time, not let the next sweep raise the same one within a minute.
+  it("\"Leave it another hour\" holds the stalled-review card off for the quiet time, then it asks again", async () => {
+    await ctx.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, ctx.ticket.id));
+    await ctx.db.insert(reviewRequests).values({ ticketId: ctx.ticket.id, kind: "code", reviewerAgentId: ctx.dev.id, round: 1, createdAt: new Date(ctx.now().getTime() - 4 * 3_600_000) });
+    for (const hours of [3, 2, 1]) {
+      await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: ctx.ticket.id, reason: "review requested", status: "launched", note: `- ${ctx.ticket.id} "Restart the API": still waiting for your code review`, createdAt: new Date(ctx.now().getTime() - hours * 3_600_000) });
+    }
+    // Count by context: an answered card frees its dedupe key, so filtering on "review-stall:%" would miss it.
+    const stalled = () => ctx.db.select().from(decisions).where(sql`${decisions.context}->>'type' = 'review_stall'`);
+
+    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
+    const [a] = await stalled();
+    const ceo = await client(ctx.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Leave it another hour", note: "The reviewer is working through it." } }))).toBe(false);
+    expect((await reload(a!.id)).status).toBe("answered");
+
+    // One minute on (the sweep runs every 60s): the answer holds it, so no new card is raised.
+    ctx.advance(1);
+    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(0);
+    expect(await stalled()).toHaveLength(1);
+    // An hour on: the quiet time has passed, so it asks once more.
+    ctx.advance(60);
+    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
+    expect(await stalled()).toHaveLength(2);
   });
 
   it("without a Scrum Master it starts at the CEO", async () => {
