@@ -1688,12 +1688,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
                 join tickets b on b.id = d.blocked_ticket_id
                where c.depth < 10 and b.system_state <> 'done'
             )
-            -- A ticket is placed under the first blocker that reaches it (as the old walk did).
-            select distinct on (blocker, blocked) dep, blocker, blocked
-              from chain order by blocker, blocked, dep`)) as unknown as { rows?: Array<{ dep: string; blocker: string; blocked: string }> } | Array<{ dep: string; blocker: string; blocked: string }>;
+            -- One row per edge, carrying the smallest dependency row that made it, so the consumer's
+            -- order is the same on every run and every database.
+            select min(dep::text) as dep, blocker, blocked from chain group by blocker, blocked`)) as unknown as { rows?: Array<{ dep: string; blocker: string; blocked: string }> } | Array<{ dep: string; blocker: string; blocked: string }>;
           const found = Array.isArray(result) ? result : (result.rows ?? []);
           // Under each blocker, its dependents in the order of the dependency rows that made them: the
-          // same order the old walk over every dependency row produced.
+          // same order the old walk over every dependency row produced (Postgres returns rows in no
+          // promised order, so the sort is done here rather than in SQL).
           for (const r of [...found].sort((x, y) => x.dep.localeCompare(y.dep))) {
             dependents.set(r.blocker, [...(dependents.get(r.blocker) ?? []), r.blocked]);
           }
@@ -1742,7 +1743,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
         const seen = new Set<string>();
-        let frontier = direct(d).filter((id) => liveOnly.has(id));
+        // Nearest first, and at each depth by ticket id: an order that is the same on every run,
+        // which a read of every dependency row (the old walk) never promised anyway.
+        const byTicket = (a: string, b: string) => a.localeCompare(b);
+        let frontier = direct(d).filter((id) => liveOnly.has(id)).sort(byTicket);
         for (let depth = 1; frontier.length && depth <= 10; depth++) {
           const next: string[] = [];
           for (const id of frontier) {
@@ -1753,7 +1757,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             chain.push({ ticketId: id, title: i.title, ref: i.ref, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
             next.push(...(dependents.get(id) ?? []));
           }
-          frontier = next;
+          frontier = next.sort(byTicket);
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
         const about = aboutIds(d).flatMap((id) => { const r = info.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });

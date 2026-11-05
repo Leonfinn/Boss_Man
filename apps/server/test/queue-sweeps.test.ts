@@ -734,7 +734,9 @@ async function legacyQueue(db: Db, now: () => Date) {
   const rows = open.map(({ d, companyName, agentName }) => {
     const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
     const seen = new Set<string>();
-    let frontier = (directIds.get(d.id) ?? []).filter((id) => info.has(id));
+    // Same stable order as the shipped queue: nearest first, then by ticket id at each depth.
+    const order = (x: string, y: string) => x.localeCompare(y);
+    let frontier = (directIds.get(d.id) ?? []).filter((id) => info.has(id)).sort(order);
     for (let depth = 1; frontier.length && depth <= 10; depth++) {
       const next: string[] = [];
       for (const id of frontier) {
@@ -744,7 +746,7 @@ async function legacyQueue(db: Db, now: () => Date) {
         chain.push({ ticketId: id, title: i.title, ref: i.ref, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
         next.push(...(byTicket.get(id) ?? []));
       }
-      frontier = next;
+      frontier = next.sort(order);
     }
     const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
     return { ...d, companyName, agentName, forAgentName: null, blocks: chain, about: [], refs: {}, ...rank };
