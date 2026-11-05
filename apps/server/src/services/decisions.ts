@@ -2,6 +2,7 @@
 // agents raise, engagement offers, stale blockers and stalled runs. Answering one resumes
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
 import { randomUUID } from "node:crypto";
+import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -17,6 +18,7 @@ import {
   type JudgeReading,
   type PermissionJudgeMode,
   TEMP_CLEANUP_RULE,
+  UNKNOWN_TOOL_RULE,
   WORKING_COPY_RULE,
   cleanupScope,
   type BlockedTicket,
@@ -291,6 +293,30 @@ export async function clearMergeCards(db: Db, ticketId: string, withdrawal: With
 }
 
 /**
+ * One open sign-off card per ticket (BOS-446): a new review round closes the older "Merge it, or send it back?"
+ * cards, and the ticket's wait on them. Returns how many were closed.
+ */
+export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Withdrawal) {
+  const rows = await db
+    .select()
+    .from(decisions)
+    .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`));
+  let cleared = 0;
+  for (const r of rows) {
+    const [done] = await db
+      .update(decisions)
+      .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(r.context as object), withdrawn: withdrawal } })
+      .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (done) {
+      cleared++;
+      await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, r.id));
+    }
+  }
+  return cleared;
+}
+
+/**
  * An approved ticket whose merge didn't finish: the merge failed (runner gone, a reply timed out) or the
  * server stopped mid-way. The owner tries again or sends it back; "Run the check again" re-runs the whole merge.
  */
@@ -314,7 +340,8 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
       recommendedOption: CHECK_AGAIN,
       tier: "owner",
       dedupeKey: `merge-stuck:${t.id}`,
-      context: { type: "check_stuck", ticketId: t.id, command: "", output: why },
+      // The one closer, on any tier: a retry card goes once its ticket finishes (DR-016, BOS-470).
+      context: { type: "check_stuck", ticketId: t.id, command: "", output: why, clearWhen: [{ kind: "ticketDone", ticketId: t.id }] },
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
@@ -414,6 +441,11 @@ export type AnswerExtra = {
   settledBy?: { agentId: string };
   /** A model change the owner edited before approving; checked with the same validator as the tool. */
   modelConfig?: AgentModelConfig;
+  /**
+   * How a sign-off answer should finish the ticket (BOS-471): the ticket page's Approve and merge wants the
+   * merge done in the same press, and a ticket with nothing to merge marked done instead of left in review.
+   */
+  merge?: { markDone: boolean };
 };
 
 /** Which checkout a working-copy cleanup deletes in, and what (BOS-120). */
@@ -541,8 +573,8 @@ export type LoopHooks = {
   sendBack(ticketId: string, text: string, reviewer: string): Promise<unknown>;
   stopTicket(ticketId: string): Promise<unknown>;
   raiseCap(ticketId: string): Promise<unknown>;
-  /** Merges an approved ticket once the owner has signed off on it (R48). */
-  land(ticketId: string, reviewer: string): Promise<unknown>;
+  /** Merges an approved ticket once the owner has signed off on it (R48); `merge.markDone` finishes a ticket with nothing to merge. */
+  land(ticketId: string, reviewer: string, merge?: AnswerExtra["merge"]): Promise<unknown>;
   /** Lands again in the background after a check that couldn't finish; `skipChecks` merges without it. */
   landAgain(ticketId: string, skipChecks: boolean): Promise<unknown>;
 };
@@ -595,6 +627,8 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
 }
 
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}, workspaceRoot?: string) {
+  // The record of permission decisions (BOS-306); app.ts swaps in one that writes log lines.
+  let permLog: PermissionLog = createPermissionLog();
   let wake: WakeHook | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
@@ -688,7 +722,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .from(decisions)
         .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ctx.ticketId}`))
         .limit(1);
-      if (signoff) throw new AnswerError("The owner's sign-off for this ticket is still waiting, so the check was not run again. Answer that card first.");
+      if (signoff) throw new AnswerError("The owner's sign-off for this ticket is still open, so the check was not run again. Use Approve and merge on the ticket, which settles the sign-off and merges in one press.");
     }
     if (ctx.type === "workflow_change") {
       // Every Apply or Skip needs a reason, whether the CEO or the owner decides (BOS-216).
@@ -1128,17 +1162,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput };
       // The owner chat may use Boss Man's own (board) tools and nothing else.
-      const [asking] = await db.select({ purpose: runs.purpose }).from(runs).where(eq(runs.id, event.runId));
-      const { outcome, rule } =
+      const [asking] = await db.select({ purpose: runs.purpose, agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+      const { outcome, rule, position } =
         asking?.purpose === "chat"
           ? isBossmanCall(info)
-            ? { outcome: "allow" as const, rule: "The owner chat's board tools" }
-            : { outcome: "deny" as const, rule: "The owner chat has board tools only" }
+            ? { outcome: "allow" as const, rule: "The owner chat's board tools", position: 0 }
+            : { outcome: "deny" as const, rule: "The owner chat has board tools only", position: 0 }
           : evaluatePermission(info, await rulesFor(runner.companyId));
+      // tier is where a card ended up (the CEO's own requests, or a paused CEO, go to the owner); outcome is what the rule said.
+      const record = (decisionId: string | null, tier: string = outcome, ruleName: string = rule) =>
+        permLog.decision({ companyId: runner.companyId, runId: event.runId, agentId: asking?.agentId ?? null, ticketId: asking?.ticketId ?? null, title: event.title, kind: event.kind, rule: ruleName, position, outcome, tier, decisionId });
       // OpenCode asks twice for one shell command that reaches outside the checkout: first for the folder, then for the command. If the owner or CEO has already allowed this tool call, the second ask is not a new question. The rules still apply first, so a denial stands.
       if (outcome !== "allow" && outcome !== "deny" && event.toolCallId) {
         const earlier = await allowedSameToolCall(event);
-        if (earlier && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) return { outcome: "allow" as const, rule: `Same tool call as decision ${earlier}, already allowed`, decisionId: null };
+        if (earlier && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) {
+          record(null, "allow", `Same tool call as decision ${earlier}, already allowed`);
+          return { outcome: "allow" as const, rule: `Same tool call as decision ${earlier}, already allowed`, decisionId: null };
+        }
       }
       // BOS-376: the same tool call can come back as a new request (a harness retry, or a second run of the
       // same call). It is the same question: the Allow once this run already got settles it, and a Deny this
@@ -1158,16 +1198,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           const note = `The same request was asked again as request ${event.requestId}: one answer covers both.`;
           const question = waiting.question.includes(note) ? waiting.question : `${waiting.question}\n${note}`;
           await db.update(decisions).set({ context: { ...ctx, repeats }, question }).where(eq(decisions.id, waiting.id));
+          record(waiting.id, "ceo", "A repeat of a card already waiting");
           return { outcome: "ceo" as const, rule: "A repeat of a card already waiting", decisionId: waiting.id };
         }
         const decided = await repeatAnswer(event, fingerprint);
         if (decided.allow && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) {
           const [shown] = await db.select({ context: decisions.context }).from(decisions).where(eq(decisions.id, decided.allow));
           await db.update(decisions).set({ context: { ...(shown?.context as object), settledByRepeat: { sameAs: decided.allow, at: now().toISOString() } } as DecisionContext }).where(eq(decisions.id, decided.allow));
+          record(null, "allow", `Same request as decision ${decided.allow}, already allowed`);
           return { outcome: "allow" as const, rule: `Same request as decision ${decided.allow}, already allowed`, decisionId: null };
         }
       }
       if (outcome === "allow" || outcome === "deny") {
+        record(null);
         if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
         // The runner dropped off between sending the request and getting the verdict. The event
         // won't be applied again when it's resent, so keep the verdict as an answered row that
@@ -1227,7 +1270,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (ceo && !ceo.paused) {
           ceoId = ceo.id;
           const since = now().toISOString();
-          const why = workingCopy ? "deletes in the agent's working copy go to the CEO first" : rule === TEMP_CLEANUP_RULE ? "temp-file cleanup goes to the CEO first" : `the rule "${rule}" sends it to the CEO`;
+          const why = workingCopy ? "deletes in the agent's working copy go to the CEO first" : rule === TEMP_CLEANUP_RULE ? "temp-file cleanup goes to the CEO first" : rule === UNKNOWN_TOOL_RULE ? "the tool isn't one Boss Man recognises, so it goes to the CEO first" : `the rule "${rule}" sends it to the CEO`;
           ladder = { rung: "ceo", since, minutes: CEO_HANDOVER_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why }] };
         } else tier = "owner";
       }
@@ -1292,6 +1335,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
                   "Two exceptions on that list reach outside /tmp. git worktree add writes into the project's repository (.git) and creates its -b branch there: check the branch name is the asking agent's own. pnpm or npm install runs the project's own install scripts, which can do anything: check that the folder is a checkout of the asking agent's own ticket branch.",
                   "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
                 ]
+              : rule === UNKNOWN_TOOL_RULE
+                ? [
+                    "Boss Man doesn't recognise this tool, so it came to you before the owner. Allow it only if you know what the tool does and the asking agent should have it; a name close to one of Boss Man's own tools (see the warning in the request) may be a copy made to get past the checks. Deny it if you can't vouch for it; escalate it to the owner (decisions tool, action escalate) if only they can settle it.",
+                  ]
               : [
                   "A company rule sends it to you rather than the owner. Allow it if you can vouch for it, or deny it if not; if only the owner can settle it (a secret, host access, sign-off, an owner-only choice), escalate it to them (decisions tool, action escalate).",
                 ]),
@@ -1299,6 +1346,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           `If you don't answer within ${CEO_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
         ].join("\n").slice(0, 4000));
       } else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
+      record(row?.id ?? null, tier);
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
@@ -1411,6 +1459,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setSelfDeployHook(hook: SelfDeployHook) {
       selfDeploy = hook;
+    },
+
+    setPermissionLog(l: PermissionLog) {
+      permLog = l;
+    },
+
+    /** A runner reported a tool call that failed with "User refused permission" (BOS-306): log it with the run, agent and ticket. */
+    async onRefusedCall(runner: { companyId: string }, runId: string, title: string | null) {
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
+      permLog.refusedCall({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
     },
 
     setMaintenanceHook(hook: MaintenanceHook) {
@@ -1871,8 +1929,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // keep it from ever reaching the owner. Leave it for the ladder to hand over.
       if (ctx.ladder?.rung === "scrum_master") throw new AnswerError("This alert is still with the Scrum Master, so it isn't yours to withdraw yet. Leave it for the ladder to hand over.");
       // An alert that has climbed to the owner is theirs: withdrawing it would take it off their queue
-      // without their seeing it, exactly what the ladder exists to prevent (BOS-149).
-      if (ctx.ladder?.rung === "owner") throw new AnswerError("This alert is already with the owner, so it isn't yours to withdraw. Leave it for them.");
+      // without their seeing it, exactly what the ladder exists to prevent (BOS-149). The one exception
+      // is a plain "Got it" system card about an agent's run (not the owner's own choice): once it is
+      // stale, the CEO may clear it, as it could before the ladder handed it over (BOS-469 point 4).
+      // A folded account card (account_limit) can name several agents' live failures, and `isStale` sees only
+      // its first raise's ticket, so it stays out of this: it closes itself once the cause is gone (BOS-469).
+      const ownerTierInfo = ctx.ladder?.rung === "owner" && isSystemCard(d) && ctx.type !== "check_stuck" && !OWNER_ONLY_ANSWER_TYPES.has(ctx.type) && !STALE_ONLY_WITHDRAW_TYPES.has(ctx.type) && (ctx as { decisionsKind?: string }).decisionsKind !== "alert:account_limit";
+      if (ctx.ladder?.rung === "owner" && !ownerTierInfo) throw new AnswerError("This alert is already with the owner, so it isn't yours to withdraw. Leave it for them.");
+      if (ownerTierInfo && !(await isStale(d))) throw new AnswerError("This alert is with the owner. Clear it only once it is stale (its ticket is done or cancelled).");
       // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
       // stale or not. It expires on its own (BOS-149).
       if (ctx.type === "permission") throw new AnswerError("A permission request holds a live run, so the CEO can't withdraw it. Leave it for the owner; it expires on its own.");
@@ -1997,7 +2061,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** Records the answer and resumes what was waiting. Returns null if not open. */
     async answer(id: string, answer: string, extra: AnswerExtra = {}) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
-      if (!d) return null;
+      if (!d) {
+        // A sign-off the owner pressed twice (or the CEO settled) is already answered, and the ticket page's
+        // Approve and merge still merges it rather than refusing on a card that is no longer open (BOS-471).
+        if (answer === APPROVE_MERGE) {
+          const [row] = await db.select({ status: decisions.status, context: decisions.context }).from(decisions).where(eq(decisions.id, id));
+          if (row?.status === "answered" && (row.context as DecisionContext).type === "risk_review") return { settled: "already" };
+        }
+        return null;
+      }
       // The server's own guard (BOS-149): a CEO answer may never settle an owner-only card, whatever the tool text says.
       if (extra.settledBy) {
         // The Scrum Master settles its own alerts through `settledBy` too, so the "not yours yet" rung
@@ -2118,6 +2190,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         const [permRun] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, ctx.runId));
         delivered = send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: allowed ? "allow" : "deny" });
+        const [asked] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, ctx.runId));
+        permLog.answer({ companyId: d.companyId, runId: ctx.runId, agentId: asked?.agentId ?? null, ticketId: asked?.ticketId ?? null, decisionId: id, answeredBy: extra.settledBy ? "ceo" : "owner", answer });
         if (!delivered && permRun?.endedAt) {
           // The agent has finished, so there is nothing to deliver to: record that and don't alarm the owner (BOS-342).
           await db.update(decisions).set({ context: { ...ctx, ...(repeatsNow ? { repeats: repeatsNow } : {}), delivered: "run_ended" } }).where(eq(decisions.id, id));
@@ -2249,7 +2323,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
-        if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner");
+        // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.
+        await clearMergeCards(db, ctx.ticketId, { by: "system", note: "The owner's sign-off was answered, so this retry card is no longer needed.", at: new Date().toISOString() });
+        if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner", extra.merge);
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "check_stuck") {
         if (answer === CHECK_SEND_BACK) await loopHooks?.sendBack(ctx.ticketId, `The review was approved, but ${ctx.command ? `the check \`${ctx.command}\`` : "the merge"} couldn't finish, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${ctx.output}`, "the owner");

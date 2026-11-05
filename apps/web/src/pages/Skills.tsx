@@ -385,7 +385,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
         </section>
       ) : (
         <section aria-label="SKILL.md">
-          <Markdown text={body} />
+          <Markdown text={body} linkContext={{ companyId: company.id }} />
         </section>
       )}
       {s.files.length > 1 && (

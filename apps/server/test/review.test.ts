@@ -1,11 +1,14 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
-import { checkNeverFinished, checkWaitedForLock, LOCK_RETRY_ATTEMPTS, setLockRetryBase, landingText } from "../src/services/review.js";
+import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, INFRA_RETRY_ATTEMPTS, LOCK_RETRY_ATTEMPTS, setInfraRetryBase, setLockRetryBase, landingText } from "../src/services/review.js";
+import { supersedeSignoffs } from "../src/services/decisions.js";
+import { MERGE_CHECK_LIMIT_KEY } from "../src/services/check-gate.js";
+import { settings } from "../src/db/schema.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -24,7 +27,7 @@ const DIFF: WorkspaceDiff = {
   truncated: false,
 };
 
-type Answers = { verify?: unknown; merge?: unknown; diff?: unknown; carried?: unknown; migrations?: unknown };
+type Answers = { verify?: unknown; merge?: unknown; diff?: unknown; carried?: unknown; migrations?: unknown; carriedFailures?: number };
 
 async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean } = {}) {
   const held: Array<() => void> = [];
@@ -53,7 +56,9 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
       if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.merge }));
       if (c.type === "workspace.carried") {
         const a = answers.carried as { error?: string } | undefined;
-        queueMicrotask(() => built.runners.resolveReply(a?.error ? { requestId: c.requestId, ok: false, error: a.error } : { requestId: c.requestId, ok: true, data: a ?? { carried: [] } }));
+        // carriedFailures: the runner is busy and answers with an error that many times first.
+        const failing = (answers.carriedFailures ?? 0) > 0 && (answers.carriedFailures = answers.carriedFailures! - 1, true);
+        queueMicrotask(() => built.runners.resolveReply(failing ? { requestId: c.requestId, ok: false, error: "runner busy" } : a?.error ? { requestId: c.requestId, ok: false, error: a.error } : { requestId: c.requestId, ok: true, data: a ?? { carried: [] } }));
       }
       if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.migrations }));
       return true;
@@ -397,9 +402,30 @@ describe("landing an approved ticket (R46, R47)", () => {
       expect(await c.db.select().from(wakes)).toHaveLength(0);
       expect((await c.db.select().from(decisions).where(eq(decisions.status, "open")))[0]!.question).toContain("shared lock");
     }, 30_000);
+
+    // BOS-370: a queue that stood still is not retried; the card says so plainly.
+    const noProgress = { ok: false, exitCode: 75, timedOut: false, output: "check-all: gave up waiting for the heavy-phase lock /tmp/x.lock: the queue made no progress for 60 min (place 3 of 9; the check holding the slot has not changed)", ms: 3_700_000 };
+
+    it("tells a queue that stood still from a plain lock wait", () => {
+      expect(checkQueueStuck(noProgress)).toBe(true);
+      expect(checkWaitedForLock(noProgress)).toBe(false);
+      expect(checkQueueStuck(gaveUp)).toBe(false);
+    });
+
+    it("asks the owner at once, without retrying, when the queue made no progress", async () => {
+      setLockRetryBase(1);
+      const c = (ctx = await setup({ answers: { verify: noProgress } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "scripts/check-all.sh" });
+      await approveAndWait(c.req, c.ticket.id);
+      await landed(c);
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1);
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("review");
+      expect((await c.db.select().from(decisions).where(eq(decisions.status, "open")))[0]!.question).toContain("made no progress for 60 minutes");
+    }, 30_000);
   });
 
-  describe("a check that was killed is the owner's call", () => {
+  describe("a check that was killed is retried by itself, then the CEO's call", () => {
+    setInfraRetryBase(1);
     const killed = { ok: false, exitCode: 137, timedOut: false, output: "vitest\nKilled", ms: 5000 };
     const open = (c: Awaited<ReturnType<typeof setup>>) => c.db.select().from(decisions).where(eq(decisions.status, "open"));
     const answer = (c: Awaited<ReturnType<typeof setup>>, id: string, a: string) => c.req("POST", `/api/decisions/${id}/answer`, { answer: a });
@@ -413,24 +439,43 @@ describe("landing an approved ticket (R46, R47)", () => {
       return c;
     };
 
-    it("is retried once by Boss Man, with no card, when the second try passes", async () => {
+    it("is retried by Boss Man, with no card, when a later try passes", async () => {
       const c = (ctx = await setup({ answers: { verify: killed } }));
       await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
       let calls = 0;
-      Object.defineProperty(c.answers, "verify", { get: () => (++calls === 1 ? killed : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 }) });
+      Object.defineProperty(c.answers, "verify", { get: () => (++calls <= 2 ? killed : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 }) });
       expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
-      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(2);
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(3);
       expect(await open(c)).toHaveLength(0);
     });
 
-    it("keeps the ticket in review, asks the owner once, and leaves the agent alone", async () => {
+    it("also retries a timeout and a runner that doesn't answer, but never a real failure", async () => {
+      const timedOut = { ok: false, exitCode: null, timedOut: true, output: "", ms: 60_000 };
+      const c = (ctx = await setup({ answers: { verify: timedOut } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      let calls = 0;
+      Object.defineProperty(c.answers, "verify", { get: () => (++calls === 1 ? timedOut : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 }) });
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(2);
+      // A failing test is sent back at once: one run only.
+      const c2 = await setup({ answers: { verify: { ok: false, exitCode: 1, timedOut: false, output: "FAIL limit.test.ts", ms: 10 } } });
+      await ctx.app.close();
+      await ctx.close();
+      ctx = c2;
+      await c2.req("PATCH", `/api/projects/${c2.project.id}`, { verifyCommand: "pnpm test" });
+      expect((await approveAndWait(c2.req, c2.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+      expect(c2.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1);
+    });
+
+    it("keeps the ticket in review, asks the CEO once after the retries, and leaves the agent alone", async () => {
       const c = await stuck();
       const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
       expect(t.systemState).toBe("review");
       expect(await c.db.select().from(wakes)).toHaveLength(0);
       const [d, ...rest] = await open(c);
       expect(rest).toHaveLength(0);
-      expect(d).toMatchObject({ tier: "owner", options: ["Run the check again", "Send it back to the agent", "Merge without the check"] });
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1 + INFRA_RETRY_ATTEMPTS);
+      expect(d).toMatchObject({ tier: "ceo", options: ["Run the check again", "Send it back to the agent", "Merge without the check"] });
       expect(d!.question).toContain("`pnpm test` couldn't finish (it was killed)");
       // The same stuck check again doesn't pile up a second question.
       await approveAndWait(c.req, c.ticket.id);
@@ -442,8 +487,8 @@ describe("landing an approved ticket (R46, R47)", () => {
       c.answers.verify = { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 };
       expect((await answer(c, (await open(c))[0]!.id, "Run the check again")).statusCode).toBe(200);
       await landed(c);
-      // Two tries in the first landing (the killed one is retried once by itself), one in the second.
-      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(3);
+      // Four tries in the first landing (the killed one is retried three times by itself), one in the second.
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(2 + INFRA_RETRY_ATTEMPTS);
       expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
     });
 
@@ -459,6 +504,106 @@ describe("landing an approved ticket (R46, R47)", () => {
       await landed(c);
       expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(verifies);
       expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("done");
+    });
+  });
+
+  describe("merge check limit and sign-off cards (BOS-446)", () => {
+    it("runs at most the set number of checks at once, the rest wait", async () => {
+      const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+      await c.db.insert(settings).values({ key: MERGE_CHECK_LIMIT_KEY, value: 1 });
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      const second = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Second", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+      await c.db.update(tickets).set({ branch: `bossman/${second.id}` }).where(eq(tickets.id, second.id));
+      const verifies = () => c.sent.filter((x) => x.type === "workspace.verify").length;
+      expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).statusCode).toBe(202);
+      await vi.waitFor(() => expect(verifies()).toBe(1));
+      expect((await c.req("POST", `/api/tickets/${second.id}/review`, { verdict: "approved" })).statusCode).toBe(202);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(verifies()).toBe(1);
+      c.held.splice(0).forEach((release) => release());
+      await vi.waitFor(() => expect(verifies()).toBe(2));
+      c.held.splice(0).forEach((release) => release());
+      for (const id of [c.ticket.id, second.id]) await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${id}/landing`)).json().landing.state).toBe("finished"));
+    });
+
+    it("a new sign-off round closes the older sign-off card, so only one stays open", async () => {
+      const c = (ctx = await setup());
+      const card = async () => {
+        const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: c.ticket.id, reviewer: "R" } }).returning();
+        await c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerDecisionId: d!.id });
+        return d!;
+      };
+      const old1 = await card();
+      const old2 = await card();
+      expect(await supersedeSignoffs(c.db, c.ticket.id, { by: "system", note: "newer", at: new Date().toISOString() })).toBe(2);
+      const rows = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+      expect(rows).toHaveLength(0);
+      expect((await c.db.select().from(decisions).where(eq(decisions.id, old1.id)))[0]!.status).toBe("withdrawn");
+      expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, old2.id))).toHaveLength(0);
+    });
+
+    it("answering the sign-off closes the ticket's open retry card", async () => {
+      const c = (ctx = await setup());
+      const [signoff] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: c.ticket.id, reviewer: "R" } }).returning();
+      await c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerDecisionId: signoff!.id });
+      const [retry] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Run the check again?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", tier: "owner", dedupeKey: `merge-stuck:${c.ticket.id}`, context: { type: "check_stuck", ticketId: c.ticket.id, command: "", output: "x" } }).returning();
+      expect((await c.req("POST", `/api/decisions/${signoff!.id}/answer`, { answer: "Send it back" })).statusCode).toBe(200);
+      expect((await c.db.select().from(decisions).where(eq(decisions.id, retry!.id)))[0]!.status).toBe("withdrawn");
+    });
+
+    /** One open owner sign-off card on the ticket, as an agent's approval of high-risk work leaves it. */
+    const signoffCard = async (c: Awaited<ReturnType<typeof setup>>) => {
+      const [d] = await c.db
+        .insert(decisions)
+        .values({ companyId: c.company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: c.ticket.id, reviewer: "R" } })
+        .returning();
+      await c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerDecisionId: d!.id });
+      return d!;
+    };
+    const mergeCards = (c: Awaited<ReturnType<typeof setup>>) =>
+      c.db.select().from(decisions).where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'check_stuck'`));
+
+    it("Approve and merge on the ticket answers the open sign-off and merges in one press (BOS-471)", async () => {
+      const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      const signoff = await signoffCard(c);
+      const res = c.req("POST", `/api/tickets/${c.ticket.id}/approve-merge`);
+      try {
+        // The sign-off is settled first, so its hold on the ticket is gone while the merge runs...
+        await vi.waitFor(async () => expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered"));
+        expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, signoff.id))).toHaveLength(0);
+        // ...and the merge is running under the owner's name.
+        await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "running", startedBy: "the owner" }));
+      } finally {
+        c.held.splice(0).forEach((release) => release());
+      }
+      const body = (await res).json() as { outcome: string; signoffAnswered: boolean; landing: unknown };
+      expect(body).toMatchObject({ outcome: "landing", signoffAnswered: true });
+      // The answer's own landing ran the merge and is gone by the time the route replies; the route must not
+      // start a second one, so there is no landing to hand back (BOS-471, review round 1).
+      expect(body.landing).toBeNull();
+      await vi.waitFor(async () => expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("done"));
+      expect(await mergeCards(c)).toHaveLength(0);
+    });
+
+    it("a press that only waits on the sign-off raises no merge-retry card (BOS-471)", async () => {
+      const c = (ctx = await setup());
+      const signoff = await signoffCard(c);
+      // No runner is needed for this: the merge must not even claim a landing while the sign-off holds it.
+      const direct = await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+      expect(direct.statusCode).toBe(409);
+      expect(await mergeCards(c)).toHaveLength(0);
+      expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("open");
+      expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toBeNull();
+    });
+
+    it("finishes a ticket with nothing to merge in the same press, rather than leaving it in review", async () => {
+      const c = (ctx = await setup());
+      await c.db.update(tickets).set({ noCode: true }).where(eq(tickets.id, c.ticket.id));
+      const signoff = await signoffCard(c);
+      expect((await c.req("POST", `/api/tickets/${c.ticket.id}/approve-merge`)).statusCode).toBe(200);
+      expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered");
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!).toMatchObject({ systemState: "done", outcome: "completed" });
     });
   });
 
@@ -603,16 +748,27 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     expect(asked!.branches).toEqual([{ ticketId: other.id, branch: other.branch }]);
   });
 
-  it("refuses rather than merging when the runner can't answer the check", async () => {
-    const c = (ctx = await setup({ answers: { carried: { error: "git rev-list failed" } } }));
-    const other = await otherTicket(c, "Permission gate");
+  it("waits for a busy runner and asks the carried-work check again by itself, then merges (BOS-486)", async () => {
+    setInfraRetryBase(1);
+    const c = (ctx = await setup({ answers: { carried: { carried: [] }, carriedFailures: 2 } }));
+    await otherTicket(c, "Permission gate");
     const r = (await approveAndWait(c.req, c.ticket.id)).json();
-    expect(r).toMatchObject({ verdict: "approved", outcome: "carried" });
-    expect(r.message).toContain("git rev-list failed");
+    expect(r).toMatchObject({ verdict: "approved", outcome: "merged" });
+    expect(c.sent.filter((x) => x.type === "workspace.carried")).toHaveLength(3);
+    expect(c.sent.map((x) => x.type)).toContain("workspace.merge");
+  });
+
+  it("raises one Run-the-check-again card, and leaves the ticket in review, when the runner never answers the carried-work check (BOS-486)", async () => {
+    setInfraRetryBase(1);
+    const c = (ctx = await setup({ answers: { carried: { carried: [] }, carriedFailures: 4 } }));
+    await otherTicket(c, "Permission gate");
+    const r = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(r).toMatchObject({ verdict: "approved", outcome: "check_stuck" });
+    expect(c.sent.filter((x) => x.type === "workspace.carried")).toHaveLength(4);
     expect(c.sent.map((x) => x.type)).not.toContain("workspace.merge");
     expect(await state(c)).toMatchObject({ systemState: "review", mergeCommit: null });
-    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.pullRequestNote).toContain("git rev-list failed");
-    const w = (await c.db.select().from(wakes)).find((x) => x.reason === "carried check failed");
-    expect(w!.note).toContain("git rev-list failed");
+    const cards = (await c.db.select().from(decisions)).filter((d) => d.status === "open" && d.dedupeKey === `merge-stuck:${c.ticket.id}`);
+    expect(cards).toHaveLength(1);
+    expect((await c.db.select().from(wakes)).find((x) => x.reason === "carried check failed")).toBeUndefined();
   });
 });

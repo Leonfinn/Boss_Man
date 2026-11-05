@@ -1,5 +1,6 @@
 // BOS-178: an edit to an installed skill must lose its "security-reviewed" mark and leave a log
 // entry that shows what actually changed, including text far into the file or in the description.
+import { nameSecurityReviewer } from "./helpers.js";
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
@@ -27,7 +28,7 @@ async function setup() {
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const reviewer = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Security Reviewer" })).json() as { id: string };
-  await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
+  await nameSecurityReviewer(db, reviewer.id);
   await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" });
   const svc = built.skillProposals;
   return { ...built, db, close, company, ceo, worker, reviewer, svc, req };

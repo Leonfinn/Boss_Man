@@ -7,14 +7,14 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "dr
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agentNotes, agents, companies, costEvents, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
@@ -30,9 +30,12 @@ import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { createStallMonitor } from "./services/stall-monitor.js";
+import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
+import { alertClearing } from "./services/alert-clearing.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
@@ -40,7 +43,7 @@ import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shar
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
-import { ReviewError, reviewService } from "./services/review.js";
+import { isSignoffPending, ReviewError, reviewService } from "./services/review.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
@@ -196,6 +199,16 @@ export async function buildApp(opts: AppOptions) {
   await app.register(cookie);
   await app.register(websocket);
 
+  // Event-loop stalls and GC pauses, with memory and what was in flight (BOS-432): logged, and shown in server_status.
+  const stalls = createStallMonitor({ runnerSockets: () => app.websocketServer?.clients.size ?? 0, log: (line) => app.log.warn(line) });
+  stalls.start();
+  app.addHook("onClose", async () => stalls.stop());
+  app.addHook("onRequest", async (req, reply) => {
+    if (req.headers.upgrade) return; // a websocket is counted as a runner socket, not a request
+    stalls.requestStarted(req, `${req.method} ${req.routeOptions.url ?? "unmatched"}`);
+    reply.raw.once("close", () => stalls.requestEnded(req));
+  });
+
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
@@ -319,6 +332,8 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   decisionsSvc.setMaintenanceHook(maintenance);
+  const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
+  decisionsSvc.setPermissionLog(permLog);
   const serverStatus = serverStatusService(db, {
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
@@ -330,6 +345,8 @@ export async function buildApp(opts: AppOptions) {
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
     },
     errors: errorBuffer,
+    stalls: () => stalls.summary(),
+    permissions: (companyId: string) => permLog.summary(companyId),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
     commit: process.env.BOSSMAN_COMMIT || "dev",
@@ -406,6 +423,8 @@ export async function buildApp(opts: AppOptions) {
       void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA relay failed"));
       void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "ticket reply failed"));
     }
+    // A tool call the agent says was refused (BOS-306).
+    if (event.type === "run.update" && (event.update as { refused?: unknown } | null)?.refused === true) void decisionsSvc.onRefusedCall(runner, event.runId, ((event.update as { title?: unknown }).title as string | null) ?? null).catch((err) => app.log.error({ err, companyId: runner.companyId }, "refused call log failed"));
     if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error, !!event.interrupted).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chat end failed"));
     if (event.type === "run.ended") void pa.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA fail-open failed"));
     // A subscription window set to run out before it resets: tell the owner once (R78).
@@ -437,16 +456,34 @@ export async function buildApp(opts: AppOptions) {
       void refreshSyntheticQuota().catch((err) => app.log.warn({ err }, "synthetic quota refresh failed"));
     }
   });
+  // One closer for every card Boss Man raises itself (DR-016, BOS-470): a card carries the conditions
+  // under which its cause is gone, and this closes it, on any tier, with the reason. It runs on the
+  // sweep below and on the events that make a condition true: a run ending or speaking, a runner
+  // connecting, a deploy finishing.
+  const clearing = alertClearing(db, {
+    isConnected: (runnerId) => runners.isConnected(runnerId),
+    hasRoom: (fundingSourceId) => scheduler.hasRoom(fundingSourceId),
+    now: opts.now,
+  });
+  // A runner coming back clears "could not start … runner offline" cards at once, on any tier
+  // (BOS-475 E): the wake it could not start is what matters, so a connected runner alone isn't enough.
+  runners.onConnect(() => void clearing.check().then((closed) => (closed ? notes.syncDecisions() : null)).catch((err) => app.log.error({ err }, "closing cards on runner connect failed")));
   // A "has sent nothing" alert for a run closes the moment the run ends or speaks again (BOS-217),
   // so the CEO and the owner are never asked about a run that has already moved on. Awaited before
   // the event is acknowledged, so nothing reads an alert the run has left behind.
   runners.onEventSync(async (runner, event) => {
     if (!("runId" in event) || event.type === "run.started") return;
-    await closeStallAlertForRun(db, event.runId, opts.now)
+    await closeStallAlertForRun(db, clearing, event.runId)
       .then((closed) => (closed ? notes.syncDecisions() : null))
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing a stall alert failed"));
+    // A clean run (or the ticket finishing, or the deploy settling) can clear other cards too.
+    await clearing
+      .check()
+      .then((closed) => (closed ? notes.syncDecisions() : null))
+      .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing cards failed"));
   });
   const sweeps = sweepService(db, {
+    clearAlerts: () => clearing.check(),
     // The same sweep settles second opinions whose asker was lost to a restart (BOS-338).
     expireAdvice: () => Promise.all([decisionsSvc.expireAdvice(), decisionsSvc.expireSecondOpinions()]),
     limits: opts.sweepLimits,
@@ -481,7 +518,18 @@ export async function buildApp(opts: AppOptions) {
     now: opts.now,
   });
   decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
-  const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now, alert: (input) => alerts.raise(input) });
+  // A limit or auth failure closes into one card per account (DR-017 B, BOS-469 point 3): the agent's own
+  // funding source, or the one the run used when it says so.
+  const loops = loopGuards(db, {
+    limits: opts.loopLimits,
+    now: opts.now,
+    alert: (input) => alerts.raise(input),
+    fundingSourceFor: async (agentId) => {
+      if (!agentId) return null;
+      const [row] = await db.select({ id: fundingSources.id, name: fundingSources.name }).from(fundingSources).innerJoin(agents, eq(agents.fundingSourceId, fundingSources.id)).where(eq(agents.id, agentId));
+      return row ?? null;
+    },
+  });
   // The Scrum Master watchdog (BOS-58): its sweep runs on the leader's timer (main.ts), its actions through the Scrum Master's MCP tool.
   const watchdog = watchdogService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
@@ -499,7 +547,19 @@ export async function buildApp(opts: AppOptions) {
   // Workflow retros (docs/19): the leader's timer starts them (main.ts), the retro agent's MCP tools fill them, and decisions apply the changes.
   const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, skillProposals, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setRetroHook(retro);
-  const alerts = alertLadder(db, { notify: (agentId, input) => scheduler.notify(agentId, input), answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra), watchdog, nudge: (input) => scheduler.nudge(input), now: opts.now });
+  const alerts = alertLadder(db, {
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
+    watchdog,
+    nudge: (input) => scheduler.nudge(input),
+    ceoCanRun: (companyId) => scheduler.ceoCanRun(companyId),
+    clearExpired: async () => {
+      const n = await clearing.check();
+      if (n) await notes.syncDecisions();
+      return n;
+    },
+    now: opts.now,
+  });
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
   const review = reviewService(db, {
@@ -517,8 +577,14 @@ export async function buildApp(opts: AppOptions) {
     // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
     // Decisions show "Checking and merging" while it runs (including lock retries), rather than inviting
     // another approval. A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
-    land: (ticketId, reviewer) =>
-      review.landVisible(ticketId, reviewer).catch(async (err) => {
+    land: (ticketId, reviewer, merge) =>
+      (merge?.markDone
+        ? // Nothing to merge (no repo, or a no-code ticket): the owner's own sign-off finishes it in the same press (BOS-471).
+          work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true, stateNote: "The owner approved and signed it off; there was nothing to merge." })
+        : review.landVisible(ticketId, reviewer)
+      ).catch(async (err) => {
+        // Another sign-off card for the same ticket being settled is a wait, not a failed merge (BOS-471).
+        if (isSignoffPending(err)) return;
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
         if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
@@ -738,7 +804,7 @@ export async function buildApp(opts: AppOptions) {
       const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, companyId));
       if (!c) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
       const names = new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(eq(agents.companyId, companyId))).map((a) => [a.id, a.name]));
-      const who = (ref: string) => (ref === "ceo" ? "the CEO" : ref === SENIOR_DEV ? "the Senior Developer (the CEO until one is hired)" : (names.get(ref) ?? "the CEO"));
+      const who = (ref: string | string[]): string => (Array.isArray(ref) ? ref.map((r) => names.get(r) ?? "the CEO").filter((n, i, all) => all.indexOf(n) === i).join(" or ") : ref === "ceo" ? "the CEO" : ref === SENIOR_DEV ? "the Senior Developer (the CEO until one is hired)" : (names.get(ref) ?? "the CEO"));
       return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, c.policy[tier].ownerSignoff, who(c.policy[tier].reviewer)) }));
     });
 
@@ -1399,6 +1465,9 @@ export async function buildApp(opts: AppOptions) {
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
+      // A ticket in review, waiting for the owner or finished has no next step for its agent, so the quota
+      // hold is not about it and the page must not say routine work is paused for it (BOS-471).
+      const needsAgent = row.t.systemState === "ready" || row.t.systemState === "in_progress";
       // The ticket's own held wake, or, when its wake was merged into another ticket's, the one
       // its assignee is held by (BOS-253): the page still offers Run now and says why it's held.
       const heldBy = (own: boolean) =>
@@ -1407,10 +1476,34 @@ export async function buildApp(opts: AppOptions) {
           .from(wakes)
           .where(and(own ? eq(wakes.ticketId, id) : eq(wakes.agentId, row.t.assigneeAgentId!), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
           .limit(1);
-      let [held] = await heldBy(true);
+      let [held] = needsAgent ? await heldBy(true) : [];
       const heldByAgent = !held;
-      if (!held && row.t.assigneeAgentId) [held] = await heldBy(false);
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent };
+      if (!held && needsAgent && row.t.assigneeAgentId) [held] = await heldBy(false);
+      // Plain words for the banner (BOS-471): the agent, the account it is paid from, and, when another
+      // ticket really holds it, which one. Never a claim that it is "held by other work" on a guess.
+      let heldSource: string | null = null;
+      let heldOther: { ref: string; title: string } | null = null;
+      if (held && row.t.assigneeAgentId) {
+        const [src] = await db
+          .select({ name: fundingSources.name })
+          .from(agents)
+          .innerJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId))
+          .where(eq(agents.id, row.t.assigneeAgentId));
+        heldSource = src?.name ?? null;
+        if (heldByAgent) {
+          const [other] = await db
+            .select({ number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix })
+            .from(wakes)
+            .innerJoin(tickets, eq(tickets.id, wakes.ticketId))
+            .innerJoin(projects, eq(projects.id, tickets.projectId))
+            .innerJoin(companies, eq(companies.id, projects.companyId))
+            .where(and(eq(wakes.agentId, row.t.assigneeAgentId), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`, ne(wakes.ticketId, id)))
+            .limit(1);
+          if (other) heldOther = { ref: ticketRef(other.prefix ?? row.prefix, other.number) ?? "", title: other.title };
+        }
+      }
+      const signoff = row.t.systemState === "review" ? await review.ownerSignoffOpen(id) : false;
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -1793,13 +1886,16 @@ export async function buildApp(opts: AppOptions) {
       if (blockedUntilReason && !blockedUntil) throw new WorkError(422, "Give the date and time you are waiting for along with the reason.");
       if (blockedUntil && new Date(blockedUntil).getTime() <= Date.now()) throw new WorkError(422, "The blocked-until time must be in the future.");
       if (blockedUntil && new Date(blockedUntil).getTime() > Date.now() + BLOCKED_UNTIL_MAX_MS) throw new WorkError(422, `The blocked-until time can be at most ${BLOCKED_UNTIL_MAX_DAYS} days ahead.`);
+      // Moving a ticket to the state it is already in must not re-run what entering that state does (DR-010).
+      const [before] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
+      const sameState = before?.state === state;
       const moved = await work.updateTicket(id, { state, ...(state === "blocked" ? { blockedUntil: blockedUntil ? new Date(blockedUntil) : null, blockedUntilReason: blockedUntil ? blockedUntilReason || null : null } : {}) });
       const label = ({ backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" } as Record<string, string>)[state] ?? state;
       await record(db, { companyId: moved.companyId, ticketId: id, kind: "state", summary: `Owner moved it to ${label}`, at: new Date() });
       // Nobody should start work on a ticket the owner has parked or closed.
       if (state === "done" || state === "backlog" || state === "blocked")
         await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
-      if (state === "review") await scheduler.onTicketReview(id, null);
+      if (state === "review" && !sameState) await scheduler.onTicketReview(id, null);
       if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
       return moved;
     });
@@ -2096,20 +2192,17 @@ export async function buildApp(opts: AppOptions) {
     owner.patch("/api/agents/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z
-        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean(), reviewKind: z.enum(REVIEW_KINDS).nullable() })
+        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean() })
         .partial()
         .parse(req.body);
-      const { reviewKind, ...patch } = b;
+      // Who reviews what is set only in Settings > Reviews now (BOS-198); say so rather than drop it quietly.
+      if (req.body && typeof req.body === "object" && "reviewKind" in req.body) return reply.code(400).send({ error: "moved", message: "Reviewers are chosen in Settings > Reviews." });
+      const patch = b;
       const [before] = await db.select().from(agents).where(eq(agents.id, id));
       if (!before) return reply.code(404).send({ error: "not_found" });
       // An agent with a standing job starts with no model; it needs one before it can run (R73).
       if (b.paused === false && before.duty && !(b.model !== undefined ? b.model : before.model)) {
         return reply.code(409).send({ error: "needs_model", message: `Choose a model for ${before.name} before starting it.` });
-      }
-      // One reviewer per kind: marking this agent unmarks whoever had it.
-      if (reviewKind !== undefined) {
-        if (reviewKind) await db.update(agents).set({ reviewKind: null }).where(and(eq(agents.companyId, before.companyId), eq(agents.reviewKind, reviewKind)));
-        await db.update(agents).set({ reviewKind }).where(eq(agents.id, id));
       }
       return agentsSvc.update(id, patch).then((a) => {
         // Unpausing lets its waiting work start now rather than at the next tick.
@@ -2372,6 +2465,58 @@ export async function buildApp(opts: AppOptions) {
       return r;
     });
     owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
+    /**
+     * "Approve and merge" on the ticket page (BOS-471): when the owner's sign-off card is open, this answers
+     * it exactly as Decisions does (same answer path, so the sign-off is settled and any stale merge-retry
+     * card is cleared) and then starts the tracked merge. Without a card it is the plain approval. On a
+     * ticket with no repo it marks it done, as before.
+     */
+    owner.post("/api/tickets/:id/approve-merge", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title, systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
+      if (!t) return reply.code(404).send({ error: "not_found" });
+      if (t.systemState !== "review") return reply.code(409).send({ error: "review", message: "This ticket isn't in review, so there's nothing to approve." });
+      const [signoff] = await db
+        .select({ id: decisions.id, question: decisions.question })
+        .from(decisions)
+        .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${id}`))
+        .limit(1);
+      let signoffAnswered = false;
+      if (signoff) {
+        // The same path as answering it in Decisions: the card closes, its hold lifts, and the merge starts.
+        // markDone when there is nothing to merge (no repo, or no code), so it finishes in the same press.
+        const [row] = await db.select({ noCode: tickets.noCode, repoUrl: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, id));
+        const markDone = !row?.repoUrl || !!row?.noCode;
+        try {
+          const r = await decisionsSvc.answer(signoff.id, "Approve and merge", { by: await ownerName(req), merge: { markDone } });
+          // null means another press or the CEO settled it first: the merge below still runs once, safely.
+          signoffAnswered = r !== null;
+        } catch (err) {
+          if (err instanceof AnswerError) return reply.code(409).send({ error: "review", message: err.message });
+          throw err;
+        }
+        try {
+          // The answer's own hook (setLoopHooks.land above) already ran and finished the merge before it
+          // returned, so start nothing more here: a second start would merge twice (BOS-471, review round 1).
+          // A press that found the sign-off already settled (r === null) started no landing, so start one now.
+          const landing = signoffAnswered ? null : await review.startLanding(id, "the owner");
+          return { outcome: "landing" as const, signoffAnswered, landing };
+        } catch (err) {
+          // A sign-off still open here is the owner's next answer, not a failed merge: say so, and raise no card.
+          if (err instanceof ReviewError) return reply.code(err.status).send({ error: "review", message: err.message });
+          throw err;
+        }
+      }
+      // No sign-off card yet: the plain approval. With a repo, an approval that needs the owner's sign-off
+      // raises that card (outcome owner_review) and nothing merges, so no retry card is raised for it (BOS-471).
+      const r = (await review.submit(id, { verdict: "approved", reviewer: "the owner", background: true }).catch(reviewErrors(reply))) as
+        | { outcome?: string; landing?: unknown }
+        | undefined;
+      if (!r) return r;
+      if (r.outcome === "landing") reply.code(202);
+      const landing = "landing" in r ? r.landing : r.outcome === "owner_review" ? null : await review.landing(id);
+      return { ...r, signoffAnswered: r.outcome === "owner_review", landing };
+    });
     // Try the ticket's pull request again now, rather than waiting for the sync (R59).
     owner.post("/api/tickets/:id/pull-request/merge", async (req, reply) => review.mergePullRequest(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
     owner.post("/api/tickets/:id/git-action", async (req, reply) => {

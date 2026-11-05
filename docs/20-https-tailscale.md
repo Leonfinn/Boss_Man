@@ -78,7 +78,31 @@ Tailscale's login is kept in `$BOSSMAN_DATA/tailscale`. Include that folder in y
 
 ## Blue/green installs
 
-`deploy/tailscale.yml` fronts the single-server install. For blue/green (the Caddy front door in `deploy/truenas-bluegreen.yml`) the Caddy edge listener is not done yet; it is a follow-up. Until then, use the single-server install for HTTPS.
+For blue/green (the Caddy front door in `deploy/truenas-bluegreen.yml`) add a second file after `deploy/tailscale.yml`. The path is tailnet, then Tailscale, then Caddy port 3100, then the live colour. Caddy believes forwarded headers only from the Tailscale container, and each colour believes them only from Caddy. The feedback portal (3101) is never reachable through Tailscale.
+
+1. Do steps 1 to 6 above, but in step 4 use this line in `.env` (swap the host file for yours; the blue/green file must come first):
+
+   ```
+   COMPOSE_FILE=docker-compose.yml:deploy/truenas-bluegreen.yml:deploy/tailscale.yml:deploy/tailscale-bluegreen.yml
+   ```
+
+2. Two private networks are used: `edge` (Tailscale and Caddy) and `front` (Caddy and the two colours). Defaults are `172.30.0.0/29` and `172.30.0.16/28`. If either clashes with a network on your host, compose stops with "Pool overlaps". Check what is used:
+
+   ```
+   docker network inspect $(docker network ls -q) --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'
+   ```
+
+   To change them, set `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP`, `BOSSMAN_EDGE_PROXY_IP`, `BOSSMAN_FRONT_SUBNET`, `BOSSMAN_FRONT_PROXY_IP` and `BOSSMAN_FRONT_RANGE` in `.env`; every address must sit inside its subnet.
+3. Apply it (this restarts Caddy and the colours for a few seconds; it is a deployment-file change, so do it by hand, not through the self-update):
+
+   ```
+   docker compose up -d
+   ```
+
+4. Check: `docker compose exec tailscale tailscale serve status` shows `http://server:3100` and no `3101`. `docker network inspect` for `front` lists only the proxy and the two colours. Log in over `https://<your machine>.<tailnet>.ts.net` and confirm the session cookie is Secure; over the LAN address it stays plain.
+5. Undo: remove the two Tailscale files from `COMPOSE_FILE`, run `docker compose up -d`, and rewrite `active.caddy` in the old form if you rolled back the deployment files (see `docs/06-install-truenas.md`).
+
+Behaviour change: the colours now see real client addresses, so the login limit counts each device separately, where before all devices looked like Caddy.
 
 ## Host notes
 

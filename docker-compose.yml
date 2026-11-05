@@ -52,7 +52,15 @@ x-runner: &runner
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   mem_limit: ${BOSSMAN_RUNNER_MEMORY:-4g}
+  # Same value: no swap on top, so a runaway browser is killed instead of thrashing the host.
+  memswap_limit: ${BOSSMAN_RUNNER_MEMORY:-4g}
+  # If the host itself runs out, runners (and their browsers) are the first to go; never the server, db or proxy.
+  oom_score_adj: 500
   pids_limit: ${BOSSMAN_RUNNER_PIDS:-4096}
+  # CPU priority, not a cap (BOS-412): half the default weight of 1024, so on a busy host the server and database win; idle, runners use every core.
+  cpu_shares: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
+  # Optional hard cap in CPUs for hosts shared with other workloads. 0 = none (the default).
+  cpus: ${BOSSMAN_RUNNER_CPUS:-0}
   # An init as PID 1 reaps the zombies agents' tools leave behind.
   init: true
 
@@ -66,6 +74,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - db-data:/var/lib/postgresql/data
+    # Memory limits (docs/00-first-time-install.md, "Memory limits"): the database is among the last things the kernel kills.
+    # 0 = no cap: the db row of the owner's docker stats reading (BOS-405) was cut off, so 1g is unverified. Set BOSSMAN_DB_MEMORY to cap it.
+    # CPU weight is left at Docker's default 1024 (BOS-412): runners get 512, so the database wins on a busy host. Not set here on purpose: it would change the db config for nothing.
+    mem_limit: ${BOSSMAN_DB_MEMORY:-0}
+    mem_reservation: ${BOSSMAN_DB_MEMORY_RESERVED:-256m}
+    oom_score_adj: -500
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bossman -d bossman"]
       interval: 5s
@@ -100,6 +114,11 @@ services:
       BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
     secrets:
       - master_key
+    # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.
+    # CPU weight is left at Docker's default 1024 (BOS-412): runners get 512, so the server wins on a busy host.
+    mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
+    mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
+    oom_score_adj: -500
     volumes:
       # The key the launcher makes on first start; the server only reads it.
       - launcher-key:/run/launcher:ro
@@ -124,6 +143,8 @@ services:
       BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
       BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-4g}
       BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
+      BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
+      BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
       BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
       BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key

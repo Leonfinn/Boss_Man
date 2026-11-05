@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Ticket } from "../src/pages/Ticket";
+
+// Vitest stubs a `?raw` CSS import to an empty string, so read the sheet the app ships.
+const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
 
 Element.prototype.scrollIntoView = () => {};
 afterEach(() => {
@@ -83,6 +88,23 @@ describe("the no-code flag on the ticket page", () => {
     expect(screen.queryByLabelText(/Doesn't need code changes/)).toBeNull();
   });
 });
+describe("the last post on the ticket", () => {
+  it("shows how long ago an agent last posted, next to the ticket's activity", async () => {
+    const posted = new Date(Date.now() - 12 * 60_000).toISOString();
+    vi.stubGlobal("fetch", stub({ lastPostAt: posted }));
+    render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByText("Last activity");
+    expect(screen.getByText("Last post")).toBeTruthy();
+    expect(screen.getByText("12m ago")).toBeTruthy();
+  });
+
+  it("has nothing to show when no agent has posted", async () => {
+    vi.stubGlobal("fetch", stub({ lastPostAt: null }));
+    render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByText("Last activity");
+    expect(screen.queryByText(/Last post/)).toBeNull();
+  });
+});
 describe("the collapsible Work panel", () => {
   it("hides and shows the panel, and remembers the choice on this device", async () => {
     localStorage.clear();
@@ -112,5 +134,54 @@ describe("the collapsible Work panel", () => {
     vi.stubGlobal("innerWidth", 1440);
     render(<Ticket id="t1" companies={[company]} />);
     await screen.findByRole("button", { name: "Hide" });
+  });
+
+  it("starts collapsed on a phone, with the status and assignee on the one-line heading (BOS-245)", async () => {
+    localStorage.clear();
+    vi.stubGlobal("fetch", stub({ assignee: "Bungle" }));
+    vi.stubGlobal("innerWidth", 390);
+    const { container } = render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByRole("button", { name: "Show" });
+    expect(container.querySelector("#ticket-props-body")!.hasAttribute("hidden")).toBe(true);
+    expect(screen.getByText("· In review · Bungle")).toBeTruthy();
+  });
+
+  it("still remembers the owner's own choice on a phone, so an opened panel stays open", async () => {
+    localStorage.setItem("bossman.ticket.workCollapsed", "0");
+    vi.stubGlobal("fetch", stub({}));
+    vi.stubGlobal("innerWidth", 390);
+    const { container } = render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByRole("button", { name: "Hide" });
+    expect(container.querySelector("#ticket-props-body")!.hasAttribute("hidden")).toBe(false);
+    expect(screen.queryByText(/^· In review/)).toBeNull();
+  });
+
+  // jsdom has no layout, and Ticket is not exported as a DOM-tree helper, so assert the phone rules
+  // that decide the order: the review and the conversation come before the description, the Work
+  // panel goes last. A later rule that quietly inverts them fails here too (BOS-246 review).
+  it("on a phone, the review and the conversation are ordered above the description and the Work panel", () => {
+    const phones = [...styles.matchAll(/@media \(max-width: 640px\)\s*\{/g)].map((m) => {
+      let depth = 1;
+      let i = (m.index ?? 0) + m[0].length;
+      const start = i;
+      for (; i < styles.length && depth > 0; i++) depth += styles[i] === "{" ? 1 : styles[i] === "}" ? -1 : 0;
+      return styles.slice(start, i - 1);
+    });
+    const order = (selector: string): number => {
+      const rule = new RegExp(`(?:^|[;{])\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^{]*\\{[^}]*\\border:\\s*(-?\\d+)`, "m");
+      let value = 0;
+      for (const block of phones) {
+        const found = rule.exec(block);
+        if (found) value = Number(found[1]);
+      }
+      return value;
+    };
+    const review = order(".ticket-main > .review-card");
+    const activity = order(".ticket-main > .activity");
+    const desc = order(".ticket-main > section.card");
+    const work = order(".ticket-props");
+    expect(review).toBeLessThan(activity);
+    expect(activity).toBeLessThan(desc);
+    expect(desc).toBeLessThan(work);
   });
 });

@@ -75,6 +75,7 @@ has "$D/outbox/available.json" '"infraPaths": []'
 has "$D/outbox/available.json" "\"srcDir\": \"$(cd "$T/src" && pwd)\""
 has "$D/outbox/available.json" "\"deployerDir\": \"$(cd "$D" && pwd)\""
 has "$D/outbox/available.json" '"bluegreen": false, "liveColour": ""'
+hasnt "$D/outbox/available.json" '"soakSeconds"' # a single server has no standby window to report
 has "$D/outbox/available.json" 'change apps/server/a'
 [[ ! -e $D/outbox/status.json ]] || fail "status written with no request"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
@@ -266,8 +267,9 @@ case "$a" in
       *"/api/setup"*) [[ -z ${FAKE_SMOKE_FAIL:-} ]] || exit 1; echo '{"needsSetup":false}' ;;
       *) ready "$c" ;;
     esac ;;
+  "exec -T proxy wget -q -T 3 -O /dev/null http://server-"*-front:*) [[ -z ${FAKE_NO_FRONT:-} ]] || exit 1 ;;
   "exec -T proxy wget"*)
-    live=$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\):.*/\1/p' "$BOSSMAN_DEPLOYER/proxy/active.caddy")
+    live=$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\)\(-front\)\{0,1\}:.*/\1/p' "$BOSSMAN_DEPLOYER/proxy/active.caddy")
     [[ ${FAKE_VERIFY_FAIL:-} != "$live" ]] || exit 1
     case "$a" in *portal.html*) echo '<html>'; exit 0 ;; esac
     ready "$live" ;;
@@ -278,7 +280,7 @@ esac
 FAKE
 chmod +x "$T/bin/docker"
 export DL W
-live_is() { grep -q "Live colour: $1" "$D/proxy/active.caddy" || fail "proxy include should name $1: $(cat "$D/proxy/active.caddy")"; }
+live_is() { grep -q "Live colour: $1" "$D/proxy/active.caddy" || fail "proxy include should name $1: $(cat "$D/proxy/active.caddy") OUT: $(cat "$T/out" "$D/deployer.log" 2>/dev/null | tail -15)"; }
 order() { # log-file pattern...: each pattern must appear after the previous one
   local f=$1 n=0 m; shift
   for pat in "$@"; do
@@ -308,7 +310,17 @@ bgreq "$b1"; bg --dry-run
 has "$T/out" "would run: a blue/green swap to ${b1:0:8}"
 rm -f "$D/inbox/request.json"
 touch "$D/inbox/check"; bg
-has "$D/outbox/available.json" '"bluegreen": true, "liveColour": "blue"'
+has "$D/outbox/available.json" '"bluegreen": true, "liveColour": "blue", "soakSeconds": 900'
+# The trial length is the host's own setting, not a copy of its default (Dougal, BOS-368): a custom SOAK_SECONDS is reported.
+printf 'REPO=%s\nSOAK_SECONDS=120\n' "$T/src" >"$D/host.conf"; chmod 600 "$D/host.conf"
+: >"$D/inbox/check"; bg
+has "$D/outbox/available.json" '"soakSeconds": 120'
+# A value that is not a whole number of seconds is not guessed at: the server falls back to its default.
+printf 'REPO=%s\nSOAK_SECONDS=abc\n' "$T/src" >"$D/host.conf"; chmod 600 "$D/host.conf"
+: >"$D/inbox/check"; bg
+hasnt "$D/outbox/available.json" '"soakSeconds"'
+has "$D/deployer.log" "SOAK_SECONDS is not a whole number of seconds"
+conf 0; : >"$D/inbox/check"; bg
 unset COMPOSE_FILE
 bgreq "$b1"; bg --dry-run; has "$T/out" "would run: scripts/deploy.sh --yes --no-runner --commit ${b1:0:8}"; rm -f "$D/inbox/request.json"
 printf "COMPOSE_FILE='docker-compose.yml:deploy/truenas-bluegreen.yml'\n" >"$T/src/.env.tmp"; mv "$T/src/.env.tmp" "$T/src/.env"
@@ -336,6 +348,11 @@ live_is green
 has "$D/state/soak" "old=blue new=green"
 [[ ! -s $T/hook.out ]] || fail "webhook posted for a good swap while success posts are off"
 
+# 15b. The include names the colour on the private front network and passes on one resolved client address;
+# a host whose compose files have no front network yet still gets the old form (and the old form stays readable).
+grep -q 'reverse_proxy server-green-front:{args\[0\]}' "$D/proxy/active.caddy" || fail "include lacks the front upstream: $(cat "$D/proxy/active.caddy")"
+grep -q 'header_up X-Forwarded-For {client_ip}' "$D/proxy/active.caddy" || fail "include lacks header_up"
+
 # 16. The next tick, inside the window, only re-checks; after the deadline it stops the old colour.
 : >"$DL"; bg
 [[ -e $W/running.blue && -e $D/state/soak ]] || fail "old colour stopped too early"
@@ -345,6 +362,14 @@ bg
 [[ ! -e $W/running.blue && ! -e $D/state/soak && -e $W/running.green ]] || fail "old colour not stopped after the window"
 has "$DL" "stopped blue"
 live_is green
+
+# 16b. A host whose compose files have no front network yet gets the old form.
+bx="$(push apps/server/bgfront)"
+reset_world green "$b1"; FAKE_NO_FRONT=1 bgreq "$bx"; FAKE_NO_FRONT=1 bg
+live_is blue
+grep -q 'reverse_proxy server-blue:{args\[0\]}' "$D/proxy/active.caddy" || fail "no-front host should get the old form: $(cat "$D/proxy/active.caddy")"
+hasnt "$D/proxy/active.caddy" "header_up"
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
 
 # 17. Post-swap checks fail inside the window: automatic switch back, rolled_back, webhook.
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"

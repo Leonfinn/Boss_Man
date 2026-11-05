@@ -113,7 +113,7 @@ describe("approve and merge", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
-        if (url === "/api/tickets/t1/review" && init?.method === "POST") {
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST") {
           landing = { state: "running", startedAt: new Date().toISOString(), command: "pnpm test" };
           return json({ verdict: "approved", outcome: "landing", landing }, 202);
         }
@@ -254,7 +254,7 @@ describe("review card during a merge", () => {
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
         if (url === "/api/tickets/t1/landing") return json({ landing: landing() });
-        if (url === "/api/tickets/t1/review" && init?.method === "POST" && onReview) return onReview();
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST" && onReview) return onReview();
         if (url === "/api/tickets/t1") return json(ticket);
         if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
         if (url.includes("/features")) return json({ features: [] });
@@ -330,5 +330,51 @@ describe("review card during a merge", () => {
     expect(await screen.findByText(/The merge check looks stuck\./)).toBeTruthy();
     expect(screen.getByText("the merge check looks stuck; you can try again")).toBeTruthy();
     expect((screen.getByRole("button", { name: "Approve and merge" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe("typing on a phone (BOS-245)", () => {
+  // jsdom has no matchMedia; a coarse pointer is what a phone reports.
+  const coarse = (matches: boolean) =>
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches, media: q, addEventListener: () => {}, removeEventListener: () => {} }));
+
+  it("Return adds a line in the ticket reply box instead of sending, and the hint drops Shift+Enter", async () => {
+    const posts: unknown[] = [];
+    coarse(true);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return posts.push(JSON.parse(String(init.body))), json({}, 201);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json([]);
+      }),
+    );
+    render(<TicketActivity ticketId="t1" assignee="Engineer" />);
+    const box = (await screen.findByLabelText("Message to the agent")) as HTMLTextAreaElement;
+    expect(box.getAttribute("placeholder")).toBe("Message Engineer");
+    expect(box.getAttribute("enterKeyHint")).toBe("newline");
+    fireEvent.change(box, { target: { value: "line one" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(posts).toEqual([]);
+  });
+
+  it("on a desktop, Return still sends, so the quick reply stays quick", async () => {
+    const posts: unknown[] = [];
+    coarse(false);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return posts.push(JSON.parse(String(init.body))), json({}, 201);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json([]);
+      }),
+    );
+    render(<TicketActivity ticketId="t1" assignee="Engineer" />);
+    const box = (await screen.findByLabelText("Message to the agent")) as HTMLTextAreaElement;
+    expect(box.getAttribute("placeholder")).toBe("Message Engineer. Enter sends, Shift+Enter adds a line.");
+    fireEvent.change(box, { target: { value: "quick reply" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(posts).toEqual([{ text: "quick reply", interrupt: false }]));
   });
 });

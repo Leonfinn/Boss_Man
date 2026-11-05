@@ -15,6 +15,7 @@ import { usePoll } from "../hooks";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
+import { ago } from "./Dashboard";
 
 /** The mark for one verdict on a "Done when" checklist row. */
 const VERDICT_MARK: Record<string, string> = { pass: "✓ pass", fail: "✗ fail", none: "not reported" };
@@ -54,9 +55,9 @@ function DiffView({ diff }: { diff: WorkspaceDiff }) {
 }
 
 /** A section that folds away behind an arrow (R76); closed unless it's asked to start open. */
-function Fold({ title, hint, open, children }: { title: string; hint?: string; open?: boolean; children: React.ReactNode }) {
+function Fold({ title, hint, open, className, children }: { title: string; hint?: string; open?: boolean; className?: string; children: React.ReactNode }) {
   return (
-    <details className="card fold" open={open || undefined}>
+    <details className={`card fold${className ? ` ${className}` : ""}`} open={open || undefined}>
       <summary>
         <span className="fold-title">{title}</span>
         {hint && <small className="muted">{hint}</small>}
@@ -136,15 +137,42 @@ function CriteriaEdit({ initial, save, busy }: { initial: string[]; save: (lines
 }
 
 type Landing =
-  | { state: "running"; startedAt: string; command: string | null; startedBy: string; stale?: boolean }
+  | { state: "running"; startedAt: string; command: string | null; startedBy: string; stale?: boolean; phase?: string }
   | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
 const elapsed = (ms: number) => `${Math.floor(Math.max(0, ms) / 60_000)}:${String(Math.floor(Math.max(0, ms) / 1000) % 60).padStart(2, "0")}`;
 const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 /** Who started a merge, in the owner's words. */
+const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Checking and merging", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted" };
 const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
 const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
 const STATE_TONE: Record<string, string> = { backlog: "", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
+
+/**
+ * The quota hold notice in the owner's words (BOS-471): who is paused, which account is nearly used up,
+ * what that pauses, and when it resets. It names another ticket only when one really holds the agent.
+ */
+function holdBanner(t: TicketDetail): { headline: string; detail: string } {
+  const agent = t.assignee ?? "This ticket's agent";
+  const source = t.quotaHeldSource;
+  const window = t.quotaHeldReason?.match(/^subscription (.+) window nearly used up$/)?.[1];
+  const limit = window === "seven_day" ? "weekly allowance" : window === "five_hour" ? "5-hour allowance" : window ? windowLabel(window).name.toLowerCase() : "allowance";
+  // "Fri 7 Nov at 14:00 UTC", so the reset is unambiguous wherever the owner is.
+  const reset = t.quotaHeldUntil
+    ? new Date(t.quotaHeldUntil).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) +
+      " UTC"
+    : "when it resets";
+  const account = source ? `${agent} is paid from ${source}, whose ${limit} is nearly used up.` : `${agent}'s ${limit} is nearly used up.`;
+  const paused = `Boss Man pauses their routine work until it resets on ${reset}.`;
+  const choice = `Run this one now, mark it urgent, or move ${agent} to another account in Agents.`;
+  if (t.quotaHeldOther) {
+    return {
+      headline: `${agent} is held by ${t.quotaHeldOther.ref}.`,
+      detail: `${account} ${paused} ${t.quotaHeldOther.ref} (${t.quotaHeldOther.title}) is the work that holds them. ${choice}`,
+    };
+  }
+  return { headline: `${agent} is paused until ${reset}.`, detail: `${account} ${paused} ${choice}` };
+}
 
 /** How often a watcher reports (R80). */
 const WATCH_EVERY: Array<[number, string]> = [
@@ -161,13 +189,13 @@ const inText = (ms: number) => (ms <= 0 ? "Due now" : ms < 3_600_000 ? `In ${Mat
 const localInput = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 
 const PROPS_KEY = "bossman.ticket.workCollapsed";
-/** The remembered choice; with none, narrow tablets (just above the stacking width) start collapsed. */
+/** The remembered choice; with none, phones and narrow tablets (just above the stacking width) start collapsed. */
 const readPropsCollapsed = () => {
   try {
     const saved = localStorage.getItem(PROPS_KEY);
     if (saved !== null) return saved === "1";
   } catch {}
-  return window.innerWidth > 900 && window.innerWidth < 1100;
+  return window.innerWidth <= 640 || (window.innerWidth > 900 && window.innerWidth < 1100);
 };
 
 export function Ticket({ id, companies }: { id: string; companies: Company[] }) {
@@ -195,6 +223,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const images = usePoll((signal) => api<TicketImage[]>(`/api/tickets/${id}/images`, { signal }), 30_000, `img-${id}`);
   const reviews = useTicketReviews(id);
   const t = ticket.data;
+  // Every link on this screen is built the same way: page names open in this company, ticket references
+  // by prefix, raw routes as written (BOS-358).
+  const ticketLinks = t ? { companyId: t.companyId, prefix: t.ref?.replace(/-[0-9]+$/, "") ?? null, selfId: t.id, tickets: t.number ? [{ id: t.id, number: t.number, prefix: t.ref?.replace(/-[0-9]+$/, "") ?? null }] : [] } : undefined;
   const img = useImageAttach(t?.companyId, id);
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
@@ -350,6 +381,45 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     }
   };
 
+  /**
+   * Approve and merge (BOS-471): when the owner's sign-off card is open, the server answers that card
+   * and merges in one press, so the page never tells them to go and answer a second button. A ticket
+   * with no repo or no code is approved and marked done in the same press.
+   */
+  const approveAndMerge = async () => {
+    if (sentReview.current) return;
+    sentReview.current = true;
+    setBusy(true);
+    try {
+      const r = await api<{ signoffAnswered?: boolean; landing?: Landing | null }>(`/api/tickets/${id}/approve-merge`, { method: "POST" });
+      if (r.landing) {
+        setNow(Date.now());
+        setLanding(r.landing);
+      }
+      setNote({
+        ok: true,
+        text:
+          r.landing?.state === "running"
+            ? `${r.signoffAnswered ? "Signed off. " : ""}Checking and merging now.`
+            : // The sign-off's own answer ran and finished the merge before it returned, so there is no
+              // landing to show: say it settled, and the reload below shows the merged state (BOS-471).
+              r.signoffAnswered
+              ? "Signed off and merged."
+              : "Approved.",
+      });
+      ticket.reload();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && ALREADY_LANDING.test(err.message)) {
+        const current = await refreshLanding();
+        const since = current?.state === "running" ? ` since ${atTime(current.startedAt)}` : "";
+        setNote({ ok: true, text: `Already being checked and merged${since}; nothing more to do.` });
+      } else setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      sentReview.current = false;
+      setBusy(false);
+    }
+  };
+
   const mergeNow = async () => {
     setBusy(true);
     try {
@@ -380,9 +450,16 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       ? `Approving opens a pull request from ${t.branch ?? "its branch"} into ${t.defaultBranch} of ${repo}. The change is under Changes above.`
       : `Approving runs ${t.verifyCommand ? `\`${t.verifyCommand}\`` : "the project's check"} and, if it passes, merges ${t.branch ?? "its branch"} into ${t.defaultBranch} of ${repo}. The change is under Changes above.`;
   const notStarted = t.systemState === "backlog" || t.systemState === "ready";
+  // One hold notice, computed once, so the headline and detail always agree.
+  const hold = holdBanner(t);
+  const approveLabel = !t.repoUrl || t.noCode ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge";
   const decide = (
     <>
-      <p className="muted" style={{ fontSize: 14 }}>{approves}</p>
+      {/* One press (BOS-471): with a sign-off card open, this button is that card's answer too. */}
+      <p className="muted" style={{ fontSize: 14 }}>
+        {approves}
+        {t.signoffWaiting ? " This is also your sign-off: one press approves, signs off and merges." : ""}
+      </p>
       {sendingBack ? (
                 <>
                   <div className="field">
@@ -405,8 +482,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 </>
               ) : (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button type="button" className="btn primary" disabled={busy || checking} onClick={() => void review("approved")}>
-                    {!t.repoUrl || t.noCode ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
+                  <button type="button" className="btn primary" disabled={busy || checking} onClick={() => void approveAndMerge()}>
+                    {approveLabel}
                   </button>
                   <button type="button" className="btn" disabled={busy || checking} onClick={() => setSendingBack(true)}>
                     Request changes
@@ -426,18 +503,22 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       </header>
 
-      {t.quotaHeldUntil && (
-        <div className="card" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      {/* Only when the ticket's next step really needs its agent to run (BOS-471): in review, waiting on the
+          owner, or done, the hold changes nothing for this ticket, so it is not shown. */}
+      {t.quotaHeldUntil && (t.systemState === "ready" || t.systemState === "in_progress") && (
+        <div className="card quota-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: "1 1 320px" }}>
-            <strong>Routine work is held until {when(t.quotaHeldUntil)}.</strong>{" "}
-            <span className="muted">
-              {t.quotaHeldReason ? `${windowLabel(t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")).name} is nearly used up. ` : ""}
-              {t.quotaHeldAgent ? "This ticket is ready but its agent is held by other work. " : ""}You can run this one now, or mark it urgent so it always runs through the hold.
-            </span>
+            <strong>{hold.headline}</strong>{" "}
+            <span className="muted">{hold.detail}</span>
           </span>
-          <button type="button" className="btn primary" disabled={busy} onClick={() => void runNow()}>
-            Run now
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" className="btn primary" disabled={busy} onClick={() => void runNow()}>
+              Run now
+            </button>
+            <button type="button" className="btn" disabled={busy || !!t.urgent} onClick={() => void patch({ urgent: true })}>
+              {t.urgent ? "Marked urgent" : "Mark urgent"}
+            </button>
+          </div>
         </div>
       )}
 
@@ -463,7 +544,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             {draft === null ? (
               t.body ? (
                 <div id="desc-body" className={longBody && !descOpen ? "clamp-8" : undefined}>
-                  <Markdown text={t.body} />
+                  <Markdown text={t.body} linkContext={ticketLinks} />
                 </div>
               ) : (
                 <p className="muted">No description yet. Say what should be done and what counts as finished.</p>
@@ -544,7 +625,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
           {t.plan && (
             <Fold title="Plan" hint={t.planApprovedAt ? `approved ${when(t.planApprovedAt)}` : "waiting for your approval"}>
-              <Markdown text={t.plan} />
+              <Markdown text={t.plan} linkContext={ticketLinks} />
               {!t.planApprovedAt && (
                 <p className="muted" style={{ fontSize: 14 }}>
                   Approve or send it back from <a href="#/decisions">Decisions</a>.
@@ -614,6 +695,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <TicketReviews reviews={reviews} />
           {t.systemState === "review" && (
             <Fold
+              className="review-card"
               title="Review"
               hint={
                 checking ? "checking and merging" :
@@ -626,7 +708,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               {landing?.state === "running" && !landing.stale && (
                 <div className="banner" role="status" aria-live="polite" style={{ flexWrap: "wrap" }}>
                   <span>
-                    <strong>Checking and merging.</strong> Started by {startedByLabel(landing.startedBy)} at {atTime(landing.startedAt)}
+                    <strong>{PHASE_WORDS[landing.phase ?? ""] ?? "Checking and merging"}.</strong> Started by {startedByLabel(landing.startedBy)} at {atTime(landing.startedAt)}
                     {landing.command ? ` (${landing.command})` : ""}; this can take several minutes. Elapsed: {elapsed(now - Date.parse(landing.startedAt))}.
                   </span>
                 </div>
@@ -681,12 +763,19 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           )}
 
           <ScrumMasterLog companyId={t.companyId} ticketId={t.id} folded />
-          <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
+          <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} ticketNumber={t.number} prefix={t.ref?.replace(/-[0-9]+$/, "") ?? null} />
         </div>
 
         <aside className="card ticket-props" aria-label="Properties">
           <div className="props-head">
             <h2 className="section-label">Work</h2>
+            {/* Folded on a phone, the heading says what the panel holds: one line instead of a whole card. */}
+            {propsCollapsed && (
+              <span className="props-glance muted">
+                · {t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}
+                {t.assignee ? ` · ${t.assignee}` : ""}
+              </span>
+            )}
             <button type="button" className="props-toggle" aria-expanded={!propsCollapsed} aria-controls="ticket-props-body" onClick={togglePanel}>
               {propsCollapsed ? "Show" : "Hide"}
             </button>
@@ -854,6 +943,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dd>{when(t.createdAt)}</dd>
             <dt>Last activity</dt>
             <dd>{when(t.lastActivityAt)}</dd>
+            {t.lastPostAt && (
+              <>
+                <dt>Last post</dt>
+                <dd>{ago(t.lastPostAt)}</dd>
+              </>
+            )}
           </dl>
           </div>
         </aside>
