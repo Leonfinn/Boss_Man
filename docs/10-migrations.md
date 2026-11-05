@@ -30,7 +30,14 @@ Drizzle names a migration by its number, so two branches that both add `0075_...
 - **The lint fails a real clash.** Two files with the same number in one folder, two journal entries on one number, a journal entry with no file, or a file the journal doesn't list all fail `scripts/lint-migrations.mjs`, and so `scripts/check-all.sh` (CI runs both run).
 - **Branches are compared, not just one folder.** When a ticket moves to review and again just before it merges, the runner reads the branch, `origin/main` and the other open tickets' branches from its bare clone and says whether the ticket's new migration numbers are already taken. On a clash the ticket goes back with the next free number right now, rather than waiting for a merge to fail. `when` values still only increase: a branch whose new journal entry isn't later than the one already applied is also sent back.
 
-Rename a clashing migration to the number you're given (e.g. `0075_x.sql` → `0076_x.sql`), update its entry in `_journal.json` with a later `when`, regenerate the snapshot with `pnpm db:generate`, run the checks, then move the ticket back to review.
+To fix a clash, merge `origin/main`, delete your migration's `.sql`, its `meta/NNNN_snapshot.json` and its `_journal.json` entry, and run `pnpm db:generate` again: drizzle-kit then picks the number, the `when` and the snapshot's parent for you. If the gate gave you a higher free number, rename the new `.sql` and `meta/NNNN_snapshot.json` to it and set the journal entry's `tag` and `idx` to match. Run the checks, then move the ticket back to review.
+
+### The snapshot chain (BOS-519)
+
+`drizzle-kit generate` diffs `schema.ts` against the snapshot file that sorts last, refuses to run when two snapshots share a `prevId`, and names the new migration after the last journal entry's `idx + 1`. Renaming migrations by hand broke all three on main by 5 Nov: three entries had no snapshot, several pointed at the wrong parent or held another migration's columns, and the last `idx` was 91, so `generate` named new migrations `0092_...`. BOS-519 rebuilt each snapshot from `schema.ts` as it was on main when that migration merged, and set 0101's `idx` to 101. `idx` may skip numbers (the migrator ignores it), but it must increase. Two checks keep the chain whole:
+
+- `scripts/lint-migrations.mjs` fails when an entry has no snapshot, a snapshot's `prevId` isn't the previous entry's id, two snapshots share a `prevId`, a snapshot has no entry, or the last `idx` is below the highest migration number.
+- `apps/server/test/migrations.test.ts` fails when `schema.ts` differs from the newest snapshot, which means a clean checkout's `generate` would write a migration.
 
 
 ## Rules for server code (`apps/server/src`)
