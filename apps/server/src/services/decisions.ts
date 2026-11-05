@@ -1688,15 +1688,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           const result = (await db.execute(sql`
             with recursive chain(dep, blocker, blocked, depth) as (
               select d.id, d.blocker_ticket_id, d.blocked_ticket_id, 1
-                from ticket_dependencies d join tickets b on b.id = d.blocked_ticket_id
+                from ticket_dependencies d
+                join tickets k on k.id = d.blocker_ticket_id
+                join tickets b on b.id = d.blocked_ticket_id
                where d.blocker_ticket_id in (${sql.join(seed.map((id) => sql`${id}`), sql`, `)})
-                 and b.system_state <> 'done'
+                 and k.system_state <> 'done' and b.system_state <> 'done'
               union
               select d.id, d.blocker_ticket_id, d.blocked_ticket_id, c.depth + 1
                 from ticket_dependencies d
                 join chain c on d.blocker_ticket_id = c.blocked
+                join tickets k on k.id = d.blocker_ticket_id
                 join tickets b on b.id = d.blocked_ticket_id
-               where c.depth < 10 and b.system_state <> 'done'
+               where c.depth < 10 and k.system_state <> 'done' and b.system_state <> 'done'
             )
             -- One row per edge, carrying the smallest dependency row that made it, so the consumer's
             -- order is the same on every run and every database.
@@ -1721,6 +1724,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
               id: tickets.id,
               title: tickets.title,
               number: tickets.number,
+              systemState: tickets.systemState,
               companyId: tickets.companyId,
               prefix: companies.ticketPrefix,
               dueDate: tickets.dueDate,
@@ -1746,8 +1750,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), companyId: w.companyId, prefix: w.prefix, number: w.number, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null } as const];
         }),
       );
-      // Only live tickets are in a chain; a done one (or a deleted one) is left out of the walk.
-      const liveOnly = new Set(work.map((w) => w.id));
+      // Only live tickets are in a chain; a done one (or a deleted one) is left out of the walk, and so
+      // is everything below it: a done ticket never starts a chain, nor is it a hop through one.
+      const liveOnly = new Set(work.filter((w) => w.systemState !== "done").map((w) => w.id));
 
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.

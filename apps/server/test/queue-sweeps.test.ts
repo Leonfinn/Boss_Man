@@ -822,6 +822,30 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
     expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(0);
   });
 
+  it("leaves a done ticket out of the chain even when the card holds it directly and it still has live dependents", async () => {
+    ctx = await setup();
+    // A ticket with a live dependent, held directly by a card that is then answered out of band: the
+    // ticket is finished while the card is still open, so it is done and still holds live work.
+    const finished = await ctx.ticket({ title: "Finished" });
+    const live = await ctx.ticket({ title: "Still waiting", state: "blocked" });
+    await ctx.req("POST", `/api/tickets/${live.id}/dependencies`, { ticketId: finished.id });
+    const card = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: finished.id });
+    // Finished behind the card's back, as another path (a merge, another ticket) would.
+    await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, finished.id));
+
+    const mine = (await ctx.queue()) as unknown as Array<Record<string, unknown> & { id: string; createdAt: string }>;
+    const row = mine.find((r) => r.id === card.id)!;
+    // The done ticket is not the start of a chain, so neither it nor its dependents appear.
+    expect(row.blocks).toEqual([]);
+
+    // The done ticket is still named as what the card is about, as before; only the chain leaves it out.
+    expect(row.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished" })]);
+    // Same chain as the old whole-table walk.
+    const legacyRaw = await legacyQueue(ctx.db, () => new Date());
+    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, createdAt: r.createdAt.toISOString() }));
+    expect(mine).toEqual(old);
+  });
+
   it("returns the same queue as the old whole-table walk on a fixture with chained dependencies", async () => {
     ctx = await setup();
     const chain = async (prefix: string, length: number) => {
