@@ -296,7 +296,7 @@ describe("destructive commands, however they're written (BOS-116)", () => {
 
   it("finds pushes however they're written", () => {
     for (const c of ['"git" push', "g\\it push origin main", "sudo npm publish", "pnpm -r publish", "bash -c 'git push'", "docker image push x"]) {
-      expect(evaluatePermission(exec(c), []), c).toEqual({ outcome: "owner", rule: "Pushing and publishing go to the owner" });
+      expect(evaluatePermission(exec(c), []), c).toEqual({ outcome: "owner", rule: "Pushing and publishing go to the owner", position: 3 });
     }
   });
 

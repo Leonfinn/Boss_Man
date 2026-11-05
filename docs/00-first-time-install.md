@@ -12,7 +12,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
 ## What you need first
 
-- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is limited to 4 GB of memory by default (`BOSSMAN_RUNNER_MEMORY`) and 4096 processes and threads (`BOSSMAN_RUNNER_PIDS`); raise the second if parallel test runs fail with `spawn EAGAIN`.
+- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is limited to 4 GB of memory by default (`BOSSMAN_RUNNER_MEMORY`; see "Memory limits" below for the server, database and tool servers) and 4096 processes and threads (`BOSSMAN_RUNNER_PIDS`); raise the second if parallel test runs fail with `spawn EAGAIN`.
 - **These tools on the host:** `git`, `openssl`, `curl`, and a normal Linux shell with `stat`.
 - **A git host account and token.** GitHub (a fine-grained token) or Gitea. You make the token in step 9.
 - **An AI provider for at least one agent program.** The runner supports three:
@@ -22,7 +22,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
-- **Internet access from the host** to [github.com/Leonfinn/Boss_Man](https://github.com/Leonfinn/Boss_Man), where the code is (step 2).
+- **Read access from the host to the Boss Man code repo** (step 2): internet access to its https address if the repo is public, or a read-only deploy key if it is private.
 
 ## A note on commands
 
@@ -66,11 +66,36 @@ You should see the folder listed.
 
 ## 2. Get the code onto the host
 
-The code is public on GitHub, so you need no account or key to read it. Clone it into `<install-dir>/src`:
+How the host reads the code depends on the repo. Use the case that matches yours. Replace `<repo-https-url>` and `<repo-ssh-url>` with your repo's own addresses (the clone address your git host shows).
+
+**Public repo: https, no key.** Clone it into `<install-dir>/src`:
 
 ```sh
-git clone https://github.com/Leonfinn/Boss_Man.git $B/src
+git clone <repo-https-url> $B/src
 ```
+
+**Private repo: a read-only deploy key, one per host.** A deploy key is an SSH key that gives read access to one repo. Do not reuse another host's key.
+
+1. Make a key with no passphrase, so updates can run unattended:
+
+   ```sh
+   ssh-keygen -t ed25519 -N "" -C "boss-man-$(hostname)" -f $B/deploy_key
+   ```
+
+2. Show the public half. It is safe to copy. Never copy the file without `.pub`.
+
+   ```sh
+   cat $B/deploy_key.pub
+   ```
+
+3. In your git host, add it as a deploy key on the repo, with write access **off**. On GitHub: the repo's Settings > Deploy keys > Add deploy key.
+4. Clone with the key. `-c core.sshCommand=...` also saves the setting in the checkout, so later `git pull` and `git ls-remote` use the same key:
+
+   ```sh
+   git clone -c core.sshCommand="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" <repo-ssh-url> $B/src
+   ```
+
+   The first time, ssh asks whether to trust the git host. Type `yes` only if the fingerprint matches the one your git host publishes (for GitHub, its "SSH key fingerprints" page).
 
 Check it worked:
 
@@ -80,9 +105,9 @@ git -C $B/src log --oneline -1
 
 You should see one commit line.
 
-If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
+If the clone hangs, check that the host can reach the git host: port 443 for https (`curl -sI <repo-https-url> | head -1` should print an HTTP status line), port 22 for ssh. If ssh says `Permission denied (publickey)`, the key is not added to the repo yet, or the `-i` path is wrong.
 
-**Older install with a deploy key?** It keeps working; see [docs/06, step 2](06-install-truenas.md#2-get-the-code).
+The same remote is used by later pulls, `scripts/deploy.sh` and the host deployer's `git ls-remote`, so there is nothing more to set up. Moving to another host? Make a new key there; a deploy key is never shared between hosts.
 
 ## 3. Make the folders, the master key and the token file
 
@@ -179,10 +204,16 @@ Go to the repo folder. Every `docker compose` command must run from here.
 cd $B/src
 ```
 
-Build the server (it includes the web page) and the launcher:
+Build the server (it includes the web page), the launcher and netguard. The launcher starts netguard beside every runner, so it must be built too:
 
 ```sh
-docker compose build server launcher
+docker compose build server launcher netguard
+```
+
+Using the optional blue/green setup? Build both server copies instead:
+
+```sh
+docker compose build server-blue server-green launcher netguard
 ```
 
 Build the runner image. This builds it, runs a safety check (the "canary") with networking off and no credentials, and only then marks it ready. It then starts everything.
@@ -255,7 +286,7 @@ claude setup-token
 
 It prints a long-lived token for your subscription. Paste it into **Value**, leave **Variable name** as `CLAUDE_CODE_OAUTH_TOKEN`, then choose **Check** and save. Boss Man refuses a token with stray spaces or quotes and says why. In the table, choose **Check with Claude**: it runs one tiny prompt on the runner and uses a little of your allowance. If you use an API key instead, choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key** from the same list.
 
-**A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Agents get it as `GIT_TOKEN`.
+**A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Boss Man's runner uses it as `GIT_TOKEN` for git; agents' own sessions never see it.
 - **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Checks read, so Boss Man can read CI results.
 - **Gitea:** Settings > Applications > Generate New Token, with repository scope **Read and Write** (`write:repository`).
 
@@ -341,6 +372,33 @@ Follow it under **Settings > Server and runner**, in **Runner update**, which al
 **Deploy latest** is optional. It needs the host deployer, a root script run by a one-minute cron job. [docs/06, 9a](06-install-truenas.md#9a-install-the-host-deployer-optional) is a worked example, and its paths are the TrueNAS ones: use `<install-dir>/deployer` in their place. Install the deployer's copy in `<install-dir>/deployer`: it uses the folder it sits in, and finds the code in `<install-dir>/src` beside it. Once it works, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves, and **Settings > Server and runner > Updates > Deploy latest** asks on demand. The **Updates** section only appears once the deployer is set up. The deployer refuses changes to files like `scripts/`, `deploy/`, compose files and Dockerfiles. Apply those by hand with `scripts/deploy.sh`.
 
 **The infra rebuild script.** `scripts/rebuild-live.sh` is only for the optional blue/green setup ([docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional)), which needs Docker Compose 2.24 or newer. It rebuilds the live copy in place after a change the deployer refuses, and the page is down for about 20 to 30 seconds. On a plain install, use `scripts/deploy.sh` instead. How it all fits together: [docs/09-self-deploy.md](09-self-deploy.md).
+
+## Memory limits (so one container can't take the whole host)
+
+On 3 Nov 2026 a headless browser with no memory limit used up the whole host's memory; the kernel then killed other things, including the proxy (BOS-392). Every container Boss Man starts now has a limit and a kill priority, set in `.env`. All of these are optional; the defaults are below.
+
+| Setting in `.env` | What it limits | Default |
+| --- | --- | --- |
+| `BOSSMAN_RUNNER_MEMORY` | each runner, including the browsers and test runs inside it (no swap on top) | `4g` |
+| `BOSSMAN_RUNNER_PIDS` | processes and threads per runner | `4096` |
+| `BOSSMAN_RUNNER_CPU_SHARES` | CPU priority of each runner against the server, database and proxy (1024 each, proxy 2048). Not a cap: only matters when the host is busy, and an idle host still lets runners use every core | `512` |
+| `BOSSMAN_RUNNER_CPUS` | optional hard CPU cap per runner (e.g. `4`). Leave empty unless the host is shared with other workloads: one runner hosts all of a company's agents and the merge check, so a low cap slows them all even when the host is idle | none |
+| `BOSSMAN_SERVER_MEMORY` / `BOSSMAN_SERVER_MEMORY_RESERVED` | the server (single, or each blue/green colour): limit / amount kept for it. No cap by default (`0`), because the server currently uses 10-13 GiB; set a value only once measured | `0` / `512m` |
+| `BOSSMAN_DB_MEMORY` / `BOSSMAN_DB_MEMORY_RESERVED` | Postgres: limit / amount kept for it | `0` (no cap) / `256m` |
+| `BOSSMAN_TOOLSERVER_MEMORY`, `BOSSMAN_TOOLSERVER_PIDS`, `BOSSMAN_TOOLSERVER_SHM` | tool servers that run a browser (crawl4ai, scrapling), see below | `2g`, `512`, `512m` |
+
+- **Priority.** If the host runs out anyway, Linux stops runners and tool servers first (`oom_score_adj` 500) and the database, server and proxy last (-500, -500 and -900). A runaway browser hits its own limit first and only that container is stopped and restarted.
+- **CPU.** On a Proxmox LXC (or any VM or container host) the container's own CPU limit applies on top of these settings. The weights only decide who wins when the CPUs are all busy.
+- **Choose numbers for your host.** Add up the limits of everything that can run at once (every runner plus tool servers); keep that below the host's RAM with room for the server, database and proxy. Limits are ceilings, not reservations, so they can add up to more than the RAM, but then one busy moment can still run the host out.
+- **Tool servers are yours.** Boss Man does not start crawl4ai, scrapling or other tool servers you register in Settings, so it cannot limit them for you. Put them in compose with limits: [deploy/tool-servers.yml](../deploy/tool-servers.yml) is a commented example. One already running by hand: `docker update --memory 2g --memory-swap 2g --pids-limit 512 <container>` (lost if the container is recreated).
+- **Check it took effect.** `docker stats --no-stream` should show a number after the slash for each Boss Man container, not your whole RAM. `docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.OomScoreAdj}}' <container>` prints the limit in bytes and the priority (0 bytes = no limit).
+- **Applying a change.** `docker compose up -d` recreates the containers whose limits changed (the server and database restart for a few seconds). Runners started by the launcher pick up a new `BOSSMAN_RUNNER_MEMORY` when the launcher is recreated and the runner is next restarted.
+- **A test keeps this in place:** `apps/server/test/compose-memory-limits.test.ts` fails if a service loses its `mem_limit`.
+
+Per host:
+- **Plain Linux or a Proxmox VM:** nothing extra. If `docker info` warns "No swap limit support", the swap setting is ignored but the memory limit still works; to enable it, add `cgroup_enable=memory swapaccount=1` to the kernel command line and reboot.
+- **Proxmox LXC running Docker:** limits apply inside the LXC's own memory setting, so size the LXC first. Whether your LXC enforces swap limits is unknown; find out with the `docker inspect` line above and `docker stats` after starting.
+- **TrueNAS SCALE:** nothing extra; the same settings go in the `.env` from docs/06 step 4.
 
 ## Troubleshooting
 

@@ -21,7 +21,8 @@
 #   RATE_LIMIT_SECONDS min gap between two runs of the same target (600)
 #   AVAILABLE_REFRESH_SECONDS  how often to look for a new commit on main (300); sooner when the server
 #                              leaves inbox/check ("Deploy latest" found nothing new; only its existence is read)
-#   SOAK_SECONDS       blue/green: how long the old colour stays up as a standby after a good swap (900)
+#   SOAK_SECONDS       blue/green: how long the old colour stays up as a standby after a good swap (900); also
+#                      published in available.json, so Boss Man's runner-update trial uses the same length
 #   SOAK_CHECK_SECONDS blue/green: how long a failing check during that window is retried before the automatic switch-back (60)
 #
 # Blue/green (docs/09-self-deploy.md, "Phase 3, part 2"): when COMPOSE_FILE (environment or the checkout's .env)
@@ -115,7 +116,7 @@ finish() { # result message [backup]: record the outcome, tell the owner, stop
   exit 0
 }
 
-# The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an older install's deploy key). Empty if unreachable.
+# The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an SSH remote with a read-only deploy key for a private one; docs/00 step 2). Empty if unreachable.
 remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }' || true; }
 
 # Tells the server what is waiting (when main is ahead of what runs), so it can raise the decision.
@@ -153,12 +154,17 @@ refresh_available() {
     if [[ $p =~ $RUNNER_PATHS ]]; then runner=true; fi
   done <"$paths"
   # What this install really looks like, so the owner's hand-apply steps never guess a folder (BOS-269).
-  local srcdir deployerdir bg=false colour=""
+  local srcdir deployerdir bg=false colour="" soak=""
   srcdir="$(cd "$REPO" 2>/dev/null && pwd)" || srcdir=""
   deployerdir="$(cd "$D" 2>/dev/null && pwd)" || deployerdir=""
   if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
-  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s}' \
-    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" >"$f.tmp"
+  # The standby window as this host really runs it (host.conf's SOAK_SECONDS), so the server's trial wording matches it.
+  # A fragment with its own separator and quoting, so the JSON stays valid whatever the setting; absent = not blue/green.
+  if [[ $bg == true ]]; then
+    if [[ $SOAK_SECONDS =~ ^[0-9]{1,6}$ ]]; then soak=", \"soakSeconds\": $SOAK_SECONDS"; else log "SOAK_SECONDS is not a whole number of seconds; not reporting the trial length."; fi
+  fi
+  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s%s}' \
+    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" "$soak" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
@@ -189,8 +195,41 @@ INCLUDE="$D/proxy/active.caddy"
 live_colour() {
   local c
   [[ -f $INCLUDE && ! -L $INCLUDE ]] || return 1
-  c="$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\):.*/\1/p' "$INCLUDE" | head -1)"
+  c="$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\)\(-front\)\{0,1\}:.*/\1/p' "$INCLUDE" | head -1)"
   [[ -n $c ]] && echo "$c"
+}
+
+# True when the proxy can reach the colour by its name on the private "front" network (the compose file has it).
+# A real request, not a name lookup: it proves the route the include is about to use.
+front_ready() { # colour
+  compose exec -T proxy wget -q -T 3 -O /dev/null "http://server-$1-front:3100/api/ready" >>"$LOG" 2>&1
+}
+
+# True when the compose files declare the front network for this colour (its -front name is in the resolved config).
+front_declared() { # colour
+  compose config 2>>"$LOG" | grep -q "server-$1-front"
+}
+
+# Sets INCLUDE_FORM (front or old) for a colour. The check is retried, because one failed exec or wget is not proof the
+# network is missing. If the compose files declare the front network but the check still fails, the include keeps the
+# form it has now (never a silent downgrade); the reason goes to the log and to a note beside the status file.
+FRONT_TRIES="${FRONT_TRIES:-4}" FRONT_WAIT="${FRONT_WAIT:-3}"
+INCLUDE_FORM=old
+choose_include_form() { # colour
+  local i cur=old
+  for ((i = 1; i <= FRONT_TRIES; i++)); do
+    if front_ready "$1"; then INCLUDE_FORM=front; return 0; fi
+    if ((i < FRONT_TRIES)); then sleep "$FRONT_WAIT"; fi
+  done
+  if grep -qs "reverse_proxy server-[a-z]*-front:" "$INCLUDE"; then cur=front; fi
+  INCLUDE_FORM=$cur
+  if front_declared "$1"; then
+    log "WARNING: the front network check for $1 failed $FRONT_TRIES times but the compose files declare it; keeping the $cur include form."
+    if ! ((DRY)); then printf '%s: the front network check for %s failed %s times though the compose files declare it; the proxy include keeps the %s form.\n' "$(now)" "$1" "$FRONT_TRIES" "$cur" >"$OUTBOX/proxy-include-note.txt"; fi
+  else
+    INCLUDE_FORM=old
+    log "The compose files have no front network for $1; writing the old include form."
+  fi
 }
 
 # Rewrites the include for a colour: made in the root-only state folder, then renamed over the old one.
@@ -203,7 +242,24 @@ write_include() { # colour
   fi
   [[ $(stat -c %d "$STATE") == "$(stat -c %d "$dir")" ]] || { log "ERROR: $STATE and $dir are on different filesystems; the rename would not be atomic."; return 1; }
   tmp="$(mktemp "$STATE/active.XXXXXX")"
-  cat >"$tmp" <<INC
+  # With the private "front" network (deploy/truenas-bluegreen.yml) the proxy reaches the colour at server-<colour>-front and
+  # tells it the one client address Caddy resolved. Without it (compose files not updated yet) the old form is written,
+  # so a new copy of this script can never break a swap or a rollback on a host that has not moved yet.
+  choose_include_form "$1"
+  if [[ $INCLUDE_FORM == front ]]; then
+    cat >"$tmp" <<INC
+# Written by host-deployer.sh. Do not edit. Live colour: $1
+(active) {
+	reverse_proxy server-$1-front:{args[0]} {
+		header_up X-Forwarded-For {client_ip}
+		health_uri {args[1]}
+		health_interval 2s
+		health_timeout 2s
+	}
+}
+INC
+  else
+    cat >"$tmp" <<INC
 # Written by host-deployer.sh. Do not edit. Live colour: $1
 (active) {
 	reverse_proxy server-$1:{args[0]} {
@@ -213,6 +269,7 @@ write_include() { # colour
 	}
 }
 INC
+  fi
   chmod 644 "$tmp"
   mv -fT "$tmp" "$INCLUDE"
 }

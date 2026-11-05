@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
-import { BASE_ENV_KEYS, adapterArgs, defaultBin, killGroup, modelChoices, opencodeEnv, stderrTail } from "./session-manager.js";
+import { BASE_ENV_KEYS, adapterArgs, defaultBin, killGroup, modelChoices, opencodeEnv, stderrTail, withoutGitCredentials } from "./session-manager.js";
 
 export type ProbedModels = Array<{ value: string; name: string; description: string | null }>;
 
@@ -33,7 +33,8 @@ export async function probeModels(
     // Codex keeps its login in CODEX_HOME, so the runner's own settings are kept.
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
   }
-  const { GIT_TOKEN: _git, ...rest } = credentials;
+  // A probe is an unscoped client of the adapter, so it gets the same withheld git credential as a run (BOS-322).
+  const rest = withoutGitCredentials(credentials);
   Object.assign(env, rest, { DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
   // The same OpenCode settings as a run, so the list leaves out models a run can't use (its hosted provider).
   if (agentKind === "opencode") Object.assign(env, opencodeEnv(rest.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, "deny"));

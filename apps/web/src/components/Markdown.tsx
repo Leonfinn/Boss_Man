@@ -2,11 +2,9 @@
 // ignores raw HTML, and its default URL check drops javascript: links, so a page can't run code.
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ReactNode } from "react";
-
-// [[slug]] and [[slug#Section]] become links to that wiki page when the company is known.
-const wikiLinks = (text: string, companyId: string) =>
-  text.replace(/\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g, (_, slug: string, sec = "") => `[${slug.trim()}${sec}](#/wiki/${companyId}/${slug.trim()}${sec})`);
+import { createContext, useContext, type ReactNode } from "react";
+import { linkMarkdown, type LinkContext } from "../links";
+import { EnlargeableImage } from "./Lightbox";
 
 /** The id a heading gets, so a link like slug#Heading can land on it. */
 export function headingId(text: string) {
@@ -20,7 +18,22 @@ export function headingId(text: string) {
 const plain = (node: ReactNode): string =>
   typeof node === "string" || typeof node === "number" ? String(node) : Array.isArray(node) ? node.map(plain).join("") : "";
 
-export function Markdown({ text, wikiCompanyId }: { text: string; wikiCompanyId?: string }) {
+// True while rendering a link's contents, so a picture inside a link stays a plain image: a button can't
+// sit inside an anchor, and the link already goes somewhere on click (BOS-330 review).
+const InLink = createContext(false);
+
+// A Markdown picture: plain inside a link (a button cannot sit in an anchor), otherwise enlargeable.
+function MarkdownImage({ src, alt }: { src?: string | URL; alt?: string }) {
+  const url = typeof src === "string" ? src : undefined;
+  return useContext(InLink) ? (
+    <img src={url} alt={alt ?? ""} />
+  ) : (
+    <EnlargeableImage src={url} alt={typeof alt === "string" ? alt : undefined} />
+  );
+}
+
+/** Markdown with links built by the one shared builder (BOS-358): page names, ticket references and routes. */
+export function Markdown({ text, wikiCompanyId, linkContext }: { text: string; wikiCompanyId?: string; linkContext?: LinkContext }) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -35,12 +48,16 @@ export function Markdown({ text, wikiCompanyId }: { text: string; wikiCompanyId?
           // Links inside Boss Man stay in the tab; anything else opens a new one.
           a: ({ href, children }) =>
             href?.startsWith("#/") ? (
-              <a href={href}>{children}</a>
+              <a href={href}>
+                <InLink.Provider value={true}>{children}</InLink.Provider>
+              </a>
             ) : (
               <a href={href} target="_blank" rel="noopener noreferrer">
-                {children}
+                <InLink.Provider value={true}>{children}</InLink.Provider>
               </a>
             ),
+          // A picture opens enlarged over the page rather than in a new window (BOS-330).
+          img: MarkdownImage,
           table: ({ children }) => (
             <div className="md-table">
               <table>{children}</table>
@@ -48,7 +65,7 @@ export function Markdown({ text, wikiCompanyId }: { text: string; wikiCompanyId?
           ),
         }}
       >
-        {wikiCompanyId ? wikiLinks(text, wikiCompanyId) : text}
+        {linkMarkdown(text, { ...linkContext, companyId: wikiCompanyId ?? linkContext?.companyId })}
       </ReactMarkdown>
     </div>
   );

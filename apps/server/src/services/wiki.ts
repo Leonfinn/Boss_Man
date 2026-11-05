@@ -90,6 +90,50 @@ export function findSection(sections: Section[], wanted: string) {
 /** [[slug]] and [[slug#Section heading]] in a page body: the slugs it links to. */
 export const linkedSlugs = (body: string) => [...new Set([...body.matchAll(/\[\[([^\]#|]+?)(?:#[^\]]*)?\]\]/g)].map((m) => m[1]!.trim()))];
 
+// BOS-359: a wiki link in agent-written text (a ticket reply, an owner note, a decision, a chat
+// reply) is only a click away from a dead page. LinkHint caps how much text it reads and how many
+// slugs it looks up, so a very long message or one with thousands of links costs little.
+export const LINK_SCAN_CHARS = 40_000;
+export const LINK_LOOKUPS = 20;
+
+/**
+ * The slugs a text links to with [[slug]] or [[slug#Heading]], in order and without repeats,
+ * reading at most LINK_SCAN_CHARS characters of it.
+ */
+export function wikilinkSlugs(text: string, max = LINK_LOOKUPS): string[] {
+  const seen = new Set<string>();  // not state: filled and dropped inside this call.
+  const out: string[] = [];
+  for (const m of text.slice(0, LINK_SCAN_CHARS).matchAll(/\[\[([^\]#|]*)(?:#[^\]]*)?\]\]/g)) {
+    const slug = m[1]!.trim();
+    if (slug && !seen.has(slug)) {
+      seen.add(slug);
+      out.push(slug);
+      if (out.length >= max) break;
+    }
+  }
+  return out;
+}
+
+/**
+ * A short note naming the wiki pages a text links to that don't exist, or null when they all do.
+ * The note is advisory: a lookup that fails returns null, so a saved reply or note is never
+ * turned into an error by it.
+ */
+export async function missingPageNote(db: Db, companyId: string, text: string): Promise<string | null> {
+  const wanted = wikilinkSlugs(text);
+  if (!wanted.length) return null;
+  let rows: { slug: string }[];
+  try {
+    rows = await db.select({ slug: wikiPages.slug }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), inArray(wikiPages.slug, wanted)));
+  } catch {
+    return null;
+  }
+  const have = new Set(rows.map((r) => r.slug));
+  const missing = wanted.filter((s) => !have.has(s));
+  if (!missing.length) return null;
+  return `Wiki link check: ${missing.length === 1 ? "this link is" : "these links are"} to no such page: ${missing.map((s) => `"${s}"`).join(", ")}. Fix the link, or create the page with wiki write. The text was saved as written.`;
+}
+
 // Lessons learned from sent-back reviews (R-review-lessons): a "Lessons" section on a project
 // brief that only a lesson decision may change, so a rewrite passes over it untouched.
 export const LESSONS_HEADING = "Lessons";

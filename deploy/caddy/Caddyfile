@@ -6,6 +6,16 @@
 	# The admin API listens inside this container only (not published); `docker compose exec proxy caddy reload` talks to it.
 	admin localhost:2019
 	auto_https off
+
+	# Who may tell Caddy the real client address with X-Forwarded-For / -Proto. Only the UI listener ever does, and only
+	# for the addresses in BOSSMAN_CADDY_TRUSTED_PROXIES (the Tailscale container, set by deploy/tailscale-bluegreen.yml).
+	# Unset = nobody: the default is an address nothing can have. "Strict" reads the header from the right, so a client
+	# cannot put a made-up address in front of the real one. The portal on :3101 never trusts forwarded headers.
+	servers :3100 {
+		trusted_proxies static {$BOSSMAN_CADDY_TRUSTED_PROXIES:127.255.255.254/32}
+		trusted_proxies_strict
+		client_ip_headers X-Forwarded-For
+	}
 }
 
 # Defines the snippet (active) = reverse_proxy to the live colour. {args[0]} is the colour's port, {args[1]} the path

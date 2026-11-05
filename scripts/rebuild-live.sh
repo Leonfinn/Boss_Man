@@ -25,7 +25,7 @@ colour="${1:-}"
 if [[ -z $colour ]]; then
   include="$D/proxy/active.caddy"
   [[ -f $include && ! -L $include ]] || die "can't find which colour is live ($include). Name it: scripts/rebuild-live.sh blue|green"
-  colour="$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\):.*/\1/p' "$include" | head -1)"
+  colour="$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\)\(-front\)\{0,1\}:.*/\1/p' "$include" | head -1)"
 fi
 [[ $colour == blue || $colour == green ]] || die "the colour must be blue or green, not '$colour'."
 commit="$(git rev-parse HEAD)"
