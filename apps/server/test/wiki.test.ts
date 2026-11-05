@@ -350,3 +350,32 @@ describe("wiki history is never lost by import (BOS-430)", () => {
     expect((await c.req("GET", `/api/companies/${companyId}/wiki-revisions/${page.revisions[0].id}`)).json().body).toBe("Thursday 23:00.");
   });
 });
+
+describe("the words that stop a wipe (BOS-430)", () => {
+  // Step 6: agents must be told to use append for logs and never send a partial body to write, in the
+  // tool itself and in the instructions of the two agents who write long-running logs.
+  it("the wiki tool description and the log-writing agents' instructions name append and warn off partial writes", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "t", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    const { tools } = await client.listTools();
+    await client.close();
+    const desc = tools.find((x) => x.name === "wiki")!.description!;
+    for (const word of ["append", "history", "restore", "replace: true", "quarter"]) expect(desc).toContain(word);
+
+    const { AGENT_TEMPLATES } = await import("@boss-man/shared");
+    const release = AGENT_TEMPLATES.find((x) => x.id === "release-manager")!;
+    expect(release.instructions).toContain("append");
+    expect(release.instructions).toContain("write replaces the whole page");
+
+    // The wiki maintainer's prompt (built by the scheduler) says the same for its own Log page.
+    const [keeper] = await c.db.select().from(agents).where(and(eqq(agents.companyId, c.company.id), eqq(agents.duty, "wiki")));
+    await c.req("PATCH", `/api/agents/${keeper!.id}`, { paused: false, model: "claude-sonnet-5-5" });
+    await c.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
+    await c.scheduler.tick();
+    const prompt = c.starts().find((s) => s.agentId === keeper!.id)!.prompt;
+    expect(prompt).toContain("append");
+    expect(prompt).toContain("never send a partial body to write");
+  });
+});
