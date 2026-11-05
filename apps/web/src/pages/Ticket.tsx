@@ -147,6 +147,32 @@ const ALREADY_LANDING = /already being checked and merged|merge is running now/i
 const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
 const STATE_TONE: Record<string, string> = { backlog: "", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
 
+/**
+ * The quota hold notice in the owner's words (BOS-471): who is paused, which account is nearly used up,
+ * what that pauses, and when it resets. It names another ticket only when one really holds the agent.
+ */
+function holdBanner(t: TicketDetail): { headline: string; detail: string } {
+  const agent = t.assignee ?? "This ticket's agent";
+  const source = t.quotaHeldSource;
+  const window = t.quotaHeldReason?.match(/^subscription (.+) window nearly used up$/)?.[1];
+  const limit = window === "seven_day" ? "weekly allowance" : window === "five_hour" ? "5-hour allowance" : window ? windowLabel(window).name.toLowerCase() : "allowance";
+  // "Fri 7 Nov at 14:00 UTC", so the reset is unambiguous wherever the owner is.
+  const reset = t.quotaHeldUntil
+    ? new Date(t.quotaHeldUntil).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) +
+      " UTC"
+    : "when it resets";
+  const account = source ? `${agent} is paid from ${source}, whose ${limit} is nearly used up.` : `${agent}'s ${limit} is nearly used up.`;
+  const paused = `Boss Man pauses their routine work until it resets on ${reset}.`;
+  const choice = `Run this one now, mark it urgent, or move ${agent} to another account in Agents.`;
+  if (t.quotaHeldOther) {
+    return {
+      headline: `${agent} is held by ${t.quotaHeldOther.ref}.`,
+      detail: `${account} ${paused} ${t.quotaHeldOther.ref} (${t.quotaHeldOther.title}) is the work that holds them. ${choice}`,
+    };
+  }
+  return { headline: `${agent} is paused until ${reset}.`, detail: `${account} ${paused} ${choice}` };
+}
+
 /** How often a watcher reports (R80). */
 const WATCH_EVERY: Array<[number, string]> = [
   [15, "Every 15 minutes"],
@@ -354,6 +380,45 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     }
   };
 
+  /**
+   * Approve and merge (BOS-471): when the owner's sign-off card is open, the server answers that card
+   * and merges in one press, so the page never tells them to go and answer a second button. A ticket
+   * with no repo or no code is approved and marked done in the same press.
+   */
+  const approveAndMerge = async () => {
+    if (sentReview.current) return;
+    sentReview.current = true;
+    setBusy(true);
+    try {
+      const r = await api<{ signoffAnswered?: boolean; landing?: Landing | null }>(`/api/tickets/${id}/approve-merge`, { method: "POST" });
+      if (r.landing) {
+        setNow(Date.now());
+        setLanding(r.landing);
+      }
+      setNote({
+        ok: true,
+        text:
+          r.landing?.state === "running"
+            ? `${r.signoffAnswered ? "Signed off. " : ""}Checking and merging now.`
+            : // The sign-off's own answer ran and finished the merge before it returned, so there is no
+              // landing to show: say it settled, and the reload below shows the merged state (BOS-471).
+              r.signoffAnswered
+              ? "Signed off and merged."
+              : "Approved.",
+      });
+      ticket.reload();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && ALREADY_LANDING.test(err.message)) {
+        const current = await refreshLanding();
+        const since = current?.state === "running" ? ` since ${atTime(current.startedAt)}` : "";
+        setNote({ ok: true, text: `Already being checked and merged${since}; nothing more to do.` });
+      } else setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      sentReview.current = false;
+      setBusy(false);
+    }
+  };
+
   const mergeNow = async () => {
     setBusy(true);
     try {
@@ -384,9 +449,16 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       ? `Approving opens a pull request from ${t.branch ?? "its branch"} into ${t.defaultBranch} of ${repo}. The change is under Changes above.`
       : `Approving runs ${t.verifyCommand ? `\`${t.verifyCommand}\`` : "the project's check"} and, if it passes, merges ${t.branch ?? "its branch"} into ${t.defaultBranch} of ${repo}. The change is under Changes above.`;
   const notStarted = t.systemState === "backlog" || t.systemState === "ready";
+  // One hold notice, computed once, so the headline and detail always agree.
+  const hold = holdBanner(t);
+  const approveLabel = !t.repoUrl || t.noCode ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge";
   const decide = (
     <>
-      <p className="muted" style={{ fontSize: 14 }}>{approves}</p>
+      {/* One press (BOS-471): with a sign-off card open, this button is that card's answer too. */}
+      <p className="muted" style={{ fontSize: 14 }}>
+        {approves}
+        {t.signoffWaiting ? " This is also your sign-off: one press approves, signs off and merges." : ""}
+      </p>
       {sendingBack ? (
                 <>
                   <div className="field">
@@ -409,8 +481,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 </>
               ) : (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button type="button" className="btn primary" disabled={busy || checking} onClick={() => void review("approved")}>
-                    {!t.repoUrl || t.noCode ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
+                  <button type="button" className="btn primary" disabled={busy || checking} onClick={() => void approveAndMerge()}>
+                    {approveLabel}
                   </button>
                   <button type="button" className="btn" disabled={busy || checking} onClick={() => setSendingBack(true)}>
                     Request changes
@@ -430,18 +502,22 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       </header>
 
-      {t.quotaHeldUntil && (
-        <div className="card" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      {/* Only when the ticket's next step really needs its agent to run (BOS-471): in review, waiting on the
+          owner, or done, the hold changes nothing for this ticket, so it is not shown. */}
+      {t.quotaHeldUntil && (t.systemState === "ready" || t.systemState === "in_progress") && (
+        <div className="card quota-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: "1 1 320px" }}>
-            <strong>Routine work is held until {when(t.quotaHeldUntil)}.</strong>{" "}
-            <span className="muted">
-              {t.quotaHeldReason ? `${windowLabel(t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")).name} is nearly used up. ` : ""}
-              {t.quotaHeldAgent ? "This ticket is ready but its agent is held by other work. " : ""}You can run this one now, or mark it urgent so it always runs through the hold.
-            </span>
+            <strong>{hold.headline}</strong>{" "}
+            <span className="muted">{hold.detail}</span>
           </span>
-          <button type="button" className="btn primary" disabled={busy} onClick={() => void runNow()}>
-            Run now
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" className="btn primary" disabled={busy} onClick={() => void runNow()}>
+              Run now
+            </button>
+            <button type="button" className="btn" disabled={busy || !!t.urgent} onClick={() => void patch({ urgent: true })}>
+              {t.urgent ? "Marked urgent" : "Mark urgent"}
+            </button>
+          </div>
         </div>
       )}
 

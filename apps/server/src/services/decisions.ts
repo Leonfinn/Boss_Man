@@ -449,6 +449,11 @@ export type AnswerExtra = {
   settledBy?: { agentId: string };
   /** A model change the owner edited before approving; checked with the same validator as the tool. */
   modelConfig?: AgentModelConfig;
+  /**
+   * How a sign-off answer should finish the ticket (BOS-471): the ticket page's Approve and merge wants the
+   * merge done in the same press, and a ticket with nothing to merge marked done instead of left in review.
+   */
+  merge?: { markDone: boolean };
 };
 
 /** Which checkout a working-copy cleanup deletes in, and what (BOS-120). */
@@ -576,8 +581,8 @@ export type LoopHooks = {
   sendBack(ticketId: string, text: string, reviewer: string): Promise<unknown>;
   stopTicket(ticketId: string): Promise<unknown>;
   raiseCap(ticketId: string): Promise<unknown>;
-  /** Merges an approved ticket once the owner has signed off on it (R48). */
-  land(ticketId: string, reviewer: string): Promise<unknown>;
+  /** Merges an approved ticket once the owner has signed off on it (R48); `merge.markDone` finishes a ticket with nothing to merge. */
+  land(ticketId: string, reviewer: string, merge?: AnswerExtra["merge"]): Promise<unknown>;
   /** Lands again in the background after a check that couldn't finish; `skipChecks` merges without it. */
   landAgain(ticketId: string, skipChecks: boolean): Promise<unknown>;
   /** A stalled-review card's action on the review (BOS-426): the reviewer, the reviewer's id and the kind. Returns false when the review can't take that action any more, which keeps the card open. */
@@ -727,7 +732,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .from(decisions)
         .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ctx.ticketId}`))
         .limit(1);
-      if (signoff) throw new AnswerError("The owner's sign-off for this ticket is still waiting, so the check was not run again. Answer that card first.");
+      if (signoff) throw new AnswerError("The owner's sign-off for this ticket is still open, so the check was not run again. Use Approve and merge on the ticket, which settles the sign-off and merges in one press.");
     }
     if (ctx.type === "workflow_change") {
       // Every Apply or Skip needs a reason, whether the CEO or the owner decides (BOS-216).
@@ -2062,7 +2067,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** Records the answer and resumes what was waiting. Returns null if not open. */
     async answer(id: string, answer: string, extra: AnswerExtra = {}) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
-      if (!d) return null;
+      if (!d) {
+        // A sign-off the owner pressed twice (or the CEO settled) is already answered, and the ticket page's
+        // Approve and merge still merges it rather than refusing on a card that is no longer open (BOS-471).
+        if (answer === APPROVE_MERGE) {
+          const [row] = await db.select({ status: decisions.status, context: decisions.context }).from(decisions).where(eq(decisions.id, id));
+          if (row?.status === "answered" && (row.context as DecisionContext).type === "risk_review") return { settled: "already" };
+        }
+        return null;
+      }
       // The server's own guard (BOS-149): a CEO answer may never settle an owner-only card, whatever the tool text says.
       if (extra.settledBy) {
         // The Scrum Master settles its own alerts through `settledBy` too, so the "not yours yet" rung
@@ -2318,7 +2331,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.
         await clearMergeCards(db, ctx.ticketId, { by: "system", note: "The owner's sign-off was answered, so this retry card is no longer needed.", at: new Date().toISOString() });
-        if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner");
+        if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner", extra.merge);
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "check_stuck") {
         if (answer === CHECK_SEND_BACK) await loopHooks?.sendBack(ctx.ticketId, `The review was approved, but ${ctx.command ? `the check \`${ctx.command}\`` : "the merge"} couldn't finish, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${ctx.output}`, "the owner");

@@ -14,7 +14,7 @@ import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agentNotes, agents, companies, costEvents, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
@@ -43,7 +43,7 @@ import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shar
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
-import { ReviewError, reviewService } from "./services/review.js";
+import { isSignoffPending, ReviewError, reviewService } from "./services/review.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
@@ -580,8 +580,14 @@ export async function buildApp(opts: AppOptions) {
     // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
     // Decisions show "Checking and merging" while it runs (including lock retries), rather than inviting
     // another approval. A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
-    land: (ticketId, reviewer) =>
-      review.landVisible(ticketId, reviewer).catch(async (err) => {
+    land: (ticketId, reviewer, merge) =>
+      (merge?.markDone
+        ? // Nothing to merge (no repo, or a no-code ticket): the owner's own sign-off finishes it in the same press (BOS-471).
+          work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true, stateNote: "The owner approved and signed it off; there was nothing to merge." })
+        : review.landVisible(ticketId, reviewer)
+      ).catch(async (err) => {
+        // Another sign-off card for the same ticket being settled is a wait, not a failed merge (BOS-471).
+        if (isSignoffPending(err)) return;
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
         if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
@@ -1462,6 +1468,9 @@ export async function buildApp(opts: AppOptions) {
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
+      // A ticket in review, waiting for the owner or finished has no next step for its agent, so the quota
+      // hold is not about it and the page must not say routine work is paused for it (BOS-471).
+      const needsAgent = row.t.systemState === "ready" || row.t.systemState === "in_progress";
       // The ticket's own held wake, or, when its wake was merged into another ticket's, the one
       // its assignee is held by (BOS-253): the page still offers Run now and says why it's held.
       const heldBy = (own: boolean) =>
@@ -1470,10 +1479,34 @@ export async function buildApp(opts: AppOptions) {
           .from(wakes)
           .where(and(own ? eq(wakes.ticketId, id) : eq(wakes.agentId, row.t.assigneeAgentId!), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
           .limit(1);
-      let [held] = await heldBy(true);
+      let [held] = needsAgent ? await heldBy(true) : [];
       const heldByAgent = !held;
-      if (!held && row.t.assigneeAgentId) [held] = await heldBy(false);
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent };
+      if (!held && needsAgent && row.t.assigneeAgentId) [held] = await heldBy(false);
+      // Plain words for the banner (BOS-471): the agent, the account it is paid from, and, when another
+      // ticket really holds it, which one. Never a claim that it is "held by other work" on a guess.
+      let heldSource: string | null = null;
+      let heldOther: { ref: string; title: string } | null = null;
+      if (held && row.t.assigneeAgentId) {
+        const [src] = await db
+          .select({ name: fundingSources.name })
+          .from(agents)
+          .innerJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId))
+          .where(eq(agents.id, row.t.assigneeAgentId));
+        heldSource = src?.name ?? null;
+        if (heldByAgent) {
+          const [other] = await db
+            .select({ number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix })
+            .from(wakes)
+            .innerJoin(tickets, eq(tickets.id, wakes.ticketId))
+            .innerJoin(projects, eq(projects.id, tickets.projectId))
+            .innerJoin(companies, eq(companies.id, projects.companyId))
+            .where(and(eq(wakes.agentId, row.t.assigneeAgentId), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`, ne(wakes.ticketId, id)))
+            .limit(1);
+          if (other) heldOther = { ref: ticketRef(other.prefix ?? row.prefix, other.number) ?? "", title: other.title };
+        }
+      }
+      const signoff = row.t.systemState === "review" ? await review.ownerSignoffOpen(id) : false;
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -2435,6 +2468,58 @@ export async function buildApp(opts: AppOptions) {
       return r;
     });
     owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
+    /**
+     * "Approve and merge" on the ticket page (BOS-471): when the owner's sign-off card is open, this answers
+     * it exactly as Decisions does (same answer path, so the sign-off is settled and any stale merge-retry
+     * card is cleared) and then starts the tracked merge. Without a card it is the plain approval. On a
+     * ticket with no repo it marks it done, as before.
+     */
+    owner.post("/api/tickets/:id/approve-merge", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title, systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
+      if (!t) return reply.code(404).send({ error: "not_found" });
+      if (t.systemState !== "review") return reply.code(409).send({ error: "review", message: "This ticket isn't in review, so there's nothing to approve." });
+      const [signoff] = await db
+        .select({ id: decisions.id, question: decisions.question })
+        .from(decisions)
+        .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${id}`))
+        .limit(1);
+      let signoffAnswered = false;
+      if (signoff) {
+        // The same path as answering it in Decisions: the card closes, its hold lifts, and the merge starts.
+        // markDone when there is nothing to merge (no repo, or no code), so it finishes in the same press.
+        const [row] = await db.select({ noCode: tickets.noCode, repoUrl: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, id));
+        const markDone = !row?.repoUrl || !!row?.noCode;
+        try {
+          const r = await decisionsSvc.answer(signoff.id, "Approve and merge", { by: await ownerName(req), merge: { markDone } });
+          // null means another press or the CEO settled it first: the merge below still runs once, safely.
+          signoffAnswered = r !== null;
+        } catch (err) {
+          if (err instanceof AnswerError) return reply.code(409).send({ error: "review", message: err.message });
+          throw err;
+        }
+        try {
+          // The answer's own hook (setLoopHooks.land above) already ran and finished the merge before it
+          // returned, so start nothing more here: a second start would merge twice (BOS-471, review round 1).
+          // A press that found the sign-off already settled (r === null) started no landing, so start one now.
+          const landing = signoffAnswered ? null : await review.startLanding(id, "the owner");
+          return { outcome: "landing" as const, signoffAnswered, landing };
+        } catch (err) {
+          // A sign-off still open here is the owner's next answer, not a failed merge: say so, and raise no card.
+          if (err instanceof ReviewError) return reply.code(err.status).send({ error: "review", message: err.message });
+          throw err;
+        }
+      }
+      // No sign-off card yet: the plain approval. With a repo, an approval that needs the owner's sign-off
+      // raises that card (outcome owner_review) and nothing merges, so no retry card is raised for it (BOS-471).
+      const r = (await review.submit(id, { verdict: "approved", reviewer: "the owner", background: true }).catch(reviewErrors(reply))) as
+        | { outcome?: string; landing?: unknown }
+        | undefined;
+      if (!r) return r;
+      if (r.outcome === "landing") reply.code(202);
+      const landing = "landing" in r ? r.landing : r.outcome === "owner_review" ? null : await review.landing(id);
+      return { ...r, signoffAnswered: r.outcome === "owner_review", landing };
+    });
     // Try the ticket's pull request again now, rather than waiting for the sync (R59).
     owner.post("/api/tickets/:id/pull-request/merge", async (req, reply) => review.mergePullRequest(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
     owner.post("/api/tickets/:id/git-action", async (req, reply) => {
