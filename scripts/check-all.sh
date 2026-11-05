@@ -25,7 +25,7 @@ STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
 # them, after a pause, only when the failure output shows that kind of error; any other failure is final.
 if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   attempts="${BOSSMAN_CHECK_ATTEMPTS:-3}"
-  budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-1500}"  # Boss Man kills the merge check at 30 min; stay well inside it
+  budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-3000}"  # Boss Man kills the merge check 60 min after its slot is taken (VERIFY_TIMEOUT_MS); stay well inside it
   pause="${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
   log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
   trap 'rm -f "$log" "$began_file"' EXIT
