@@ -6,7 +6,7 @@ t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
-cp "$here/check-quick.sh" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$repo/scripts/"
 cat >"$repo/scripts/check-shell.sh" <<'S'
 #!/usr/bin/env bash
 echo "check-shell" >>"$LOG"
@@ -27,7 +27,7 @@ fi
 echo "node $*" >>"$LOG"
 S
 chmod +x "$t/bin/pnpm" "$t/bin/node"
-export PATH="$t/bin:$PATH" LOG="$t/log"
+export PATH="$t/bin:$PATH" LOG="$t/log" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_PAIR_PROOF="$t/proof" CHECK_ALL_QUEUE_REPORT=1
 
 g() { git -C "$repo" -c user.name=t -c user.email=t@t "$@"; }
 g init -q -b main; echo a >"$repo/README"; g add -A; g commit -q -m init
@@ -78,6 +78,39 @@ run 1 "typecheck fails" env FAIL_ON=typecheck
 grep -q "^FAIL  typecheck" "$t/out" || fail "FAIL line: $(cat "$t/out")"
 grep -q boom "$t/out" || fail "failure output not shown"
 logged "build" "later steps still run after a failure"
+
+# The heavy steps wait for the check slot: hold it here, and check-quick must queue (and say so) instead of running.
+if command -v flock >/dev/null; then
+  g checkout -q -B slot origin/main; commit apps/web/src/s.ts
+  : >"$LOG"
+  (exec 8>"$t/lock.slot.1"; flock 8; sleep 8) & holder=$!
+  sleep 1
+  (cd "$repo" && ./scripts/check-quick.sh >"$t/out" 2>&1) & cq=$!
+  sleep 4
+  grep -q "waiting for a free check slot (place" "$t/out" || fail "no slot wait message: $(cat "$t/out")"
+  ! grep -q typecheck "$LOG" || fail "typecheck ran without the slot: $(cat "$LOG")"
+  rc=0; wait "$cq" || rc=$?; wait "$holder" || true
+  [ "$rc" -eq 0 ] || fail "queued run rc $rc: $(cat "$t/out")"
+  logged "pnpm --filter @boss-man/web typecheck" "ran after the slot freed"
+  grep -q "^PASS  typecheck @boss-man/web" "$t/out" || fail "queued PASS line: $(cat "$t/out")"
+fi
+
+# A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.
+g checkout -q -B broad origin/main; commit apps/server/src/mcp.ts
+run 0 "mcp.ts is broad" env
+grep -qF "SKIP related tests: too broad for a hand run, the merge gate runs them" "$t/out" || fail "no SKIP line: $(cat "$t/out")"
+notlogged "vitest related" "broad skip"
+logged "pnpm --filter @boss-man/server typecheck" "broad skip keeps typecheck"
+run 0 "forced related" env CHECK_QUICK_FORCE_RELATED=1
+logged "vitest related --run src/mcp.ts" "forced"
+g checkout -q -B many origin/main
+many=(); for i in $(seq 1 16); do many+=("apps/server/src/m$i.ts"); done; commit "${many[@]}"
+run 0 "16 files is broad" env
+notlogged "vitest related" "16 files"
+g checkout -q -B few origin/main
+many=(); for i in $(seq 1 15); do many+=("apps/server/src/m$i.ts"); done; commit "${many[@]}"
+run 0 "15 files is not broad" env
+logged "vitest related" "15 files"
 
 # A branch that conflicts with the base
 g checkout -q main; echo main >"$repo/README"; g add -A; g commit -q -m m; g update-ref refs/remotes/origin/main HEAD
