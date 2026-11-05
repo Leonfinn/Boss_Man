@@ -1957,7 +1957,7 @@ export async function buildApp(opts: AppOptions) {
     const CustomerIn = z.object({ name: Text(200), email: z.string().trim().email().max(320).nullable().optional(), segment: z.string().trim().max(100).nullable().optional() });
     const FeatureFields = z.object({
       title: Text(200),
-      description: z.string().max(20_000).nullable(),
+      description: z.string().max(OWNER_MESSAGE_MAX).nullable(),
       status: z.enum(FEATURE_STATUSES),
       areaId: Uuid.nullable(),
       parentId: Uuid.nullable(),
@@ -2111,7 +2111,7 @@ export async function buildApp(opts: AppOptions) {
     // "Let the CEO question me first": the Board's add form sends its draft here instead of creating it.
     owner.post("/api/companies/:id/chat/grill", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ kind: z.enum(["task", "feature"]), title: z.string().trim().min(1).max(200), description: z.string().trim().max(10_000).nullable().optional(), projectId: Uuid.optional() }).parse(req.body);
+      const b = z.object({ kind: z.enum(["task", "feature"]), title: z.string().trim().min(1).max(200), description: z.string().trim().max(OWNER_MESSAGE_MAX).nullable().optional(), projectId: Uuid.optional() }).parse(req.body);
       return chat.grill(id, b).then((r) => reply.code(201).send(r), chatErrors(reply));
     });
 

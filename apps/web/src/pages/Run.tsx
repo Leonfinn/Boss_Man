@@ -1,25 +1,45 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, type Company } from "../api";
+import { useImageAttach, withAttachments } from "../components/ImageAttach";
+import { OwnerMessageBox, tooLong } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
 import { outcomeTag, usage, when } from "./Runs";
 
 /** Steering (R37): a message after the current turn, or one that interrupts it, and stop. */
-function Steer({ runId }: { runId: string }) {
+function Steer({ runId, companyId, ticketId }: { runId: string; companyId: string; ticketId?: string | null }) {
   const [text, setText] = useState("");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const img = useImageAttach(companyId, ticketId ?? undefined);
   const send = async (interrupt: boolean) => {
-    if (!text.trim()) return;
+    const outgoing = withAttachments(text, img.attached);
+    if (!outgoing.trim() || tooLong(outgoing)) return;
     setBusy(true);
     try {
-      await api(`/api/runs/${runId}/message`, { method: "POST", body: { text, interrupt } });
+      await api(`/api/runs/${runId}/message`, { method: "POST", body: { text: outgoing, interrupt } });
       setText("");
+      img.clear();
       setNote({ ok: true, text: interrupt ? "Sent. The current turn stops first." : "Sent. It goes in after the current turn." });
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
     } finally {
       setBusy(false);
+    }
+  };
+  // Too long for a message: attach it to the run's ticket as a .txt file, which the agent opens whole,
+  // then send the run a short message pointing at it.
+  const sendAsFile = async (long: string) => {
+    if (!ticketId) return;
+    try {
+      const markdown = await img.uploadText(long, "message.txt");
+      const outgoing = withAttachments("I've sent the text as a file (below); please read it before answering.", [markdown]);
+      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: outgoing } });
+      setText("");
+      img.clear();
+      setNote({ ok: true, text: "Sent as a .txt file on the ticket; the agent is woken to read it." });
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
     }
   };
   const stop = async () => {
@@ -36,14 +56,25 @@ function Steer({ runId }: { runId: string }) {
   return (
     <form className="card" onSubmit={(e: FormEvent) => (e.preventDefault(), void send(false))} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div className="field">
-        <label htmlFor="steer">Message the agent</label>
-        <textarea id="steer" rows={3} value={text} onChange={(e) => setText(e.target.value)} />
+        <OwnerMessageBox
+          id="steer"
+          label="Message the agent"
+          rows={3}
+          value={text}
+          onChange={setText}
+          onPaste={img.onPaste}
+          onSendAsFile={ticketId ? sendAsFile : undefined}
+          attaching={img.busy}
+          error={img.error}
+          placeholder={ticketId ? undefined : "This run isn't on a ticket, so a very long paste can't be sent as a file."}
+        />
+        {img.attached.length > 0 && <small className="muted">Attached files are sent with the message.</small>}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-        <button className="btn primary" type="submit" disabled={busy}>
+        <button className="btn primary" type="submit" disabled={busy || img.busy || tooLong(text)}>
           Send after this turn
         </button>
-        <button className="btn" type="button" disabled={busy} onClick={() => void send(true)}>
+        <button className="btn" type="button" disabled={busy || img.busy || tooLong(text)} onClick={() => void send(true)}>
           Interrupt and send
         </button>
         <button className="btn" type="button" disabled={busy} onClick={() => void stop()} style={{ marginLeft: "auto", color: "var(--red-ink)" }}>
@@ -102,7 +133,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
           )}
         </div>
       </header>
-      {run && !run.endedAt && <Steer runId={runId} />}
+      {run && !run.endedAt && <Steer runId={runId} companyId={run.companyId} ticketId={run.ticketId} />}
       {dropped > 0 && (
         <p className="muted" style={{ fontSize: 13 }}>
           Showing the latest {MAX_ITEMS.toLocaleString()} events; {dropped.toLocaleString()} earlier ones aren't kept in this page.
