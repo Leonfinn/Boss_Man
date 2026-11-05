@@ -7,7 +7,7 @@ import { strFromU8, unzipSync } from "fflate";
 import { z } from "zod";
 import { columnProblems, DEFAULT_REVIEW_POLICY, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
+import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, wikiRevisions, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
 import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.js";
 import { MAX_BODY, slugify } from "./wiki.js";
@@ -424,8 +424,11 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
           .insert(wikiPages)
           .values(pkg.wiki.map((w) => ({ companyId, slug: w.slug.split("/").map(slugify).join("/"), folder: w.folder, title: w.title, body: w.body, ticketId: (w.ticket && ticketId.get(w.ticket)) || null })))
           .onConflictDoNothing()
-          .returning({ id: wikiPages.id })
+          .returning({ id: wikiPages.id, title: wikiPages.title, body: wikiPages.body })
       : [];
+    // An imported page keeps its imported text as its first version (BOS-430), so its first edit
+    // doesn't make the original the one version nobody can get back.
+    if (pages.length) await tx.insert(wikiRevisions).values(pages.map((p) => ({ pageId: p.id, title: p.title, body: p.body })));
 
     // What the owner still has to do, for the checklist decision.
     const slugName = (slug: string) => pkg.agents.find((a) => a.slug === slug)?.name ?? slug;

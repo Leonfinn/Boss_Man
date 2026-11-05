@@ -1689,9 +1689,9 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "wiki",
     {
       description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output), append (slug, entry, optional heading and position), history (slug: every version of a page, newest first, with its size and who saved it) and restore (slug and version id: put an old version back as a new version), and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). write always sets the whole page: it takes no section or offset (those are for read). A write to an existing page that would remove more than about a quarter of its text, or any of its headings, is refused unless you pass replace: true; only the CEO or the owner may replace a page another agent created. For a running log (a release log, a cock-ups log, a status page) never re-send the whole body to write: add one entry with append, which inserts it under a heading (newest first by default, or position \"oldest\" at the end of that section) or at the top or the end of the page, and never shortens the page (one entry is a line or two, at most 20,000 characters). An append needs a real heading: \"intro\" (the text above the first heading) is refused, and an entry whose code fence (```) never closes is refused so it can't swallow the page after it. If a page was wiped, history shows the full version and restore puts it back; the CEO and the page's last writer may restore. Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
       inputSchema: {
-        action: z.enum(["list", "read", "write", "attach"]),
+        action: z.enum(["list", "read", "write", "append", "history", "restore", "attach"]),
         q: z.string().max(200).optional(),
         slug: z.string().max(500).optional(),
         folder: z.string().max(400).optional(),
@@ -1703,6 +1703,11 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         url: z.string().max(2000).optional(),
         section: z.string().max(300).optional(),
         offset: z.number().int().min(0).optional(),
+        replace: z.boolean().optional(),
+        entry: z.string().max(20_000).optional(),
+        position: z.enum(["top", "bottom", "oldest"]).optional(),
+        revisionId: z.string().uuid().optional(),
+        heading: z.string().max(300).optional(),
       },
     },
     async (input) => {
@@ -1747,13 +1752,40 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           }
           case "write": {
             if (!input.title || input.body === undefined) return fail("Give a title and a body.");
+            // section and offset are for read: write always sets the whole page, so ignore them at your peril (BOS-430).
+            if (input.section !== undefined) return fail("write has no section argument: it replaces the whole page. To add an entry under a heading, use append; to read one section, use read with section.");
+            if (input.offset !== undefined) return fail("write has no offset argument: it replaces the whole page. To read the page in parts, use read with offset.");
             if (input.ticketId) {
               const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, input.ticketId, scope.agentId);
               if (reviewWrite) return fail(reviewWrite);
             }
-            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, ...by });
+            const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, replace: input.replace, isCeo: me?.role === "ceo", ...by });
             const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
             return text(`${r.created ? "Created" : "Updated"} ${link}${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
+          }
+          case "append": {
+            if (!input.slug) return fail("Give the page's slug.");
+            if (input.entry === undefined) return fail("Give the entry to add.");
+            if (input.section !== undefined) return fail("append has no section argument: give the heading to add under as heading.");
+            if (input.replace !== undefined) return fail("append adds an entry and never replaces the page; to replace it, use write with the whole body.");
+            const r = await wiki.append(scope.companyId, { slug: input.slug, entry: input.entry, heading: input.heading, position: input.position, title: input.title, ticketId: input.ticketId ?? null, agentId: scope.agentId, runId: scope.runId });
+            const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
+            return text(`Added the entry${r.where} of ${link} (${r.size.toLocaleString("en-GB")} characters now)${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
+          }
+          case "history": {
+            if (!input.slug) return fail("Give the page's slug.");
+            const h = await wiki.history(scope.companyId, input.slug);
+            const rows = h.revisions.map((r) => `- ${r.id} · ${r.createdAt.toISOString()} · ${r.agent ?? "the owner"} · ${r.size.toLocaleString("en-GB")} chars${r.runId ? ` · run #/runs/${r.runId}` : ""}`);
+            return text([`# ${h.title} (${h.slug}): ${h.size.toLocaleString("en-GB")} characters now, ${h.revisions.length} version${h.revisions.length === 1 ? "" : "s"}, newest first.`, ...rows, "", "Put one back with restore (slug and version id). A restore is itself a new version, so it can be undone."].join("\n"));
+          }
+          case "restore": {
+            if (!input.slug) return fail("Give the page's slug.");
+            if (!input.revisionId) return fail("Give the version id (from history).");
+            const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+            const r = await wiki.restore(scope.companyId, { slug: input.slug, revisionId: input.revisionId, agentId: scope.agentId, runId: scope.runId, isCeo: me?.role === "ceo" });
+            const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
+            return text(`Restored ${link} to that version (${r.size.toLocaleString("en-GB")} characters), kept as a new version so it can be undone. Pass link "${link}" to notify_owner when you tell the owner about it.`);
           }
           case "attach": {
             if (!input.ticketId) return fail("Give the ticketId it belongs to.");

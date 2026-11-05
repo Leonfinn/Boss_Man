@@ -1786,6 +1786,8 @@ export async function buildApp(opts: AppOptions) {
     // A page's address can hold folders ("research/agent-landscape"), so it's the rest of the path.
     const SlugParams = z.object({ id: Uuid, "*": z.string().min(1).max(500) }).transform((p) => ({ id: p.id, slug: p["*"] }));
     const PageBody = z.object({ title: z.string().trim().min(1).max(200), body: z.string().max(MAX_BODY), folder: z.string().max(400).optional() });
+    // The owner's own editor may replace a page outright; the shrink guard is for agents (BOS-430).
+    const OwnerPageBody = PageBody.extend({ replace: z.boolean().optional() });
     // The CEO-style brief, built when asked and never stored as a page (R84).
     owner.get("/api/companies/:id/brief", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1813,11 +1815,18 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.put("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
-      return wiki.write(id, { ...PageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
+      return wiki.write(id, { ...OwnerPageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
     });
     owner.delete("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
       return wiki.remove(id, slug).then(() => reply.code(204).send(), wikiErrors(reply));
+    });
+    // Put an old version back (BOS-430): a new version of its own, so the restore can be undone.
+    // The page's slug goes in the body, as a page address can hold folders and Fastify's wildcard must be last.
+    owner.post("/api/companies/:id/wiki-restore", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ slug: z.string().min(1).max(500), revisionId: Uuid }).parse(req.body);
+      return wiki.restore(id, { ...b, agentId: null, runId: null, isCeo: true }).then((r) => r.page, wikiErrors(reply));
     });
     owner.get("/api/companies/:id/wiki-revisions/:rev", async (req, reply) => {
       const { id, rev } = z.object({ id: Uuid, rev: Uuid }).parse(req.params);
