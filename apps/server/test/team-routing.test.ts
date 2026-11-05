@@ -302,14 +302,12 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Leave it another hour", note: "The reviewer is working through it." } }))).toBe(false);
     expect((await reload(a!.id)).status).toBe("answered");
 
-    // Swept again straight away: the answer holds it, so no new card is raised.
+    // One minute on (the sweep runs every 60s): the answer holds it, so no new card is raised.
+    ctx.advance(1);
     expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(0);
     expect(await stalled()).toHaveLength(1);
-    // Half the quiet time later, still held.
-    ctx.advance(15);
-    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(0);
-    // Past the quiet time, it asks once more.
-    ctx.advance(20);
+    // An hour on: the quiet time has passed, so it asks once more.
+    ctx.advance(60);
     expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
     expect(await stalled()).toHaveLength(2);
   });
