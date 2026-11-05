@@ -2,9 +2,9 @@
 // launcher to start the container with it, so nobody copies tokens into files. The launcher
 // is optional (BOSSMAN_LAUNCHER=1); without it the owner registers runners by hand as before.
 import { readFile } from "node:fs/promises";
-import { eq, like } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { companies, mcpServers, settings } from "../db/schema.js";
+import { companies, mcpServers, projects, settings } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
 export type LauncherOptions = { url: string; keyFile: string };
@@ -41,6 +41,19 @@ export function toolServerAddress(url: string): string | null {
     const u = new URL(url);
     if (u.hostname.startsWith("[")) return null;
     return `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+  } catch {
+    return null;
+  }
+}
+
+/** host:port of a project's git remote (http 80, https 443, ssh 22 unless it names a port), or null for a local path or anything the guard can't allow. */
+export function gitHostAddress(repoUrl: string): string | null {
+  const scp = /^[\w.-]+@([A-Za-z0-9.-]+):(?!\/\/)/.exec(repoUrl);
+  if (scp) return `${scp[1]}:22`;
+  try {
+    const u = new URL(repoUrl);
+    if (!["http:", "https:", "ssh:"].includes(u.protocol) || !u.hostname || u.hostname.startsWith("[")) return null;
+    return `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : u.protocol === "ssh:" ? "22" : "80")}`;
   } catch {
     return null;
   }
@@ -89,10 +102,12 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     return now!.value as string;
   }
 
-  /** The company's tool servers as host:port: the runner's network guard keeps these reachable on private addresses. */
+  /** The company's tool servers and git remotes as host:port: the runner's network guard keeps these reachable on private addresses. */
   async function allowFor(companyId: string): Promise<string[]> {
     const rows = await db.select({ url: mcpServers.url }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
-    return [...new Set(rows.map((r) => toolServerAddress(r.url)).filter((a): a is string => !!a))];
+    // The company's own git remotes: each project's host and port only, so its runner can clone and fetch from a LAN git server.
+    const repos = await db.select({ url: projects.repoUrl }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+    return [...new Set([...rows.map((r) => toolServerAddress(r.url)), ...repos.map((r) => gitHostAddress(r.url!))].filter((a): a is string => !!a))];
   }
 
   return {

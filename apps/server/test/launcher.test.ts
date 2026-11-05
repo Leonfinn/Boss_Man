@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { notifications } from "../src/db/schema.js";
-import { slugify, toolServerAddress } from "../src/services/launcher.js";
+import { gitHostAddress, slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -111,6 +111,24 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [] }));
     expect(toolServerAddress("https://tools.lan/mcp")).toBe("tools.lan:443");
     expect(toolServerAddress("http://[fd00::1]/mcp")).toBeNull();
+  });
+
+  it("lets the runner reach the company's own git host only, and follows a changed repo address", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
+    const last = () => c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body;
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["192.168.68.67:3003"] }));
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "https://github.com/o/r.git" });
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["github.com:443"] }));
+    expect(gitHostAddress("http://192.168.68.67:3003/o/r.git")).toBe("192.168.68.67:3003");
+    expect(gitHostAddress("git@git.lan:o/r.git")).toBe("git.lan:22");
+    expect(gitHostAddress("ssh://git@h.lan:2222/o/r")).toBe("h.lan:2222");
+    expect(gitHostAddress("http://gitea.lan/o/r")).toBe("gitea.lan:80");
+    expect(gitHostAddress("/srv/repos/r")).toBeNull();
+    expect(gitHostAddress("file:///srv/r")).toBeNull();
   });
 
   it("does nothing without the launcher", async () => {

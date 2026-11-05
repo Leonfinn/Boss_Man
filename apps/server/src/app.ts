@@ -1335,6 +1335,8 @@ export async function buildApp(opts: AppOptions) {
         .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
         .where(eq(projects.id, id))
         .returning();
+      // A new repo address (or archiving) changes which git host the company's runner may reach.
+      if (p && (fields.repoUrl !== undefined || archived !== undefined)) void launch.syncAllow(p.companyId);
       return p ?? reply.code(404).send({ error: "not_found" });
     });
 
