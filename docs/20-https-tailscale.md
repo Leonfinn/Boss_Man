@@ -31,7 +31,7 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 ## Steps
 
 1. Open the Tailscale admin console, **DNS** page. Turn on **MagicDNS**, then under **HTTPS Certificates** click **Enable HTTPS**. Note your tailnet name (it ends in `.ts.net`).
-2. On the **Settings > Keys** page, click **Generate auth key**. Leave **Reusable** off, set a short expiry, and copy the key. Do not paste it anywhere except step 4.
+2. On the **Settings > Keys** page, click **Generate auth key**. Leave **Reusable** off and **Ephemeral** off (an ephemeral machine disappears when it goes offline), set a short expiry, and copy the key. Do not paste it anywhere except step 4. **Use a key, not the interactive login link:** the Tailscale container gives up on a pending login link after about a minute and restarts, which discards the link, so a login you approve a little late never completes (see "Troubleshooting").
 3. On the Docker host, check the default private range is free, and make the state folder (use your `BOSSMAN_DATA` folder):
 
    ```sh
@@ -51,7 +51,19 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 
    If `.env` has no `COMPOSE_FILE` line, add `COMPOSE_FILE=docker-compose.yml:deploy/tailscale.yml`.
    You do not need to touch `BOSSMAN_INSECURE_COOKIES`: once the sidecar file is in use, Boss Man chooses Secure per request and ignores that line. The feedback portal port is plain http, so its cookie stays non-Secure.
-5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. After it is up you can delete the `TS_AUTHKEY` line from `.env`: the login is kept in the state folder, and an empty key is fine. If the line stays, the key is spent after first use and does no harm.
+5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. Then run the check in step 5a.
+
+   **Remove the key from `.env` once it is logged in:** delete the `TS_AUTHKEY=` line (`sed -i '/^TS_AUTHKEY=/d' .env`), then `docker compose up -d tailscale`. The login is kept in the state folder, so an empty key is fine. A spent one-time key does no harm, but it should not sit in a file.
+
+5a. Check it is stable. Both numbers matter: `RestartCount` must stay at 0 (or stop growing), and the state file must be well over 1000 bytes once logged in (a login that never completed leaves a tiny file of about 120 bytes):
+
+   ```sh
+   C=$(docker compose ps -q tailscale)
+   docker inspect --format 'RestartCount={{.RestartCount}} Status={{.State.Status}} ExitCode={{.State.ExitCode}}' "$C"
+   stat -c 'tailscaled.state: %s bytes' "$BOSSMAN_DATA/tailscale/tailscaled.state"
+   ```
+
+   Run it again after two minutes; `RestartCount` must not have gone up.
 6. In the Tailscale admin console the machine `boss-man` appears. Check Serve is on and Funnel is off:
 
    ```sh
@@ -68,6 +80,12 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 9. In Boss Man, open **Notifications** and set **Boss Man's address on your phone** to the ts.net address, so notification links open it.
 
 To undo: `docker compose stop tailscale`, remove `:deploy/tailscale.yml` from `COMPOSE_FILE` (or restore `.env.bak`), then `docker compose up -d server`. The LAN address is unaffected throughout.
+
+## Troubleshooting
+
+- **The Tailscale container restarts every ~2 minutes (exit code 0), `RestartCount` keeps rising, `tailscaled.state` stays about 120 bytes, and every start logs `NeedsLogin` with a new login link.** Cause: no auth key was set, so the container waits for an interactive login. Tailscale's start-up script allows about 60 seconds for the whole start, including that wait; when it runs out, the container exits cleanly and Docker restarts it with a fresh, different login link. A link opened from an earlier start is dead, and the machine shows in the admin console as approved but disconnected. Fix: delete that machine in the admin console, do steps 2 to 5 with an auth key, and re-run step 5a. (Source: `cmd/containerboot` in the Tailscale repository, which applies a 60-second `bootCtx` to the login step; not reproduced on a live Docker host from this ticket, so confirm with step 5a.)
+- `failed to symlink socket: file exists` in the log on every restart is harmless: it is left over from the previous start.
+- **Interactive login as a fallback (no key available):** run `docker compose up -d tailscale && docker compose logs -f tailscale`, open the newest `https://login.tailscale.com/a/...` link within about 50 seconds and approve it straight away. If the container restarts first, the link is dead; use the newest one. Prefer a key.
 
 ## Backing up and moving to a new host
 
