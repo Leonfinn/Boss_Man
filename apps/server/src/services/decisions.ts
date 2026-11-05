@@ -1688,17 +1688,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
                 join tickets b on b.id = d.blocked_ticket_id
                where c.depth < 10 and b.system_state <> 'done'
             )
-            -- A ticket is placed under the first blocker that reaches it (as the old walk did), and
-            -- siblings keep the order of the dependency rows that made them.
+            -- A ticket is placed under the first blocker that reaches it (as the old walk did).
             select distinct on (blocker, blocked) dep, blocker, blocked
               from chain order by blocker, blocked, dep`)) as unknown as { rows?: Array<{ dep: string; blocker: string; blocked: string }> } | Array<{ dep: string; blocker: string; blocked: string }>;
           const found = Array.isArray(result) ? result : (result.rows ?? []);
-          // The same edge can come back at two depths; the first one (by dependency row) is the place.
-          const seenEdge = new Set<string>();
+          // Under each blocker, its dependents in the order of the dependency rows that made them: the
+          // same order the old walk over every dependency row produced.
           for (const r of [...found].sort((x, y) => x.dep.localeCompare(y.dep))) {
-            const edge = `${r.blocker}|${r.blocked}`;
-            if (seenEdge.has(edge)) continue;
-            seenEdge.add(edge);
             dependents.set(r.blocker, [...(dependents.get(r.blocker) ?? []), r.blocked]);
           }
         }
