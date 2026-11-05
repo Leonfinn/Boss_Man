@@ -81,6 +81,8 @@ describe("R6: a card names a button that doesn't exist", () => {
 const FILE_SCREEN: Record<string, OwnerScreen> = {
   "App.tsx": "Any screen",
   "components/ImageAttach.tsx": "Any screen",
+  // Opened from a picture in any Markdown text.
+  "components/Lightbox.tsx": "Any screen",
   "components/SaveButton.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
   "components/ReviewPolicy.tsx": "Settings",
@@ -131,6 +133,8 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   "Any screen": ["OK", "Cancel"],
   // The command block's copy button: its label is a variable ("Copy", then "Copied").
   Decisions: ["Copy"],
+  // The sign-off button: its label is a variable that depends on how the project lands work (BOS-471).
+  Ticket: ["Approve", "Approve and open a pull request", "Approve and merge"],
 };
 
 function skipString(s: string, i: number): number {
@@ -318,6 +322,8 @@ describe("OWNER_CONTROLS matches the web app", () => {
   it("has no entry the app no longer shows", () => {
     expect(readFileSync(join(WEB, "pages/Decisions.tsx"), "utf8")).toMatch(/Copy this command/);
     expect(tsx.some((f) => /\bconfirm\(/.test(readFileSync(f, "utf8")))).toBe(true);
+    const approveLabel = readFileSync(join(WEB, "pages/Ticket.tsx"), "utf8").match(/const approveLabel = (.*);/)?.[1] ?? "";
+    expect(shown(approveLabel).sort()).toEqual([...NOT_FROM_BUTTONS.Ticket!].sort());
     const stale = (Object.keys(OWNER_CONTROLS) as OwnerScreen[]).flatMap((s) =>
       listed(s).filter((l) => !found.get(s)?.has(l) && !NOT_FROM_BUTTONS[s]?.includes(l)).map((l) => `${s}: ${l}`),
     );

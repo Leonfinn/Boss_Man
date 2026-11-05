@@ -18,6 +18,8 @@ export const OWNER_CONTROLS = {
     "Agents", "Skills", "Runs", "Scrum Master", "Workflow", "Engagements", "Settings",
     "Switch company", "Create", "New company", "Close menu", "Menu …", "Turn on browser notifications", "Log out",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
+    // A picture opened from Markdown text.
+    "Actual size", "Fit to window",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -48,6 +50,7 @@ export const OWNER_CONTROLS = {
     "Approve and open a pull request", "Approve and merge", "Request changes", "Run now", "Description", "Edit",
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
+    "Mark urgent", "Marked urgent", "Edit steps", "Save steps",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // The Scrum Master's log of this ticket.
