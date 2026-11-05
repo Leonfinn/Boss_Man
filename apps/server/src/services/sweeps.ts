@@ -5,17 +5,17 @@
 // - missed work (R82): an assigned ticket that is ready to go but that nobody is working on;
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
 import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
-import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, type DecisionContext } from "./decisions.js";
+import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
-import { activeRows, evaluate, latestRows } from "./review-kinds.js";
+import { activeRows, endedNormallySql, evaluate, latestRows, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { progressSweep } from "./progress.js";
 import { MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
@@ -44,6 +44,10 @@ export type SweepLimits = {
   busyStallAfterMs: number;
   /** A quiet run whose runner is connected and still answering pings is probably inside a long command: wait this long too (BOS-217). */
   busyRunnerAfterMs: number;
+  /** A run that has said nothing this long after launch, on a connected and settled runner, never began: it is started again (BOS-480). */
+  neverStartedAfterMs: number;
+  /** How many times a never-started run's wake is queued again before the CEO is told (BOS-480). */
+  neverStartedRetries: number;
 };
 export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   staleAfterMs: 24 * 3_600_000,
@@ -57,7 +61,14 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   ticketlessAfterMs: 10 * 60_000,
   busyStallAfterMs: 15 * 60_000,
   busyRunnerAfterMs: 15 * 60_000,
+  neverStartedAfterMs: 3 * 60_000,
+  neverStartedRetries: 2,
 };
+/**
+ * The line a re-queued wake carries at the end of its note: it is how the retries of one original
+ * wake are counted without a column (BOS-480), and it tells the agent why it was started again.
+ */
+const RETRY_MARK = /\n*\[Boss Man started this again: the earlier start never began \(retry (\d+) of \d+\)\]$/;
 // After this many nudges in a day the owner is told instead (R82).
 const MISSED_NUDGES_PER_DAY = 2;
 
@@ -66,7 +77,7 @@ const hhmm = (d: Date) => d.toISOString().slice(11, 16);
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; /** Closes every card whose conditions have cleared (DR-016, BOS-470). */ clearAlerts?: () => Promise<number>; isConnected: (runnerId: string) => boolean; /** The runner connected only just now, so its queued runs are still starting (BOS-331). */ runnerSettling?: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; /** Closes every card whose conditions have cleared (DR-016, BOS-470). */ clearAlerts?: () => Promise<number>; isConnected: (runnerId: string) => boolean; /** The runner connected only just now, so its queued runs are still starting (BOS-331). */ runnerSettling?: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; /** Queues a wake as given, never merged into another or steered into a live run (BOS-480). */ requeue?: (input: WakeInput) => Promise<unknown>; /** Tells the runner to drop a run it may still be setting up. */ cancelOnRunner?: (runnerId: string, runId: string) => unknown; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -169,7 +180,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    */
   async function lostRuns(t: Date) {
     const live = await db
-      .select({ run: runs, runnerId: runners.id })
+      .select({ run: runs, runnerId: runners.id, bootId: runners.bootId })
       .from(runs)
       .leftJoin(runners, eq(runners.companyId, runs.companyId))
       .where(isNull(runs.endedAt));
@@ -180,10 +191,99 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const idle = t.getTime() - (r.run.lastEventAt ?? r.run.startedAt).getTime();
       if (idle < limits.stallAfterMs + limits.lostAfterMs) continue;
       if (r.runnerId && opts.isConnected(r.runnerId) && r.run.lastEventAt) continue;
-      await opts.endRun(r.run.id, r.run.lastEventAt ? "lost: runner offline" : "lost: never started", t);
+      if (r.run.lastEventAt) await opts.endRun(r.run.id, "lost: runner offline", t);
+      // Never started (the runner was offline throughout, say): its wake is queued again, to start once the runner is back.
+      else await endNeverStarted(r.run, r.runnerId, r.bootId, t);
       ended++;
     }
     return ended;
+  }
+
+  /**
+   * Whether the runner said the run is waiting for the repo lock (BOS-331). Such a run is alive
+   * but sends no event of its own until the lock frees, up to 30 minutes, so it is not lost.
+   */
+  async function waitingForRepoLock(runId: string) {
+    const [hit] = await db
+      .select({ id: runnerEvents.id })
+      .from(runnerEvents)
+      .where(and(eq(runnerEvents.type, "runner.log"), sql`${runnerEvents.payload}->>'message' like ${`Run ${runId} is waiting for the repo lock%`}`))
+      .limit(1);
+    return !!hit;
+  }
+
+  /**
+   * Runs the runner never began (BOS-480): `run.started` sets `lastEventAt`, so a run without one,
+   * this long after launch on a runner that is connected and past its settling time, was lost (most
+   * often in a runner restart). It is ended and its wake queued again; nobody is asked to cancel it.
+   */
+  async function neverStartedRuns(t: Date) {
+    const live = await db
+      .select({ run: runs, runnerId: runners.id, bootId: runners.bootId })
+      .from(runs)
+      .innerJoin(runners, eq(runners.companyId, runs.companyId))
+      // A run being cancelled is left to the cancel sweep, which ends it within a minute.
+      .where(and(isNull(runs.endedAt), isNull(runs.lastEventAt), isNull(runs.cancelRequestedAt)));
+    let ended = 0;
+    for (const r of live) {
+      if (t.getTime() - r.run.startedAt.getTime() < limits.neverStartedAfterMs) continue;
+      if (!opts.isConnected(r.runnerId) || opts.runnerSettling?.(r.runnerId)) continue;
+      if (await waitingForRepoLock(r.run.id)) continue;
+      if (await endNeverStarted(r.run, r.runnerId, r.bootId, t)) ended++;
+    }
+    return ended;
+  }
+
+  /**
+   * Ends a run that never started and queues its wake again: same agent, ticket, reason, note and
+   * priority, keeping the run it resumes, with no cause (a retry is not a new link in a chain).
+   * After `neverStartedRetries` retries of one wake, the CEO is told instead (BOS-480).
+   */
+  async function endNeverStarted(run: typeof runs.$inferSelect, runnerId: string | null, bootId: string | null, t: Date) {
+    if ((await opts.endRun(run.id, "lost: never started", t)) === false) return false;
+    // The runner may still be setting the run up (slow, not lost): stop it there, so the retry can't
+    // end up running beside it. A runner that doesn't know the run just reports it ended.
+    if (runnerId && opts.isConnected(runnerId)) opts.cancelOnRunner?.(runnerId, run.id);
+    const [w] = await db.select().from(wakes).where(eq(wakes.runId, run.id)).limit(1);
+    // A deploy's run is not retried: its deploy failed when the run ended, and only a new approval restarts it.
+    if (!w || w.deployId || !opts.requeue) return true;
+    const tries = Number(w.note?.match(RETRY_MARK)?.[1] ?? 0);
+    if (tries >= limits.neverStartedRetries) {
+      await tellCeoNeverStarted(run.companyId, w, runnerId, bootId);
+      return true;
+    }
+    const note = (w.note ?? "").replace(RETRY_MARK, "");
+    const mark = `[Boss Man started this again: the earlier start never began (retry ${tries + 1} of ${limits.neverStartedRetries})]`;
+    await opts.requeue({ agentId: w.agentId, ticketId: w.ticketId, reason: w.reason, note: note ? `${note}\n\n${mark}` : mark, priority: w.priority, resumeRunId: w.resumeRunId, causedByRunId: null });
+    return true;
+  }
+
+  /**
+   * One CEO card per runner boot lists every agent whose run never started even after its retries
+   * (BOS-480, DR-017 D). A later failure on the same boot is added to the open card, not a new one.
+   */
+  async function tellCeoNeverStarted(companyId: string, w: typeof wakes.$inferSelect, runnerId: string | null, bootId: string | null) {
+    const [agent] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
+    const [ticket] = w.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+    const entry = `${agent?.name ?? "An agent"}${ticket ? ` on "${ticket.title}"` : ""}`;
+    const question = (list: string[]) =>
+      `${list.length === 1 ? "A run" : `${list.length} runs`} never started on the runner, even after Boss Man started ${list.length === 1 ? "it" : "each"} again ${limits.neverStartedRetries} times: ${list.join("; ")}. Boss Man has stopped trying. Check the runner (Settings → Server and runner), then wake ${list.length === 1 ? "the agent" : "these agents"} again.`;
+    const dedupeKey = `runner-boot:${runnerId ?? "none"}:${bootId ?? "unknown"}`;
+    // The CEO is this card's highest rung (DR-017 A): the `runner_boot` kind's row holds it there (BOS-469).
+    // No `cause`, so the ladder doesn't fold it into its generic "N runs" heading: this card keeps its own
+    // list of agents and tickets in the question, added to below under the same dedupe key.
+    // No `about` or ticket: it lists several agents, and an agent it is about (the CEO itself) would be skipped as a rung.
+    const raised = await opts.alert({ companyId, kind: "runner_boot", question: question([entry]), from: "ceo", dedupeKey, context: { neverStarted: [entry] } });
+    if (raised) return;
+    const [open] = await db.select().from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open")));
+    if (!open) return;
+    const list = (open.context as { neverStarted?: string[] }).neverStarted ?? [];
+    if (list.includes(entry)) return;
+    const next = [...list, entry];
+    await db
+      .update(decisions)
+      .set({ question: question(next), context: { ...(open.context as object), neverStarted: next } })
+      .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")));
   }
 
   /**
@@ -228,8 +328,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A finished ticket needs no alert about its run, and neither does one waiting on the owner.
       const eligible = !waiting.has(run.run.id) && !!run.runnerId && run.ticketState !== "done";
       if (!eligible || idle < limits.stallAfterMs) return { idle, stalled: false };
-      // A run that has said nothing yet, on a runner that has only just come back, is queued behind the others: wait.
-      if (!run.run.lastEventAt && opts.runnerSettling?.(run.runnerId!)) return { idle, stalled: false };
+      // A run that has never said anything is not stalled but not started: the never-started sweep
+      // retries it, and nobody is asked to cancel it (BOS-480).
+      if (!run.run.lastEventAt) return { idle, stalled: false };
       if (!withBusyChecks) return { idle, stalled: true };
       const command = await busyInCommand(run.run.id);
       if (command) {
@@ -281,12 +382,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
             cardKind: "stalled_run",
             kind: "stalled_run",
             cause: { runId },
-            // No event at all: the runner never began it, most likely lost in a runner restart.
-            question: r.run.lastEventAt
-              ? `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. ${busy.get(runId) ? `It is still inside ${busy.get(runId)}, so it may just be a long command.` : "It may be stuck, or busy with a long command."}`
-              : `${r.agentName ?? "An agent"}'s run${r.ticketTitle ? ` on "${r.ticketTitle}"` : ""} never started: the runner hasn't reported it beginning in ${ago(r.idle)}, probably because the runner restarted. Cancel it, then message ${r.agentName ?? "the agent"} on the task to start again.`,
+            question: `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. ${busy.get(runId) ? `It is still inside ${busy.get(runId)}, so it may just be a long command.` : "It may be stuck, or busy with a long command."}`,
             options: [KEEP_WAITING, CANCEL_RUN],
-            recommended: r.run.lastEventAt ? KEEP_WAITING : CANCEL_RUN,
+            recommended: KEEP_WAITING,
             from: "scrum_master",
             duty: true,
             ticketId: r.run.ticketId,
@@ -372,31 +470,41 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         if (!agentId || busy.has(agentId) || done.has(agentId)) continue;
         const [reviewer] = await db.select({ name: agents.name, paused: agents.paused, retiredAt: agents.retiredAt }).from(agents).where(eq(agents.id, agentId));
         if (!reviewer || reviewer.paused || reviewer.retiredAt) continue;
-        // A run that ended after the request counts as the reviewer having looked; give it the usual quiet time.
-        const [last] = await db.select({ at: max(runs.endedAt) }).from(runs).where(eq(runs.agentId, agentId));
-        const lastActive = later(r.createdAt, last?.at)!;
+        // A run that ended after the request counts as the reviewer having looked; give it the usual
+        // quiet time. A run that was cut off (interrupted, or lost by the server) never gave a verdict,
+        // so it must not hold the re-wake back (DR-017, decision F).
+        const roundStart = (await roundStartedAt(db, ticket.id)) ?? r.createdAt;
+        const [last] = await db.select({ at: max(runs.endedAt) }).from(runs).where(and(eq(runs.agentId, agentId), endedNormallySql(runs.outcome)));
+        const lastActive = later(roundStart, last?.at)!;
         if (t.getTime() - lastActive.getTime() < limits.missedAfterMs) continue;
-        // Review wakes name the ticket at the start of their note; the first one counts too.
+        // "Leave it another hour" holds this review for another quiet period, starting from the answer,
+        // so the CEO's choice isn't re-asked within a minute (BOS-426, BOS-433 fix B).
+        const waited = await reviewWaitedSince(db, r.id);
+        if (waited && t.getTime() - waited.getTime() < limits.missedAfterMs) continue;
+        // Review wakes name the ticket at the start of their note; the first one counts too. Only this
+        // round's wakes count (BOS-433): a reviewer who answered rounds 1-2 isn't reported for round 3.
         const recent = await db
           .select({ id: wakes.id, createdAt: wakes.createdAt })
           .from(wakes)
-          .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, REVIEW_REASON), like(wakes.note, `%- ${ticket.id} %`), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
+          .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, REVIEW_REASON), like(wakes.note, reviewAskPattern(ticket.id)), gte(wakes.createdAt, roundStart)))
           .orderBy(desc(wakes.createdAt));
         if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.missedAfterMs) continue;
         if (recent.length > MISSED_NUDGES_PER_DAY) {
           // The CEO first: stopping or moving a review is beyond the Scrum Master, and the owner
-          // should only see this if the CEO doesn't settle it (BOS-119).
+          // should only see this if the CEO doesn't settle it (BOS-119). Real actions on the review,
+          // not "Got it": the CEO can take it over, give it to another reviewer, send it back to the
+          // author, or leave it another hour (BOS-404, BOS-426, BOS-433 fix B kept its card).
           const row = await opts.alert({
             companyId: ticket.companyId,
             kind: "review_stall",
-            question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it ${recent.length} times in the last day without giving a verdict. Look into it, or move the ticket on yourself.`,
-            options: ["Got it"],
-            recommended: "Got it",
+            question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it this round ${recent.length} times without giving a verdict. What should happen to the review?`,
+            options: [TAKE_REVIEW, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, WAIT_ANOTHER_HOUR],
+            recommended: WAIT_ANOTHER_HOUR,
             from: "ceo",
             ticketId: ticket.id,
             about: [agentId],
             dedupeKey: `review-stall:${r.id}`,
-            context: { type: "question" },
+            context: { type: "review_stall", reviewId: r.id, ticketId: ticket.id, reviewerAgentId: agentId, kind: r.kind },
           });
           if (row) result.gaveUp++;
           continue;
@@ -620,6 +728,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       await opts.expireSkills?.();
       await opts.endUnconfirmedCancels(t);
       await opts.expireAdvice?.();
+      const neverStarted = await neverStartedRuns(t);
       const lost = await lostRuns(t);
       const staleB = await staleBlockers(t);
       const stalled = await stalledRuns(t);
@@ -636,7 +745,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const unmerged = held ? 0 : await unmergedApprovals(t);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
       const ticketless = held ? { raised: 0 } : await longTicketlessRuns(t);
-      return { goalChecks, closedCards, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, progress };
+      return { goalChecks, closedCards, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, progress };
     },
   };
 }

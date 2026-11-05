@@ -342,6 +342,10 @@ export const tickets = pgTable(
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
+    /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
+    ownerSetup: text("owner_setup"),
+    /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
+    ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
