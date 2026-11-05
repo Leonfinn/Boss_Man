@@ -185,3 +185,109 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect(w!.note).toContain(A.slice(0, 8));
   });
 });
+
+/** A finished code ticket with its merge commit and setup steps, as the merge gate and its author left it. */
+async function doneTicket(c: Awaited<ReturnType<typeof setupApp>>, projectId: string, over: { title: string; mergeCommit: string; ownerSetup?: string; at: Date }) {
+  const t = await c.work.createTicket(projectId, { title: over.title, noCode: false, state: "done" });
+  await c.db.update(tickets).set({ mergeCommit: over.mergeCommit, lastActivityAt: over.at, ...(over.ownerSetup ? { ownerSetup: over.ownerSetup } : {}) }).where(eq(tickets.id, t.id));
+  return t;
+}
+
+const setupCards = (c: Awaited<ReturnType<typeof setupApp>>) =>
+  c.db.select().from(decisions).then((all) => all.filter((d) => (d.context as { type?: string }).type === "owner_setup"));
+
+describe("owner setup cards (DR-011)", () => {
+  it("raises no card at merge: a merged ticket alone earns nothing until its commit is live", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await doneTicket(c, projectId, { title: "Second Claude account", mergeCommit: A, ownerSetup: "Settings → Funding → Add account", at: new Date("2026-11-03T12:00:00Z") });
+    await c.releaseLog.note(companyId, C); // live, but not this ticket's commit
+    expect(await c.releaseLog.releaseManagerWakes("restarted")).toBeGreaterThanOrEqual(0);
+    expect(await setupCards(c)).toHaveLength(0);
+  });
+
+  it("raises one card when the live commit includes the merge, with the author's steps", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await doneTicket(c, projectId, { title: "Second Claude account", mergeCommit: B, ownerSetup: "Settings → Funding → Add account\nThen sign in to the second plan", at: new Date("2026-11-03T12:00:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, B); // the deployer says B is live (after the standby window: only a finished deploy is noted)
+    await c.releaseLog.releaseManagerWakes("deployed");
+
+    const cards = await setupCards(c);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ kind: "question", tier: "owner", status: "open", dedupeKey: `owner-setup:${(await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add account\nThen sign in to the second plan")))[0]!.id}` });
+    expect(cards[0]!.question).toContain("Second Claude account");
+    expect(cards[0]!.question).toContain("Add account");
+    expect(cards[0]!.question).toContain("sign in to the second plan");
+    expect((cards[0]!.context as { ticketId?: string }).ticketId).toBeDefined();
+    // The ticket records which card it raised.
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add account\nThen sign in to the second plan"));
+    expect(t!.ownerSetupDecisionId).toBe(cards[0]!.id);
+  });
+
+  it("doesn't raise a second card on a repeat go-live pass", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await doneTicket(c, projectId, { title: "Second Claude account", mergeCommit: B, ownerSetup: "Settings → Funding → Add account", at: new Date("2026-11-03T12:00:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    await c.releaseLog.note(companyId, C); // another deploy, still including B
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(1);
+  });
+
+  it("withdraws the card on a switch-back and raises it again on the next go-live", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await doneTicket(c, projectId, { title: "Older change", mergeCommit: B, ownerSetup: "Settings → Funding → Add account", at: new Date("2026-11-03T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Newer change", mergeCommit: C, at: new Date("2026-11-03T13:00:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(1);
+
+    // Switched back to B: C is no longer running, but B's card is still right.
+    await deployResult(c, { result: "rolled_back", from: C, to: B, ended: new Date(Date.now() + 60_000).toISOString(), id: randomUUID() });
+    await c.selfDeploy.sync();
+    expect(await setupCards(c)).toHaveLength(1);
+
+    // Switched back to before B: its card goes, freed to come back later.
+    await deployResult(c, { result: "rolled_back", from: B, to: A, ended: new Date(Date.now() + 120_000).toISOString(), id: randomUUID() });
+    await c.selfDeploy.sync();
+    const after = await setupCards(c);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.status).toBe("withdrawn");
+    expect(after[0]!.dedupeKey).toBeNull();
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.mergeCommit, B));
+    expect(t!.ownerSetupDecisionId).toBeNull();
+
+    // Live again: a fresh card.
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const again = await setupCards(c);
+    expect(again).toHaveLength(2);
+    expect(again.filter((d) => d.status === "open")).toHaveLength(1);
+  });
+
+  it("leaves a ticket alone when it has no setup steps", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await doneTicket(c, projectId, { title: "Nothing to do", mergeCommit: B, at: new Date("2026-11-03T12:00:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(0);
+  });
+
+  it("refuses a card whose command isn't copy-safe, and logs why instead of showing it", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await doneTicket(c, projectId, { title: "Run a command", mergeCommit: B, ownerSetup: "Run this:\n```sh\nmkdir <your-folder>\n```", at: new Date("2026-11-03T12:00:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(0);
+  });
+});

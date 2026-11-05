@@ -48,6 +48,7 @@ import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
+import { commandProblem, parseStep } from "./steps.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -135,6 +136,12 @@ export type DecisionContext =
    * "A step failed" on the card.
    */
   | { type: "owner_todo"; ofDecisionId: string; steps: string[]; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate }
+  /**
+   * The owner's setup steps for a ticket, raised by Boss Man once the ticket's change is live (DR-011).
+   * `ticketId` links it back; `commit` is the live commit it was raised on, so a later switch-back to
+   * before that commit withdraws it. Steps are the ticket author's words, checked by review.
+   */
+  | { type: "owner_setup"; ticketId: string; steps: string[]; commit: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; result?: { result: string; message: string; at: string } }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
@@ -252,6 +259,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "deploy",
   "self_deploy",
   "owner_todo",
+  "owner_setup",
   "maintenance",
   "hire",
   "instructions",
@@ -379,6 +387,63 @@ export async function raiseOwnerTodo(
   return row ?? null;
 }
 
+/** The dedupe key for a ticket's owner setup card (DR-011): one per ticket, ever. */
+export const ownerSetupKey = (ticketId: string) => `owner-setup:${ticketId}`;
+
+/**
+ * The owner's setup card for a ticket whose change is now live (DR-011). `steps` is the author's text,
+ * already through the card check. One card per ticket: the key is unique, so a repeat go-live pass or a
+ * second deploy that already includes the commit can't stack a second card. Returns the row, or null
+ * when a card is already open for this ticket.
+ */
+export async function raiseOwnerSetup(db: Db, t: { companyId: string; ticketId: string; title: string; steps: string[]; commit: string }) {
+  // The card check (DR-008), the part that exists today: any command block must be copy-safe. A step set
+  // that fails it raises no card and is logged, so the developer is the one who fixes the steps, never the
+  // owner meeting an un-runnable command. Newer lint rules run here too once they land on main.
+  const bad = ownerSetupProblem(t.steps);
+  if (bad) {
+    await record(db, { companyId: t.companyId, ticketId: t.ticketId, kind: "owner_setup_refused", summary: `The setup card wasn't raised: ${bad}`, at: new Date() });
+    return null;
+  }
+  const [row] = await db
+    .insert(decisions)
+    .values({
+      companyId: t.companyId,
+      kind: "question",
+      question: `"${t.title}" is live. To start using it:\n\n${t.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}`,
+      options: [TODO_DONE],
+      recommendedOption: TODO_DONE,
+      tier: "owner",
+      dedupeKey: ownerSetupKey(t.ticketId),
+      context: { type: "owner_setup", ticketId: t.ticketId, steps: t.steps, commit: t.commit } satisfies DecisionContext,
+    })
+    .onConflictDoNothing()
+    .returning({ id: decisions.id, companyId: decisions.companyId });
+  if (!row) return null;
+  await record(db, { companyId: row.companyId, ticketId: t.ticketId, kind: "decision_raised", summary: `The owner's setup steps for "${t.title}" are live: raised their card.`, at: new Date() });
+  return row;
+}
+
+/**
+ * Takes back a ticket's setup card when the live commit moves back to before its merge (DR-011): a
+ * rollback or a switch-back. Frees the key so the next go-live raises it again with its steps.
+ */
+export async function withdrawOwnerSetup(db: Db, ticketId: string, note: string) {
+  const [open] = await db.select().from(decisions).where(and(eq(decisions.dedupeKey, ownerSetupKey(ticketId)), eq(decisions.status, "open")));
+  if (!open) return null;
+  const withdrawal: Withdrawal = { by: "system", note, at: new Date().toISOString() };
+  const [row] = await db
+    .update(decisions)
+    .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(open.context as object), withdrawn: withdrawal } })
+    .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")))
+    .returning({ id: decisions.id, companyId: decisions.companyId });
+  if (row) {
+    await db.update(tickets).set({ ownerSetupDecisionId: null }).where(eq(tickets.id, ticketId));
+    await record(db, { companyId: row.companyId, ticketId, kind: "decision_withdrawn", summary: note, at: new Date() });
+  }
+  return row ?? null;
+}
+
 /** Closes the open owner to-do for a key once the owner's step is confirmed done (BOS-122), e.g. by the live commit changing. */
 export async function clearOwnerTodo(db: Db, key: string, summary: string) {
   const [row] = await db
@@ -431,6 +496,22 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
   if (soft.length && !override) return { error: `These steps can't go to the owner as written:\n${lintLines(soft)}\n${tail}${a.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
   const lint: CardLint = { warn, ...(soft.length && override ? { override: { reason: override, findings: soft } } : {}) };
   return { error: null, ...(lint.warn.length || lint.override ? { lint } : {}) };
+}
+
+/**
+ * Why a ticket's owner setup steps can't become a card (DR-008's card check over server-built text), or
+ * null. Today that's the copy-safe rule: every command block in the steps must be one line the owner can
+ * paste as it is. Length is left to the author and review, not the card.
+ */
+export function ownerSetupProblem(steps: string[]): string | null {
+  const text = steps.join("\n");
+  if (!text.trim()) return "it has no steps";
+  for (const piece of parseStep(text)) {
+    if (piece.type !== "command") continue;
+    const problem = commandProblem(piece.text);
+    if (problem) return `a command is not copy-safe (${problem}): ${piece.text}`;
+  }
+  return null;
 }
 
 /** An agent's model setup as the CEO sets it and the owner sees it (BOS-128). */
