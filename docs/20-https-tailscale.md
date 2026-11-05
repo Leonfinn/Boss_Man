@@ -32,11 +32,10 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 
 1. Open the Tailscale admin console, **DNS** page. Turn on **MagicDNS**, then under **HTTPS Certificates** click **Enable HTTPS**. Note your tailnet name (it ends in `.ts.net`).
 2. On the **Settings > Keys** page, click **Generate auth key**. Leave **Reusable** off and **Ephemeral** off (an ephemeral machine disappears when it goes offline), set a short expiry, and copy the key. Do not paste it anywhere except step 4. **Use a key, not the interactive login link:** the Tailscale container gives up on a pending login link after about a minute and restarts, which discards the link, so a login you approve a little late never completes (see "Troubleshooting").
-3. On the Docker host, check the default private range is free, and make the state folder (use your `BOSSMAN_DATA` folder):
+3. On the Docker host, check the default private range is free (Docker creates the Tailscale state folder under your `BOSSMAN_DATA` itself on first start, so there is nothing to make by hand):
 
    ```sh
    docker network ls -q | xargs docker network inspect --format "{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}" | grep 172.30.0 || echo free
-   mkdir -p "$BOSSMAN_DATA/tailscale"
    ```
 
    If it prints a network instead of `free`, or `ip -4 route` shows 172.30.0.x in use, set `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP` and `BOSSMAN_EDGE_SERVER_IP` in `.env` (see above) before step 5.
@@ -55,15 +54,16 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 
    **Remove the key from `.env` once it is logged in:** delete the `TS_AUTHKEY=` line (`sed -i '/^TS_AUTHKEY=/d' .env`), then `docker compose up -d tailscale`. The login is kept in the state folder, so an empty key is fine. A spent one-time key does no harm, but it should not sit in a file.
 
-5a. Check it is stable. Both numbers matter: `RestartCount` must stay at 0 (or stop growing), and the state file must be well over 1000 bytes once logged in (a login that never completed leaves a tiny file of about 120 bytes):
+5a. Check it is stable. Run these from the Boss Man folder (the one with `docker-compose.yml`); they need no shell variables. `RestartCount` must stay at 0 (or stop growing), `BackendState` must say `"Running"` (not `"NeedsLogin"`), and the state file must be well over 1000 bytes (a login that never completed leaves about 120 bytes):
 
    ```sh
    C=$(docker compose ps -q tailscale)
    docker inspect --format 'RestartCount={{.RestartCount}} Status={{.State.Status}} ExitCode={{.State.ExitCode}}' "$C"
-   stat -c 'tailscaled.state: %s bytes' "$BOSSMAN_DATA/tailscale/tailscaled.state"
+   docker compose exec tailscale stat -c "tailscaled.state: %s bytes" /var/lib/tailscale/tailscaled.state
+   docker compose exec tailscale tailscale status --json | grep -m1 BackendState
    ```
 
-   Run it again after two minutes; `RestartCount` must not have gone up.
+   Run it again after two minutes; `RestartCount` must not have gone up. Then prove the login survives a restart: run `docker compose restart tailscale`, wait 30 seconds, and run the block again. `BackendState` must still be `"Running"` with no new login link in `docker compose logs tailscale`.
 6. In the Tailscale admin console the machine `boss-man` appears. Check Serve is on and Funnel is off:
 
    ```sh
