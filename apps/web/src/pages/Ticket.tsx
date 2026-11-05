@@ -137,6 +137,53 @@ function CriteriaEdit({ initial, save, busy }: { initial: string[]; save: (lines
   );
 }
 
+/** The owner's setup steps (DR-011): what they do once this change is live, written by whoever built it. */
+function OwnerSetup({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => void; busy: boolean }) {
+  const steps = (t.ownerSetup ?? "").trim();
+  return (
+    <Fold title="After it goes live, you'll need to" hint={steps ? steps.split("\n").filter(Boolean).length + " step" + (steps.split("\n").filter(Boolean).length === 1 ? "" : "s") : undefined}>
+      <OwnerSetupEdit key={steps} initial={steps} busy={busy} save={(v) => patch({ ownerSetup: v })} />
+    </Fold>
+  );
+}
+
+/** One step per line; saving nothing clears them. */
+function OwnerSetupEdit({ initial, save, busy }: { initial: string; save: (v: string) => void; busy: boolean }) {
+  const [text, setText] = useState(initial);
+  const [open, setOpen] = useState(!initial);
+  return open ? (
+    <div className="field">
+      <label htmlFor="t-owner-setup" style={{ fontWeight: 600 }}>
+        What you have to do, one step per line
+      </label>
+      <textarea
+        id="t-owner-setup"
+        rows={3}
+        maxLength={4_000}
+        placeholder={"Settings → Funding → Add account, then sign in to the second plan"}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
+      />
+      <small className="muted">In plain words, by the buttons you'd click, one step per line. Boss Man shows this as a card only once the change is actually running. Leave empty if there's nothing for you to do.</small>
+      <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+        <button type="button" className="btn primary" disabled={busy || text === initial} onClick={() => save(text.trim())}>
+          Save steps
+        </button>
+        {initial && (
+          <button type="button" className="btn" onClick={() => setOpen(false)}>
+            Done
+          </button>
+        )}
+      </div>
+    </div>
+  ) : (
+    <button type="button" className="link" style={{ alignSelf: "flex-start", padding: 0 }} onClick={() => setOpen(true)}>
+      Edit steps
+    </button>
+  );
+}
+
 type Landing =
   | { state: "running"; startedAt: string; command: string | null; startedBy: string; stale?: boolean; phase?: string }
   | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
@@ -609,6 +656,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </label>
 
           <DoneWhen t={t} patch={patch} busy={busy} />
+          <OwnerSetup t={t} patch={patch} busy={busy} />
 
           <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch && !t.noCode ? "code on its branch" : "nothing yet"}>
             <TicketOutputs items={made} companyId={t.companyId} ticketId={t.id} prefix={t.ref?.replace(/-\d+$/, "") ?? null} onChanged={outputs.reload} code={t.mergeCommit ? { merged: t.mergeCommit } : t.branch && !t.noCode ? { branch: t.branch } : null} />

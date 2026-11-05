@@ -34,10 +34,12 @@ const KIND: Record<string, { label: string; tone: string }> = {
   plan: { label: "Plan", tone: "blue" },
   stale_blocker: { label: "Stale blocker", tone: "amber" },
   stalled_run: { label: "Stalled run", tone: "amber" },
+  review_stall: { label: "Stalled review", tone: "amber" },
   question: { label: "Question", tone: "" },
   deploy: { label: "Production deploy", tone: "red" },
   self_deploy: { label: "Boss Man update", tone: "blue" },
   owner_todo: { label: "Waiting for you", tone: "amber" },
+  owner_setup: { label: "Ready to use", tone: "green" },
   rule_proposal: { label: "Proposed rule", tone: "blue" },
   skill: { label: "Skill", tone: "blue" },
 };
@@ -54,6 +56,10 @@ const EFFECT = {
 const OPTION_HELP: Record<string, string> = {
   "Cancel run": "Cancel run: stops it; message the agent on the task to start again.",
   "Keep waiting": "Keep waiting: you'll be asked again in 30 minutes if it stays quiet.",
+  "Leave it another hour": "Leave it another hour: the review stays with the same reviewer; you'll be asked again if it's still missed.",
+  "Take the review myself": "Take the review myself: you become the reviewer and are woken to give the verdict.",
+  "Give it to another reviewer": "Give it to another reviewer: goes to another qualified reviewer of the same kind, who is woken.",
+  "Send it back to the author": "Send it back to the author: the ticket goes back to them to sort out (for example, a stale branch).",
 };
 
 type TicketLanding = { state: "running"; startedAt: string; startedBy: string; stale?: boolean; phase?: string } | { state: "finished"; text?: string };
@@ -280,7 +286,7 @@ function settledWord(answer: string) {
 
 function kindOf(d: Decision) {
   const ctx = (d as Decision & { context?: { type?: string } }).context;
-  const key = ctx?.type === "deploy" || ctx?.type === "self_deploy" || ctx?.type === "rule_proposal" ? ctx.type : d.options.includes("Approve plan") ? "plan" : d.kind;
+  const key = ctx?.type === "deploy" || ctx?.type === "self_deploy" || ctx?.type === "rule_proposal" ? ctx.type : d.options.includes("Approve plan") ? "plan" : ctx?.type === "review_stall" ? "review_stall" : d.kind;
   return KIND[key] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
 }
 
