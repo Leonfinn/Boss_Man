@@ -138,7 +138,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           healthy = false;
         }
       }
-      if (!h) return { on: false as const, last, healthy };
+      if (!h) return last && !last.ok ? { on: false as const, last, healthy } : { on: false as const, last };
       const active = await activeByCompany();
       return { on: true as const, reason: h.reason, since: h.since, deadline: h.deadline, runs: [...active.values()].reduce((a, b) => a + b, 0), companies: active.size, last };
     },
