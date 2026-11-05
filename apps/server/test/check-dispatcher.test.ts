@@ -45,6 +45,17 @@ describe("check dispatcher", () => {
     expect(s.sent).toHaveLength(0);
   });
 
+  it("gives a full job a longer time limit than a quick one", async () => {
+    const s = await setup();
+    const quick = await s.req("q1");
+    await s.d.pump();
+    expect(s.sent[0]!.command.timeoutMs).toBe(30 * 60_000);
+    await s.d.onDone(s.runner.id, { jobId: quick.id, commit: quick.commit, exitCode: 0, timedOut: false, tail: "" });
+    await s.req("f1", { scope: "full", kind: "merge" });
+    await s.d.pump();
+    expect(s.sent.find((m) => m.command.type === "check.run" && m.command.commit === "c-f1")!.command.timeoutMs).toBe(90 * 60_000);
+  });
+
   it("starts one job per slot, then the next when the first ends, and wakes the requester", async () => {
     const s = await setup();
     const a = await s.req("t1");

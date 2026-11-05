@@ -28,12 +28,14 @@ describe("CheckJobs", () => {
     expect(f.jobs.running()).toEqual([J]);
     f.finish({ ok: true, exitCode: 0, timedOut: false, output: "all green", ms: 5 });
     await tick();
-    expect(f.jobs.running()).toEqual([]);
+    // Finished but not acknowledged: still listed in hello, so the server does not put it back in line.
+    expect(f.jobs.running()).toEqual([J]);
     expect(f.sent.find((m) => m.type === "check.done")).toMatchObject({ jobId: J, commit: "abc1234", exitCode: 0, timedOut: false, tail: "all green" });
     f.sent.length = 0;
     f.jobs.resend();
     expect(f.sent).toHaveLength(1);
     f.jobs.acknowledge(J);
+    expect(f.jobs.running()).toEqual([]);
     f.sent.length = 0;
     f.jobs.resend();
     expect(f.sent).toHaveLength(0);

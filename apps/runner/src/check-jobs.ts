@@ -20,7 +20,8 @@ export class CheckJobs {
 
   /** Job ids this runner is running now, for the hello message: the server puts back in line any it thinks run here but don't. */
   running(): string[] {
-    return [...this.cancels.keys()];
+    // Finished jobs the server has not acknowledged still count: it must not put them back in line and run a 30-50 minute check again.
+    return [...new Set([...this.cancels.keys(), ...this.unsent.keys()])];
   }
 
   /** Called on every (re)connect: results that could not be delivered go out again. */

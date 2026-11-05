@@ -22,6 +22,8 @@ export type CheckDispatcherDeps = {
 };
 
 const DEFAULT_TIMEOUT = 30 * 60_000;
+/** The full check takes 30 to 50 minutes (CLAUDE.md), so a full job gets longer than a quick one. */
+const FULL_TIMEOUT = 90 * 60_000;
 const verdict = (j: CheckJob) =>
   j.state === "passed" ? `The ${j.scope} check of your ticket passed.` : j.state === "failed" ? `The ${j.scope} check of your ticket FAILED: ${j.reason ?? ""}` : `Your ${j.scope} check did not finish (${j.state}): ${j.reason ?? "no reason recorded"}`;
 
@@ -51,7 +53,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
           ticketId: job.ticketId,
           commit: job.commit,
           command: job.command ?? deps.defaultCommand?.(job) ?? (job.scope === "full" ? "scripts/check-all.sh" : "scripts/check-quick.sh"),
-          timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT,
+          timeoutMs: deps.timeoutMs ?? (job.scope === "full" ? FULL_TIMEOUT : DEFAULT_TIMEOUT),
         });
         if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
       }
