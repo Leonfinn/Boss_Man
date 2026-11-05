@@ -146,18 +146,15 @@ describe("a review that ends without a verdict twice", () => {
 });
 
 describe("a run that fails to start", () => {
-  it("raises a card on the first failure, naming the reason", async () => {
+  it("raises no card when the runner is offline: the wake waits for it, and the runner watch is the one alert (BOS-480)", async () => {
     ctx = await setup();
     const id = await ctx.ticket("Start me");
     await ctx.scheduler.wake({ agentId: ctx.worker.id, ticketId: id, reason: "assigned" });
     await ctx.scheduler.tick();
-    const mine = async () => (await ctx.cards("start-fail:")).filter((d) => d.question.includes("Engineer"));
-    const [c] = await mine();
-    expect(c!.question).toContain("Engineer");
-    expect(c!.question).toContain("runner offline");
-    // Ticks that fail the same way again do not add cards.
     await ctx.scheduler.tick();
-    expect(await mine()).toHaveLength(1);
+    expect(await ctx.cards("start-fail:")).toEqual([]);
+    const [w] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, id));
+    expect(w).toMatchObject({ status: "queued", statusReason: "runner offline" });
   });
 });
 
