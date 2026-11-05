@@ -3,6 +3,8 @@
 // explains it, and the block holds exactly what is to be pasted. The web app renders each block with a Copy
 // button (apps/web/src/pages/Decisions.tsx, StepText). Plain text without a fence still renders as before.
 
+import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
+
 export type Command = { sh: string };
 /** Marks a command inside `step(...)`: it is rendered as its own block. */
 export const sh = (command: string): Command => ({ sh: command });
@@ -57,7 +59,37 @@ export function parseStep(text: string): StepPiece[] {
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R9" | "warn"; problem: string };
+
+/**
+ * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
+ * is reviewable; matched on the whole step, sentences and commands alike.
+ */
+const ADDON_WORDS: Record<Addon, { label: string; re: RegExp }> = {
+  tailscale: { label: "Tailscale", re: /\btailscale\b|\bts\.net\b|\btailnet\b/i },
+  ntfy: { label: "ntfy", re: /\bntfy\b|\btest push(?:es)?\b|\bphone notifications?\b/i },
+  penpot: { label: "Penpot", re: /\bpenpot\b/i },
+};
+const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up", stopped: "stopped", needs_login: "waiting for a login", running: "running", unknown: "unknown" };
+/** What R9 needs: each add-on's state, and the add-on this card sets up, whose own steps are exempt. */
+export type LintFacts = { addons: AddonFacts; setsUp?: Addon };
+
+/** R9: a step that relies on an add-on that isn't running is refused; one Boss Man can't see is warned about. */
+function addonFindings(step: number, text: string, facts: LintFacts, refuse: LintFinding[], warn: LintFinding[]) {
+  for (const addon of ADDONS) {
+    if (addon === facts.setsUp) continue;
+    const m = ADDON_WORDS[addon].re.exec(text);
+    if (!m) continue;
+    const { label } = ADDON_WORDS[addon];
+    const f = facts.addons[addon];
+    if (f.state === "running") continue;
+    if (f.state === "unknown") {
+      warn.push({ step, rule: "warn", problem: `relies on ${label} ("${m[0]}"), which Boss Man can't confirm is running (${f.source}). Don't tell the owner it carries over or is back up` });
+    } else {
+      refuse.push({ step, rule: "R9", problem: `relies on ${label} ("${m[0]}"), which is ${ADDON_STATE_WORDS[f.state]} (${f.source}${f.detail ? `: ${f.detail}` : ""}). Set ${label} up first with its own card (raise_decision with setsUp: "${addon}"), or leave it out of these steps` });
+    }
+  }
+}
 /** What a raised card keeps from the lint: warnings, and a CEO override with its reason and what it let through. */
 export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[] } };
 
@@ -112,8 +144,11 @@ function usesIn(code: string): string[] {
  * in inline code; R4 a `{{…}}` token, which Boss Man can't fill in yet (host facts are DR-008 ticket 2; R5,
  * contradicting a recorded fact, comes with them). Warnings: a wiki or ticket link, more than one command in a
  * step or more than 12 steps, and hedging next to a command.
+ * R9 (DR-023), only when `facts` are given: a step that names an add-on (ADDON_WORDS) that is not set up,
+ * stopped or waiting for a login is refused, and one whose state is unknown is warned about; the add-on the
+ * card itself sets up (`facts.setsUp`) is exempt.
  */
-export function lintOwnerSteps(steps: string[]): { refuse: LintFinding[]; warn: LintFinding[] } {
+export function lintOwnerSteps(steps: string[], facts?: LintFacts): { refuse: LintFinding[]; warn: LintFinding[] } {
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
   const set = new Set<string>();
@@ -142,6 +177,7 @@ export function lintOwnerSteps(steps: string[]): { refuse: LintFinding[]; warn: 
     }
     for (const c of inline) if (PLACEHOLDER.test(c)) refuse.push({ step, rule: "R3", problem: `has a placeholder the owner would have to edit: ${c.slice(0, 120)}` });
     for (const m of text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) refuse.push({ step, rule: "R4", problem: `has {{${m[1]}}}, which Boss Man has no value for. Write the value itself` });
+    if (facts) addonFindings(step, text, facts, refuse, warn);
     if (LINK.test(prose)) warn.push({ step, rule: "warn", problem: "links to a wiki page or ticket; fine as background, but the step itself must be complete" });
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
     const hedge = code.length ? HEDGES.exec(prose) : null;

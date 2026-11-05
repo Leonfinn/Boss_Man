@@ -9,6 +9,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
+import type { AddonFacts } from "./addons.js";
 import type { BlueGreen } from "./bluegreen.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
@@ -36,6 +37,8 @@ export type ServerStatusDeps = {
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
+  /** Which add-ons are running (addons.ts, DR-023): server-wide, like commit. Absent: null. */
+  addons?: () => Promise<AddonFacts>;
   /** Where this process's memory sits, server-wide like commit (memory-sampler.ts, BOS-410). */
   memory?: Pick<MemorySampler, "status">;
   commit: string;
@@ -236,6 +239,9 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // it are scoped to this company (see funding.syntheticUsage). A failed reading is unknown,
         // never an error, and never blocks this view.
         syntheticUsage: deps.syntheticUsage ? await deps.syntheticUsage(companyId).catch(() => []) : [],
+        // ntfy, Tailscale and Penpot: state (not_set_up, stopped, needs_login, running, unknown), since and source (DR-023).
+        // Only "running" means the add-on is up; never tell the owner otherwise.
+        addons: deps.addons ? await deps.addons() : null,
       };
     },
   };

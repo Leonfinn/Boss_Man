@@ -30,6 +30,7 @@ import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { addonsService, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { createPermissionLog } from "./services/permission-log.js";
@@ -232,6 +233,12 @@ export async function buildApp(opts: AppOptions) {
   const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
+  // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
+  // card reads it through addonFacts, and a failed read is "unknown" for all (warnings only), never a refused card.
+  const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), now: opts.now });
+  const addonFacts = () => addonsSvc.facts().catch(() => unknownAddons("Boss Man couldn't read the add-on state just now"));
+  // The socket peer, not req.ip: the edge is the hop itself, and X-Forwarded-For is the client's to set.
+  app.addHook("onRequest", async (req) => addonsSvc.noteRequest(req.socket.remoteAddress));
   const leader = opts.leader ?? createLeader();
   // A standby holds no runner: on demotion every runner socket is closed with 1013 ("try again later"), and they retry.
   leader.onDemote(() => {
@@ -369,6 +376,7 @@ export async function buildApp(opts: AppOptions) {
     permissions: (companyId: string) => permLog.summary(companyId),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
+    addons: addonFacts,
     commit: process.env.BOSSMAN_COMMIT || "dev",
     startedAt: new Date(STARTED_AT),
     now: opts.now,
@@ -556,6 +564,7 @@ export async function buildApp(opts: AppOptions) {
   });
   // The Scrum Master watchdog (BOS-58): its sweep runs on the leader's timer (main.ts), its actions through the Scrum Master's MCP tool.
   const watchdog = watchdogService(db, {
+    addons: addonFacts,
     notify: (agentId, input) => scheduler.notify(agentId, input),
     nudge: (input) => scheduler.nudge(input),
     raise: (input) => decisionsSvc.raise(input),
@@ -572,6 +581,7 @@ export async function buildApp(opts: AppOptions) {
   const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, skillProposals, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setRetroHook(retro);
   const alerts = alertLadder(db, {
+    addons: addonFacts,
     notify: (agentId, input) => scheduler.notify(agentId, input),
     answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
     watchdog,
@@ -632,7 +642,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, addons: addonFacts }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
