@@ -287,6 +287,7 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
   const proposed = d.context?.applied?.config ?? d.context?.proposed;
   const [form, setForm] = useState<ModelConfigView>(proposed ?? { harness: "claude", provider: "anthropic", model: "", fundingSourceId: "" });
   if (!before || !proposed) return null;
+  const fitProblem = modelFitProblem(form.harness, form.provider, form.model);
   const paidFrom = (c: ModelConfigView) => c.fundingSourceName ?? sources.data?.find((s) => s.id === c.fundingSourceId)?.name ?? c.fundingSourceId;
   const rows: Array<[string, string, string]> = [
     ["Harness", harnessLabel(before.harness), harnessLabel(proposed.harness)],
@@ -324,7 +325,7 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
           style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}
           onSubmit={(e) => {
             e.preventDefault();
-            if (modelFitProblem(form.harness, form.provider, form.model)) return;
+            if (fitProblem) return;
             onSubmit({ harness: form.harness, provider: form.provider, model: form.model, fundingSourceId: form.fundingSourceId });
           }}
         >
@@ -368,11 +369,11 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
             </div>
           </div>
           {/* The same check the server makes, shown before saving so a model this account can't serve is clear (BOS-477). */}
-          {modelFitProblem(form.harness, form.provider, form.model) && (
-            <p className="error" role="alert">{modelFitProblem(form.harness, form.provider, form.model)}</p>
+          {fitProblem && (
+            <p className="error" role="alert">{fitProblem}</p>
           )}
           <div className="actions">
-            <button type="submit" className="btn primary" disabled={busy || !form.model || !form.fundingSourceId || !!modelFitProblem(form.harness, form.provider, form.model)}>Save and approve</button>
+            <button type="submit" className="btn primary" disabled={busy || !form.model || !form.fundingSourceId || !!fitProblem}>Save and approve</button>
             <button type="button" className="btn" onClick={onCancel}>Cancel</button>
           </div>
           <small className="muted">The same checks apply as when the CEO proposed it. The change takes effect between runs.</small>

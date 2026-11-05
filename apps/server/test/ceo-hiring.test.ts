@@ -103,6 +103,11 @@ describe("the CEO builds the team (R62)", () => {
     // A Synthetic plan pays for an OpenCode agent on a Synthetic model.
     const synthetic = (await c.req("POST", "/api/funding-sources", { name: "Synthetic", kind: "subscription", provider: "synthetic" })).json() as { id: string };
     expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "E", harness: "opencode", provider: "synthetic", fundingSourceId: synthetic.id, model: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" }) }))).toMatch(/waiting for the owner's approval/);
+    // The Brian case on a hire, not just a model change: a DeepSeek model on a Claude account.
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "F", harness: "opencode", provider: "anthropic", fundingSourceId: c.funding.id, model: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" }) }))).toContain("Anthropic serves Claude models only");
+    // A real move: a Claude agent hired onto Claude Max 2 instead of Claude Max.
+    const claude2 = (await c.req("POST", "/api/funding-sources", { name: "Claude Max 2", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "G", fundingSourceId: claude2.id }) }))).toMatch(/waiting for the owner's approval/);
     await client.close();
   });
 

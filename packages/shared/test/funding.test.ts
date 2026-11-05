@@ -40,6 +40,16 @@ describe("modelFitProblem (BOS-477)", () => {
     expect(modelFitProblem("opencode", "synthetic", "hf:deepseek-ai/DeepSeek")).toContain("synthetic/");
   });
 
+  it("judges Ollama and Synthetic by the real names the catalog lists", () => {
+    // From the second-opinion presets and the runner's OpenCode list.
+    expect(modelFitProblem("opencode", "ollama", "gpt-oss-safeguard:20b")).toBeNull();
+    expect(modelFitProblem("opencode", "ollama", "qwen3:8b")).toBeNull();
+    expect(modelFitProblem("opencode", "synthetic", "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017")).toBeNull();
+    // The same catalog names on the wrong provider.
+    expect(modelFitProblem("opencode", "ollama", "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017")).toContain("Ollama");
+    expect(modelFitProblem("opencode", "synthetic", "hf:deepseek-ai/DeepSeek-V4.1-Flash-1017")).toContain("synthetic/");
+  });
+
   it("leaves providers that serve a mix to their reported model list", () => {
     expect(modelFitProblem("opencode", "gateway", "anthropic/claude-sonnet-4")).toBeNull();
     expect(modelFitProblem("opencode", "bedrock", "anything")).toBeNull();
