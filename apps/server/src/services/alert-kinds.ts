@@ -16,14 +16,23 @@ export type ClearWhen =
   /** Start-failure cards name the wake that failed: the runner must be connected and that wake must have started. */
   | { kind: "runnerConnected"; companyId: string; wakeId?: string }
   /** Usage-limit cards: the account has room again (the same test as the scheduler's account pick). */
-  | { kind: "limitReset"; fundingSourceId: string };
+  | { kind: "limitReset"; fundingSourceId: string }
+  /**
+   * Auth and credit-failure cards: a run on that account has finished cleanly since the card was raised.
+   * A revoked key or an empty credit balance leaves the quota windows untouched, so "room again" is true
+   * at once (BOS-469, security review): only a clean run proves the credential is fixed.
+   */
+  | { kind: "accountRanOk"; fundingSourceId: string };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
 /** What a raise says about itself, when it doesn't bring its own condition or cause key. */
 export type AlertCause = {
-  /** The funding source the alert is about, for account outages (one card per account, DR-017 B). */
-  account?: { fundingSourceId: string; name: string; window?: string };
+  /**
+   * The funding source the alert is about, for account outages (one card per account, DR-017 B).
+   * `auth` is set for a credential/credit failure, which closes only on a clean run (not on "room again").
+   */
+  account?: { fundingSourceId: string; name: string; window?: string; auth?: boolean };
   /** The agent ids the card names, for a grouped card's text and its clean-run closer. */
   agents?: Array<string | null | undefined>;
   /** The run a stalled/self/heartbeat alert is about, when its key doesn't carry it. */
@@ -99,7 +108,16 @@ export const ALERT_KINDS = {
     groupBy: (c) => (c.account ? `account:${c.account.fundingSourceId}:account_limit` : null),
     title: (c, n) =>
       `${c.account?.name ?? "An account"}: ${n} run${n === 1 ? "" : "s"} failed on ${c.account?.window ?? "a usage limit or auth error"}${c.agents?.length ? ` (${c.agents.length} agent${c.agents.length === 1 ? "" : "s"})` : ""}`,
-    clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
+    // A usage limit lifts when the account has room again; an auth or credit failure does not, because
+    // a revoked key leaves the quota windows empty. That one waits for a clean run on the account.
+    clearWhen: (c) => {
+      if (!c.account) return [];
+      const src = c.account.fundingSourceId;
+      // "company" is the fallback key when the error named no account: there is no single source to watch,
+      // so watch a clean run by any agent the card names.
+      if (src === "company") return c.account.auth ? ranOk(c) : [];
+      return c.account.auth ? [{ kind: "accountRanOk", fundingSourceId: src }] : [{ kind: "limitReset", fundingSourceId: src }];
+    },
   },
   // loop-guards.ts reviewRound(): a review round that keeps coming back.
   review_loop: {

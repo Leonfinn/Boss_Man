@@ -94,7 +94,9 @@ export function loopGuards(
       // not three cards and three CEO runs.
       const named = accountOutage(input.text);
       const source: { id: string; name: string } | null = named ? ((opts.fundingSourceFor ? await opts.fundingSourceFor(input.agentId) : null) ?? { id: "company", name: named.name }) : null;
-      const outage = named && source ? { fundingSourceId: source.id, name: source.name, ...(named.window ? { window: named.window } : {}) } : null;
+      // An auth or credit failure closes only on a clean run on the account; a revoked key leaves the quota
+      // windows empty, so "room again" would close it at once (BOS-469, security review).
+      const outage = named && source ? { fundingSourceId: source.id, name: source.name, ...(named.window ? { window: named.window } : {}), ...(named.auth ? { auth: true } : {}) } : null;
       const question = `${input.what} has hit the same failure ${n} times in ${Math.round(limits.circularWindowMs / 3_600_000)} hours${t ? ` on "${t.title}"` : ""}. It has been told to try a different approach. Last output: ${input.text.slice(-300)}`;
       if (outage) {
         if (opts.alert) {
@@ -132,13 +134,15 @@ export function loopGuards(
  * error's sender, when it names one ("Claude Max: ..."); otherwise the card is per company, since the
  * failure signature alone can't say which of the owner's accounts it was.
  */
-export function accountOutage(text: string): { fundingSourceId: string; name: string; window?: string } | null {
+export function accountOutage(text: string): { fundingSourceId: string; name: string; window?: string; auth?: boolean } | null {
   const limit = text.match(/(weekly limit|5-hour limit|five-hour limit|rate limit|usage limit|quota|limit reached|limit will reset|out of credit|credit balance)/i);
-  const auth = text.match(/(authentication|unauthori[sz]ed|forbidden|identity verification|invalid api key|logged out|sign in again)/i);
+  // The credential problems, not a 403 on ordinary work (a git push): a revoked key, a logged-out session,
+  // identity verification, or an empty credit balance, which no quota window can tell you has emptied.
+  const auth = text.match(/(authentication|unauthori[sz]ed|identity verification|invalid api key|logged out|sign in again|out of credit|credit balance)/i);
   if (!limit && !auth) return null;
   // "<name>: <message>" is how the runner prefixes an error that names the account.
   const named = text.replace(/^error:\s*/i, "").match(/^([A-Za-z0-9 .'-]{2,40}):\s/);
-  return { fundingSourceId: "company", name: named?.[1] ?? "The owner's account", ...(limit ? { window: `the ${limit[1]!.toLowerCase()}` } : {}) };
+  return { fundingSourceId: "company", name: named?.[1] ?? "The owner's account", ...(limit ? { window: `the ${limit[1]!.toLowerCase()}` } : {}), ...(auth ? { auth: true } : {}) };
 }
 
 /** What a looping agent is told on top of the failure itself. */

@@ -87,4 +87,10 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
     expect(row.groupBy(cause)).toBe("account:fs-1:account_limit");
     expect(row.clearWhen(cause)).toEqual([{ kind: "limitReset", fundingSourceId: "fs-1" }]);
   });
+
+  it("an auth or credit failure closes only on a clean run on the account, never on 'room again' (BOS-469, security review)", () => {
+    const row = ALERT_KINDS.account_limit;
+    const cause = { account: { fundingSourceId: "fs-1", name: "Claude Max", auth: true }, agents: ["a-1"] };
+    expect(row.clearWhen(cause)).toEqual([{ kind: "accountRanOk", fundingSourceId: "fs-1" }]);
+  });
 });

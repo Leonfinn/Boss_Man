@@ -339,7 +339,8 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
       recommendedOption: CHECK_AGAIN,
       tier: "owner",
       dedupeKey: `merge-stuck:${t.id}`,
-      context: { type: "check_stuck", ticketId: t.id, command: "", output: why },
+      // The one closer, on any tier: a retry card goes once its ticket finishes (DR-016, BOS-470).
+      context: { type: "check_stuck", ticketId: t.id, command: "", output: why, clearWhen: [{ kind: "ticketDone", ticketId: t.id }] },
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
@@ -1921,7 +1922,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // without their seeing it, exactly what the ladder exists to prevent (BOS-149). The one exception
       // is a plain "Got it" system card about an agent's run (not the owner's own choice): once it is
       // stale, the CEO may clear it, as it could before the ladder handed it over (BOS-469 point 4).
-      const ownerTierInfo = ctx.ladder?.rung === "owner" && isSystemCard(d) && ctx.type !== "check_stuck" && !OWNER_ONLY_ANSWER_TYPES.has(ctx.type) && !STALE_ONLY_WITHDRAW_TYPES.has(ctx.type);
+      // A folded account card (account_limit) can name several agents' live failures, and `isStale` sees only
+      // its first raise's ticket, so it stays out of this: it closes itself once the cause is gone (BOS-469).
+      const ownerTierInfo = ctx.ladder?.rung === "owner" && isSystemCard(d) && ctx.type !== "check_stuck" && !OWNER_ONLY_ANSWER_TYPES.has(ctx.type) && !STALE_ONLY_WITHDRAW_TYPES.has(ctx.type) && (ctx as { decisionsKind?: string }).decisionsKind !== "alert:account_limit";
       if (ctx.ladder?.rung === "owner" && !ownerTierInfo) throw new AnswerError("This alert is already with the owner, so it isn't yours to withdraw. Leave it for them.");
       if (ownerTierInfo && !(await isStale(d))) throw new AnswerError("This alert is with the owner. Clear it only once it is stale (its ticket is done or cancelled).");
       // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,

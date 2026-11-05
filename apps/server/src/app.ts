@@ -30,13 +30,14 @@ import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { createStallMonitor } from "./services/stall-monitor.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
+import { alertClearing } from "./services/alert-clearing.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
-import { alertClearing } from "./services/alert-clearing.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
 import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { DeployError, deploysService } from "./services/deploys.js";
@@ -198,6 +199,16 @@ export async function buildApp(opts: AppOptions) {
   await app.register(cookie);
   await app.register(websocket);
 
+  // Event-loop stalls and GC pauses, with memory and what was in flight (BOS-432): logged, and shown in server_status.
+  const stalls = createStallMonitor({ runnerSockets: () => app.websocketServer?.clients.size ?? 0, log: (line) => app.log.warn(line) });
+  stalls.start();
+  app.addHook("onClose", async () => stalls.stop());
+  app.addHook("onRequest", async (req, reply) => {
+    if (req.headers.upgrade) return; // a websocket is counted as a runner socket, not a request
+    stalls.requestStarted(req, `${req.method} ${req.routeOptions.url ?? "unmatched"}`);
+    reply.raw.once("close", () => stalls.requestEnded(req));
+  });
+
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
@@ -334,6 +345,7 @@ export async function buildApp(opts: AppOptions) {
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
     },
     errors: errorBuffer,
+    stalls: () => stalls.summary(),
     permissions: (companyId: string) => permLog.summary(companyId),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
@@ -444,16 +456,34 @@ export async function buildApp(opts: AppOptions) {
       void refreshSyntheticQuota().catch((err) => app.log.warn({ err }, "synthetic quota refresh failed"));
     }
   });
+  // One closer for every card Boss Man raises itself (DR-016, BOS-470): a card carries the conditions
+  // under which its cause is gone, and this closes it, on any tier, with the reason. It runs on the
+  // sweep below and on the events that make a condition true: a run ending or speaking, a runner
+  // connecting, a deploy finishing.
+  const clearing = alertClearing(db, {
+    isConnected: (runnerId) => runners.isConnected(runnerId),
+    hasRoom: (fundingSourceId) => scheduler.hasRoom(fundingSourceId),
+    now: opts.now,
+  });
+  // A runner coming back clears "could not start … runner offline" cards at once, on any tier
+  // (BOS-475 E): the wake it could not start is what matters, so a connected runner alone isn't enough.
+  runners.onConnect(() => void clearing.check().then((closed) => (closed ? notes.syncDecisions() : null)).catch((err) => app.log.error({ err }, "closing cards on runner connect failed")));
   // A "has sent nothing" alert for a run closes the moment the run ends or speaks again (BOS-217),
   // so the CEO and the owner are never asked about a run that has already moved on. Awaited before
   // the event is acknowledged, so nothing reads an alert the run has left behind.
   runners.onEventSync(async (runner, event) => {
     if (!("runId" in event) || event.type === "run.started") return;
-    await closeStallAlertForRun(db, event.runId, opts.now)
+    await closeStallAlertForRun(db, clearing, event.runId)
       .then((closed) => (closed ? notes.syncDecisions() : null))
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing a stall alert failed"));
+    // A clean run (or the ticket finishing, or the deploy settling) can clear other cards too.
+    await clearing
+      .check()
+      .then((closed) => (closed ? notes.syncDecisions() : null))
+      .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing cards failed"));
   });
   const sweeps = sweepService(db, {
+    clearAlerts: () => clearing.check(),
     // The same sweep settles second opinions whose asker was lost to a restart (BOS-338).
     expireAdvice: () => Promise.all([decisionsSvc.expireAdvice(), decisionsSvc.expireSecondOpinions()]),
     limits: opts.sweepLimits,
@@ -517,9 +547,6 @@ export async function buildApp(opts: AppOptions) {
   // Workflow retros (docs/19): the leader's timer starts them (main.ts), the retro agent's MCP tools fill them, and decisions apply the changes.
   const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, skillProposals, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setRetroHook(retro);
-  // One closer for Boss Man's own cards (DR-016, BOS-470's shape; BOS-469 point 2 closes the account and
-  // loop alerts on it). It runs at the start of the ladder's sweep, so any tier closes, the owner's included.
-  const clearing = alertClearing(db, { hasRoom: (id) => scheduler.hasRoom(id), isConnected: (id) => runners.isConnected(id), now: opts.now });
   const alerts = alertLadder(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
     answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
