@@ -30,6 +30,7 @@ import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
@@ -357,6 +358,8 @@ export async function buildApp(opts: AppOptions) {
     isSettling: (id, at) => runners.isSettling(id, at),
     connectedSince: (id) => runners.connectedSince(id),
     deploy: () => selfDeploy.overview(),
+    // Both colours, the same probe as GET /api/bluegreen (DR-020 E). `build` is defined further down; this only runs per request.
+    colours: () => probeColours(colour(), build),
     hold: async () => {
       const h = await getHold(db);
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
@@ -745,21 +748,7 @@ export async function buildApp(opts: AppOptions) {
   await app.register(async (owner) => {
     owner.addHook("preHandler", requireOwner);
     /** Blue/green at a glance: each colour's own /api/health over the compose network, or down when it doesn't answer. */
-    owner.get("/api/bluegreen", async () => {
-      const self = colour();
-      if (!self) return { enabled: false };
-      const peek = async (c: string) => {
-        if (c === self) return { ...build(), colour: c, up: true };
-        try {
-          const r = await fetch(`http://server-${c}:3100/api/health`, { signal: AbortSignal.timeout(2000) });
-          const h = (await r.json()) as { role?: string; commit?: string; startedAt?: string };
-          return { colour: c, up: r.ok, role: h.role ?? null, commit: h.commit ?? null, startedAt: h.startedAt ?? null };
-        } catch {
-          return { colour: c, up: false, role: null, commit: null, startedAt: null };
-        }
-      };
-      return { enabled: true, self, colours: await Promise.all(["blue", "green"].map(peek)) };
-    });
+    owner.get("/api/bluegreen", async () => probeColours(colour(), build));
 
     owner.get("/api/me", async () => {
       const [o] = await db.select({ username: owners.username }).from(owners);
