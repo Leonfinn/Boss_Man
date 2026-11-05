@@ -56,8 +56,9 @@ const OPTION_HELP: Record<string, string> = {
   "Keep waiting": "Keep waiting: you'll be asked again in 30 minutes if it stays quiet.",
 };
 
-type TicketLanding = { state: "running"; startedAt: string; startedBy: string; stale?: boolean } | { state: "finished"; text?: string };
+type TicketLanding = { state: "running"; startedAt: string; startedBy: string; stale?: boolean; phase?: string } | { state: "finished"; text?: string };
 const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Checking and merging", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted" };
 const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
 const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 
@@ -876,7 +877,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     )}
                     {checking && land?.state === "running" && (
                       <p role="status" style={{ fontWeight: 600 }}>
-                        Checking and merging since {atTime(land.startedAt)}, started by {startedByLabel(land.startedBy)}. This can take several minutes; nothing more to do here.
+                        {land.phase ? PHASE_WORDS[land.phase] : "Checking and merging"} since {atTime(land.startedAt)}, started by {startedByLabel(land.startedBy)}. This can take several minutes; nothing more to do here.
                       </p>
                     )}
                     {staleCheck && land?.state === "running" && (

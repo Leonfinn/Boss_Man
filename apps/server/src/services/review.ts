@@ -7,6 +7,7 @@ import type { Db } from "../db/client.js";
 import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
+import { RunnerGone } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
@@ -36,7 +37,7 @@ export type LandingStatus = { state: "running"; startedAt: string; command: stri
  * merge can take (the same heartbeat the unmerged-approvals sweep watches), so the marker is a
  * leftover and the owner may start it again rather than waiting forever.
  */
-export type LandingView = (LandingStatus & { stale?: boolean }) | null;
+export type LandingView = (LandingStatus & { stale?: boolean; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" }) | null;
 
 /**
  * A check that was killed or timed out says nothing about the agent's work (the runner ran out of
@@ -96,6 +97,8 @@ export const MERGE_WAIT_MS = 10 * 60_000;
 const CHECK_MERGED_KEY = "check_merged_result";
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
+/** How long a merge waits for a runner that is away (a swap: image pull, slow start) before it counts as a failed try. */
+export const RUNNER_WAIT_MS = 30 * 60_000;
 
 /** What the author hears when a ticket that needs code changes has none. */
 export const NOTHING_CHANGED = "Nothing in the repository changed. Make the change, or ask your CEO or a manager to mark the ticket as not needing code (update_ticket with noCode true) and say why.";
@@ -210,6 +213,8 @@ export function reviewService(
   // activity, which chat and chases also bump: talk must not hold a merge retry back, and a running merge must.
   // shortcut: in memory like `landings`; a restart ends every merge, so forgetting it is correct.
   const landingBeat = new Map<string, number>();
+  // Where a running merge is: waiting its turn for a check slot, running the check, or merging (DR-014). In memory like `landings`.
+  const phases = new Map<string, "queued" | "checking" | "merging" | "waiting_to_retry">();
   const beatNow = (ticketId: string) => {
     landingBeat.set(ticketId, Date.now());
     return db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
@@ -704,7 +709,22 @@ export function reviewService(
       const status = landings.get(ticketId);
       if (!status) return null;
       if (status.state === "finished") return status;
-      return { ...status, stale: await landingStale(ticketId) };
+      return { ...status, stale: await landingStale(ticketId), phase: phases.get(ticketId) ?? "checking" };
+    },
+
+    /**
+     * One plain line on where a ticket's merge stands, for every list of sign-off and merge cards (DR-014), built on the
+     * server so agents copy it: queued / checking / merging / waiting to retry / looks stuck / finished (with why).
+     * Null when no merge has run since the server started.
+     */
+    async mergeState(ticketId: string): Promise<string | null> {
+      const l = await this.landing(ticketId);
+      if (!l) return null;
+      const at = (iso: string) => new Date(iso).toISOString().slice(11, 16) + " UTC";
+      if (l.state === "finished") return `merge finished: ${l.text}`;
+      if (l.stale) return `merge looks stuck since ${at(l.startedAt)}; nothing is running now`;
+      const word = { queued: "queued for a check slot", checking: "checking", merging: "merging", waiting_to_retry: "waiting to try again after the runner restarted" }[l.phase ?? "checking"];
+      return `merge ${word} (since ${at(l.startedAt)})`;
     },
 
     /** True while a merge for this ticket has said it is alive within the merge window (a check or lock wait under way). */
@@ -724,6 +744,7 @@ export function reviewService(
       // Claimed before the first await, so two approvals at the same moment cannot both start a landing.
       const startedAt = new Date().toISOString();
       landings.set(ticketId, { state: "running", startedAt, command: null, startedBy: reviewer });
+      phases.delete(ticketId);
       // A ticket can sit in review for hours before its last reviewer approves. Count the merge itself as
       // activity now, so the very first poll of a fresh merge is never judged stale from that quiet spell.
       await beatNow(ticketId);
@@ -806,8 +827,40 @@ export function reviewService(
       try {
         // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
         // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
+        let goneTries = 0;
         for (let attempt = 1; ; attempt++) {
-          const r = await this.landOnce(ticketId, reviewer, causedByRunId, opts);
+          let r: Awaited<ReturnType<typeof this.landOnce>> | { outcome: "runner_gone"; delivered: null; detail: { message: string } };
+          try {
+            r = await this.landOnce(ticketId, reviewer, causedByRunId, opts);
+          } catch (err) {
+            if (!(err instanceof RunnerGone)) throw err;
+            r = { outcome: "runner_gone", delivered: null, detail: { message: err.message } };
+          }
+          if (r.outcome === "runner_gone") {
+            // The runner restarted or went away under the merge (DR-014): the work is fine. Try again by itself, keeping the place in line.
+            const { t } = await ticketWithRepo(ticketId);
+            const message = (r.detail as { message: string }).message;
+            goneTries++;
+            if (goneTries > INFRA_RETRY_ATTEMPTS) {
+              await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The runner kept going away under the merge (${message}); it's in your Decisions.` });
+              await raiseCheckStuck(db, t, "the merge", "was cut off because the runner restarted or went away", message);
+              return { outcome: "check_stuck", delivered: null, detail: r.detail };
+            }
+            const pause = INFRA_RETRY_BASE_MS * 2 ** (goneTries - 1);
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Runner restarted: the merge was cut off (${message}); running it again (try ${goneTries} of ${INFRA_RETRY_ATTEMPTS}, in ${Math.max(1, Math.round(pause / 1000))}s). Nothing to do.` });
+            phases.set(ticketId, "waiting_to_retry");
+            const beat = setInterval(() => void beatNow(ticketId).catch(() => undefined), MERGE_ACTIVITY_MS);
+            beat.unref?.();
+            try {
+              await new Promise((resolve) => setTimeout(resolve, pause));
+            } finally {
+              clearInterval(beat);
+            }
+            const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+            if (now?.state !== "review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge waited, so it was not retried." } };
+            attempt--;
+            continue;
+          }
           if (r.outcome !== "lock_wait") return r;
           const { t } = await ticketWithRepo(ticketId);
           const d = r.detail as { command: string; output: string };
@@ -867,8 +920,21 @@ export function reviewService(
       if (!runner) throw new ReviewError(409, "The company has no runner.");
       const ask = async <T>(build: (requestId: string) => Parameters<typeof deps.runners.send>[1], timeoutMs: number) => {
         try {
+          // A runner that is away (a swap takes minutes) is waited for, not retried against: no try is used until a request is delivered.
+          // The wait sits inside the check gate's slot, so queued merges keep their order and never run out of the line.
+          if (!deps.runners.isConnected(runner.id)) {
+            const beat = setInterval(() => void touch().catch(() => undefined), MERGE_ACTIVITY_MS);
+            beat.unref?.();
+            try {
+              if (!(await deps.runners.waitConnected(runner.id, RUNNER_WAIT_MS))) throw new RunnerGone("The company's runner stayed offline.");
+            } finally {
+              clearInterval(beat);
+            }
+          }
           return await deps.runners.request<T>(runner.id, build, timeoutMs);
         } catch (err) {
+          // The runner went away: land() runs the merge again by itself instead of raising a card (DR-014).
+          if (err instanceof RunnerGone) throw err;
           throw new ReviewError(409, (err as Error).message);
         }
       };
@@ -879,7 +945,8 @@ export function reviewService(
       // Checks can run for half an hour and merges can queue behind other work: keep saying the ticket
       // is active while we wait, so the unmerged-approvals sweep never starts a second landing beside it.
       const whileActive = async <T>(work: () => Promise<T>): Promise<T> => {
-        const beat = setInterval(() => void touch().catch(() => undefined), MERGE_ACTIVITY_MS);
+        // Only while the runner is connected (DR-014): a merge waiting on a runner that has gone must not look alive.
+        const beat = setInterval(() => { if (deps.runners.isConnected(runner.id)) void touch().catch(() => undefined); }, MERGE_ACTIVITY_MS);
         beat.unref?.();
         try {
           return await work();
@@ -973,11 +1040,17 @@ export function reviewService(
         await touch();
         // Through the gate: at most N checks run at once. A runner that doesn't answer counts as an infra failure too.
         const runCheck = (alone: boolean) =>
-          whileActive(() =>
-            gate.run(checkPriority(t), alone, () =>
-              ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS).catch((err: Error): VerifyResult & { noAnswer: true } => ({ ok: false, exitCode: null, timedOut: false, output: err.message, ms: 0, noAnswer: true })),
-            ),
-          );
+          whileActive(() => {
+            phases.set(ticketId, "queued");
+            return gate.run(checkPriority(t), alone, () => {
+              phases.set(ticketId, "checking");
+              return ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS).catch((err: Error): VerifyResult & { noAnswer: true } => {
+                // The runner went away mid-check: land() runs the merge again once it is back, without using the check retries.
+                if (err instanceof RunnerGone) throw err;
+                return { ok: false, exitCode: null, timedOut: false, output: err.message, ms: 0, noAnswer: true };
+              });
+            });
+          });
         let v = await runCheck(false);
         // Killed, out of memory, timed out or no answer: the host was cut off, not the work. Run it again by itself,
         // keeping the ticket's place, before any card appears (BOS-446). The lock wait has its own retries in land().
@@ -1013,6 +1086,7 @@ export function reviewService(
       // worktree set-ups before its own fetch and push; two minutes wasn't enough on a busy project. A merge
       // that finishes after this is still safe: trying again finds the branch already merged.
       await touch();
+      phases.set(ticketId, "merging");
       const m: MergeResult | PushResult = pr
         ? await whileActive(() => ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
         : await whileActive(() =>

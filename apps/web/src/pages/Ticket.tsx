@@ -138,11 +138,12 @@ function CriteriaEdit({ initial, save, busy }: { initial: string[]; save: (lines
 }
 
 type Landing =
-  | { state: "running"; startedAt: string; command: string | null; startedBy: string; stale?: boolean }
+  | { state: "running"; startedAt: string; command: string | null; startedBy: string; stale?: boolean; phase?: string }
   | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
 const elapsed = (ms: number) => `${Math.floor(Math.max(0, ms) / 60_000)}:${String(Math.floor(Math.max(0, ms) / 1000) % 60).padStart(2, "0")}`;
 const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 /** Who started a merge, in the owner's words. */
+const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Checking and merging", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted" };
 const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
 const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
@@ -715,7 +716,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               {landing?.state === "running" && !landing.stale && (
                 <div className="banner" role="status" aria-live="polite" style={{ flexWrap: "wrap" }}>
                   <span>
-                    <strong>Checking and merging.</strong> Started by {startedByLabel(landing.startedBy)} at {atTime(landing.startedAt)}
+                    <strong>{PHASE_WORDS[landing.phase ?? ""] ?? "Checking and merging"}.</strong> Started by {startedByLabel(landing.startedBy)} at {atTime(landing.startedAt)}
                     {landing.command ? ` (${landing.command})` : ""}; this can take several minutes. Elapsed: {elapsed(now - Date.parse(landing.startedAt))}.
                   </span>
                 </div>

@@ -967,8 +967,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           const more = rows.length - offset - shown.length;
           return text(
             [
-              shown
-                .map((r) => {
+              (await Promise.all(shown
+                .map(async (r) => {
                   const ctx = r.context as {
                     type?: string;
                     planText?: string | null;
@@ -982,10 +982,14 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
                   };
                   const tickets = [...new Set([...(r.about ?? []).map((a) => (a.ref ? `${a.ref} "${a.title}"` : a.title)), ...(r.blocks ?? []).map((b) => b.ref ?? "")].filter((x): x is string => !!x))];
                   const advice = adviceOf(r.context);
+                  // Merge state, server-built (DR-014): an open sign-off card can sit beside a merge already running, so say which.
+                  const mergeTicket = ctx.type === "risk_review" || ctx.type === "check_stuck" ? (r.context as { ticketId?: string }).ticketId : undefined;
+                  const merge = mergeTicket ? await review.mergeState(mergeTicket) : null;
                   return [
                     `${r.id}: ${ctx.tempCleanup ? "TEMP-FILE CLEANUP: " : ctx.workingCopy ? "WORKING-COPY CLEANUP: " : ""}[${r.kind}/${r.tier}]`,
                     `Question: ${untrusted("decision card", r.question)}`,
                     `Ticket: ${tickets.join(", ") || "none"} · Raised by: ${r.agentName ?? "Boss Man"} · Age: ${ago(r.createdAt)} · Score: ${Math.round(r.score)}`,
+                    ...(merge ? [`Merge state: ${merge}`] : []),
                     ...(r.reasons?.length ? [`Why it ranks here: ${r.reasons.join("; ")}`] : []),
                     `Options: ${(r.options as string[]).join(" | ") || "none"} (recommended: ${r.recommendedOption ?? "none"})`,
                     ...(ctx.explain?.command ? [`Command: ${untrusted("decision card command", ctx.explain.command)}`] : []),
@@ -996,7 +1000,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
                     ...(ctx.lastFailure ? [`Last failure: ${ctx.lastFailure.note}`] : []),
                     ...(advice?.state === "asking" ? [`ASKED FOR YOUR ADVICE${advice.note ? `: ${advice.note}` : ""} — use action advise.`] : []),
                   ].join("\n");
-                })
+                })))
                 .join("\n\n"),
               `Showing cards ${offset + 1}–${offset + shown.length} of ${rows.length}, newest first.`,
               ...(more > 0
@@ -1295,10 +1299,12 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const note = stateNoteLine(t, new Date());
       // One page covers the whole thing, description through conversation, so a long owner message is
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
+      const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
       const head = [
         `# ${t.title}`,
         `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
         ...(note ? [note] : []),
+        ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
         t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
         "",
