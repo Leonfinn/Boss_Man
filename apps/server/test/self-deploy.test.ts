@@ -504,10 +504,10 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     it("holds the runner offer until the trial is over, and refuses the button and a runner card during it", async () => {
       const { c, early } = await deployedInTrial();
       expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(0);
-      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("standby window");
+      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("trial");
       const r = await c.req("POST", `/api/decisions/${early.id}/answer`, { answer: "Update runners" });
       expect(r.statusCode).toBeGreaterThanOrEqual(400);
-      expect(r.json().message ?? r.body).toContain("standby window");
+      expect(r.json().message ?? r.body).toContain("trial");
       // After the trial (900 s soak + 120 s margin), still on B: the runner card appears by itself.
       vi.setSystemTime(new Date("2026-11-03T01:18:01Z"));
       await c.selfDeploy.sync();
@@ -543,7 +543,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       await c.status({ id: "", result: "deployed", message: "Switched in.", ended: "2026-11-03T01:01:00Z", soak_seconds: "300" });
       await c.available({ deployed: B, tip: B });
       await c.selfDeploy.sync();
-      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("standby window");
+      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("trial");
       const r = await c.req("POST", `/api/decisions/${early!.id}/answer`, { answer: "Update runners" });
       expect(r.statusCode).toBeGreaterThanOrEqual(400);
       // After 300 s + 120 s the hold is over and the button works again.
