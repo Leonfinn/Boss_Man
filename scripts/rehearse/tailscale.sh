@@ -17,6 +17,8 @@ project="${REHEARSE_PROJECT:-bossman-rehearse-ts}"
 case "$project" in *[!a-z0-9_-]* | '') echo "REHEARSE_PROJECT must be lowercase letters, digits, - or _" >&2; exit 64 ;; esac
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 69; }
 
+image="$(grep -oE "image:\s*\S*tailscale\S*" deploy/tailscale.yml | head -1 | sed -E "s/image:\s*//")"
+[ -n "$image" ] || { echo "no tailscale image found in deploy/tailscale.yml" >&2; exit 70; }
 data="$(mktemp -d)"
 made_secrets=()
 for f in secrets/master.key secrets/runner-app-co.token; do
@@ -28,7 +30,7 @@ dc() { docker compose -p "$project" -f docker-compose.yml -f deploy/tailscale.ym
 cleanup() {
   dc down -v --remove-orphans >/dev/null 2>&1 || true
   # State is written by the container's user, so remove it through a container, then the empty folder.
-  docker run --rm -v "$data:/d" --entrypoint sh "$(dc config --images 2>/dev/null | grep tailscale/tailscale | head -1)" -c 'rm -rf /d/* /d/.[!.]* 2>/dev/null' >/dev/null 2>&1 || true
+  docker run --rm -v "$data:/d" --entrypoint sh "$image" -c 'rm -rf /d/* /d/.[!.]* 2>/dev/null' >/dev/null 2>&1 || true
   rm -rf "$data" 2>/dev/null || true
   for f in "${made_secrets[@]}"; do rm -f "$f"; done
 }
@@ -54,7 +56,7 @@ sleep "$secs"
 [ "$(docker inspect -f '{{.State.StartedAt}}' "$(cid)")" = "$started" ] || fail "container was started again during the watch"
 
 echo "== it says it needs a login (running, not crashing)"
-dc logs --no-color tailscale 2>&1 | grep -qiE "NeedsLogin|authkey|log in|login" || fail "no login prompt in the logs"
+dc logs --no-color tailscale 2>&1 | grep -qiE "NeedsLogin|authkey" || fail "no login prompt in the logs"
 
 echo "== state is written and survives a restart"
 dc exec -T tailscale sh -c 'ls /var/lib/tailscale | grep -q .' || fail "state folder is empty"
@@ -65,9 +67,20 @@ sleep 10
 after="$(dc exec -T tailscale sh -c 'ls /var/lib/tailscale' | sort | tr '\n' ' ')"
 [ "$before" = "$after" ] || fail "state changed across restart: [$before] -> [$after]"
 
+echo "== guide's key steps with a placeholder key (the sidecar must reject it; no real login is tried)"
+TS_AUTHKEY=tskey-auth-rehearse-not-a-real-key dc up -d --no-deps --force-recreate tailscale
+sleep 20
+if dc logs --no-color tailscale 2>&1 | grep -qiE "invalid|unauthorized|auth.?key|NeedsLogin"; then
+  echo "placeholder key was refused or ignored, as expected"
+else
+  echo "note: no refusal seen in the logs for the placeholder key (wording may differ)"
+fi
+
 cat <<'SUMMARY'
-PASS: tailscale sidecar rehearsal
-Rehearsed: starts from the repo's compose files, stays up with no restarts, waits for login, keeps its state across a restart.
-Not rehearsed (needs a real Tailscale account): the login with a key, approving the device, HTTPS and DNS in the tailnet,
-the serve config being applied, and the login surviving a restart. Mark these "first time on a real machine".
+RESULT: sidecar rehearsal OK, but kind 3: login not rehearsed
+Rehearsed: starts from the repo's compose files, stays up with no restarts (a restart loop fails this run),
+asks for a login, keeps its state across a restart, and the guide's key steps run with a placeholder key.
+kind 3: login not rehearsed. Needs a real Tailscale account: the login with a real key, approving the device,
+HTTPS and DNS in the tailnet, the serve config being applied, and the login surviving a restart.
+Mark these "first time on a real machine". A green job here does not mean the login works.
 SUMMARY
