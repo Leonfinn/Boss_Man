@@ -144,7 +144,11 @@ export type DecisionContext =
   | { type: "ticket_cap"; ticketId: string }
   | { type: "project_cap"; projectId: string }
   | { type: "budget_limit"; policyId: string }
-  | { type: "risk_review"; ticketId: string; reviewer: string }
+  /**
+   * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
+   * by the owner copies them into `signedOff`, so a later round on the same commit reuses it (DR-013).
+   */
+  | { type: "risk_review"; ticketId: string; reviewer: string; head?: string; risk?: string; signedOff?: { head: string; risk: string | null; at: string; by: "owner" } }
   /** The merge check was killed or timed out: the owner's call, not the agent's. */
   | { type: "check_stuck"; ticketId: string; command: string; output: string }
   /** A lesson learned from a sent-back review (R-review-lessons), awaiting the owner's call. */
@@ -2336,6 +2340,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.
         await clearMergeCards(db, ctx.ticketId, { by: "system", note: "The owner's sign-off was answered, so this retry card is no longer needed.", at: new Date().toISOString() });
+        // DR-013: the owner signed off this commit. Merged into the stored context (not overwriting it) so an advice record stays.
+        // Only the owner's own answer counts; the CEO is refused above, and this keeps it so if that guard ever changes.
+        if (answer === APPROVE_MERGE && !extra.settledBy && ctx.head) {
+          const signedOff = { head: ctx.head, risk: ctx.risk ?? null, at: now().toISOString(), by: "owner" as const };
+          await db.update(decisions).set({ context: sql`${decisions.context} || ${JSON.stringify({ signedOff })}::jsonb` }).where(eq(decisions.id, id));
+        }
         if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner", extra.merge);
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "check_stuck") {
