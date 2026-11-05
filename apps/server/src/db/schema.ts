@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -338,8 +338,8 @@ export const tickets = pgTable(
     /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
     monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
-    /** The ticket's acceptance criteria (1 to 10 non-empty strings), checked against at review; empty means none. */
-    acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
+    /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
+    acceptanceCriteria: jsonb("acceptance_criteria").$type<Criterion[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
