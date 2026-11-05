@@ -15,7 +15,7 @@ import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
-import { activeRows, endedNormallySql, evaluate, latestRows, roundStartedAt } from "./review-kinds.js";
+import { activeRows, endedNormallySql, evaluate, latestRows, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { progressSweep } from "./progress.js";
 import { MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
@@ -477,12 +477,16 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         const [last] = await db.select({ at: max(runs.endedAt) }).from(runs).where(and(eq(runs.agentId, agentId), endedNormallySql(runs.outcome)));
         const lastActive = later(roundStart, last?.at)!;
         if (t.getTime() - lastActive.getTime() < limits.missedAfterMs) continue;
+        // "Leave it another hour" holds this review for another quiet period, starting from the answer,
+        // so the CEO's choice isn't re-asked within a minute (BOS-426, BOS-433 fix B).
+        const waited = await reviewWaitedSince(db, r.id);
+        if (waited && t.getTime() - waited.getTime() < limits.missedAfterMs) continue;
         // Review wakes name the ticket at the start of their note; the first one counts too. Only this
         // round's wakes count (BOS-433): a reviewer who answered rounds 1-2 isn't reported for round 3.
         const recent = await db
           .select({ id: wakes.id, createdAt: wakes.createdAt })
           .from(wakes)
-          .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, REVIEW_REASON), like(wakes.note, `%- ${ticket.id} %`), gte(wakes.createdAt, roundStart)))
+          .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, REVIEW_REASON), like(wakes.note, reviewAskPattern(ticket.id)), gte(wakes.createdAt, roundStart)))
           .orderBy(desc(wakes.createdAt));
         if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.missedAfterMs) continue;
         if (recent.length > MISSED_NUDGES_PER_DAY) {

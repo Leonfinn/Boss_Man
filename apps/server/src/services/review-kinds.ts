@@ -4,7 +4,7 @@
 import { and, desc, eq, inArray, isNull, like, max, min, ne, or, sql, type AnyColumn } from "drizzle-orm";
 import { KIND_FOCUS, REVIEW_KINDS, ruleFor, slotRef, ticketRef, type ReviewerRefValue, type ReviewSlot } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
+import { activity, agents, companies, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { readVerdicts } from "@boss-man/shared";
 import { effectivePolicy, otherReviewers, resolveKindReviewer } from "./review-policy.js";
@@ -49,6 +49,28 @@ export async function roundStartedAt(db: Db, ticketId: string): Promise<Date | n
   if (!m?.n) return null;
   const [at] = await db.select({ at: min(reviewRequests.createdAt) }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.round, m.n)));
   return at?.at ?? null;
+}
+
+/** The activity kind a "Leave it another hour" answer writes (BOS-426, BOS-433 fix B). */
+export const REVIEW_WAIT = "review_wait";
+
+/**
+ * Record that the CEO or owner left this review another quiet period, so the stall sweep leaves it
+ * alone until then (BOS-426, BOS-433 fix B). Without it the answer only freed the card's key and the
+ * next sweep raised the same card again within a minute. The review's id is on the row's detail, so
+ * the sweep reads it back through {@link reviewWaitedSince}.
+ */
+export async function recordReviewWait(db: Db, row: { companyId: string; ticketId: string; reviewId: string; at: Date; agentId?: string | null }) {
+  await record(db, { companyId: row.companyId, agentId: row.agentId ?? null, ticketId: row.ticketId, kind: REVIEW_WAIT, summary: "The review was left another hour.", detail: { reviewId: row.reviewId }, at: row.at });
+}
+
+/** When this review was last left another hour, or null if it never was. */
+export async function reviewWaitedSince(db: Db, reviewId: string): Promise<Date | null> {
+  const [row] = await db
+    .select({ at: max(activity.at) })
+    .from(activity)
+    .where(and(eq(activity.kind, REVIEW_WAIT), sql`${activity.detail}->>'reviewId' = ${reviewId}`));
+  return row?.at ?? null;
 }
 
 /** Pending reviews whose turn it is. Seq 0 is never held back and holds nobody; a numbered review waits for the lower numbers to approve or be overruled. */

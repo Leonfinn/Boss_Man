@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq, like } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { RunnerCommand } from "@boss-man/shared";
@@ -283,6 +283,35 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(owner.tier).toBe("owner");
     expect((owner.context as { triedFirst?: string }).triedFirst).toMatch(/moved the review on/);
     expect(await queueIds()).toContain(open.id);
+  });
+
+  // BOS-433 fix B, Rex round 4 must-fix: answering "Leave it another hour" must actually hold the
+  // card off for the quiet time, not let the next sweep raise the same one within a minute.
+  it("\"Leave it another hour\" holds the stalled-review card off for the quiet time, then it asks again", async () => {
+    await ctx.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, ctx.ticket.id));
+    await ctx.db.insert(reviewRequests).values({ ticketId: ctx.ticket.id, kind: "code", reviewerAgentId: ctx.dev.id, round: 1, createdAt: new Date(ctx.now().getTime() - 4 * 3_600_000) });
+    for (const hours of [3, 2, 1]) {
+      await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: ctx.ticket.id, reason: "review requested", status: "launched", note: `- ${ctx.ticket.id} "Restart the API": still waiting for your code review`, createdAt: new Date(ctx.now().getTime() - hours * 3_600_000) });
+    }
+    // Count by context: an answered card frees its dedupe key, so filtering on "review-stall:%" would miss it.
+    const stalled = () => ctx.db.select().from(decisions).where(sql`${decisions.context}->>'type' = 'review_stall'`);
+
+    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
+    const [a] = await stalled();
+    const ceo = await client(ctx.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Leave it another hour", note: "The reviewer is working through it." } }))).toBe(false);
+    expect((await reload(a!.id)).status).toBe("answered");
+
+    // Swept again straight away: the answer holds it, so no new card is raised.
+    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(0);
+    expect(await stalled()).toHaveLength(1);
+    // Half the quiet time later, still held.
+    ctx.advance(15);
+    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(0);
+    // Past the quiet time, it asks once more.
+    ctx.advance(20);
+    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
+    expect(await stalled()).toHaveLength(2);
   });
 
   it("without a Scrum Master it starts at the CEO", async () => {
