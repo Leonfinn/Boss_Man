@@ -748,7 +748,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const urgentIdleResult = held ? { woken: 0 } : await urgentIdle(t);
       const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
       // Silent runs, reviews that end without a verdict, and causes left unproven (BOS-314): these run whether or not the watchdog is on.
-      const progress = held ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 } : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert });
+      const progress = held ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 } : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert, inCheckQueue: async (runId, silentMs) => silentMs < limits.checkQueueAfterMs && !!(await busyInCommand(runId))?.checkScript });
       const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);
       const unmerged = held ? 0 : await unmergedApprovals(t);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).

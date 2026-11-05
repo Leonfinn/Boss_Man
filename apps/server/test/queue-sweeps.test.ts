@@ -658,10 +658,11 @@ describe("stalled runs (R32)", () => {
       expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
     }
     expect(await ctx.alerts()).toEqual([]);
-    ctx.advance(31 * 60_000);
+    ctx.advance(29 * 60_000);
     await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
-    ctx.advance(60 * 60_000);
+    expect(await ctx.alerts()).toEqual([]);
+    ctx.advance(2 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
   });
 
