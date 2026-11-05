@@ -136,3 +136,19 @@ staging check.
 - Staging, once merged and deployed: restore the 4 Nov Index (pre-11:33) and the
   3 Nov release log; confirm both come back and the restore is listed as a new
   version; confirm the History screen shows sizes and opens every row.
+
+## Build status (5 Nov)
+
+- **Step 1 (committed, 2f5eedc6):** `write` refuses `section`/`offset` and refuses a rewrite that drops more than a
+  quarter of the text or any heading unless `replace: true` (CEO only on another agent's page).
+- **Step 2 (committed, a8dff64b):** `append`, `history` (every version, with sizes; the page screen no
+  longer caps at 100), `restore` (CEO or the page's last writer; itself a new version), owner route
+  `POST /api/companies/:id/wiki-restore`, company import keeps a first version, History screen shows sizes and
+  says so when a version won't open, and the wiki tool description plus the Wiki Maintainer's and Release
+  Manager's instructions say to use `append` for log entries.
+- **Tests:** 7 new in `apps/server/test/wiki.test.ts` and 3 in `apps/web/test/wiki-history.test.tsx`; all 10 fail
+  on 2f5eedc6 and pass with a8dff64b (run by file with one worker). Server, web and shared typecheck pass.
+- **Still to do:** the project's full check runs at the merge gate; after merge, staging should restore the
+  4 Nov Index and 3 Nov release log from History.
+- Caveat: the guard, append, history and restore were exercised by the wiki tests and typecheck only tonight;
+  the broader related suite was stopped at the CEO's request so it would not starve the merge gate.
