@@ -76,6 +76,11 @@ LEADER_AFTER=999 REBUILD_WAIT_SECONDS=1 run && fail "a standby server reported s
 grep -q "Last role seen: standby" "$T/out" || fail "didn't print the last role"
 grep -q "docker compose kill -s SIGUSR2 server-green" "$T/out" || fail "didn't print the recovery command"
 
+# The front-network form of the include names the same colour.
+printf '(active) {\n\treverse_proxy server-blue-front:{args[0]} {\n\t\theader_up X-Forwarded-For {client_ip}\n\t}\n}\n' >"$T/deployer/proxy/active.caddy"
+run || fail "front-form include failed"
+logged "compose build server-blue" || fail "front-form include: didn't build blue"
+
 # Naming the colour skips the include; a missing include without a name refuses.
 run blue || fail "naming blue failed"
 logged "compose build server-blue" || fail "didn't build the named colour"
