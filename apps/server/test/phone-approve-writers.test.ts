@@ -112,23 +112,22 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/agents.ts": { counts: { insert: 5 }, why: "kind approval: hire, model_change, instructions, team_plan, rename" },
   "src/services/alert-ladder.ts": { counts: { insert: 1 }, why: "tier ceo with a ladder key" },
   "src/services/decisions.ts": {
-    counts: { insert: 11, question: 7, todo: 2 },
-    why: "merge-stuck (check_stuck, no agent), owner to-do (owner_todo, ownerMustDo), lesson_replace x2 (tier ceo), permission/plan rows (kind permission/approval), raise() (eligible case), skill (kind skill), CEO reissue (advice), undelivered permission (no agent)",
+    counts: { insert: 12, question: 8, todo: 2 },
+    why: "merge-stuck (check_stuck, no agent), owner to-do (owner_todo, ownerMustDo), owner setup (type owner_setup, ticketId, no agent, one option), lesson_replace x2 (tier ceo), permission/plan rows (kind permission/approval), raise() (eligible case), skill (kind skill), CEO reissue (advice), undelivered permission (no agent)",
   },
   "src/services/deploys.ts": { counts: { insert: 1 }, why: "kind approval: deploy" },
   "src/services/disk.ts": { counts: { insert: 1, question: 1 }, why: "no raising agent, one option" },
   "src/services/engagements.ts": { counts: { insert: 1 }, why: "kind engagement" },
   "src/services/goal-check.ts": { counts: { insert: 1 }, why: "kind approval: goal_check" },
-  "src/services/loop-guards.ts": { counts: { insert: 2, question: 1 }, why: "no raising agent, one option" },
+  "src/services/loop-guards.ts": { counts: { insert: 3, question: 2 }, why: "no raising agent, one option (repeated-failure and account-outage notices)" },
   "src/services/maintenance.ts": { counts: { insert: 1 }, why: "kind approval: maintenance" },
   "src/services/policy-rules.ts": { counts: { insert: 1, question: 1 }, why: "type rule_proposal" },
-  "src/services/progress.ts": { counts: { question: 3 }, why: "status-check, review-silent and unproven-cause notices go through alerts (tier ceo, ladder), each with a ticketId and one option" },
   "src/services/retro.ts": { counts: { insert: 3, question: 1 }, why: "type lesson (and approvals: workflow_change, workflow_check)" },
   "src/services/review.ts": { counts: { insert: 4, question: 3 }, why: "check_stuck (no agent), lesson (tier ceo), risk_review (kind approval), carried (type carried, ticketId, blocker, one option)" },
   "src/services/runners.ts": { counts: { insert: 1 }, why: "kind budget" },
   "src/services/scheduler.ts": { counts: { insert: 3 }, why: "kind budget: budget_limit, project_cap, ticket_cap" },
   "src/services/self-deploy.ts": { counts: { insert: 1 }, why: "kind approval: self_deploy" },
-  "src/services/sweeps.ts": { counts: { insert: 2, question: 3 }, why: "stale_blocker kind; missed-nudge and review-stall go through alerts (tier ceo, ladder); gave-up notice has no agent and one option" },
+  "src/services/sweeps.ts": { counts: { insert: 2, question: 1 }, why: "stale_blocker kind; gave-up notice has no agent and one option (its alerts now use named alert kinds via the ladder: tier ceo, ladder key)" },
 };
 const PATTERNS: Record<string, RegExp> = { insert: /insert\(decisions\w*\)/g, question: /kind: "question"/g, raise: /\.raise\(/g, todo: /raiseOwnerTodo\(/g };
 
