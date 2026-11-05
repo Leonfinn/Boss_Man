@@ -92,8 +92,10 @@ describe("evaluatePermission defaults", () => {
   });
 
   it("keeps a request that names a path with the owner, e.g. OpenCode's external_directory (BOS-295 security review)", () => {
-    const oc = { title: "/home/x", kind: "other", rawInput: { filepath: "/home/x/a", parentDir: "/home/x" } };
+    // The title is not a path here: a title that is a folder path is refused outright (BOS-495, below).
+    const oc = { title: "external_directory", kind: "other", rawInput: { filepath: "/home/x/a", parentDir: "/home/x" } };
     expect(evaluatePermission(oc, []).outcome).toBe("owner");
+    expect(evaluatePermission({ ...oc, title: "/home/x" }, []).outcome).toBe("deny");
     expect(evaluatePermission({ title: "x", kind: null, rawInput: { file_path: "/etc/passwd" } }, []).outcome).toBe("owner");
   });
 
