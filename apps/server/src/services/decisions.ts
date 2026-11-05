@@ -147,6 +147,8 @@ export type DecisionContext =
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
+  /** A review woken this round again and again with no verdict (BOS-404, BOS-426): the CEO acts on it. */
+  | { type: "review_stall"; ticketId: string; reviewId: string; reviewerAgentId: string; kind: string }
   | { type: "ticket_cap"; ticketId: string }
   | { type: "project_cap"; projectId: string }
   | { type: "budget_limit"; policyId: string }
@@ -197,6 +199,12 @@ export const SEND_IT_BACK = "Send it back";
 export const CHECK_AGAIN = "Run the check again";
 export const CHECK_SEND_BACK = "Send it back to the agent";
 export const CHECK_SKIP = "Merge without the check";
+/** A stalled review (BOS-404, BOS-426): real actions on the review instead of "Got it". */
+export const TAKE_REVIEW = "Take the review myself";
+export const REASSIGN_REVIEW = "Give it to another reviewer";
+export const SEND_BACK_FOR_MERGE = "Send it back to the author";
+export const WAIT_ANOTHER_HOUR = "Leave it another hour";
+export const REVIEW_STALL_ACTIONS = [TAKE_REVIEW, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, WAIT_ANOTHER_HOUR];
 /** An owner to-do (BOS-122): the approved deploy still needs the owner's own hand. */
 export const TODO_DONE = "Done, it's applied";
 export const TODO_FAILED = "A step failed";
@@ -240,6 +248,7 @@ export function ceoAnswerRefusal(d: { kind: string; tier: string; options: unkno
   if (opts.ladder !== false && ctx.ladder?.rung === "owner") return "This alert is already with the owner, so it isn't yours to settle. Leave it for them.";
   if (OWNER_ONLY_ANSWER_TYPES.has(ctx.type)) return "Only the owner can answer this kind of decision. Leave it for them; if they asked for your advice, use action advise.";
   if (ctx.type === "question" && ctx.steps?.length) return "This asks the owner to do something, so only they can answer it. Leave it for them; if they asked for your advice, use action advise.";
+  if (ctx.type === "review_stall" && answer !== undefined && !REVIEW_STALL_ACTIONS.includes(answer)) return `On a stalled review, choose one of: ${REVIEW_STALL_ACTIONS.join(", ")}.`;
   if (d.tier === "owner" && !isSystemCard(d)) return "This card is the owner's to answer. Leave it for them; if they asked for your advice, use action advise.";
   if (isSystemCard(d)) {
     // An allow-list, not a single refusal: anything added to a system card later stays off the CEO's list.
@@ -694,6 +703,8 @@ export type LoopHooks = {
   land(ticketId: string, reviewer: string, merge?: AnswerExtra["merge"]): Promise<unknown>;
   /** Lands again in the background after a check that couldn't finish; `skipChecks` merges without it. */
   landAgain(ticketId: string, skipChecks: boolean): Promise<unknown>;
+  /** A stalled-review card's action on the review (BOS-426): the reviewer, the reviewer's id and the kind. Returns false when the review can't take that action any more, which keeps the card open. */
+  reviewStall?(ctx: Extract<DecisionContext, { type: "review_stall" }>, answer: string, byAgentId: string | null): Promise<boolean>;
 };
 
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
@@ -2298,7 +2309,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           status: "answered",
           answer,
           answeredAt: now(),
-          ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
+          ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || ctx.type === "review_stall" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
           ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : settled ? { context: settledContext! } : {}),
         })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), eq(decisions.tier, d.tier), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
@@ -2538,6 +2549,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const r = await cancelRun?.(ctx.runId).catch(() => null);
         endedHere = !!r?.endedHere;
         delivered = !!r && !r.endedHere;
+      } else if (ctx.type === "review_stall") {
+        // The action on the review; if the review has moved on (a verdict landed meanwhile) the card
+        // is reopened rather than closing with nothing done (BOS-426, BOS-433 fix B).
+        const did = await loopHooks?.reviewStall?.(ctx, answer, extra.settledBy?.agentId ?? null).catch((err) => {
+          if (err instanceof Error) throw new AnswerError(`Nothing was done about the review: ${err.message}`);
+          throw err;
+        });
+        if (did === false) {
+          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null, context: d.context as object }).where(eq(decisions.id, id));
+          throw new AnswerError("That review has already moved on (it got a verdict or passed), so this card no longer applies. Nothing was changed.");
+        }
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
