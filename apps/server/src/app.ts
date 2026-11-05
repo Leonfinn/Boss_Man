@@ -518,7 +518,18 @@ export async function buildApp(opts: AppOptions) {
     now: opts.now,
   });
   decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
-  const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now, alert: (input) => alerts.raise(input) });
+  // A limit or auth failure closes into one card per account (DR-017 B, BOS-469 point 3): the agent's own
+  // funding source, or the one the run used when it says so.
+  const loops = loopGuards(db, {
+    limits: opts.loopLimits,
+    now: opts.now,
+    alert: (input) => alerts.raise(input),
+    fundingSourceFor: async (agentId) => {
+      if (!agentId) return null;
+      const [row] = await db.select({ id: fundingSources.id, name: fundingSources.name }).from(fundingSources).innerJoin(agents, eq(agents.fundingSourceId, fundingSources.id)).where(eq(agents.id, agentId));
+      return row ?? null;
+    },
+  });
   // The Scrum Master watchdog (BOS-58): its sweep runs on the leader's timer (main.ts), its actions through the Scrum Master's MCP tool.
   const watchdog = watchdogService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
@@ -536,7 +547,19 @@ export async function buildApp(opts: AppOptions) {
   // Workflow retros (docs/19): the leader's timer starts them (main.ts), the retro agent's MCP tools fill them, and decisions apply the changes.
   const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, skillProposals, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setRetroHook(retro);
-  const alerts = alertLadder(db, { notify: (agentId, input) => scheduler.notify(agentId, input), answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra), watchdog, nudge: (input) => scheduler.nudge(input), now: opts.now });
+  const alerts = alertLadder(db, {
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
+    watchdog,
+    nudge: (input) => scheduler.nudge(input),
+    ceoCanRun: (companyId) => scheduler.ceoCanRun(companyId),
+    clearExpired: async () => {
+      const n = await clearing.check();
+      if (n) await notes.syncDecisions();
+      return n;
+    },
+    now: opts.now,
+  });
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
   const review = reviewService(db, {
