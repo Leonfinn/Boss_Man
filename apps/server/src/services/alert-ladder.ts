@@ -190,7 +190,8 @@ export function alertLadder(
     if (!ceo) return { skip: "there is no CEO" };
     if (ceo.paused) return { skip: "the CEO is paused" };
     if (about.includes(ceo.id)) return { skip: "the alert is about the CEO" };
-    // Each hop starts a CEO run, so a loop raising alerts on many tickets could feed itself; past the cap they go to the owner as before.
+    // Each hop starts a CEO run, so a loop raising alerts on many tickets could feed itself; past the cap the
+    // CEO is skipped, and place() then holds a CEO-ceiling card with it (or passes an owner kind on).
     const [n] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(watchdogActions)

@@ -72,10 +72,9 @@ async function setup() {
   // owner's queue unless it is an owner kind. These tests read the card itself, whatever rung holds it, in
   // the CEO's own view (which carries the same evidence and reasons the owner's queue shows).
   const alerts = async () => (await built.decisions.queue({ includeAll: true, companyId: company.id })) as unknown as Row[];
-  const alertFor = async (kind: string) => (await alerts()).find((r) => r.kind === kind) as Row & { id: string; question: string };
   const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
-  return { ...built, db, reads, close, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, alertFor, sweep, advance, clock, offline, online };
+  return { ...built, db, reads, close, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, sweep, advance, clock, offline, online };
 }
 
 describe("ranked decision queue (R20)", () => {
