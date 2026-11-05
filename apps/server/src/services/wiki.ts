@@ -56,6 +56,30 @@ const folderOf = (slug: string) => slug.split("/").slice(0, -1).join("/");
 /** A heading's span in a page body. start..end is the section with its subsections; start..ownEnd is its own text. */
 export type Section = { path: string; heading: string; level: number; start: number; ownEnd: number; end: number };
 
+/**
+ * The ``` or ~~~ fence a line opens or closes, or null for any other line: the fence's marker character
+ * and how many of it. A fence opens with at least three of ``` or ~~~ and closes only with the same
+ * character, in a run at least as long as the opener (adversarial round 7: a ```-opened block "closed"
+ * with ~~~ stays open). Fences are tracked by this one function wherever page structure is read, so an
+ * append's entry and `splitSections` can't disagree about whether a block is closed.
+ */
+export function fenceLine(line: string): { char: string; len: number } | null {
+  const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  return m ? { char: m[1]![0]!, len: m[1]!.length } : null;
+}
+
+/** Whether `lines` end with a fence still open, by the same open/close rule `splitSections` uses. */
+export function endsInOpenFence(lines: string[]): boolean {
+  let open: { char: string; len: number } | null = null;
+  for (const line of lines) {
+    const f = fenceLine(line);
+    if (!f) continue;
+    if (!open) open = f;
+    else if (f.char === open.char && f.len >= open.len) open = null;
+  }
+  return open !== null;
+}
+
 /** Markdown ATX headings, ignoring # lines inside ``` or ~~~ fences. Text before the first heading is "intro" (level 0). */
 export function splitSections(body: string): Section[] {
   const out: Section[] = [];
@@ -66,8 +90,8 @@ export function splitSections(body: string): Section[] {
   // heading regex from matching (adversarial round 6). Offsets still count in the original body.
   for (const raw of body.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]?.[0];
-    if (f) fence = fence === null ? f : fence === f ? null : fence;
+    const f = fenceLine(line);
+    if (f) fence = fence === null ? f.char : fence === f.char ? null : fence;
     const m = fence === null && !f ? /^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/.exec(line) : null;
     if (m) {
       const level = m[1]!.length;
@@ -167,9 +191,11 @@ export function appendToBody(body: string, entry: string, heading: string | unde
   const glue = nl + nl;
   const lines = entryLines(entry);
   const text = lines.join(nl);
-  // An odd number of fence lines means the entry's last code block never closes: it would swallow the
-  // page's later headings (adversarial round 6), so refuse it rather than corrupt the page silently.
-  if (lines.filter((l) => /^ {0,3}(`{3,}|~{3,})/.test(l)).length % 2) throw new WikiError(400, "This entry has a code fence (```) that it never closes. Close it, so the page after the entry isn't read as code.");
+  // An entry whose last code block never closes would swallow the page's later headings (adversarial
+  // round 6), so refuse it rather than corrupt the page silently. The check is the same open/close rule
+  // `splitSections` uses, so a ```-block "closed" with ~~~ is caught and a valid 4-tick block holding a
+  // 3-tick line is not (adversarial round 7).
+  if (endsInOpenFence(lines)) throw new WikiError(400, "This entry has a code fence (```) that it never closes. Close it with the same marks, so the page after the entry isn't read as code.");
   const isList = (l: string | undefined) => /^[-*] /.test(l ?? "");
   const bare = (l: string | undefined) => (l ?? "").replace(/\r$/, "");
   const lastLine = (t: string) => bare(t.split("\n").at(-1));

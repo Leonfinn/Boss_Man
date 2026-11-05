@@ -311,6 +311,28 @@ describe("wiki append, history and restore (BOS-430)", () => {
     expect(ok).toContain("## B\ny");
   });
 
+  it("append refuses an entry whose fence is closed with a different mark, so the page's later headings survive", async () => {
+    // Adversarial round 7: the check counted fence lines, so "```" opened and "~~~" "closed" it looked
+    // balanced while the wiki kept the block open and hid every heading after the entry.
+    const c = (ctx = await setup());
+    const body = "# T\n\n## A\nx\n\n## B\ny\n";
+    await c.wiki.write(c.company.id, { title: "T", body, agentId: c.worker.id, runId: null });
+    await expect(c.wiki.append(c.company.id, { slug: "t", entry: "```\ncode\n~~~", heading: "A", agentId: c.worker.id, runId: null })).rejects.toThrow(/never closes/);
+    expect((await c.wiki.get(c.company.id, "t")).body).toBe(body);
+    expect((await c.wiki.get(c.company.id, "t")).revisions).toHaveLength(1);
+  });
+
+  it("append accepts a closed four-backtick block that holds a three-backtick line", async () => {
+    // Adversarial round 7: the line count refused "````\\nx\\n```\\n````" although it is a valid closed
+    // block (a 3-tick run can't close a 4-tick opener).
+    const c = (ctx = await setup());
+    const body = "# T\n\n## A\nx\n\n## B\ny\n";
+    await c.wiki.write(c.company.id, { title: "T", body, agentId: c.worker.id, runId: null });
+    const r = await c.wiki.append(c.company.id, { slug: "t", entry: "````\nx\n```\n````", heading: "A", agentId: c.worker.id, runId: null });
+    expect(r.page.body).toContain("````\nx\n```\n````");
+    expect(r.page.body).toContain("## B\ny");
+  });
+
   it("append finds headings on a page with Windows (CRLF) line endings", async () => {
     // Adversarial round 6: the trailing "\r" stopped the heading regex, so such a page reported no headings.
     const c = (ctx = await setup());
