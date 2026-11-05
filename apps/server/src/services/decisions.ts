@@ -1606,36 +1606,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const forIds = [...new Set(open.map((o) => o.d.forAgentId).filter((x): x is string => !!x))];
       const forNames = new Map(forIds.length ? (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, forIds))).map((a) => [a.id, a.name]) : []);
 
-      // Open work, with the most important objective it serves and its effective due date.
-      const work = await db
-        .select({
-          id: tickets.id,
-          title: tickets.title,
-          number: tickets.number,
-          prefix: companies.ticketPrefix,
-          dueDate: tickets.dueDate,
-          milestoneTarget: milestones.targetDate,
-          krPriority: objectives.priority,
-          milestoneObjectiveId: milestones.objectiveId,
-        })
-        .from(tickets)
-        .innerJoin(companies, eq(companies.id, tickets.companyId))
-        .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
-        .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
-        .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
-        .where(ne(tickets.systemState, "done"));
-      const msObjectives = [...new Set(work.map((w) => w.milestoneObjectiveId).filter((x): x is string => !!x))];
-      const msPriority = new Map(
-        msObjectives.length ? (await db.select({ id: objectives.id, p: objectives.priority }).from(objectives).where(inArray(objectives.id, msObjectives))).map((o) => [o.id, o.p]) : [],
-      );
-      const info = new Map(
-        work.map((w) => {
-          const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
-          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null }];
-        }),
-      );
-      // (BOS-413) Read only what the open cards point at, never every dependency row: the rows that name
-      // an open card, then the chain below the tickets those reach.
+      // (BOS-413) Read only what the open cards point at, never every open ticket in every company with
+      // its objective joins, and never every dependency row: the rows that name an open card, then the
+      // chain below the tickets those reach.
       const openIds = open.map(({ d }) => d.id);
       const directDeps = await db.select().from(ticketDependencies).where(inArray(ticketDependencies.blockerDecisionId, openIds));
 
@@ -1694,58 +1667,103 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return explain?.push?.ticketId ? [explain.push.ticketId] : [];
       });
       const wantedAbout = [...new Set([...open.flatMap(({ d }) => aboutIds(d)), ...pushTicketIds])];
-      const aboutRows = wantedAbout.length
+      // (BOS-413) The dependents chain below the tickets the cards hold up, in one round trip: a
+      // recursive walk down from those tickets only, capped at the same depth of 10, reading only
+      // rows that name a ticket already in the chain. Nothing outside the chain is read.
+      const dependents = new Map<string, string[]>();
+      {
+        const seed = [...new Set(open.flatMap(({ d }) => direct(d)))];
+        if (seed.length) {
+          // node-postgres and PGlite both answer db.execute with the rows, but one wraps them.
+          const result = (await db.execute(sql`
+            with recursive chain(dep, blocker, blocked, depth) as (
+              select d.id, d.blocker_ticket_id, d.blocked_ticket_id, 1
+                from ticket_dependencies d join tickets b on b.id = d.blocked_ticket_id
+               where d.blocker_ticket_id in (${sql.join(seed.map((id) => sql`${id}`), sql`, `)})
+                 and b.system_state <> 'done'
+              union
+              select d.id, d.blocker_ticket_id, d.blocked_ticket_id, c.depth + 1
+                from ticket_dependencies d
+                join chain c on d.blocker_ticket_id = c.blocked
+                join tickets b on b.id = d.blocked_ticket_id
+               where c.depth < 10 and b.system_state <> 'done'
+            )
+            -- A ticket is placed under the first blocker that reaches it (as the old walk did), and
+            -- siblings keep the order of the dependency rows that made them.
+            select distinct on (blocker, blocked) dep, blocker, blocked
+              from chain order by blocker, blocked, dep`)) as unknown as { rows?: Array<{ dep: string; blocker: string; blocked: string }> } | Array<{ dep: string; blocker: string; blocked: string }>;
+          const found = Array.isArray(result) ? result : (result.rows ?? []);
+          // The same edge can come back at two depths; the first one (by dependency row) is the place.
+          const seenEdge = new Set<string>();
+          for (const r of [...found].sort((x, y) => x.dep.localeCompare(y.dep))) {
+            const edge = `${r.blocker}|${r.blocked}`;
+            if (seenEdge.has(edge)) continue;
+            seenEdge.add(edge);
+            dependents.set(r.blocker, [...(dependents.get(r.blocker) ?? []), r.blocked]);
+          }
+        }
+      }
+
+      // The chains' tickets, and only those, with the most important objective each serves and its
+      // effective due date; plus the tickets a card is about, which may be done or hold nothing up.
+      const chainIds = [...new Set([...dependents.keys(), ...[...dependents.values()].flat()])];
+      const wantedTickets = [...new Set([...chainIds, ...wantedAbout])];
+      const work = wantedTickets.length
         ? await db
-            .select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix })
+            .select({
+              id: tickets.id,
+              title: tickets.title,
+              number: tickets.number,
+              companyId: tickets.companyId,
+              prefix: companies.ticketPrefix,
+              dueDate: tickets.dueDate,
+              milestoneTarget: milestones.targetDate,
+              krPriority: objectives.priority,
+              milestoneObjectiveId: milestones.objectiveId,
+            })
             .from(tickets)
             .innerJoin(companies, eq(companies.id, tickets.companyId))
-            .where(inArray(tickets.id, wantedAbout))
+            .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
+            .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+            .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
+            // A chain member that is done is skipped, as before; a card's "about" ticket may be done.
+            .where(inArray(tickets.id, wantedTickets))
         : [];
-      const aboutInfo = new Map(aboutRows.map((r) => [r.id, r]));
-
-      // The dependents map, filled from the whole chain (BOS-413): every ticket found while walking down
-      // is read, and the next level's edges come from that. Nothing outside the chain is read.
-      const dependents = new Map<string, string[]>();
-      const addDependents = async (ids: string[]) => {
-        const wanted = ids.filter((id) => !dependents.has(id));
-        if (!wanted.length) return;
-        for (const id of wanted) dependents.set(id, []);
-        const rows = await db
-          .select({ blocker: ticketDependencies.blockerTicketId, blocked: ticketDependencies.blockedTicketId })
-          .from(ticketDependencies)
-          .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
-          .where(and(inArray(ticketDependencies.blockerTicketId, wanted), ne(tickets.systemState, "done")));
-        for (const r of rows) if (r.blocker) dependents.get(r.blocker)!.push(r.blocked);
-      };
-      // A dependent that is missing from `info` (a done or deleted ticket) is skipped, as before.
-      let level = [...new Set(open.flatMap(({ d }) => direct(d)))].filter((id) => info.has(id));
-      for (let depth = 0; depth <= 10 && level.length && depth <= 10; depth++) {
-        await addDependents(level);
-        level = [...new Set(level.flatMap((id) => dependents.get(id) ?? []))].filter((id) => info.has(id));
-      }
+      const msObjectives = [...new Set(work.map((w) => w.milestoneObjectiveId).filter((x): x is string => !!x))];
+      const msPriority = new Map(
+        msObjectives.length ? (await db.select({ id: objectives.id, p: objectives.priority }).from(objectives).where(inArray(objectives.id, msObjectives))).map((o) => [o.id, o.p]) : [],
+      );
+      const info = new Map(
+        work.map((w) => {
+          const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
+          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), companyId: w.companyId, prefix: w.prefix, number: w.number, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null } as const];
+        }),
+      );
+      // Only live tickets are in a chain; a done one (or a deleted one) is left out of the walk.
+      const liveOnly = new Set(work.map((w) => w.id));
 
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
         const seen = new Set<string>();
-        let frontier = direct(d).filter((id) => info.has(id));
+        let frontier = direct(d).filter((id) => liveOnly.has(id));
         for (let depth = 1; frontier.length && depth <= 10; depth++) {
           const next: string[] = [];
           for (const id of frontier) {
             if (seen.has(id)) continue;
             seen.add(id);
             const i = info.get(id);
-            if (!i) continue;
+            if (!i || !liveOnly.has(id)) continue;
             chain.push({ ticketId: id, title: i.title, ref: i.ref, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
             next.push(...(dependents.get(id) ?? []));
           }
           frontier = next;
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
-        const about = aboutIds(d).flatMap((id) => { const r = aboutInfo.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
+        const about = aboutIds(d).flatMap((id) => { const r = info.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
         const c = d.context as DecisionContext;
         const push = c.type === "permission" ? c.explain?.push : undefined;
-        const pushTicket = push?.ticketId ? aboutInfo.get(push.ticketId) : undefined;
+        const pushTicket = push?.ticketId ? info.get(push.ticketId) : undefined;
         const context = pushTicket && c.type === "permission" && c.explain
           ? { ...c, explain: { ...c.explain, push: { ...push!, ref: ticketRef(pushTicket.prefix, pushTicket.number) ?? undefined } } }
           : d.context;
