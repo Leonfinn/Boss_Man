@@ -80,8 +80,12 @@ describe("leader heartbeat and server freezes (BOS-432)", () => {
 
   it("no reply at all: one miss is tolerated, the second steps down", async () => {
     const { pg, leader, logs, demotions } = await leaderOn({ queryTimeoutMs: 300 });
+    // The fake Postgres still grants the lock while it holds heartbeats back, so a stepped-down leader would win it
+    // again and cycle on. End the hang in the step-down itself (not by polling, which a busy machine delays), so
+    // exactly one cycle is observed however late the test thread runs (BOS-505).
+    leader.onDemote(() => pg.set("normal"));
     pg.set("hang");
-    await waitFor(() => !leader.isLeader());
+    await waitFor(() => demotions() > 0); // not isLeader(): it may already have won the lock back
     expect(demotions()).toBe(1);
     // Judged from the log order, not by polling between the misses, so a busy machine can't make it flaky.
     const at = (s: string) => logs.findIndex((l) => l.includes(s));
