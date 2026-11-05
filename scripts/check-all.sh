@@ -234,14 +234,16 @@ fi
 # Test hook: scripts/check-all.test.sh stops here once the lock is held.
 [ -z "${CHECK_ALL_STOP_AFTER_LOCK:-}" ] || { echo "check-all: lock held"; exit 0; }
 if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
-node scripts/check-in-memory-state.mjs
+# step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
+step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
+step in-memory-state node scripts/check-in-memory-state.mjs
 # Memory-safe on a shared runner (a 12 GB cgroup shared with other agents, two checks at once): one package at a time,
 # at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),
 # and a capped heap for tsc only. Callers can override any of these.
 export BOSSMAN_TEST_MAX_WORKERS="${BOSSMAN_TEST_MAX_WORKERS:-2}"
-NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}" pnpm -r --workspace-concurrency=1 typecheck
-pnpm -r --workspace-concurrency=1 test
-pnpm build
-scripts/check-shell.sh
-scripts/test-shell.sh
+NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}" step typecheck pnpm -r --workspace-concurrency=1 typecheck
+step test pnpm -r --workspace-concurrency=1 test
+step build pnpm build
+step shellcheck scripts/check-shell.sh
+step shell-tests scripts/test-shell.sh
 echo "check-all: everything passed"
