@@ -48,6 +48,9 @@ const bg = createBackground(
   [
     // Scheduling passes; run ends and new wakes also prompt one.
     { name: "scheduler tick", everyMs: Number(env.BOSSMAN_TICK_MS ?? 5000), run: () => scheduler.tick() },
+    // Watchers' reports, scheduled checks that are due and quota notices (BOS-414). Watch intervals are in
+    // minutes and schedule_check's minimum is 5 minutes, so 30 s is plenty.
+    { name: "watch and monitor", everyMs: Number(env.BOSSMAN_SLOW_MS ?? 30_000), run: () => scheduler.slow() },
     // New decisions reach the owner's notifications (R44).
     { name: "notification sync", everyMs: Number(env.BOSSMAN_NOTIFY_MS ?? 5000), run: () => notes.syncDecisions() },
     // Stale-blocker, stalled-run and missed-work sweeps.
@@ -63,7 +66,8 @@ const bg = createBackground(
     // Project briefs whose branch moved on the git host, merges made outside Boss Man included.
     { name: "brief upkeep", everyMs: Number(env.BOSSMAN_BRIEF_UPKEEP_MS ?? 30 * 60_000), run: briefUpkeep },
     // What the host deployer reports: raises "Deploy?" when main moves and tells the owner how a deploy went. // leader-only
-    { name: "self-deploy sync", everyMs: Number(env.BOSSMAN_SELF_DEPLOY_MS ?? 5000), run: () => selfDeploy.sync() },
+    // The sync itself skips the pass when the deployer's files haven't changed (BOS-414), so polling this often costs a stat.
+    { name: "self-deploy sync", everyMs: Number(env.BOSSMAN_SELF_DEPLOY_MS ?? 30_000), run: () => selfDeploy.sync() },
     // The runner update drain: starts when update-runner.sh asks, swaps each runner as its company goes idle, lifts the hold at the end. // leader-only
     // What each runner's add-ons say about their health (docs/12).
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
