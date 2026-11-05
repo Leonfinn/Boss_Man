@@ -27,7 +27,7 @@ const DIFF: WorkspaceDiff = {
   truncated: false,
 };
 
-type Answers = { verify?: unknown; merge?: unknown; diff?: unknown; carried?: unknown; migrations?: unknown };
+type Answers = { verify?: unknown; merge?: unknown; diff?: unknown; carried?: unknown; migrations?: unknown; carriedFailures?: number };
 
 async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean } = {}) {
   const held: Array<() => void> = [];
@@ -56,7 +56,9 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
       if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.merge }));
       if (c.type === "workspace.carried") {
         const a = answers.carried as { error?: string } | undefined;
-        queueMicrotask(() => built.runners.resolveReply(a?.error ? { requestId: c.requestId, ok: false, error: a.error } : { requestId: c.requestId, ok: true, data: a ?? { carried: [] } }));
+        // carriedFailures: the runner is busy and answers with an error that many times first.
+        const failing = (answers.carriedFailures ?? 0) > 0 && (answers.carriedFailures = answers.carriedFailures! - 1, true);
+        queueMicrotask(() => built.runners.resolveReply(failing ? { requestId: c.requestId, ok: false, error: "runner busy" } : a?.error ? { requestId: c.requestId, ok: false, error: a.error } : { requestId: c.requestId, ok: true, data: a ?? { carried: [] } }));
       }
       if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.migrations }));
       return true;
@@ -691,17 +693,28 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     expect(asked!.branches).toEqual([{ ticketId: other.id, branch: other.branch }]);
   });
 
-  it("refuses rather than merging when the runner can't answer the check", async () => {
-    const c = (ctx = await setup({ answers: { carried: { error: "git rev-list failed" } } }));
-    const other = await otherTicket(c, "Permission gate");
+  it("waits for a busy runner and asks the carried-work check again by itself, then merges (BOS-486)", async () => {
+    setInfraRetryBase(1);
+    const c = (ctx = await setup({ answers: { carried: { carried: [] }, carriedFailures: 2 } }));
+    await otherTicket(c, "Permission gate");
     const r = (await approveAndWait(c.req, c.ticket.id)).json();
-    expect(r).toMatchObject({ verdict: "approved", outcome: "carried" });
-    expect(r.message).toContain("git rev-list failed");
+    expect(r).toMatchObject({ verdict: "approved", outcome: "merged" });
+    expect(c.sent.filter((x) => x.type === "workspace.carried")).toHaveLength(3);
+    expect(c.sent.map((x) => x.type)).toContain("workspace.merge");
+  });
+
+  it("raises one Run-the-check-again card, and leaves the ticket in review, when the runner never answers the carried-work check (BOS-486)", async () => {
+    setInfraRetryBase(1);
+    const c = (ctx = await setup({ answers: { carried: { carried: [] }, carriedFailures: 4 } }));
+    await otherTicket(c, "Permission gate");
+    const r = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(r).toMatchObject({ verdict: "approved", outcome: "check_stuck" });
+    expect(c.sent.filter((x) => x.type === "workspace.carried")).toHaveLength(4);
     expect(c.sent.map((x) => x.type)).not.toContain("workspace.merge");
     expect(await state(c)).toMatchObject({ systemState: "review", mergeCommit: null });
-    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.pullRequestNote).toContain("git rev-list failed");
-    const w = (await c.db.select().from(wakes)).find((x) => x.reason === "carried check failed");
-    expect(w!.note).toContain("git rev-list failed");
+    const cards = (await c.db.select().from(decisions)).filter((d) => d.status === "open" && d.dedupeKey === `merge-stuck:${c.ticket.id}`);
+    expect(cards).toHaveLength(1);
+    expect((await c.db.select().from(wakes)).find((x) => x.reason === "carried check failed")).toBeUndefined();
   });
 });
 

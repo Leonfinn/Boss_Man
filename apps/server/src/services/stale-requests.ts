@@ -88,15 +88,21 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   // text, so a context value that isn't an id simply doesn't match rather than failing to cast.
   const named = sql`${inArray(sql`(${decisions.context} ->> 'ticketId')`, scope)} or ${inArray(sql`(${decisions.context} ->> 'blockedTicketId')`, scope)}`;
   const blocking = sql`exists (select 1 from ${ticketDependencies} where ${ticketDependencies.blockerDecisionId} = ${decisions.id} and ${inArray(ticketDependencies.blockedTicketId, scope)})`;
-  const runTicket = sql`exists (select 1 from ${runs} where ${runs.id}::text = (${decisions.context} ->> 'runId') and ${inArray(runs.ticketId, scope)})`;
   const deployTicket = sql`exists (select 1 from ${deploys} where ${deploys.id}::text = (${decisions.context} ->> 'deployId') and ${inArray(deploys.ticketId, scope)})`;
   // An engagement card names no ticket or card id, only an engagement; its tickets are the ones blocked
   // by that engagement. Found in SQL too, or an owner action would stop marking it (BOS-175).
   const engagementCard = sql`exists (select 1 from ${ticketDependencies} where ${ticketDependencies.blockerEngagementId}::text = (${decisions.context} ->> 'engagementId') and ${inArray(ticketDependencies.blockedTicketId, scope)})`;
+  // Only cards a person wrote: a card Boss Man raised itself (no raiser, or one that went up the
+  // alert ladder) is not made "may be out of date" by an answer. That guess is how Jane's answer on
+  // one card was quoted on Rod's stalled-run card for the same ticket (BOS-470); a system card is
+  // either current or closed by its own condition, not marked stale. A question an agent asked by
+  // hand keeps today's flag-and-wake, and is matched only by the ticket it names or blocks, never by
+  // an answer on a different card about the same ticket.
+  const system = or(isNull(decisions.raisedByAgentId), sql`${decisions.context}->'ladder' is not null`);
   const open = await db
     .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, context: decisions.context })
     .from(decisions)
-    .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), isNull(decisions.staleAt), or(named, blocking, runTicket, deployTicket, engagementCard)));
+    .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), isNull(decisions.staleAt), sql`not (${system})`, or(named, blocking, deployTicket, engagementCard)));
   // The query above already picked out the cards about these tickets, so these are the flagged
   // cards; no second lookup is needed (BOS-175).
   const flagged = open;

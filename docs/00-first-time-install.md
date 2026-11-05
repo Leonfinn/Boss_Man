@@ -22,8 +22,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
-- **Internet access from the host** to GitHub (port 22, for SSH), where the code is (step 2).
-- **Admin access to the Boss Man repository on GitHub.** The repository is private, and only an admin can add the deploy key in step 2.
+- **Read access from the host to the Boss Man code repo** (step 2): internet access to its https address if the repo is public, or a read-only deploy key if it is private.
 
 ## A note on commands
 
@@ -67,41 +66,38 @@ You should see the folder listed.
 
 ## 2. Get the code onto the host
 
-The repository is private, so the host needs its own read-only deploy key. You need admin access to the repository to add one. Replace `OWNER/REPO` below with your repository.
+How the host reads the code depends on the repo. Use the case that matches yours. Replace `<repo-https-url>` and `<repo-ssh-url>` with your repo's own addresses (the clone address your git host shows).
 
-1. Make the key:
-
-   ```sh
-   ssh-keygen -t ed25519 -N "" -C "boss-man $(hostname)" -f "$B/deploy_key"
-   ```
-
-2. Print the public half:
-
-   ```sh
-   cat "$B/deploy_key.pub"
-   ```
-
-3. On GitHub, open the repository's **Settings > Deploy keys > Add deploy key**. Paste the line from step 2. Leave **Allow write access** unticked.
-
-4. Clone with that key into `<install-dir>/src`:
-
-   ```sh
-   GIT_SSH_COMMAND="ssh -i $B/deploy_key -o IdentitiesOnly=yes" git clone git@github.com:OWNER/REPO.git $B/src
-   ```
-
-5. Save the key in the checkout, so later `git fetch`, `scripts/deploy.sh` and the host deployer's `git ls-remote` use it too:
-
-   ```sh
-   git -C $B/src config core.sshCommand "ssh -i $B/deploy_key -o IdentitiesOnly=yes"
-   ```
-
-Check it worked. This prints a commit id and does not ask for a password:
+**Public repo: https, no key.** Clone it into `<install-dir>/src`:
 
 ```sh
-git -C $B/src ls-remote origin HEAD
+git clone <repo-https-url> $B/src
 ```
 
-Then check the clone:
+**Private repo: a read-only deploy key, one per host.** A deploy key is an SSH key that gives read access to one repo. Do not reuse another host's key.
+
+1. Make a key with no passphrase, so updates can run unattended:
+
+   ```sh
+   ssh-keygen -t ed25519 -N "" -C "boss-man-$(hostname)" -f $B/deploy_key
+   ```
+
+2. Show the public half. It is safe to copy. Never copy the file without `.pub`.
+
+   ```sh
+   cat $B/deploy_key.pub
+   ```
+
+3. In your git host, add it as a deploy key on the repo, with write access **off**. On GitHub: the repo's Settings > Deploy keys > Add deploy key.
+4. Clone with the key. `-c core.sshCommand=...` also saves the setting in the checkout, so later `git pull` and `git ls-remote` use the same key:
+
+   ```sh
+   git clone -c core.sshCommand="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" <repo-ssh-url> $B/src
+   ```
+
+   The first time, ssh asks whether to trust the git host. Type `yes` only if the fingerprint matches the one your git host publishes (for GitHub, its "SSH key fingerprints" page).
+
+Check it worked:
 
 ```sh
 git -C $B/src log --oneline -1
@@ -109,7 +105,9 @@ git -C $B/src log --oneline -1
 
 You should see one commit line.
 
-If the clone says `Permission denied (publickey)`, the deploy key is not on the repository yet, or you pasted the wrong half. Add the contents of `deploy_key.pub` as in step 3. If it hangs, check that the host can reach github.com on port 22 (`ssh -T -i $B/deploy_key -o IdentitiesOnly=yes git@github.com` should greet you, then close).
+If the clone hangs, check that the host can reach the git host: port 443 for https (`curl -sI <repo-https-url> | head -1` should print an HTTP status line), port 22 for ssh. If ssh says `Permission denied (publickey)`, the key is not added to the repo yet, or the `-i` path is wrong.
+
+The same remote is used by later pulls, `scripts/deploy.sh` and the host deployer's `git ls-remote`, so there is nothing more to set up. Moving to another host? Make a new key there; a deploy key is never shared between hosts.
 
 ## 3. Make the folders, the master key and the token file
 
@@ -288,7 +286,7 @@ claude setup-token
 
 It prints a long-lived token for your subscription. Paste it into **Value**, leave **Variable name** as `CLAUDE_CODE_OAUTH_TOKEN`, then choose **Check** and save. Boss Man refuses a token with stray spaces or quotes and says why. In the table, choose **Check with Claude**: it runs one tiny prompt on the runner and uses a little of your allowance. If you use an API key instead, choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key** from the same list.
 
-**A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Agents get it as `GIT_TOKEN`.
+**A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Boss Man's runner uses it as `GIT_TOKEN` for git; agents' own sessions never see it.
 - **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Checks read, so Boss Man can read CI results.
 - **Gitea:** Settings > Applications > Generate New Token, with repository scope **Read and Write** (`write:repository`).
 
@@ -383,11 +381,14 @@ On 3 Nov 2026 a headless browser with no memory limit used up the whole host's m
 | --- | --- | --- |
 | `BOSSMAN_RUNNER_MEMORY` | each runner, including the browsers and test runs inside it (no swap on top) | `4g` |
 | `BOSSMAN_RUNNER_PIDS` | processes and threads per runner | `4096` |
+| `BOSSMAN_RUNNER_CPU_SHARES` | CPU priority of each runner against the server, database and proxy (1024 each, proxy 2048). Not a cap: only matters when the host is busy, and an idle host still lets runners use every core | `512` |
+| `BOSSMAN_RUNNER_CPUS` | optional hard CPU cap per runner (e.g. `4`). Leave empty unless the host is shared with other workloads: one runner hosts all of a company's agents and the merge check, so a low cap slows them all even when the host is idle | none |
 | `BOSSMAN_SERVER_MEMORY` / `BOSSMAN_SERVER_MEMORY_RESERVED` | the server (single, or each blue/green colour): limit / amount kept for it. No cap by default (`0`), because the server currently uses 10-13 GiB; set a value only once measured | `0` / `512m` |
 | `BOSSMAN_DB_MEMORY` / `BOSSMAN_DB_MEMORY_RESERVED` | Postgres: limit / amount kept for it | `0` (no cap) / `256m` |
 | `BOSSMAN_TOOLSERVER_MEMORY`, `BOSSMAN_TOOLSERVER_PIDS`, `BOSSMAN_TOOLSERVER_SHM` | tool servers that run a browser (crawl4ai, scrapling), see below | `2g`, `512`, `512m` |
 
 - **Priority.** If the host runs out anyway, Linux stops runners and tool servers first (`oom_score_adj` 500) and the database, server and proxy last (-500, -500 and -900). A runaway browser hits its own limit first and only that container is stopped and restarted.
+- **CPU.** On a Proxmox LXC (or any VM or container host) the container's own CPU limit applies on top of these settings. The weights only decide who wins when the CPUs are all busy.
 - **Choose numbers for your host.** Add up the limits of everything that can run at once (every runner plus tool servers); keep that below the host's RAM with room for the server, database and proxy. Limits are ceilings, not reservations, so they can add up to more than the RAM, but then one busy moment can still run the host out.
 - **Tool servers are yours.** Boss Man does not start crawl4ai, scrapling or other tool servers you register in Settings, so it cannot limit them for you. Put them in compose with limits: [deploy/tool-servers.yml](../deploy/tool-servers.yml) is a commented example. One already running by hand: `docker update --memory 2g --memory-swap 2g --pids-limit 512 <container>` (lost if the container is recreated).
 - **Check it took effect.** `docker stats --no-stream` should show a number after the slash for each Boss Man container, not your whole RAM. `docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.OomScoreAdj}}' <container>` prints the limit in bytes and the priority (0 bytes = no limit).

@@ -22,7 +22,7 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 - TrueNAS SCALE 24.10 or later, with an apps pool chosen under Apps > Configuration > Choose Pool. The Docker service only runs once a pool is chosen.
 - A root shell on the NAS: TrueNAS UI > System > Shell, or `su -` over SSH. Every command in this guide is typed there, so none has `sudo` in front.
 - A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
-- A GitHub account that can create a fine-grained token for the repos the agents will work on, and access to the public repo `Leonfinn/Boss_Man`, which needs no key (the repo is public).
+- A GitHub account that can create a fine-grained token for the repos the agents will work on, and read access to the Boss Man repo from the NAS: a read-only deploy key if the repo is private, nothing if it is public (see [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host)).
 
 The commands below put Boss Man in `/mnt/NVME_Apps/Container_files/boss-man`, next to your other container apps on the mirrored NVMe pool. If you keep it somewhere else, change that path everywhere it appears. Replace `<nas-ip>` with the NAS's LAN address. Your router is at 192.168.68.1, so the NAS is most likely on 192.168.68.x. Check it in the TrueNAS UI under Network.
 
@@ -56,13 +56,18 @@ Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip
 cd /mnt/NVME_Apps/Container_files/boss-man
 ```
 
-The repository is private, so the NAS needs its own read-only deploy key. Follow [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host), with `B` set to this dataset and the clone going to `src`. Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` use the key saved in `core.sshCommand`.
+How the NAS reads the repo (a deploy key if it is private, https if it is public) is in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host). Use `$B` as `/mnt/NVME_Apps/Container_files/boss-man` there. For a public repo the clone is:
+
+```sh
+git clone <repo-https-url> src
+```
+
+Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up.
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
-If the clone hangs, check that the host can reach github.com on port 22 (see docs/00, step 2).
+If the clone hangs, see the troubleshooting lines in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host).
 
-**Already installed with a deploy key?** Nothing to change. `src` keeps its `git@github.com:` address and the `core.sshCommand` setting, and updates keep working. To move to https later, run `git -C /mnt/NVME_Apps/Container_files/boss-man/src remote set-url origin https://github.com/Leonfinn/Boss_Man.git`; the old key can then be deleted from the repo's settings and the dataset.
 
 
 ## 3. Folders and ownership
@@ -269,7 +274,7 @@ On the Secrets page, choose **Claude setup-token** and paste the token. Agents g
 
 Choose **Generate Token** and copy it; Gitea shows it only once. The token can do what your Gitea user can, so a user with write access to the repo is enough. (Labels from Gitea 28.0.0's [`access_tokens.tmpl`](https://github.com/go-gitea/gitea/blob/v28.0.0/templates/shared/user/access_tokens.tmpl); see also Gitea's [scopes documentation](https://docs.gitea.com/development/oauth2-provider#scopes).)
 
-On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Agents get it as `GIT_TOKEN`, and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check on the Projects page, tells you whether it can push.
+On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Boss Man's runner holds it as `GIT_TOKEN` (agents' sessions never see it, so an agent can't push by itself), and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check on the Projects page, tells you whether it can push.
 
 **When work is approved** (the Projects page) is either **Merge into the default branch** (R46) or **Open a pull request** (R59). If the default branch is protected so that only pull requests can change it, choose the pull request option; a direct push would be refused and the ticket would go back to the agent with the error.
 
@@ -409,7 +414,7 @@ docker compose exec -T db psql -U bossman -d bossman -tA -c 'SELECT count(*) FRO
 
 If step 5's second command stops with an error, the new empty database is half filled: do not start the app. Repeat step 5 (it drops and recreates) with the same or an older backup.
 
-**Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps nothing GitHub-related to redo: the repo is cloned fresh over https (a deploy key from an older install, if you have one, stays in place). Check what's there first:
+**Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps nothing git-related to redo: the repo is cloned fresh (a deploy key, if you use one, stays in place). Check what's there first:
 
 ```sh
 ls -la /mnt/NVME_Apps/Container_files/boss-man
@@ -435,7 +440,7 @@ D=/mnt/NVME_Apps/Container_files/boss-man/deployer
 
 **Before you start**
 - `main` on GitHub should be branch-protected, so agents can only land reviewed PRs: Repo > Settings > Branches > add a rule for `main` that requires a pull request. The deployer treats the tip of `main` as approved code.
-- The `src` checkout must be on `main`, clean, and able to read GitHub over https (or the old deploy key, if you installed with one). Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
+- The `src` checkout must be on `main`, clean, and able to read the remote (https for a public repo, the deploy key for a private one). Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
 
   ```sh
   git -C /mnt/NVME_Apps/Container_files/boss-man/src ls-remote origin refs/heads/main

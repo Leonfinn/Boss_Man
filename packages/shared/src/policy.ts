@@ -2,7 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
-import { cleanupScope, explainCommand, readPush, tempCleanup } from "./explain.js";
+import { cleanupScope, explainCommand, readPush, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -46,7 +46,7 @@ export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to 
 
 // Boss Man's own tool server is named "bossman"; each harness spells the tool title its own way: Claude Code mcp__bossman__wiki,
 // Codex mcp.bossman.wiki or "Tool: bossman/wiki", OpenCode bossman_wiki, other adapters "bossman: wiki". Matched case-insensitively.
-export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2})?bossman(?:__|_|\.|:\s*|/|\s+-\s+)\S`;
+export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2}bossman(?:__|\.|:\s*|/|\s+-\s+)|bossman(?:__|_|\.|:\s*|/|\s+-\s+))\S`;
 const BOSSMAN_TOOL = new RegExp(BOSSMAN_TOOL_PATTERN, "i");
 
 /** True when a tool title names a tool of Boss Man's own server, in any harness's spelling. */
@@ -148,7 +148,9 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     if (new RegExp(`${DESTRUCTIVE}|${PUSHING}`, "i").test(cmd)) return false;
   }
   if (rule.scratchOnly) {
-    // shortcut: paths are checked as written, so a symlink inside /tmp pointing elsewhere isn't caught; resolving them needs the runner's filesystem.
+    // Paths are checked as written, so the note (scratchOnly in explain.ts) vouches only for
+    // programs that can't follow a symlink at their target: rm/rmdir/unlink/mkdir of one plain
+    // /tmp entry, no redirects (BOS-165).
     const scratch = explainCommand(commandOf(info.rawInput) ?? "").scratch;
     if (!scratch || scratch.unchecked.length) return false;
   }
@@ -189,6 +191,19 @@ function urlsIn(rawInput: unknown, depth = 0): string[] {
 }
 
 const LAN_GUARD = "Fetching from your home network or this machine is blocked";
+const NOT_A_TOOL = "The tool name is a folder path, not a tool (call read, list or bash)";
+
+/**
+ * BOS-495: a request whose "tool" is a folder path and that has no command. OpenCode names an
+ * external_directory ask after its folder when it has no description or command, so this is an
+ * agent reaching outside its checkout by a route Boss Man has no card for. Refused outright, never a card.
+ * Only kinds "other" or none: for execute the title is the command, and read/edit titles are file paths.
+ */
+export function titleIsPath(info: PermissionInfo): boolean {
+  const title = info.title?.trim();
+  if (!title || (info.kind && info.kind !== "other") || commandOf(info.rawInput)) return false;
+  return /^(\/|~(\/|$)|\.{1,2}\/|[A-Za-z]:[\\/])/.test(title);
+}
 
 /** True when a fetch, or a call to an outside tool server, aims at a private address. Unparseable addresses count as private. */
 export function reachesPrivateNetwork(info: PermissionInfo): boolean {
@@ -209,6 +224,8 @@ export type PermissionDecision = { outcome: PolicyOutcome; rule: string; row: nu
 export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): PermissionDecision {
   // Row 1. Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
   if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD, row: 1 };
+  // Not a tool at all (BOS-495): refused before any rule, so no allow rule can turn it into a card or an allow.
+  if (titleIsPath(info)) return { outcome: "deny", rule: NOT_A_TOOL, row: 1 };
   // Row 3: the built-in guard that catches this request, if any.
   const guard = BUILTIN_GUARDS.find((r) => matches(r.match, info));
   // Row 4: company deny rules.
@@ -242,6 +259,9 @@ export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]
 /** Build output directly in the agent's working folder (node_modules, dist…): one component only, no trailing slash. rm -rf NAME/ follows a symlink as if NAME were its target (BOS-150), and a deeper path such as dist/x still follows a symlinked dist, so `rm -rf dist` is the only shape vouched for. */
 const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:node_modules|dist|build|coverage|out|target))+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
 
+/** find -delete rooted at one plain /tmp entry: kept Allow as BOS-111 pinned it. Root must be one level, quoted patterns kept simple. */
+const FIND_TMP_DELETE = /^find\s+\/tmp\/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+(?:\s+-(?:name|iname|type|path|mindepth|maxdepth|mtime|mmin|newer|empty|print)(?:\s+(?:'[^']*'|[\w.*?-]+))?)*\s+-delete$/;
+
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
  * files isn't a reason to refuse on its own: temp-file cleanup and deletes of build output in the
@@ -266,8 +286,15 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const scratch = explainCommand(cmd).scratch;
   if (scratch && !scratch.unchecked.length) return "allow";
   if (!hits.length) return "allow";
-  if (hits.some((h) => !/^rm\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
+  // A shell still runs $( ), backticks and <( ) inside double quotes, which `run` blanked out, so the pieces below can't be judged without seeing them (security round 2).
+  if (/\$\(|`|[<>]\(/.test(cmd)) return "deny";
+  if (hits.some((h) => !/^(?:rm|find)\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");
   const pieces = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
-  return pieces.every((s) => !destructive.test(s) || WORKSPACE_DELETE.test(s)) ? "allow" : "deny";
+  // A plain delete of one-level /tmp entries never makes the suggestion Deny, whatever else the
+  // command does (BOS-165, from BOS-153 finding 2). TEMP_DELETE accepts no trailing slash, deeper
+  // path, glob or redirect to a file, so /tmp/a/, /tmp/a/b and rm > /home/x stay Deny. A piece with
+  // no vouched delete is accepted only when it can't reach beyond /tmp either (writesBeyondTmp),
+  // so cp -t /home and a redirect into the home folder still pay Deny.
+  return pieces.every((s) => (destructive.test(s) ? WORKSPACE_DELETE.test(s) || TEMP_DELETE.test(s) || FIND_TMP_DELETE.test(s) : !writesBeyondTmp(s))) ? "allow" : "deny";
 }
