@@ -44,7 +44,7 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    ```sh
    cp .env .env.bak
    sed -i "s#^COMPOSE_FILE=.*#&:deploy/tailscale.yml#" .env
-   # the leading space keeps this line out of shell history in most shells (or edit .env in an editor instead)
+   # the leading space keeps this line out of shell history in bash by default (zsh needs HIST_IGNORE_SPACE; or edit .env in an editor instead)
     echo "TS_AUTHKEY=tskey-auth-PASTE-YOUR-KEY" >> .env
    chmod 600 .env
    ```
