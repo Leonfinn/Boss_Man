@@ -1,5 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Hoisted so it is set before review.ts reads it: the landing re-reads its check job row this often.
+vi.hoisted(() => { process.env.BOSSMAN_CHECK_JOB_POLL_MS = "20"; });
 import { eq } from "drizzle-orm";
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
