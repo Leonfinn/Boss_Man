@@ -269,10 +269,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     const question = (list: string[]) =>
       `${list.length === 1 ? "A run" : `${list.length} runs`} never started on the runner, even after Boss Man started ${list.length === 1 ? "it" : "each"} again ${limits.neverStartedRetries} times: ${list.join("; ")}. Boss Man has stopped trying. Check the runner (Settings → Server and runner), then wake ${list.length === 1 ? "the agent" : "these agents"} again.`;
     const dedupeKey = `runner-boot:${runnerId ?? "none"}:${bootId ?? "unknown"}`;
-    // The CEO is this card's highest rung (DR-017 A). Until BOS-469's ceiling lands the ladder can
-    // still move it on to the owner when the CEO leaves it; raising it at the CEO is all this can do.
+    // The CEO is this card's highest rung (DR-017 A): the `runner_boot` kind's row holds it there (BOS-469).
+    // No `cause`, so the ladder doesn't fold it into its generic "N runs" heading: this card keeps its own
+    // list of agents and tickets in the question, added to below under the same dedupe key.
     // No `about` or ticket: it lists several agents, and an agent it is about (the CEO itself) would be skipped as a rung.
-    const raised = await opts.alert({ companyId, question: question([entry]), from: "ceo", dedupeKey, context: { neverStarted: [entry] } });
+    const raised = await opts.alert({ companyId, kind: "runner_boot", question: question([entry]), from: "ceo", dedupeKey, context: { neverStarted: [entry] } });
     if (raised) return;
     const [open] = await db.select().from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open")));
     if (!open) return;
@@ -367,15 +368,20 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .map((d) => d.id);
     if (free.length) await db.update(decisions).set({ dedupeKey: null }).where(inArray(decisions.id, free));
 
+    // One open alert per run: a card already with the team (on any rung) is not raised again, whichever key it uses.
+    const alreadyOpen = new Set(open.map((d) => (d.context as { runId?: unknown }).runId).filter((id): id is string => typeof id === "string"));
     let raised = 0;
     for (const [runId, r] of stalled) {
+      if (alreadyOpen.has(runId)) continue;
       const ctx: DecisionContext = { type: "stalled_run", runnerId: r.runnerId!, runId };
       // A stalled run is the Scrum Master's first, then the CEO, then the owner (BOS-119). It goes
       // on the ladder whether or not the watchdog is switched on; without a Scrum Master it starts at the CEO.
       const row = opts.alert
         ? await opts.alert({
             companyId: r.run.companyId,
+            cardKind: "stalled_run",
             kind: "stalled_run",
+            cause: { runId },
             question: `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. ${busy.get(runId) ? `It is still inside ${busy.get(runId)}, so it may just be a long command.` : "It may be stuck, or busy with a long command."}`,
             options: [KEEP_WAITING, CANCEL_RUN],
             recommended: KEEP_WAITING,
@@ -416,7 +422,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const doing = run.lastEventAt ? `It last did something ${ago(t.getTime() - run.lastEventAt.getTime())} ago.` : "It hasn't reported anything since it started.";
       const row = await opts.alert({
         companyId: run.companyId,
-        kind: "question",
+        kind: "ticketless_run",
         question: `${agentName ?? "An agent"} has been running for ${ago(t.getTime() - run.startedAt.getTime())} without a ticket ("${run.origin ?? run.purpose ?? "no reason recorded"}"). ${doing} Settle it: stop the run if there is nothing for it to do, or tell it on the ticket it should be on.`,
         options: ["Got it"],
         recommended: "Got it",
@@ -480,7 +486,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           // should only see this if the CEO doesn't settle it (BOS-119).
           const row = await opts.alert({
             companyId: ticket.companyId,
-            kind: "question",
+            kind: "review_stall",
             question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it ${recent.length} times in the last day without giving a verdict. Look into it, or move the ticket on yourself.`,
             options: ["Got it"],
             recommended: "Got it",
