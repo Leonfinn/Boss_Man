@@ -69,9 +69,15 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         ...(usage ? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedReadTokens: usage.cachedReadTokens, cachedWriteTokens: usage.cachedWriteTokens } : {}),
       })
       .where(eq(runs.id, runId))
-      .returning({ companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
+      .returning({ fundingSourceId: runs.fundingSourceId, companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
+    // A run refused with "weekly limit" proves its account is full whatever the last reading said: mark it
+    // full for an hour so new runs go to the next account instead of failing there again (BOS-463). A
+    // real reading from the account replaces this as soon as one arrives.
+    if (ended?.fundingSourceId && outcome && /weekly limit/i.test(outcome)) {
+      await funding.recordQuota(ended.fundingSourceId, [{ provider: "anthropic", window: "seven_day", utilization: 1, resetsAt: new Date(at.getTime() + 60 * 60_000), status: "rejected", overageInUse: false }], at);
     // The run is over, so its token goes with it (BOS-513).
     await db.delete(runTokens).where(eq(runTokens.runId, runId));
+    }
     // A finished run's own questions are moot: its permission requests leave the queue, and its
     // stall alert is closed by the one closer on `runActive`, which says why it went (DR-016, BOS-470).
     await db

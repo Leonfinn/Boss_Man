@@ -5,17 +5,17 @@
 // - missed work (R82): an assigned ticket that is ready to go but that nobody is working on;
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
 import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
-import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, type DecisionContext } from "./decisions.js";
+import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
-import { activeRows, evaluate, latestRows } from "./review-kinds.js";
+import { activeRows, endedNormallySql, evaluate, latestRows, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { progressSweep } from "./progress.js";
 import { MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
@@ -470,31 +470,41 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         if (!agentId || busy.has(agentId) || done.has(agentId)) continue;
         const [reviewer] = await db.select({ name: agents.name, paused: agents.paused, retiredAt: agents.retiredAt }).from(agents).where(eq(agents.id, agentId));
         if (!reviewer || reviewer.paused || reviewer.retiredAt) continue;
-        // A run that ended after the request counts as the reviewer having looked; give it the usual quiet time.
-        const [last] = await db.select({ at: max(runs.endedAt) }).from(runs).where(eq(runs.agentId, agentId));
-        const lastActive = later(r.createdAt, last?.at)!;
+        // A run that ended after the request counts as the reviewer having looked; give it the usual
+        // quiet time. A run that was cut off (interrupted, or lost by the server) never gave a verdict,
+        // so it must not hold the re-wake back (DR-017, decision F).
+        const roundStart = (await roundStartedAt(db, ticket.id)) ?? r.createdAt;
+        const [last] = await db.select({ at: max(runs.endedAt) }).from(runs).where(and(eq(runs.agentId, agentId), endedNormallySql(runs.outcome)));
+        const lastActive = later(roundStart, last?.at)!;
         if (t.getTime() - lastActive.getTime() < limits.missedAfterMs) continue;
-        // Review wakes name the ticket at the start of their note; the first one counts too.
+        // "Leave it another hour" holds this review for another quiet period, starting from the answer,
+        // so the CEO's choice isn't re-asked within a minute (BOS-426, BOS-433 fix B).
+        const waited = await reviewWaitedSince(db, r.id);
+        if (waited && t.getTime() - waited.getTime() < limits.missedAfterMs) continue;
+        // Review wakes name the ticket at the start of their note; the first one counts too. Only this
+        // round's wakes count (BOS-433): a reviewer who answered rounds 1-2 isn't reported for round 3.
         const recent = await db
           .select({ id: wakes.id, createdAt: wakes.createdAt })
           .from(wakes)
-          .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, REVIEW_REASON), like(wakes.note, `%- ${ticket.id} %`), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
+          .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, REVIEW_REASON), like(wakes.note, reviewAskPattern(ticket.id)), gte(wakes.createdAt, roundStart)))
           .orderBy(desc(wakes.createdAt));
         if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.missedAfterMs) continue;
         if (recent.length > MISSED_NUDGES_PER_DAY) {
           // The CEO first: stopping or moving a review is beyond the Scrum Master, and the owner
-          // should only see this if the CEO doesn't settle it (BOS-119).
+          // should only see this if the CEO doesn't settle it (BOS-119). Real actions on the review,
+          // not "Got it": the CEO can take it over, give it to another reviewer, send it back to the
+          // author, or leave it another hour (BOS-404, BOS-426, BOS-433 fix B kept its card).
           const row = await opts.alert({
             companyId: ticket.companyId,
             kind: "review_stall",
-            question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it ${recent.length} times in the last day without giving a verdict. Look into it, or move the ticket on yourself.`,
-            options: ["Got it"],
-            recommended: "Got it",
+            question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it this round ${recent.length} times without giving a verdict. What should happen to the review?`,
+            options: [TAKE_REVIEW, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, WAIT_ANOTHER_HOUR],
+            recommended: WAIT_ANOTHER_HOUR,
             from: "ceo",
             ticketId: ticket.id,
             about: [agentId],
             dedupeKey: `review-stall:${r.id}`,
-            context: { type: "question" },
+            context: { type: "review_stall", reviewId: r.id, ticketId: ticket.id, reviewerAgentId: agentId, kind: r.kind },
           });
           if (row) result.gaveUp++;
           continue;
