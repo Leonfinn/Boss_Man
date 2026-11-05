@@ -34,6 +34,7 @@ import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
+import { alertClearing } from "./services/alert-clearing.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
@@ -443,16 +444,34 @@ export async function buildApp(opts: AppOptions) {
       void refreshSyntheticQuota().catch((err) => app.log.warn({ err }, "synthetic quota refresh failed"));
     }
   });
+  // One closer for every card Boss Man raises itself (DR-016, BOS-470): a card carries the conditions
+  // under which its cause is gone, and this closes it, on any tier, with the reason. It runs on the
+  // sweep below and on the events that make a condition true: a run ending or speaking, a runner
+  // connecting, a deploy finishing.
+  const clearing = alertClearing(db, {
+    isConnected: (runnerId) => runners.isConnected(runnerId),
+    hasRoom: (fundingSourceId) => scheduler.hasRoom(fundingSourceId),
+    now: opts.now,
+  });
+  // A runner coming back clears "could not start … runner offline" cards at once, on any tier
+  // (BOS-475 E): the wake it could not start is what matters, so a connected runner alone isn't enough.
+  runners.onConnect(() => void clearing.check().then((closed) => (closed ? notes.syncDecisions() : null)).catch((err) => app.log.error({ err }, "closing cards on runner connect failed")));
   // A "has sent nothing" alert for a run closes the moment the run ends or speaks again (BOS-217),
   // so the CEO and the owner are never asked about a run that has already moved on. Awaited before
   // the event is acknowledged, so nothing reads an alert the run has left behind.
   runners.onEventSync(async (runner, event) => {
     if (!("runId" in event) || event.type === "run.started") return;
-    await closeStallAlertForRun(db, event.runId, opts.now)
+    await closeStallAlertForRun(db, clearing, event.runId)
       .then((closed) => (closed ? notes.syncDecisions() : null))
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing a stall alert failed"));
+    // A clean run (or the ticket finishing, or the deploy settling) can clear other cards too.
+    await clearing
+      .check()
+      .then((closed) => (closed ? notes.syncDecisions() : null))
+      .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing cards failed"));
   });
   const sweeps = sweepService(db, {
+    clearAlerts: () => clearing.check(),
     // The same sweep settles second opinions whose asker was lost to a restart (BOS-338).
     expireAdvice: () => Promise.all([decisionsSvc.expireAdvice(), decisionsSvc.expireSecondOpinions()]),
     limits: opts.sweepLimits,

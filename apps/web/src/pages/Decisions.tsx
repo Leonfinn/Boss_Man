@@ -652,7 +652,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     )}
                     {d.staleAt && !done && (
                       <p role="status" style={{ fontWeight: 600 }}>
-                        May be out of date{d.staleReason ? `: ${d.staleReason}` : ""}. The agent that raised it has been asked to confirm or withdraw it.
+                        The owner acted since this was written{d.staleReason ? ` (${d.staleReason})` : ""}. The agent that raised it has been asked to confirm or withdraw it.
                       </p>
                     )}
                     {rule && (

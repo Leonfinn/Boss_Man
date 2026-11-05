@@ -32,6 +32,7 @@ import { conversationLines } from "./ticket-chat.js";
 import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
+import type { ClearWhen } from "./alert-clearing.js";
 import { AGE_STEP_MS, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
@@ -247,6 +248,19 @@ export function schedulerService(
     if (!urgent) return false;
     if (source.quotaOverage === "urgent") return true;
     return !full.some((s) => s.utilization >= 1) && !samples.some((s) => s.overageInUse);
+  }
+
+  /**
+   * Whether an account has room for a new run again, by the same test a run launch uses (BOS-383,
+   * BOS-227). The one closer asks this for usage-limit cards, so the card and the scheduler never
+   * disagree about what "back under the limit" means.
+   */
+  async function hasRoom(fundingSourceId: string): Promise<boolean> {
+    const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, fundingSourceId));
+    if (!source) return false;
+    const samples = await latestQuotaWindows(source.id);
+    if (samples.length === 0) return false;
+    return holdingWindows(source, samples, now()).length === 0;
   }
 
   /** For the hold notice: when no other Claude account can take over, how to swap by hand (BOS-383). */
@@ -751,7 +765,9 @@ export function schedulerService(
     if (open) return;
     const [agent] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
     const [t] = w.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
-    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}` });
+    // A "could not start" card closes itself once the runner is back and this wake has started (DR-017 E, BOS-475).
+    const clearWhen: ClearWhen[] = /runner offline/i.test(reason) ? [{ kind: "runnerConnected", companyId: w.companyId, wakeId: w.id }] : [];
+    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}`, clearWhen });
   }
 
   /** The owner's ranked Claude subscriptions in order, when this source is one of them (BOS-383). */
@@ -919,6 +935,7 @@ export function schedulerService(
 
   const self = {
     limits,
+    hasRoom,
 
     /** Queues a wake, or drops it (and tells the owner) if it looks like a loop. */
     async wake(input: WakeInput) {
