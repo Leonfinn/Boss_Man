@@ -17,7 +17,13 @@ export type ClearWhen =
   /** Start-failure cards name the wake that failed: the runner must be connected and that wake must have started (BOS-475 E). */
   | { kind: "runnerConnected"; companyId: string; wakeId?: string }
   /** Usage-limit cards: the account has room again (the same test as the scheduler's account pick). */
-  | { kind: "limitReset"; fundingSourceId: string };
+  | { kind: "limitReset"; fundingSourceId: string }
+  /**
+   * Auth and credit-failure cards: a run on that account has finished cleanly since the card was raised.
+   * A revoked key or an empty credit balance leaves the quota windows untouched, so "room again" is true
+   * at once; only a clean run proves the credential is fixed (BOS-469, security review).
+   */
+  | { kind: "accountRanOk"; fundingSourceId: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -47,6 +53,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "limitReset":
         if (typeof c.fundingSourceId === "string") out.push({ kind: "limitReset", fundingSourceId: c.fundingSourceId });
+        break;
+      case "accountRanOk":
+        if (typeof c.fundingSourceId === "string") out.push({ kind: "accountRanOk", fundingSourceId: c.fundingSourceId });
         break;
       default:
         break;
@@ -112,6 +121,17 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       }
       case "limitReset": {
         return (await deps.hasRoom(c.fundingSourceId)) ? "the account has room again" : null;
+      }
+      case "accountRanOk": {
+        // A run on this account that finished without an error, since the card was raised. Only that proves
+        // a revoked key, a logged-out session or an empty credit balance is fixed (BOS-469, security review).
+        const [clean] = await db
+          .select({ endedAt: runs.endedAt })
+          .from(runs)
+          .where(and(eq(runs.fundingSourceId, c.fundingSourceId), gt(runs.startedAt, card.createdAt), sql`${runs.endedAt} is not null`, sql`coalesce(${runs.outcome}, '') not like 'error:%'`, sql`coalesce(${runs.outcome}, '') not like 'lost:%'`, sql`coalesce(${runs.outcome}, '') not like 'interrupted'`))
+          .orderBy(runs.endedAt)
+          .limit(1);
+        return clean?.endedAt ? `a run on the account succeeded at ${hhmm(clean.endedAt)}` : null;
       }
       default:
         return null;
