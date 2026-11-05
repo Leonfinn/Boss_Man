@@ -93,10 +93,10 @@ describe("R6: where a command runs and as whom (BOS-427)", () => {
     expect(refuse([step("Go:", sh("cd /mnt/bm/src", { host: "nas01", as: "root" }))])).toEqual([]);
   });
 
-  it("refuses a host Boss Man hasn't recorded, and says so", () => {
-    const f = refuse([step("Go:", sh("cd /mnt/bm", { host: "orange", as: "root" }))]);
-    expect(f).toHaveLength(1);
-    expect(f[0]!.problem).toMatch(/hasn't recorded/);
+  it("warns, not refuses, on a host Boss Man hasn't recorded, and asks the card to start with a read-only check", () => {
+    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm", { host: "orange", as: "root" }))], HOSTS);
+    expect(f.refuse.filter((x) => x.rule === "R6")).toEqual([]);
+    expect(f.warn.some((x) => /hasn't recorded/.test(x.problem))).toBe(true);
   });
 
   it("refuses a login-run block that reads a folder the login can't read, and passes it once an earlier block staged a copy", () => {

@@ -176,7 +176,7 @@ export function lintOwnerSteps(steps: string[], hosts?: HostFacts[]): { refuse: 
     }
     for (const c of inline) if (PLACEHOLDER.test(c)) refuse.push({ step, rule: "R3", problem: `has a placeholder the owner would have to edit: ${c.slice(0, 120)}` });
     for (const m of text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) refuse.push({ step, rule: "R4", problem: `has {{${m[1]}}}, which Boss Man has no value for. Write the value itself` });
-    const host = lintHost(blockPieces, step, hosts, staged);
+    const host = lintHost(blockPieces, step, hosts, staged, step === 1);
     refuse.push(...host.refuse);
     warn.push(...host.warn);
     if (LINK.test(prose)) warn.push({ step, rule: "warn", problem: "links to a wiki page or ticket; fine as background, but the step itself must be complete" });
@@ -389,7 +389,7 @@ function modeOpensUp(p: Prog): boolean {
  * or a `cp`/`rsync` by the login); and a block that opens a backup folder to everyone is refused.
  * `staged` carries the folders earlier blocks made readable, so the check runs across the whole card.
  */
-function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, step: number, hosts: HostFacts[] | undefined, staged: Map<string, Set<string>>): { refuse: LintFinding[]; warn: LintFinding[] } {
+function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, step: number, hosts: HostFacts[] | undefined, staged: Map<string, Set<string>>, first: boolean): { refuse: LintFinding[]; warn: LintFinding[] } {
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
   for (const piece of blockPieces) {
@@ -400,7 +400,9 @@ function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, s
     }
     const known = hosts?.find((h) => h.name === where.host);
     if (hosts && !known) {
-      refuse.push({ step, rule: "R6", problem: `names the host "${where.host}", which Boss Man hasn't recorded. Use the host's own name as the machine reported it, or record it first` });
+      // A host with no deployer yet (the move's new host) has no ownership record, so R6 can't check a step's
+      // paths. The card is allowed, but its first step should be a read-only check that shows what to look for.
+      if (first) warn.push({ step, rule: "warn", problem: `runs on "${where.host}", which Boss Man hasn't recorded, so it can't check what the owner's login can read there. Start with a read-only check (ls -ld, df -h) and say what the owner should see before anything is changed` });
       continue;
     }
     if (!hosts || !known) continue;
