@@ -5,7 +5,8 @@
 // small no-code ticket, so the work is visible and isn't dropped by the ticketless-wake cap (BOS-272).
 import { and, asc, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, projects, settings, tickets, wakes } from "../db/schema.js";
+import { agents, decisions, projects, settings, tickets, wakes } from "../db/schema.js";
+import { ownerSetupKey, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
 
 /** The Release Manager's wake reason. */
 export const RELEASE_REASON = "live release";
@@ -22,6 +23,9 @@ const HOW_WORDS: Record<ReleaseHow, string> = {
   "rolled-back": "a rollback",
   restarted: "a restart after a hand-apply",
 };
+
+/** A ticket's setup steps as lines: one per step, blank lines and a leading "1." left off. */
+const splitSteps = (text: string) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 
 const short = (sha: string) => sha.slice(0, 8);
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
@@ -161,6 +165,70 @@ export const releaseLogService = (
     return true;
   }
 
+  /**
+   * The owner's setup cards (DR-011), run on the same live-commit change as the Release Manager's wake:
+   * once the live commit is `to`, every finished ticket whose merge commit is at or before it and that
+   * has setup steps but no card yet gets one. A step-back (a switch-back to an older commit) withdraws
+   * the cards for tickets merged after it, so they come back on the next go-live. The merge gate merges
+   * one ticket at a time and the deployer reports only finished deploys, so merge time is merge order
+   * (DR-011 point 4). A human push whose commit is unknown to Boss Man changes nothing here.
+   */
+  async function ownerSetupPass(companyId: string, to: string, how: ReleaseHow) {
+    const order = await mergeOrder(companyId);
+    const liveAt = order.indexOf(to);
+    // A rollback lands back on an older commit, so nothing it went past is running. A deploy or a hand-apply
+    // that lands on a commit Boss Man doesn't know (a human push) is newer, so nothing here is withdrawn.
+    const steppedBack = how === "rolled-back" || how === "switched-back";
+    const withSetup = await ticketsWithSetup(companyId);
+    let raised = 0;
+    let withdrew = 0;
+    for (const t of withSetup) {
+      const at = order.indexOf(t.mergeCommit);
+      // Not live any more: a step-back to before its merge (the live commit is an earlier merge, or not a
+      // merge at all, so a rollback went back past it). A ticket whose own merge commit Boss Man can't
+      // place is left alone rather than guessed at.
+      if (at >= 0 && (steppedBack || (liveAt >= 0 && at > liveAt))) {
+        if (t.ownerSetupDecisionId && (await withdrawOwnerSetup(db, t.id, `Switched back: "${t.title}" isn't running any more. You'll get this card again if it goes live once more.`))) withdrew++;
+        continue;
+      }
+      if (!t.ownerSetupDecisionId) {
+        const card = await raiseOwnerSetup(db, { companyId, ticketId: t.id, title: t.title, steps: t.steps, commit: to });
+        if (card) {
+          await db.update(tickets).set({ ownerSetupDecisionId: card.id }).where(eq(tickets.id, t.id));
+          raised++;
+        }
+      }
+    }
+    if (raised || withdrew) log(`owner setup for company ${companyId}: raised ${raised}, withdrew ${withdrew} (live ${short(to)})`);
+    return { raised, withdrew };
+  }
+
+  /**
+   * This company's merge commits, oldest merge first, from its done tickets. The merge gate sets a
+   * ticket's merge commit when it merges it and merges one at a time, so the order of merges is the
+   * order of merge times. It includes tickets whose setup card is already raised, so a switch-back can
+   * still place them.
+   */
+  async function mergeOrder(companyId: string) {
+    const rows = await db
+      .select({ mergeCommit: tickets.mergeCommit, mergedAt: tickets.lastActivityAt })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")))
+      .orderBy(asc(tickets.lastActivityAt));
+    return [...new Set(rows.map((r) => r.mergeCommit).filter((c): c is string => !!c))];
+  }
+
+  /** Done tickets in this company that carry setup steps and a merge commit, with their card if raised. */
+  async function ticketsWithSetup(companyId: string) {
+    const rows = await db
+      .select({ id: tickets.id, title: tickets.title, ownerSetup: tickets.ownerSetup, mergeCommit: tickets.mergeCommit, ownerSetupDecisionId: tickets.ownerSetupDecisionId })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")));
+    return rows
+      .filter((t) => !!t.mergeCommit && !!t.ownerSetup?.trim())
+      .map((t) => ({ id: t.id, title: t.title, mergeCommit: t.mergeCommit!, ownerSetupDecisionId: t.ownerSetupDecisionId, steps: splitSteps(t.ownerSetup!) }));
+  }
+
   return {
     /** Records the live commit it is given (see noteLiveCommit). Nothing else happens until the leader's pass. */
     async note(companyId: string, commit: string) {
@@ -184,6 +252,12 @@ export const releaseLogService = (
           if (!isSha(seen.old) || !isSha(seen.new) || seen.old === seen.new) continue;
           // The record moves on whatever happens below, so a retry (or the next pass) can't double the ticket.
           await saveSeen(companyId, { old: seen.new, new: seen.new });
+          // The owner's setup cards (DR-011) go on the same change, and don't need a Release Manager.
+          try {
+            await ownerSetupPass(companyId, seen.new, how);
+          } catch (err) {
+            log(`owner setup for company ${companyId}: ${(err as Error).message}`);
+          }
           try {
             if (await wakeOne(companyId, seen.old, seen.new, how, seen.ticketId)) woken++;
           } catch (err) {
