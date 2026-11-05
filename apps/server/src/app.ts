@@ -466,6 +466,7 @@ export async function buildApp(opts: AppOptions) {
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
         })
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
+        .then(() => (event.interrupted ? null : scheduler.afterReviewRun(event.runId)))
         .then(() => scheduler.tick())
         .catch((err) => app.log.error({ err, companyId: runner.companyId }, "run-ended handling failed"));
       // A run ended; ask for a quota refresh. Any provider ends here, but the reading is cached for
@@ -594,6 +595,8 @@ export async function buildApp(opts: AppOptions) {
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
+    // A stalled-review card's actions (BOS-404, BOS-426): take it, hand it to another reviewer, send it back, or leave it.
+    reviewStall: (ctx, answer, byAgentId) => review.reviewStall(ctx, answer, byAgentId),
     // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
     // Decisions show "Checking and merging" while it runs (including lock retries), rather than inviting
     // another approval. A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
