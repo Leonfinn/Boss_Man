@@ -1,7 +1,7 @@
 // The Agents tab (R62): who works for each company, what they cost this month, and every change
 // to them, with what it was before so it can be undone.
 import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, harnessLabel, providerLabel, speakerNameProblem } from "@boss-man/shared";
+import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, harnessLabel, isClaudeModel, modelFitProblem, providerLabel, speakerNameProblem } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
@@ -58,7 +58,6 @@ const HARNESS_PROVIDERS: Record<string, readonly string[]> = {
   codex: ["openai", "bedrock", "foundry", "gateway"],
   opencode: FUNDING_PROVIDERS,
 };
-const CLAUDE_ALIASES = new Set(["default", "opus", "sonnet", "haiku", "fable"]);
 const labelConfig = (c: AgentModelConfig) => `Harness: ${harnessLabel(c.harness)} · Provider: ${c.provider ? providerLabel(c.provider) : "not set"} · Model: ${c.model || "default"} · Paid from: ${c.fundingSourceName || (c.fundingSourceId ? c.fundingSourceId : "not set")}`;
 
 export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify; assignPlanned?: (companyId: string, hired: AgentRow, ticketIds: string[]) => Promise<unknown>; catalog?: Catalog } = {}) {
@@ -109,20 +108,31 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     const allowed = HARNESS_PROVIDERS[harness] ?? [];
     if (!allowed.includes(provider)) throw new AgentError(422, `${harnessLabel(harness)} can't run on ${providerLabel(provider)}. Use ${allowed.map(providerLabel).join(", ")}, or choose OpenCode for this provider.`);
     if (!model) throw new AgentError(422, "Choose a model. Call model_options to see the models the harness and funding source offer.");
+    // A model the account doesn't serve can't run, whatever lists are (or aren't) reported (BOS-477):
+    // a DeepSeek model on a Claude account was the card that reached the owner before this check.
+    const misfit = modelFitProblem(harness, provider, model);
+    if (misfit) throw new AgentError(422, misfit);
     if (opts.catalog) {
       const catalog = await opts.catalog(companyId);
       const offered = [...(catalog.runner[harness]?.models ?? []), ...(catalog.api.find((a) => a.fundingSourceId === fundingSourceId)?.models ?? [])].filter((m) => m.value !== "default");
-      const known = offered.some((m) => m.value === model) || (harness === "claude" && (CLAUDE_ALIASES.has(model) || /^claude[-.]/i.test(model)));
+      const known = offered.some((m) => m.value === model) || (harness === "claude" && isClaudeModel(model));
       if (offered.length && !known) throw new AgentError(422, `That model (${model}) isn't in the list for ${harnessLabel(harness)} on ${source.name}. Call model_options to see the valid models.`);
     }
     return { harness, provider, model, fundingSourceId, fundingSourceName: source.name };
   }
 
-  /** Valid choices for the CEO, with the same names the Agents page shows. */
+  /** Valid choices for the CEO, with the same names the Agents page shows, and what each agent runs on now. */
   async function modelOptions(companyId: string) {
     const sources = await db.select().from(fundingSources).orderBy(fundingSources.name);
     const catalog: ModelCatalog = opts.catalog ? await opts.catalog(companyId) : { runner: {}, api: [] };
+    // Every live agent's current setup, so moving people off one account is a check per agent, not a guess (BOS-477).
+    const rows = await db.select({ a: agents, funding: fundingSources.name }).from(agents).leftJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId)).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt)));
+    const current = rows.map(({ a, funding }) => {
+      const source = sources.find((s) => s.id === a.fundingSourceId);
+      return { id: a.id, name: a.name, role: a.role, harness: a.agentKind, harnessLabel: harnessLabel(a.agentKind), provider: source?.provider ?? null, providerLabel: source?.provider ? providerLabel(source.provider) : "not set", model: a.model, fundingSourceId: a.fundingSourceId, fundingSourceName: funding ?? null };
+    }).sort((x, y) => (x.role === "ceo" ? -1 : y.role === "ceo" ? 1 : x.name.localeCompare(y.name)));
     return {
+      current,
       harnesses: HARNESSES.map((h) => ({ value: h.value, label: h.label })),
       providers: FUNDING_PROVIDERS.map((value) => ({ value, label: providerLabel(value) })),
       fundingSources: sources.map((s) => ({ id: s.id, name: s.name, kind: s.kind, provider: s.provider, providerLabel: providerLabel(s.provider) })),
@@ -130,7 +140,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         runner: Object.fromEntries(Object.entries(catalog.runner).map(([kind, list]) => [kind, list.models.filter((m) => m.value !== "default")])),
         byFundingSource: catalog.api.map((a) => ({ fundingSourceId: a.fundingSourceId, name: a.name, provider: a.provider, providerLabel: providerLabel(a.provider), models: a.models, error: a.error })),
       },
-      note: "Pick a harness, a provider, a model and a funding source whose provider is the same. If a model list is empty, the runner or provider hasn't reported one; a valid model ID can still be used. Every hire and model change waits for the owner's approval.",
+      note: "Pick a harness, a provider, a model and a funding source whose provider is the same, and a model the funding source serves (Claude models on a Claude account, OpenAI models on OpenAI, and so on). If a model list is empty, the runner or provider hasn't reported one; a valid model ID can still be used. `current` lists what every live agent runs on now. Every hire and model change waits for the owner's approval.",
     };
   }
 

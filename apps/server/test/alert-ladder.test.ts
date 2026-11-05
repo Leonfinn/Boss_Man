@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, notifications, runs, tickets, wakes, watchdogActions } from "../src/db/schema.js";
+import { activity, agents, decisions, notifications, quotaSamples, runs, tickets, wakes, watchdogActions } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { alertLadder, type Ladder } from "../src/services/alert-ladder.js";
 
@@ -65,6 +65,11 @@ async function wakeChain() {
   const [d] = await ctx.db.select().from(decisions).where(eq(decisions.companyId, ctx.companyId));
   return d!;
 }
+/** A raise by hand: the ladder itself, without a newer ticket's kinds, for the parts every card shares. */
+const handRaise = (input: Parameters<typeof ctx.alerts.raise>[0]) => ctx.alerts.raise(input);
+/** An owner-ceiling raise (only the owner can settle it), for the tests of the ladder's climb to the top. */
+const ownerRaise = (why = "only the owner can act on it") =>
+  handRaise({ companyId: ctx.companyId, kind: "owner", question: `Owner card: ${why}`, ticketId: ctx.ticket.id, from: "scrum_master", options: ["Got it"] });
 const ladderOf = async (id: string) => ((await ctx.db.select().from(decisions).where(eq(decisions.id, id)))[0]!.context as { ladder: Ladder; triedFirst?: string; steps?: string[] });
 const alertWakes = () => ctx.db.select().from(wakes).where(inArray(wakes.reason, ["alert", "decision"]));
 const ownerNotified = async (id: string) => {
@@ -107,7 +112,7 @@ describe("the alert ladder (BOS-64)", () => {
 
   it("timeouts: past the limit it climbs to the CEO, then to the owner with what was tried", async () => {
     await ctx.switchOn();
-    const d = await wakeChain();
+    const d = (await ownerRaise())!;
     ctx.advance(29);
     expect((await ctx.alerts.sweep()).moved).toBe(0);
     ctx.advance(2);
@@ -135,7 +140,7 @@ describe("the alert ladder (BOS-64)", () => {
 
   it("a card no CEO run ever picks up still reaches the owner at the company's alert time (BOS-180)", async () => {
     await ctx.switchOn();
-    const d = await wakeChain();
+    const d = (await ownerRaise())!;
     ctx.advance(31);
     await ctx.alerts.sweep();
     ctx.advance(29);
@@ -204,14 +209,25 @@ describe("the alert ladder (BOS-64)", () => {
       expect((await alertWakes()).map((w) => w.agentId)).toEqual([ctx.ceo.id]);
     });
 
-    it("Scrum Master paused and CEO paused: straight to the owner", async () => {
+    it("Scrum Master paused and CEO paused: an owner-ceiling card goes straight to the owner", async () => {
+      await ctx.switchOn();
+      await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.sm.id));
+      await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.ceo.id));
+      const d = (await ownerRaise())!;
+      expect(d).toMatchObject({ rung: "owner" });
+      expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]).toMatchObject({ tier: "owner" });
+      expect(await alertWakes()).toHaveLength(0);
+      expect(await ownerNotified(d.id)).toHaveLength(1);
+    });
+
+    it("Scrum Master paused and CEO paused: a CEO-ceiling card parks with the CEO, not the owner (BOS-469)", async () => {
       await ctx.switchOn();
       await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.sm.id));
       await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.ceo.id));
       const d = await wakeChain();
-      expect(d).toMatchObject({ tier: "owner" });
-      expect(await alertWakes()).toHaveLength(0);
-      expect(await ownerNotified(d.id)).toHaveLength(1);
+      expect(d).toMatchObject({ tier: "ceo", forAgentId: null });
+      expect((d.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo", parked: expect.stringContaining("paused") });
+      expect(await ownerNotified(d.id)).toHaveLength(0);
     });
 
     it("an alert about the Scrum Master itself skips it", async () => {
@@ -234,11 +250,11 @@ describe("the alert ladder (BOS-64)", () => {
       expect(d).toMatchObject({ tier: "ceo", forAgentId: null });
     });
 
-    it("record only: Boss Man's own alerts skip the Scrum Master and still climb to the owner (BOS-166)", async () => {
+    it("record only: Boss Man's own alerts skip the Scrum Master, go to the CEO, and an owner-ceiling card still climbs to the owner (BOS-166)", async () => {
       await ctx.switchOn({ recordOnly: true });
-      const d = await wakeChain();
+      const d = (await ownerRaise())!;
       // The Scrum Master isn't woken: the alert goes straight to the CEO, who is told.
-      expect(d).toMatchObject({ tier: "ceo", forAgentId: null });
+      expect(d.rung).toBe("ceo");
       expect((await ladderOf(d.id)).ladder.hops.map((h) => h.to)).toEqual(["ceo"]);
       expect((await ladderOf(d.id)).ladder.hops[0]!.why).toMatch(/record-only mode/);
       expect((await alertWakes()).map((w) => w.agentId)).toEqual([ctx.ceo.id]);
@@ -264,8 +280,10 @@ describe("the alert ladder (BOS-64)", () => {
     const last = await ctx.loops.reviewRound({ ticketId: ctx.ticket.id, reviewer: "CEO", comments: [], message: "again" });
     expect(last.escalated).toBeTruthy();
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.id, last.escalated!));
+    // A review loop stops at the CEO (DR-017 A): it is the CEO's work, not the owner's.
     expect(d).toMatchObject({ kind: "approval", tier: "ceo", forAgentId: null });
     expect((d!.context as { type: string }).type).toBe("review_loop");
+    expect((d!.context as { ladder: Ladder }).ladder.topRung).toBe("ceo");
     expect((await alertWakes()).map((w) => w.agentId)).toEqual([ctx.ceo.id]);
     expect(await ownerNotified(d!.id)).toHaveLength(0);
     // The CEO stops work through its decisions tool; the review-loop hook still runs.
@@ -276,7 +294,7 @@ describe("the alert ladder (BOS-64)", () => {
 
   it("the owner's queue leaves out alerts the team still holds, and lists them as being handled", async () => {
     await ctx.switchOn();
-    const d = await wakeChain();
+    const d = (await ownerRaise())!;
     const queue = async () => ((await ctx.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((x) => x.id);
     const team = async () => (await ctx.req("GET", "/api/decisions/with-team")).json() as Array<{ id: string; holder: string }>;
     expect(await queue()).not.toContain(d.id);
@@ -319,16 +337,83 @@ describe("the alert ladder (BOS-64)", () => {
     expect(isError(await (await client(ctx.sm.id)).callTool({ name: "watchdog", arguments: { action: "pass_alert", alertId: b.id, reason: "too late" } }))).toBe(true);
   });
 
-  it("the CEO rung has an hourly cap; past it alerts go to the owner", async () => {
+  it("the CEO rung has an hourly cap; past it an owner-ceiling alert goes to the owner", async () => {
     for (let i = 0; i < 6; i++) await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "alert_hop", targetAgentId: ctx.ceo.id, reason: "x", createdAt: ctx.now() });
-    const d = await wakeChain();
-    expect(d).toMatchObject({ tier: "owner" });
-    expect((d.context as { ladder: Ladder }).ladder.hops.at(-1)!.why).toMatch(/CEO has had its hourly limit/);
+    const d = (await ownerRaise())!;
+    expect(d).toMatchObject({ rung: "owner" });
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]).toMatchObject({ tier: "owner" });
     expect(await alertWakes()).toHaveLength(0);
     // An hour later the CEO takes them again.
     ctx.advance(61);
-    const e = (await ctx.alerts.raise({ companyId: ctx.companyId, question: "Later alert" }))!;
+    const e = (await ctx.alerts.raise({ companyId: ctx.companyId, kind: "alert", question: "Later alert" }))!;
     expect(e.rung).toBe("ceo");
+  });
+
+  it("a CEO-ceiling alert at the CEO's hourly cap parks with the CEO and never reaches the owner, and is offered again once the cap frees (BOS-469 point 7)", async () => {
+    for (let i = 0; i < 6; i++) await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "alert_hop", targetAgentId: ctx.ceo.id, reason: "x", createdAt: ctx.now() });
+    // A stalled run is CEO-ceiling: past the cap it must not jump to the owner, which is what happened on 4 Nov at 21:40.
+    // A real, live run, so the closer finds it still active and the card stays open.
+    const runId = randomUUID();
+    await ctx.db.insert(runs).values({ id: runId, companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: ctx.ticket.id, startedAt: ctx.now(), lastEventAt: ctx.now() });
+    const d = (await ctx.alerts.raise({ companyId: ctx.companyId, kind: "stalled_run", question: "A run went quiet", options: ["Keep waiting", "Cancel it"], ticketId: ctx.ticket.id, about: [ctx.dev.id], cause: { runId } }))!;
+    expect(d.rung).toBe("ceo");
+    let row = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
+    expect(row).toMatchObject({ tier: "ceo", forAgentId: null });
+    expect((row.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo", topRung: "ceo", parked: expect.stringContaining("hourly limit") });
+    expect(await alertWakes()).toHaveLength(0);
+    expect(await ownerNotified(d.id)).toHaveLength(0);
+    // However long it waits, it never reaches the owner.
+    ctx.advance(600);
+    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    row = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
+    expect(row).toMatchObject({ tier: "ceo" });
+    expect(await ownerNotified(d.id)).toHaveLength(0);
+    // Once the cap frees, the sweep has offered it to the CEO again.
+    expect((row.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo", parked: null });
+    expect((await alertWakes()).map((w) => w.agentId)).toEqual([ctx.ceo.id]);
+  });
+
+  it("a card handed to a CEO that is failing on a usage/auth error does not reach the owner, but one only the owner can settle does (BOS-469 point 1)", async () => {
+    const fs = (await ctx.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, ctx.ceo.id));
+    // The CEO's last runs ended on the weekly limit, with nothing successful since.
+    const started = new Date(ctx.now().getTime() - 20 * 60_000);
+    await ctx.db.insert(runs).values([
+      { companyId: ctx.companyId, agentId: ctx.ceo.id, purpose: null, startedAt: started, endedAt: new Date(started.getTime() + 60_000), outcome: "error: 400 weekly limit reached" },
+      { companyId: ctx.companyId, agentId: ctx.ceo.id, purpose: null, startedAt: new Date(started.getTime() + 120_000), endedAt: new Date(started.getTime() + 180_000), outcome: "error: 400 Identity verification is required" },
+    ]);
+    expect(await ctx.scheduler.ceoCanRun(ctx.companyId)).toBe(false);
+    // The Scrum Master is paused, so a CEO-ceiling card would normally wait with the CEO; with the CEO unable
+    // to run it is held there rather than passed to the owner.
+    await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.sm.id));
+    const held = await wakeChain();
+    expect(held).toMatchObject({ tier: "ceo", forAgentId: null });
+    expect((held.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo", topRung: "ceo", parked: expect.stringContaining("can't run") });
+    // However long it waits, it doesn't reach the owner.
+    ctx.advance(600);
+    await ctx.alerts.sweep();
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, held.id)))[0]).toMatchObject({ tier: "ceo" });
+    expect(await ownerNotified(held.id)).toHaveLength(0);
+    // A card only the owner can settle still goes on.
+    const owner = (await ownerRaise())!;
+    expect(owner.rung).toBe("owner");
+    expect(await ownerNotified(owner.id)).toHaveLength(1);
+  });
+
+  it("a stalled-run alert whose CEO wake is dropped parks with the CEO, not the owner (BOS-469 point 7)", async () => {
+    // The CEO's wake comes back dropped: over its hourly cap is how that happens in practice.
+    for (let i = 0; i < 6; i++) await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "alert_hop", targetAgentId: ctx.ceo.id, reason: "x", createdAt: ctx.now() });
+    const ladder = alertLadder(ctx.db, {
+      notify: async () => ({ id: randomUUID(), status: "dropped", statusReason: "queue full" }),
+      answer: (id, answer) => ctx.decisions.answer(id, answer),
+      watchdog: ctx.watchdog,
+      now: ctx.now,
+    });
+    const d = (await ladder.raise({ companyId: ctx.companyId, kind: "self_wake", question: "Brains keeps waking itself", ticketId: ctx.ticket.id, about: [ctx.dev.id], dedupeKey: `alert:self:${ctx.dev.id}` }))!;
+    expect(d.rung).toBe("ceo");
+    const row = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
+    expect(row).toMatchObject({ tier: "ceo", forAgentId: null });
+    expect((row.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo", topRung: "ceo", parked: expect.stringMatching(/hourly limit|wake was dropped/) });
   });
 
   it("a looping agent raises one climbing alert while it is open, and a fresh one once it's answered", async () => {
@@ -347,7 +432,7 @@ describe("the alert ladder (BOS-64)", () => {
 
   it("the Scrum Master can only settle a plain 'Got it' alert, not one that asks for a choice", async () => {
     await ctx.switchOn();
-    const a = (await ctx.alerts.raise({ companyId: ctx.companyId, question: "Pick one", kind: "approval", options: ["Carry on", "Stop work on it"], recommended: "Stop work on it" }))!;
+    const a = (await ctx.alerts.raise({ companyId: ctx.companyId, question: "Pick one", options: ["Carry on", "Stop work on it"], recommended: "Stop work on it" }))!;
     expect(a.rung).toBe("scrum_master");
     const sm = await client(ctx.sm.id);
     const r = await sm.callTool({ name: "watchdog", arguments: { action: "resolve_alert", alertId: a.id, reason: "looks fine to me" } });
@@ -363,6 +448,72 @@ describe("the alert ladder (BOS-64)", () => {
     const rows = await ctx.db.select().from(decisions).where(eq(decisions.companyId, ctx.companyId));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ tier: "ceo", forAgentId: ctx.sm.id });
+  });
+
+  it("a CEO not at the window and two raises with one cause key make one card listing both (BOS-469 point 6)", async () => {
+    const ladder = alertLadder(ctx.db, {
+      notify: async () => ({ id: randomUUID(), status: "queued" }),
+      answer: (id, answer) => ctx.decisions.answer(id, answer),
+      watchdog: ctx.watchdog,
+      now: ctx.now,
+    });
+    const a = (await ladder.raise({ companyId: ctx.companyId, kind: "runner_boot", question: "First runner problem", cause: { agents: [ctx.dev.id], runnerId: "r1", bootId: "b1" } }))!;
+    const b = (await ladder.raise({ companyId: ctx.companyId, kind: "runner_boot", question: "Second runner problem", cause: { agents: [ctx.qa.id], runnerId: "r1", bootId: "b1" } }))!;
+    expect(b.id).toBe(a.id);
+    const rows = await ctx.db.select().from(decisions).where(eq(decisions.companyId, ctx.companyId));
+    expect(rows).toHaveLength(1);
+    const ctxOf = rows[0]!.context as { items?: Array<{ question: string }> };
+    expect(ctxOf.items?.map((i) => i.question)).toEqual(["First runner problem", "Second runner problem"]);
+    // The heading is rewritten with the count.
+    expect(rows[0]!.question).toMatch(/2 runs didn.t start/);
+  });
+
+  it("usage-limit failures on one account within the hour fold into one card naming the agents, not one per run (BOS-469 point 3)", async () => {
+    const fs = (await ctx.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    await ctx.db.update(agents).set({ fundingSourceId: fs.id });
+    // The account is out of room right now, so the card holds while the failures are grouped.
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: fs.id, window: "five_hour", utilization: 1, resetsAt: new Date(ctx.now().getTime() + 3_600_000), observedAt: ctx.now() });
+    for (const agentId of [ctx.sm.id, ctx.dev.id, ctx.qa.id]) {
+      for (let i = 0; i < 3; i++) await ctx.loops.failure({ companyId: ctx.companyId, ticketId: ctx.ticket.id, agentId, text: "Error: 429 weekly limit reached on Claude Max", what: "An agent run" });
+    }
+    const rows = await ctx.db.select().from(decisions).where(eq(decisions.companyId, ctx.companyId));
+    expect(rows).toHaveLength(1);
+    const card = rows[0]!;
+    // One card for all three agents; its cause key names the account and its top rung is the owner.
+    expect(card.question).toMatch(/Claude Max/);
+    expect(card.question).toMatch(/3 agents/);
+    expect((card.context as { ladder: Ladder }).ladder).toMatchObject({ groupBy: `account:${fs.id}:account_limit`, topRung: "owner" });
+    // Point 2: once the account has room again (a fresh sample under the hold threshold), the sweep closes the
+    // card by itself, on its rung, with the reason. The card is with the Scrum Master, and it still closes.
+    await ctx.db.delete(quotaSamples).where(eq(quotaSamples.fundingSourceId, fs.id));
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: fs.id, window: "five_hour", utilization: 0.1, resetsAt: new Date(ctx.now().getTime() + 3_600_000), observedAt: ctx.now() });
+    await ctx.alerts.sweep();
+    const gone = (await ctx.db.select().from(decisions).where(eq(decisions.id, card.id)))[0]!;
+    expect(gone.status).toBe("withdrawn");
+    expect((gone.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/room again/);
+  });
+
+  it("a repeated failure alert closes itself once the agent finishes a clean run, on any tier (BOS-469 point 2)", async () => {
+    const ladder = alertLadder(ctx.db, {
+      notify: async () => ({ id: randomUUID(), status: "queued" }),
+      answer: (id, answer) => ctx.decisions.answer(id, answer),
+      watchdog: ctx.watchdog,
+      now: ctx.now,
+    });
+    const d = (await ladder.raise({ companyId: ctx.companyId, kind: "self_wake", question: "Zippy keeps waking itself", ticketId: ctx.ticket.id, about: [ctx.dev.id], dedupeKey: `alert:self:${ctx.dev.id}`, cause: { agents: [ctx.dev.id] } }))!;
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
+    // No clean run yet: the card holds.
+    ctx.advance(5);
+    await ctx.alerts.sweep();
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
+    // A clean run since the card: it closes by itself with the reason.
+    const started = new Date(ctx.now().getTime() + 1000);
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.dev.id, purpose: null, ticketId: ctx.ticket.id, startedAt: started, endedAt: new Date(started.getTime() + 60_000), outcome: "end_turn" });
+    ctx.advance(5);
+    await ctx.alerts.sweep();
+    const after = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
+    expect(after.status).toBe("withdrawn");
+    expect((after.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/clean run/);
   });
 });
 

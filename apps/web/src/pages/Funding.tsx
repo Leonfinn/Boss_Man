@@ -311,7 +311,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
             )}
             {q.resetsAt && (
               <span className="muted" style={{ fontSize: 12 }}>
-                Resets {when(q.resetsAt)}
+                {new Date(q.resetsAt).getTime() < Date.now() ? "Last reading was before its reset; updates on the next run" : `Resets ${when(q.resetsAt)}`}
                 {q.overageInUse ? " · using usage credits" : ""}
               </span>
             )}
