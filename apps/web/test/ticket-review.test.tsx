@@ -111,4 +111,25 @@ describe("Approve and merge settles the owner's sign-off (BOS-471)", () => {
     expect(await screen.findByText(/Signed off\. Checking and merging now\./)).toBeTruthy();
     expect(calls).toEqual(["/api/tickets/t1/approve-merge"]);
   });
+
+  it("says it signed off and merged when the answer's own landing already finished", async () => {
+    const at = new Date().toISOString();
+    const ticket = { id: "t1", title: "Fix typo", systemState: "review", risk: "high", repoUrl: "https://github.com/Leonfinn/customer-app.git", defaultBranch: "main", branch: "bm/fix-typo", landing: "merge", verifyCommand: "pnpm test", ownerSignoff: true, signoffWaiting: true, projectId: "p1", project: "App", companyId: "c1", assignee: "Engineer", assigneeAgentId: "a1", createdAt: at, lastActivityAt: at };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        // The sign-off's own answer ran the merge before it returned, so the route hands back no landing.
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST") return json({ outcome: "landing", signoffAnswered: true, landing: null });
+        if (url === "/api/tickets/t1") return json(ticket);
+        if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
+        if (url.includes("/features")) return json({ features: [] });
+        if (url.endsWith("/artifacts") || url.endsWith("/reviews") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json({});
+      }),
+    );
+    render(<Ticket id="t1" companies={[company]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve and merge" }));
+    expect(await screen.findByText(/Signed off and merged\./)).toBeTruthy();
+  });
 });

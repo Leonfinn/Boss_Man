@@ -575,8 +575,11 @@ describe("landing an approved ticket (R46, R47)", () => {
       } finally {
         c.held.splice(0).forEach((release) => release());
       }
-      const body = (await res).json() as { outcome: string; signoffAnswered: boolean };
+      const body = (await res).json() as { outcome: string; signoffAnswered: boolean; landing: unknown };
       expect(body).toMatchObject({ outcome: "landing", signoffAnswered: true });
+      // The answer's own landing ran the merge and is gone by the time the route replies; the route must not
+      // start a second one, so there is no landing to hand back (BOS-471, review round 1).
+      expect(body.landing).toBeNull();
       await vi.waitFor(async () => expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("done"));
       expect(await mergeCards(c)).toHaveLength(0);
     });

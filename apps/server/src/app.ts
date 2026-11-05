@@ -2442,7 +2442,10 @@ export async function buildApp(opts: AppOptions) {
           throw err;
         }
         try {
-          const landing = await review.startLanding(id, "the owner");
+          // The answer's own hook (setLoopHooks.land above) already ran and finished the merge before it
+          // returned, so start nothing more here: a second start would merge twice (BOS-471, review round 1).
+          // A press that found the sign-off already settled (r === null) started no landing, so start one now.
+          const landing = signoffAnswered ? null : await review.startLanding(id, "the owner");
           return { outcome: "landing" as const, signoffAnswered, landing };
         } catch (err) {
           // A sign-off still open here is the owner's next answer, not a failed merge: say so, and raise no card.
