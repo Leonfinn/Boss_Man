@@ -101,9 +101,13 @@ fi
 # BOSSMAN_CHECK_BODY replaces the checks below with a stub command (for check-all.test.sh).
 if [ -n "${BOSSMAN_CHECK_BODY:-}" ]; then bash -c "$BOSSMAN_CHECK_BODY"; exit; fi
 
-pnpm install --frozen-lockfile --prefer-offline >/dev/null
-node --test scripts/*.test.mjs
-node scripts/lint-migrations.mjs
+# CHECK_ALL_SLOT_COMMAND (used by check-quick.sh, with BOSSMAN_CHECK_CHILD=1): wait for a slot exactly like a hand-run check,
+# run that one command while holding it, and exit with its status. None of the full checks run.
+if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
+  pnpm install --frozen-lockfile --prefer-offline >/dev/null
+  node --test scripts/*.test.mjs
+  node scripts/lint-migrations.mjs
+fi
 # The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS checks (1 until a side-by-side pair has passed, then 2) run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
 # A waiter prints its place and an estimated wait. Hand-run checks never give up. A merge check keeps its place for as
@@ -229,6 +233,7 @@ fi
 [ -z "${CHECK_ALL_STARTED_FILE:-}" ] || date +%s >"$CHECK_ALL_STARTED_FILE"
 # Test hook: scripts/check-all.test.sh stops here once the lock is held.
 [ -z "${CHECK_ALL_STOP_AFTER_LOCK:-}" ] || { echo "check-all: lock held"; exit 0; }
+if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
 node scripts/check-in-memory-state.mjs
 # Memory-safe on a shared runner (a 12 GB cgroup shared with other agents, two checks at once): one package at a time,
 # at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),

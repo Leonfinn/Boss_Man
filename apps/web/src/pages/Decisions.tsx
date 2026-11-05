@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { HARNESSES, harnessLabel, providerLabel } from "@boss-man/shared";
+import { HARNESSES, harnessLabel, modelFitProblem, providerLabel } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -40,8 +40,9 @@ const OPTION_HELP: Record<string, string> = {
   "Keep waiting": "Keep waiting: you'll be asked again in 30 minutes if it stays quiet.",
 };
 
-type TicketLanding = { state: "running"; startedAt: string; startedBy: string; stale?: boolean } | { state: "finished"; text?: string };
+type TicketLanding = { state: "running"; startedAt: string; startedBy: string; stale?: boolean; phase?: string } | { state: "finished"; text?: string };
 const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Checking and merging", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted" };
 const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
 const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 
@@ -287,6 +288,7 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
   const proposed = d.context?.applied?.config ?? d.context?.proposed;
   const [form, setForm] = useState<ModelConfigView>(proposed ?? { harness: "claude", provider: "anthropic", model: "", fundingSourceId: "" });
   if (!before || !proposed) return null;
+  const fitProblem = modelFitProblem(form.harness, form.provider, form.model);
   const paidFrom = (c: ModelConfigView) => c.fundingSourceName ?? sources.data?.find((s) => s.id === c.fundingSourceId)?.name ?? c.fundingSourceId;
   const rows: Array<[string, string, string]> = [
     ["Harness", harnessLabel(before.harness), harnessLabel(proposed.harness)],
@@ -324,6 +326,7 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
           style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}
           onSubmit={(e) => {
             e.preventDefault();
+            if (fitProblem) return;
             onSubmit({ harness: form.harness, provider: form.provider, model: form.model, fundingSourceId: form.fundingSourceId });
           }}
         >
@@ -366,8 +369,12 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
               </select>
             </div>
           </div>
+          {/* The same check the server makes, shown before saving so a model this account can't serve is clear (BOS-477). */}
+          {fitProblem && (
+            <p className="error" role="alert">{fitProblem}</p>
+          )}
           <div className="actions">
-            <button type="submit" className="btn primary" disabled={busy || !form.model || !form.fundingSourceId}>Save and approve</button>
+            <button type="submit" className="btn primary" disabled={busy || !form.model || !form.fundingSourceId || !!fitProblem}>Save and approve</button>
             <button type="button" className="btn" onClick={onCancel}>Cancel</button>
           </div>
           <small className="muted">The same checks apply as when the CEO proposed it. The change takes effect between runs.</small>
@@ -829,7 +836,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     )}
                     {checking && land?.state === "running" && (
                       <p role="status" style={{ fontWeight: 600 }}>
-                        Checking and merging since {atTime(land.startedAt)}, started by {startedByLabel(land.startedBy)}. This can take several minutes; nothing more to do here.
+                        {land.phase ? PHASE_WORDS[land.phase] : "Checking and merging"} since {atTime(land.startedAt)}, started by {startedByLabel(land.startedBy)}. This can take several minutes; nothing more to do here.
                       </p>
                     )}
                     {staleCheck && land?.state === "running" && (
