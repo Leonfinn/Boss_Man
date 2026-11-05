@@ -15,7 +15,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
-import { checkQueueEnv } from "./fence.js";
+import { checkQueueEnv, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
 
 const run = promisify(execFile);
@@ -105,6 +105,8 @@ export class Workspaces {
     private readonly baseEnv: NodeJS.ProcessEnv = process.env,
     /** check-all.sh's shared queue folder (checkQueueEnv), so the merge check takes turns with agents' checks. */
     private readonly coordDir?: string,
+    /** Fence for server-queued check jobs (BOS-316, security F1): a job runs a commit nobody has reviewed yet. */
+    private readonly jobFence?: { level: FenceLevel; pnpmStore?: string },
   ) {}
 
   repoDir = (projectId: string) => path.join(this.root, "repos", `${projectId}.git`);
@@ -511,6 +513,7 @@ export class Workspaces {
     timeoutMs: number,
     hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void } = {},
   ): Promise<VerifyResult> {
+    if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
     const dir = path.join(this.root, "check-jobs", spec.jobId);
     rmSync(dir, { recursive: true, force: true });
@@ -520,7 +523,7 @@ export class Workspaces {
       await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
     });
     try {
-      return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart });
+      return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, spec.jobId) });
     } finally {
       await this.withRepoLock(spec.projectId, async () => {
         await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
@@ -530,17 +533,40 @@ export class Workspaces {
     }
   }
 
+  /**
+   * The fence and own HOME/TMPDIR for one job, like an agent session's: the job's folder, its own home and temp folder, the pnpm
+   * store, and the shared repo with only objects/refs/logs writable. The runner's token, data folder and other tickets' worktrees
+   * are outside it. On a runner that can't fence, the job runs as before (the same fallback sessions have).
+   */
+  private jobFenceFor(repo: string, dir: string, jobId: string): { env: Record<string, string>; wrap: (bin: string, args: string[]) => { bin: string; args: string[] } } | undefined {
+    if (!this.jobFence || this.jobFence.level === "unavailable") return undefined;
+    const home = path.join(this.root, "check-jobs-home", jobId);
+    const tmp = path.join(home, "tmp");
+    mkdirSync(tmp, { recursive: true });
+    const env: Record<string, string> = { HOME: home, TMPDIR: tmp, XDG_CACHE_HOME: path.join(home, ".cache"), XDG_CONFIG_HOME: path.join(home, ".config"), BOSSMAN_CHECK_STORE: "off", GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null", GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "gc.auto", GIT_CONFIG_VALUE_2: "0" };
+    const readWrite: string[] = [];
+    if (this.jobFence.pnpmStore) {
+      mkdirSync(this.jobFence.pnpmStore, { recursive: true });
+      env.npm_config_store_dir = this.jobFence.pnpmStore;
+      readWrite.push(this.jobFence.pnpmStore);
+    }
+    const readOnly = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
+    const rules = fenceProfile({ cwd: dir, home, tmp, repo: repoGrant(repo, dir), readOnly, readWrite });
+    return { env, wrap: (bin, args) => fencedCommand(rules, bin, args) };
+  }
+
   /** One check command in a folder: its own process group, output kept to the last 8 KB. */
-  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void }): Promise<VerifyResult> {
+  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void; fence?: { env: Record<string, string>; wrap: (bin: string, args: string[]) => { bin: string; args: string[] } } }): Promise<VerifyResult> {
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
       // Own process group, so a timeout can take down pnpm, tsc, vitest and their workers, not just the shell.
-      const child = spawn("sh", ["-c", command], {
+      const launch = job?.fence ? job.fence.wrap("sh", ["-c", command]) : { bin: "sh", args: ["-c", command] };
+      const child = spawn(launch.bin, launch.args, {
         cwd: dir,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
         // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
-        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1" } : this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
+        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1", ...job.fence?.env } : this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
       });
       const killGroup = (signal: NodeJS.Signals) => {
         try {

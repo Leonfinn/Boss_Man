@@ -62,7 +62,8 @@ export function checkQueue(db: Db) {
       .from(checkJobs)
       .where(and(eq(checkJobs.projectId, input.projectId), eq(checkJobs.tree, input.tree), inArray(checkJobs.state, ["passed", "queued", "running"])))
       .orderBy(asc(checkJobs.queuedAt));
-    const wide = (j: CheckJob) => (SCOPE_RANK[j.scope] ?? 0) >= SCOPE_RANK[scope]!;
+    // The same command must have passed: a quick script, or the first of several merge commands, never stands in for another.
+    const wide = (j: CheckJob) => (SCOPE_RANK[j.scope] ?? 0) >= SCOPE_RANK[scope]! && (j.command ?? null) === (input.command ?? null);
     const passed = sameTree.find((j) => j.state === "passed" && wide(j));
     if (passed) return { job: passed, reused: "passed" };
     // The same ticket already has a live job on this tree that is wide enough: it is the answer.

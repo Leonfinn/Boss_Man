@@ -56,6 +56,19 @@ describe("check queue", () => {
     await s.close();
   });
 
+  it("a pass of one command never stands in for another on the same tree", async () => {
+    const s = await setup();
+    const quick = (await s.req({ tree: "c1", kind: "pre_review", scope: "full", command: "scripts/check-quick.sh" })).job;
+    await s.q.claimNext(null);
+    await s.q.complete(quick.id, { commit: quick.commit, exitCode: 0, logTail: "" });
+    const first = await s.req({ tree: "c1", command: "pnpm verify" });
+    expect(first.reused).toBeNull();
+    await s.q.claimNext(null);
+    await s.q.complete(first.job.id, { commit: first.job.commit, exitCode: 0, logTail: "" });
+    expect((await s.req({ tree: "c1", command: "pnpm verify" })).reused).toBe("passed");
+    expect((await s.req({ tree: "c1", command: "pnpm deep" })).reused).toBeNull();
+    await s.close();
+  });
   it("reuses a pass on the same tree, wider scope satisfying narrower, never the reverse", async () => {
     const s = await setup();
     const a = (await s.req({ tree: "t1", kind: "pre_review", scope: "full" })).job;

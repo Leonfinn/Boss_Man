@@ -31,10 +31,10 @@ const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
 // the merge check share, so checks still take turns (BOS-321).
 const coordDir = path.join(workspacesRoot, ".bossman-coord");
 mkdirSync(coordDir, { recursive: true });
-const workspaces = new Workspaces(workspacesRoot, process.env, coordDir);
+const sandbox = sandboxSelfTest();
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, { level: sandbox.level, pnpmStore: path.join(workspacesRoot, ".pnpm-store") });
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
-const sandbox = sandboxSelfTest();
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
 
 let connection: RunnerConnection;
