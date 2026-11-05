@@ -2,7 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
-import { cleanupScope, explainCommand, readPush, tempCleanup } from "./explain.js";
+import { cleanupScope, explainCommand, readPush, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -46,7 +46,7 @@ export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to 
 
 // Boss Man's own tool server is named "bossman"; each harness spells the tool title its own way: Claude Code mcp__bossman__wiki,
 // Codex mcp.bossman.wiki or "Tool: bossman/wiki", OpenCode bossman_wiki, other adapters "bossman: wiki". Matched case-insensitively.
-export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2})?bossman(?:__|_|\.|:\s*|/|\s+-\s+)\S`;
+export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2}bossman(?:__|\.|:\s*|/|\s+-\s+)|bossman(?:__|_|\.|:\s*|/|\s+-\s+))\S`;
 const BOSSMAN_TOOL = new RegExp(BOSSMAN_TOOL_PATTERN, "i");
 
 /** True when a tool title names a tool of Boss Man's own server, in any harness's spelling. */
@@ -63,6 +63,42 @@ export function isBossmanCall(info: PermissionInfo): boolean {
   if (commandOf(info.rawInput) != null) return false;
   if (info.kind && NOT_A_BOSSMAN_CALL.includes(info.kind)) return false;
   return isBossmanTool(info.title);
+}
+
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) row[j] = Math.min(prev[j]! + 1, row[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = row;
+  }
+  return prev[b.length]!;
+}
+
+/** True when a tool title's server name is close to "bossman" (two edits or fewer) but isn't one of Boss Man's own tools: mcp__bossrnan__wiki, mcp__bossmann__wiki, a title with an invisible character in it. */
+export function looksLikeBossmanTool(title: string | null | undefined): boolean {
+  if (!title || isBossmanTool(title)) return false;
+  const t = title.normalize("NFKC").replace(/\p{Cf}/gu, "").toLowerCase().replace(/^\s*tool:\s*/, "").replace(/^mcp[_\-.\s:]*/, "");
+  // The server segment ends at "__", a space or a colon; separators inside it are ignored (boss_man, boss-man).
+  const server = (t.split(/__|[\s:]/)[0] ?? "").replace(/[_\-.]/g, "");
+  if (!server) return false;
+  // Other alphabets (a Cyrillic "о" for "o") can't be told apart by eye, so any non-ASCII server name is flagged.
+  return /[^\x00-\x7f]/.test(server) || editDistance(server, "bossman") <= 2;
+}
+
+// Input keys that name a file or folder. A request carrying one is about the filesystem, not an unknown tool (OpenCode's external_directory arrives as kind "other" with filepath and parentDir).
+const PATH_KEYS = ["filepath", "parentdir", "path", "paths", "cwd", "workdir", "file", "directory", "dir"];
+
+function carriesPath(rawInput: unknown): boolean {
+  if (!rawInput || typeof rawInput !== "object") return false;
+  return Object.keys(rawInput as Record<string, unknown>).some((k) => PATH_KEYS.includes(k.toLowerCase().replace(/[_-]/g, "")));
+}
+
+export const UNKNOWN_TOOL_RULE = "Unrecognised tools go to the CEO first";
+
+/** True when a request is for a tool Boss Man doesn't recognise: no command, no path-like input key, and an unknown or "other" kind. These go to the CEO first (BOS-295), unless a rule above decides. */
+export function isUnrecognisedTool(info: PermissionInfo): boolean {
+  return commandOf(info.rawInput) == null && !carriesPath(info.rawInput) && (!info.kind || info.kind === "other" || !(TOOL_KINDS as readonly string[]).includes(info.kind));
 }
 
 /** Table row 3: the built-in guards. Checked before any company allow, so a broad allow cannot lift them (BOS-307, DR-001). */
@@ -148,7 +184,9 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     if (new RegExp(`${DESTRUCTIVE}|${PUSHING}`, "i").test(cmd)) return false;
   }
   if (rule.scratchOnly) {
-    // shortcut: paths are checked as written, so a symlink inside /tmp pointing elsewhere isn't caught; resolving them needs the runner's filesystem.
+    // Paths are checked as written, so the note (scratchOnly in explain.ts) vouches only for
+    // programs that can't follow a symlink at their target: rm/rmdir/unlink/mkdir of one plain
+    // /tmp entry, no redirects (BOS-165).
     const scratch = explainCommand(commandOf(info.rawInput) ?? "").scratch;
     if (!scratch || scratch.unchecked.length) return false;
   }
@@ -189,6 +227,19 @@ function urlsIn(rawInput: unknown, depth = 0): string[] {
 }
 
 const LAN_GUARD = "Fetching from your home network or this machine is blocked";
+const NOT_A_TOOL = "The tool name is a folder path, not a tool (call read, list or bash)";
+
+/**
+ * BOS-495: a request whose "tool" is a folder path and that has no command. OpenCode names an
+ * external_directory ask after its folder when it has no description or command, so this is an
+ * agent reaching outside its checkout by a route Boss Man has no card for. Refused outright, never a card.
+ * Only kinds "other" or none: for execute the title is the command, and read/edit titles are file paths.
+ */
+export function titleIsPath(info: PermissionInfo): boolean {
+  const title = info.title?.trim();
+  if (!title || (info.kind && info.kind !== "other") || commandOf(info.rawInput)) return false;
+  return /^(\/|~(\/|$)|\.{1,2}\/|[A-Za-z]:[\\/])/.test(title);
+}
 
 /** True when a fetch, or a call to an outside tool server, aims at a private address. Unparseable addresses count as private. */
 export function reachesPrivateNetwork(info: PermissionInfo): boolean {
@@ -209,6 +260,8 @@ export type PermissionDecision = { outcome: PolicyOutcome; rule: string; row: nu
 export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): PermissionDecision {
   // Row 1. Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
   if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD, row: 1 };
+  // Not a tool at all (BOS-495): refused before any rule, so no allow rule can turn it into a card or an allow.
+  if (titleIsPath(info)) return { outcome: "deny", rule: NOT_A_TOOL, row: 1 };
   // Row 3: the built-in guard that catches this request, if any.
   const guard = BUILTIN_GUARDS.find((r) => matches(r.match, info));
   // Row 4: company deny rules.
@@ -224,7 +277,8 @@ export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[]):
   const builtin = BUILTIN_ALLOWS.find((r) => matches(r.match, info));
   if (builtin) return { outcome: builtin.outcome, rule: builtin.name, row: 6 };
   if (first) return { outcome: first.outcome, rule: first.name, row: 7 };
-  return { outcome: "owner", rule: "No rule matched", row: 8 };
+  // Row 8: a tool Boss Man doesn't recognise is the CEO's call first (BOS-295); anything else is the owner's.
+  return isUnrecognisedTool(info) ? { outcome: "ceo", rule: UNKNOWN_TOOL_RULE, row: 8 } : { outcome: "owner", rule: "No rule matched", row: 8 };
 }
 
 /** Routing rules the built-in allows cover: they only fire for guarded requests now (BOS-307). Judged from the tool kinds alone: listed when it names no kinds, or when any kind it names is a built-in allow. */
@@ -241,6 +295,9 @@ export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]
 
 /** Build output directly in the agent's working folder (node_modules, dist…): one component only, no trailing slash. rm -rf NAME/ follows a symlink as if NAME were its target (BOS-150), and a deeper path such as dist/x still follows a symlinked dist, so `rm -rf dist` is the only shape vouched for. */
 const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:node_modules|dist|build|coverage|out|target))+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
+
+/** find -delete rooted at one plain /tmp entry: kept Allow as BOS-111 pinned it. Root must be one level, quoted patterns kept simple. */
+const FIND_TMP_DELETE = /^find\s+\/tmp\/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+(?:\s+-(?:name|iname|type|path|mindepth|maxdepth|mtime|mmin|newer|empty|print)(?:\s+(?:'[^']*'|[\w.*?-]+))?)*\s+-delete$/;
 
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
@@ -266,8 +323,15 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const scratch = explainCommand(cmd).scratch;
   if (scratch && !scratch.unchecked.length) return "allow";
   if (!hits.length) return "allow";
-  if (hits.some((h) => !/^rm\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
+  // A shell still runs $( ), backticks and <( ) inside double quotes, which `run` blanked out, so the pieces below can't be judged without seeing them (security round 2).
+  if (/\$\(|`|[<>]\(/.test(cmd)) return "deny";
+  if (hits.some((h) => !/^(?:rm|find)\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");
   const pieces = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
-  return pieces.every((s) => !destructive.test(s) || WORKSPACE_DELETE.test(s)) ? "allow" : "deny";
+  // A plain delete of one-level /tmp entries never makes the suggestion Deny, whatever else the
+  // command does (BOS-165, from BOS-153 finding 2). TEMP_DELETE accepts no trailing slash, deeper
+  // path, glob or redirect to a file, so /tmp/a/, /tmp/a/b and rm > /home/x stay Deny. A piece with
+  // no vouched delete is accepted only when it can't reach beyond /tmp either (writesBeyondTmp),
+  // so cp -t /home and a redirect into the home folder still pay Deny.
+  return pieces.every((s) => (destructive.test(s) ? WORKSPACE_DELETE.test(s) || TEMP_DELETE.test(s) || FIND_TMP_DELETE.test(s) : !writesBeyondTmp(s))) ? "allow" : "deny";
 }

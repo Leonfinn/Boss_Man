@@ -336,4 +336,36 @@ describe("stale requests (BOS-123)", () => {
     const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d.id));
     expect(after!.status).toBe("withdrawn");
   });
+
+  it("never quotes one card's owner answer on another card about the same ticket (BOS-470, Jane/Rod)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Security review on the payments page", c.worker.id);
+    // Jane's answer settles her own card on the ticket.
+    const jane = await c.decisions.raise({ companyId: c.company.id, agentId: c.other.id, question: "Jane - Security Reviewer has sent nothing for 5 minutes while working on this.", options: ["Keep waiting", "Cancel run"], recommended: "Keep waiting", blocksTicketId: t.id, triedFirst: "Checked the run's events" });
+    // Rod's stalled-run card is Boss Man's own card (raised on the ladder, no author). It must not be
+    // flagged by Jane's answer, nor have her answer quoted on it.
+    const [rod] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "stalled_run",
+        question: 'Rod has sent nothing for 5 minutes while working on "Security review on the payments page".',
+        options: ["Keep waiting", "Cancel run"],
+        recommendedOption: "Keep waiting",
+        tier: "owner",
+        dedupeKey: `stalled:${randomUUID()}`,
+        raisedByAgentId: c.worker.id,
+        context: { type: "stalled_run", runnerId: randomUUID(), runId: randomUUID(), ladder: { rung: "owner", since: new Date().toISOString(), ticketId: t.id, about: [c.worker.id], hops: [] } },
+      })
+      .returning();
+
+    await c.decisions.answer(jane.id, "Keep waiting");
+
+    const [after] = await c.db.select().from(decisions).where(eq(decisions.id, rod!.id));
+    expect(after!.staleAt).toBeNull();
+    expect(after!.staleReason).toBeNull();
+    // Rod is not woken about a card an owner answer never made out of date.
+    const stale = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, STALE_REASON)));
+    expect(stale).toHaveLength(0);
+  });
 });
