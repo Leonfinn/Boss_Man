@@ -733,7 +733,13 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 #ticket-props-body { display: flex; flex-direction: column; gap: 8px; }
 #ticket-props-body[hidden] { display: none; }
 .props-toggle { min-height: 32px; padding: 0 10px; font-size: 13px; }
-.ticket-layout.props-collapsed { grid-template-columns: minmax(0, 1fr) auto; }
+/* Folded, the Work panel is a one-line card: it sits in the narrow right-hand column so the description
+   keeps the main one. Without the rule below, the `.props-collapsed` grid from R76 hands the 1fr share to
+   whichever column comes last in the source, which on a tablet or an unfolded foldable is the panel, and
+   the description gets crushed into roughly 200px (BOS-485). Explicit placement fixes it without touching
+   the phone order. */
+.ticket-layout.props-collapsed > .ticket-main { grid-column: 1; grid-row: 1; }
+.ticket-layout.props-collapsed > .ticket-props { grid-column: 2; grid-row: 1; min-width: 0; }
 .ticket-props small { font-size: 12px; }
 .fold { padding: 0; }
 .fold > summary { display: flex; gap: 10px; align-items: flex-start; padding: 14px 18px; cursor: pointer; list-style: none; }
@@ -769,6 +775,9 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 @media (max-width: 900px) {
   .ticket-layout, .ticket-layout.props-collapsed { grid-template-columns: minmax(0, 1fr); }
   .ticket-props { position: static; order: -1; }
+  /* One column: back to source order, so the description keeps the width and a folded Work panel sits below it (BOS-485). */
+  .ticket-layout.props-collapsed > .ticket-main, .ticket-layout.props-collapsed > .ticket-props { grid-column: 1; grid-row: auto; }
+  .ticket-layout.props-collapsed > .ticket-props { max-width: none; }
 }
 /* On a phone the owner's jobs come first: read, reply, approve. The Work panel goes last and folds
    to one row, the review and the conversation sit near the top, and the conversation runs down the
