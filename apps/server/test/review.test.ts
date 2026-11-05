@@ -703,17 +703,17 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     expect(c.sent.map((x) => x.type)).toContain("workspace.merge");
   });
 
-  it("refuses rather than merging when the runner can't answer the check", async () => {
+  it("raises one Run-the-check-again card, and leaves the ticket in review, when the runner never answers the carried-work check (BOS-486)", async () => {
     setInfraRetryBase(1);
-    const c = (ctx = await setup({ answers: { carried: { error: "git rev-list failed" } } }));
-    const other = await otherTicket(c, "Permission gate");
+    const c = (ctx = await setup({ answers: { carried: { carried: [] }, carriedFailures: 4 } }));
+    await otherTicket(c, "Permission gate");
     const r = (await approveAndWait(c.req, c.ticket.id)).json();
-    expect(r).toMatchObject({ verdict: "approved", outcome: "carried" });
-    expect(r.message).toContain("git rev-list failed");
+    expect(r).toMatchObject({ verdict: "approved", outcome: "check_stuck" });
+    expect(c.sent.filter((x) => x.type === "workspace.carried")).toHaveLength(4);
     expect(c.sent.map((x) => x.type)).not.toContain("workspace.merge");
     expect(await state(c)).toMatchObject({ systemState: "review", mergeCommit: null });
-    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.pullRequestNote).toContain("git rev-list failed");
-    const w = (await c.db.select().from(wakes)).find((x) => x.reason === "carried check failed");
-    expect(w!.note).toContain("git rev-list failed");
+    const cards = (await c.db.select().from(decisions)).filter((d) => d.status === "open" && d.dedupeKey === `merge-stuck:${c.ticket.id}`);
+    expect(cards).toHaveLength(1);
+    expect((await c.db.select().from(wakes)).find((x) => x.reason === "carried check failed")).toBeUndefined();
   });
 });

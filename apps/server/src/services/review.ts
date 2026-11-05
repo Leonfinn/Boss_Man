@@ -882,9 +882,16 @@ export function reviewService(
           break;
         } catch (err) {
           if (!(err instanceof ReviewError)) throw err;
-          if (!err.retryable || retry > INFRA_RETRY_ATTEMPTS) {
+          if (!err.retryable) {
             const r = await refuseUnchecked(t, err);
             return { outcome: r.outcome, delivered: r.delivered, detail: r.detail };
+          }
+          if (retry > INFRA_RETRY_ATTEMPTS) {
+            // Retries used up: one "Run the check again" card, and the ticket stays in review so running it
+            // again does not reset the reviews (BOS-460 stalled overnight on a reset request).
+            await wait(t, `Not merged: the runner didn't answer the check for other tickets' unmerged work (${err.message}). Nothing was merged.`);
+            await raiseCheckStuck(db, t, "carried-work check", "the runner didn't answer the check for other tickets' unmerged work", err.message);
+            return { outcome: "check_stuck", delivered: null, detail: { unchecked: err.message } };
           }
           const pause = INFRA_RETRY_BASE_MS * 2 ** (retry - 1);
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The runner didn't answer the check for other tickets' unmerged work; asking again (try ${retry} of ${INFRA_RETRY_ATTEMPTS}, in ${Math.max(1, Math.round(pause / 1000))}s). Nothing to do.` });
