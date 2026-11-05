@@ -262,18 +262,26 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(isError(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Got it", note: "I looked at the review and the reviewer is working through it." } }))).toBe(false);
     expect(await ownerNotified(a!.id)).toEqual([]);
 
-    // A second stuck review the CEO leaves alone reaches the owner with what was tried.
+    // A second stuck review the CEO leaves alone stays with the CEO (DR-017 A: a review is the CEO's work),
+    // with its clock stopped, and never falls through to the owner's queue on its own.
     await ctx.db.update(reviewRequests).set({ status: "approved" }).where(eq(reviewRequests.id, first.id));
     await review(2);
     expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
     const open = (await stalled()).find((d) => d.id !== a!.id)!;
-    ctx.advance(31);
-    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    ctx.advance(600);
+    await ctx.alerts.sweep();
+    const held = await reload(open.id);
+    expect(held.tier).toBe("ceo");
+    expect((held.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo", topRung: "ceo" });
+    expect(await queueIds()).not.toContain(open.id);
+    expect((await ownerNotified(open.id)).length).toBe(0);
+    // Only the CEO sending it on (escalate) puts it in front of the owner, with what was tried.
+    const esc = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "escalate", id: open.id, triedFirst: "Checked the reviewer and moved the review on; nobody else is free to take it", steps: ["Move the review to another agent in Settings → Reviews"] } });
+    expect(isError(esc)).toBe(false);
     const owner = await reload(open.id);
     expect(owner.tier).toBe("owner");
-    expect((owner.context as { triedFirst?: string }).triedFirst).toMatch(/the CEO/);
+    expect((owner.context as { triedFirst?: string }).triedFirst).toMatch(/moved the review on/);
     expect(await queueIds()).toContain(open.id);
-    expect((await ownerNotified(open.id)).length).toBe(1);
   });
 
   it("without a Scrum Master it starts at the CEO", async () => {
