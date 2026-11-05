@@ -516,6 +516,32 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(c.made.length).toBeGreaterThan(ranFrom);
     });
 
+    // BOS-414 review: the poller runs every 30 s, so skipped calls must not push the forced pass back.
+    it("forces a pass a minute after the last one that ran, even when every 30 s call since then was skipped", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-20T12:05:00Z"));
+      const c = (ctx = await setup());
+      await c.available({ deployed: B });
+      await c.selfDeploy.sync(); // the pass that runs, at 12:05:00
+      const ranFrom = c.made.length;
+      // Unchanged files, called every 30 s: the 30 s call skips and must not move the clock.
+      vi.setSystemTime(new Date("2026-10-20T12:05:30Z"));
+      await c.selfDeploy.sync();
+      expect(c.made.slice(ranFrom)).toEqual([]);
+      // At the minute mark, still unchanged, the forced pass runs and reads the database.
+      vi.setSystemTime(new Date("2026-10-20T12:06:00Z"));
+      await c.selfDeploy.sync();
+      expect(c.made.length).toBeGreaterThan(ranFrom);
+      // And the next window is measured from that pass, not from the skipped call before it.
+      const ranAgain = c.made.length;
+      vi.setSystemTime(new Date("2026-10-20T12:06:30Z"));
+      await c.selfDeploy.sync();
+      expect(c.made.slice(ranAgain)).toEqual([]);
+      vi.setSystemTime(new Date("2026-10-20T12:07:00Z"));
+      await c.selfDeploy.sync();
+      expect(c.made.length).toBeGreaterThan(ranAgain);
+    });
+
     it("skips nothing once a deploy has finished, and runs again the moment its result lands", async () => {
       const c = (ctx = await setup());
       await c.available();

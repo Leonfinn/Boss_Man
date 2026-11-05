@@ -92,13 +92,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * Nothing a pass reads outside its database can change until the host writes a file, or a request
    * is put in its inbox, so when all three have the same mtime and size as last time there is nothing
    * to do (BOS-414). A pass still runs at least once a minute, which covers a missed rename and
-   * anything else a file token can't see. Tests set the time with fake timers, never a timer.
+   * anything else a file token can't see. The minute is measured from the last pass that *ran*, not
+   * the last call: a skipped call keeps the old time, or the poller skipping every 30 s would push the
+   * forced pass back for ever (BOS-414 review). Tests set the time with fake timers, never a timer.
    */
   const unchanged = async () => {
     const nowMs = Date.now();
     const print = (await Promise.all([fingerprint(availableFile), fingerprint(statusFile), fingerprint(inboxFile)])).join("|");
     const skip = seen !== null && seen.print === print && nowMs - seen.at < FORCED_SYNC_MS;
-    seen = { print, at: nowMs };
+    // On a skip only the print is refreshed: the clock for the forced pass stays on the last real pass.
+    seen = skip ? { print, at: seen!.at } : { print, at: nowMs };
     return skip;
   };
 
