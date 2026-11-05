@@ -129,6 +129,20 @@ describe("wake classes: scheduled wakes", () => {
     expect((await ctx!.db.select().from(wakes).where(eq(wakes.id, fresh.id)))[0]!.status).toBe("queued");
   });
 
+  it("ranks a wake for an urgent ticket one higher within its class (BOS-346)", async () => {
+    ctx = await setup({ instance: 1, company: 1 });
+    const a = await ctx!.agent("A");
+    const b = await ctx!.agent("B");
+    const ta = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Routine" })).json();
+    const tb = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Urgent" })).json();
+    await ctx!.db.update(tickets).set({ urgent: true }).where(eq(tickets.id, tb.id));
+    // Same stored priority and the routine one is older: without the urgent bonus it would start first.
+    await ctx!.scheduler.wake({ agentId: a.id, ticketId: ta.id, reason: "assigned", priority: 2 });
+    await ctx!.scheduler.wake({ agentId: b.id, ticketId: tb.id, reason: "assigned", priority: 2 });
+    await ctx!.scheduler.tick();
+    expect(ctx!.commands.map((c) => c.agentId)).toEqual([b.id]);
+  });
+
   it("does not age an agent-started wake", async () => {
     ctx = await setup({ instance: 1, company: 1 });
     const a = await ctx!.agent("A");
@@ -224,6 +238,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/decisions.ts": NEVER_DROPPED + "; chased and engagement are " + DROP_RECORDED,
     "services/deploys.ts": NEVER_DROPPED,
     "services/engagements.ts": DROP_RECORDED,
+    "services/progress.ts": NEVER_DROPPED + " (a status check steers into the live silent run)",
     "services/recovery.ts": NEVER_DROPPED,
     "services/retro.ts": NEVER_DROPPED,
     "services/review.ts": DROP_RECORDED + " (ci passed is scheduled and never dropped)",
@@ -241,8 +256,8 @@ describe("wake classes: callers of wake() and notify()", () => {
     const callers = walk(SRC)
       .filter((f) => /\b(scheduler|deps|self|this)\.(wake|notify)\(|\bwake\(\{|\.setWakeHook\(|\bnotify: \(agentId/.test(readFileSync(f, "utf8")))
       .map((f) => path.relative(SRC, f))
-      // These two call a notes notifier of the same name, which tells the owner and wakes nobody.
-      .filter((f) => f !== "services/maintenance.ts" && f !== "services/self-deploy.ts");
+      // These three call a notes notifier of the same name, which tells the owner and wakes nobody.
+      .filter((f) => f !== "services/maintenance.ts" && f !== "services/self-deploy.ts" && f !== "services/runner-watch.ts");
     const unlisted = callers.filter((f) => !(f in CALLERS));
     expect(unlisted).toEqual([]);
   });

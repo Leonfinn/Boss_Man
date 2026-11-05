@@ -1,7 +1,7 @@
 // Plain-English explanations of permission requests, worked out from the command itself
 // (no model): what the owner is being asked to allow, and the worst thing it could do.
 
-import { commandOf, DESTRUCTIVE, PUSHING, type PermissionInfo, type PolicyMatch } from "./policy.js";
+import { commandOf, DESTRUCTIVE, looksLikeBossmanTool, PUSHING, type PermissionInfo, type PolicyMatch } from "./policy.js";
 
 export type Effect = "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown";
 
@@ -43,6 +43,17 @@ const GIT_NETWORK = new Set(["fetch", "pull", "clone", "ls-remote", "submodule"]
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
 const PKG = new Set(["npm", "pnpm", "yarn"]);
 const PKG_INSTALL = new Set(["install", "i", "add", "ci", "remove", "uninstall"]);
+/**
+ * Package-manager subcommands that are the project's own work (an install, its scripts and the
+ * project's build/test/lint), so their writes belong to the project and never aim at a named
+ * target. An allow-list, not a denylist (BOS-165 security round 4): anything else — dlx, exec,
+ * create, publish, an unknown subcommand — runs a program on any folder, so it is not exempt.
+ * Only a subcommand right after the program counts (round 6): any leading option, whatever its
+ * arity, means not exempt. Counting options' values was a losing game — rounds 3-5 each found one
+ * more spelling that slipped a runner past — and losing Allow on `pnpm --silent run build` costs
+ * little.
+ */
+const PKG_SCRIPTS = new Set(["install", "i", "add", "ci", "remove", "uninstall", "run", "run-script", "build", "test", "t", "typecheck", "lint", "start"]);
 
 /** Paths the owner will recognise, in friendly words. */
 const FRIENDLY: Array<[RegExp, string]> = [
@@ -243,7 +254,6 @@ const list = (xs: string[]) => {
   return all.slice(0, 4).join(", ") + (all.length > 4 ? ` and ${all.length - 4} more` : "");
 };
 
-const SCRATCH = /^\/tmp(\/|$)/;
 /** An absolute path with . and .. worked out; null for ~, $VARS and other things only the shell knows. */
 function norm(p: string): string | null {
   if (!p.startsWith("/") || /[$~`]/.test(p)) return null;
@@ -270,31 +280,45 @@ function norm(p: string): string | null {
  * Every segment, reads included, must also be scratchSafe: a listed program using only listed
  * options, in plain words. Otherwise an option's value (cp -t /home, sort -o/home/x) is a target
  * this function never sees (BOS-111 adversarial round 5).
+ *
+ * Writes and deletes, narrowed further (BOS-165): paths are checked as written, and the runner's
+ * filesystem would be needed to tell whether /tmp/NAME is a symlink pointing outside /tmp. So the
+ * note (and the owner's "/tmp only" switch) vouches only for programs that never follow a link at
+ * their target — rm, rmdir, unlink (a delete removes the link, not its target) and mkdir of a new
+ * name — and only when the target is exactly one level below /tmp with no trailing slash. tee, cp,
+ * mv, ln, touch, chmod, chown, find -delete and any redirect to a file all follow a link at the
+ * destination, so they lose the note; so do deeper paths (/tmp/a/b) and a trailing slash
+ * (/tmp/a/). Only the part that writes or deletes is held to this: reading through a link doesn't
+ * falsify "every file it changes or deletes is there".
  */
 function scratchOnly(parts: Part[]): { unchecked: string[] } | null {
   let wrote = false;
   for (const p of parts) {
     if (p.program === "cd" || p.program === "pushd" || p.program === "popd") return null;
     if (!p.safe) return null;
-    if (p.writes?.length && !p.writes.every((t) => !/[*?[{]/.test(t) && norm(t) !== null && norm(t) !== "/tmp" && SCRATCH.test(norm(t)!))) return null;
+    // A file the output is redirected to could be a link; /dev/null and fd copies aren't in writes.
+    if (p.writes?.length) return null;
     if (p.effect === "pushes" || p.effect === "network" || p.effect === "unknown" || p.repo) return null;
     if (p.effect !== "changes" && p.effect !== "deletes") continue;
     wrote = true;
-    // norm() reads paths as written, but the shell expands globs and braces (/tmp/*, /tmp/{a,../home}) after it.
-    if (!p.targets.length || p.targets.some((t) => !t.startsWith("/") || /[*?[{]/.test(t))) return null;
-    const where = p.targets.map(norm);
-    if (where.some((w) => !w || !SCRATCH.test(w))) return null;
-    // Deleting /tmp itself wipes every agent's temp files: not scratch work.
-    if (p.effect === "deletes" && where.includes("/tmp")) return null;
+    if (!SCRATCH_WRITES.has(p.program ?? "")) return null;
+    // Test the raw target, not norm(t): norm removes ".." as plain text, but the kernel resolves
+    // a/../b from where the link at a points (security round: rm -rf /tmp/lnk/../x, mkdir -p /tmp/lnk/../x).
+    // TEMP_PATH holds the target to one plain entry directly in /tmp, so a trailing slash, //, a glob
+    // or brace (/tmp/*, /tmp/{a,../home}), and any . or .. part all fail the test.
+    if (!p.targets.length || p.targets.some((t) => !TEMP_ONLY.test(t))) return null;
   }
   return wrote ? { unchecked: [] } : null;
 }
 
+/** Programs whose write or delete at one level below /tmp can't follow a symlink at the target (BOS-165). */
+const SCRATCH_WRITES = new Set(["rm", "rmdir", "unlink", "mkdir"]);
+
 /** One plain entry directly in /tmp: not /tmp itself, no deeper path, nothing the shell would expand or resolve. */
 const TEMP_PATH = String.raw`/tmp/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+`;
 /** A plain rm/rmdir/unlink: options first, then its paths (group 1); output may only go to /dev/null. */
-/** A delete that touches only TEMP_PATHs, as written: only these clear a /tmp entry for later writes. */
-const TEMP_DELETE = new RegExp(String.raw`^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+${TEMP_PATH})+(?:\s+(?:(?:[12]|&)?>>?\s*/dev/null|2>&1))*$`);
+/** A delete that touches only TEMP_PATHs, as written: only these clear a /tmp entry for later writes. Exported for recommendedVerdict (BOS-165). */
+export const TEMP_DELETE = new RegExp(String.raw`^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+${TEMP_PATH})+(?:\s+(?:(?:[12]|&)?>>?\s*/dev/null|2>&1))*$`);
 const DELETE = /^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*((?:\s+[^\s>&]+)+)(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
 /**
  * A plain relative path in the agent's working copy (BOS-120): no leading / - or ~, and no . .. or
@@ -451,6 +475,43 @@ export function cleanupScope(command: string): CleanupScope | null {
 export function tempCleanup(command: string): boolean {
   const scope = cleanupScope(command);
   return Boolean(scope && !scope.workingCopy.length);
+}
+
+/**
+ * The subcommand a package-manager segment runs (BOS-165 security round 4, simplified in round 6):
+ * the word right after the program, and only that word. `pnpm --silent dlx rimraf …` reads
+ * "--silent", not "dlx" or "test", so a leading option can never smuggle a program runner past
+ * PKG_SCRIPTS — whatever the option's arity. Empty when the segment is just the program or the
+ * first word is an option.
+ */
+function pkgSubcommand(seg: string): string {
+  const first = seg.trim().split(/\s+/)[1] ?? "";
+  return first.startsWith("-") ? "" : first;
+}
+
+/**
+ * True when the command could change or delete something whose target isn't an absolute path
+ * under /tmp (BOS-165). recommendedVerdict relaxes Deny for a vouched /tmp delete; this is the
+ * other half of that relax, so it never whitewashes the rest of the command (cp -t /home, a
+ * redirect to /home/word, an option that carries the real target). Every segment must be one
+ * scratchSafe vouches for, and a change's or delete's every target — options' values included,
+ * hence the safe check — must normalize to under /tmp. An install or a package-manager script is
+ * exempt: its writes are the project's node_modules, not a named target it could aim elsewhere.
+ */
+export function writesBeyondTmp(command: string): boolean {
+  for (const seg of segments(command)) {
+    const p = explainSegment(seg);
+    // An install or a project script (pnpm build, pnpm --silent run test) is exempt: its writes
+    // are the project's own folders (node_modules, dist), not a named target it could aim at
+    // /home. Anything else a package manager is asked to run (dlx, exec, create) is exempt only
+    // when its subcommand is on the allow-list, found past any leading options (round 4).
+    if (p.install || (PKG.has(p.program ?? "") && PKG_SCRIPTS.has(pkgSubcommand(seg)))) continue;
+    if (!p.safe) return true;
+    const targets = [...p.targets, ...(p.writes ?? [])];
+    if ((p.effect === "changes" || p.effect === "deletes") && !targets.length) return true;
+    if (targets.some((t) => { const w = norm(t); return !w || !/^\/tmp(?:\/|$)/.test(w); })) return true;
+  }
+  return false;
 }
 
 /** How a `git push` reads on a permission card (BOS-208): where it goes and what would be dangerous. */
@@ -669,7 +730,10 @@ export function explainPermission(info: PermissionInfo, agent: string): Permissi
   }
   const t = TOOL[info.kind ?? ""];
   const target = text(info.rawInput, "file_path", "filePath", "path", "url") ?? (info.kind === "search" ? text(info.rawInput, "pattern", "query") : null);
-  if (!t) return { title: `${agent} wants to use a tool`, summary: `Uses the tool "${info.title ?? "unnamed"}", which Boss Man doesn't recognise.`, effect: "unknown", reason };
+  if (!t) {
+    const lookalike = looksLikeBossmanTool(info.title) ? ` Warning: this name looks like one of Boss Man's own tools (mcp__bossman__…) but is not one. Read it carefully: it may be a copy made to get past the checks.` : "";
+    return { title: `${agent} wants to use a tool`, summary: `Uses the tool "${info.title ?? "unnamed"}", which Boss Man doesn't recognise.${lookalike}`, effect: "unknown", reason };
+  }
   const noun = t.verb === "Fetch" ? "" : t.verb === "Search" ? " for" : " the file";
   return { title: `${agent} wants to ${t.what}`, summary: `${t.verb}${target ? `${noun} ${target}` : ` (no name given)`}.`, effect: t.effect, reason };
 }
