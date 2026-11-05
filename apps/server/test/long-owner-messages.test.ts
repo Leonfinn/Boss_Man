@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
+import { OWNER_MESSAGE_MAX, RunnerCommand, ServerMessage } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, runners } from "../src/db/schema.js";
@@ -98,6 +98,11 @@ describe("long owner messages (BOS-502)", () => {
     const msg = await c.req("POST", `/api/runs/${run.runId}/message`, { text: big });
     expect(msg.statusCode, msg.body.slice(0, 400)).toBe(200);
     expect(c.sent.at(-1)).toMatchObject({ type: "run.message", runId: run.runId, text: `Message from the owner: ${big}` });
+    // Parse it exactly as the runner does on the wire (ServerMessage wraps the command): a message it
+    // rejects would be dropped silently, with the owner still seeing success.
+    const wired = ServerMessage.safeParse({ type: "command", id: "c1", command: c.sent.at(-1) });
+    expect(wired.success, wired.success ? "" : JSON.stringify(wired.error.issues.slice(0, 3))).toBe(true);
+    expect(RunnerCommand.safeParse(c.sent.at(-1)).success).toBe(true);
 
     const chat = await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: big });
     expect(chat.statusCode).toBe(201);

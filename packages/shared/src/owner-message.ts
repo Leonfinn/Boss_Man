@@ -12,3 +12,11 @@ export const OWNER_MESSAGE_MAX = 200_000;
 
 /** From this many characters the box shows a character count, so the owner can see it all went in. */
 export const OWNER_MESSAGE_COUNT_FROM = 5_000;
+
+/**
+ * The runner's limit for the text of a `run.message` (BOS-502). It is bigger than OWNER_MESSAGE_MAX
+ * because the server adds a prefix before sending it, e.g. "Message from the owner: " (24 chars) or
+ * "Message from Boss Man (<reason>): ". The runner drops a command it can't parse, so without room
+ * for the prefix a longest-allowed owner message would vanish silently.
+ */
+export const RUN_MESSAGE_MAX = OWNER_MESSAGE_MAX + 10_000;
