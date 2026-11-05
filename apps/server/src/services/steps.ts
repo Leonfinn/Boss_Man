@@ -116,6 +116,7 @@ function usesIn(code: string): string[] {
 export function lintOwnerSteps(steps: string[]): { refuse: LintFinding[]; warn: LintFinding[] } {
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
+  // shortcut: local to one call, lost on return, harmless because it only tracks variables set within this card.
   const set = new Set<string>();
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
