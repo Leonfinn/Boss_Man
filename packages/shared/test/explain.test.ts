@@ -155,6 +155,9 @@ describe("explainPermission", () => {
     expect(explainPermission({ title: "Edit", kind: "edit", rawInput: { file_path: "a.md" } }, "A").summary).toBe("Change the file a.md.");
     expect(explainPermission({ title: "Fetch", kind: "fetch", rawInput: { url: "https://x.dev" } }, "A")).toMatchObject({ title: "A wants to fetch a web page", summary: "Fetch https://x.dev.", effect: "network" });
     expect(explainPermission({ title: "Mystery", kind: "other", rawInput: null }, "A").effect).toBe("unknown");
+    expect(explainPermission({ title: "Mystery", kind: "other", rawInput: null }, "A").summary).not.toMatch(/Warning/);
+    const copy = explainPermission({ title: "mcp__bossrnan__wiki", kind: "other", rawInput: null }, "A");
+    expect(copy.summary).toMatch(/doesn't recognise\. Warning: this name looks like one of Boss Man's own tools/);
   });
 });
 
@@ -201,9 +204,12 @@ describe("work only in a temporary folder", () => {
   const scratch = (c: string) => explainCommand(c).scratch;
 
   it("says so when every change and delete names an absolute path under /tmp", () => {
-    const s = scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut && touch /tmp/opencode/mut/x.js");
+    const s = scratch("rm -rf /tmp/mut && mkdir -p /tmp/mut");
     expect(s?.unchecked).toEqual([]);
     expect(s?.note).toMatch(/^Works only in a temporary folder \(\/tmp\)/);
+    // BOS-165: touch follows a link at its target, and a deeper path is never vouched for.
+    expect(scratch("rm -rf /tmp/mut && mkdir -p /tmp/mut && touch /tmp/mut/x.js"), "touch at a /tmp path").toBeUndefined();
+    expect(scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut"), "deeper path").toBeUndefined();
   });
 
   it("doesn't follow cd, so any cd, pushd or popd means not /tmp-only (BOS-111 security re-checks)", () => {
@@ -279,8 +285,9 @@ describe("round-5 regression pins (BOS-153)", () => {
     }
   });
 
-  it("keeps the /tmp note for find -delete, and gives none for shred (finding 4)", () => {
-    expect(explainCommand("find /tmp/x -delete").scratch?.note).toMatch(/^Works only in a temporary folder/);
+  it("gives no /tmp note to find -delete (BOS-165: its root or entries can be links) or shred (finding 4)", () => {
+    expect(explainCommand("find /tmp/x -delete").scratch).toBeUndefined();
     expect(explainCommand("shred /tmp/a").scratch).toBeUndefined();
+    expect(explainCommand("rm -rf /tmp/a").scratch?.note).toMatch(/^Works only in a temporary folder/);
   });
 });

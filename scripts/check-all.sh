@@ -27,8 +27,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   attempts="${BOSSMAN_CHECK_ATTEMPTS:-3}"
   budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-1500}"  # Boss Man kills the merge check at 30 min; stay well inside it
   pause="${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
-  start=$SECONDS
-  log="$(mktemp)"; began_file="$(mktemp)"
+  log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
   trap 'rm -f "$log" "$began_file"' EXIT
 
   # Only a clean checkout has a tree hash that says what was checked.
@@ -44,6 +43,21 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   else
     key=""
   fi
+  # A signal ends the run with a visible trace: stop the child (which frees its queue place), write the line to the
+  # log and the result store, and exit non-zero. Without this a killed check just vanished and the agent waited for nothing.
+  child=""
+  on_signal() {
+    local name=$1
+    trap '' TERM INT HUP
+    if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi
+    sleep 0.2  # let tee drain before the line is added
+    echo "check-all: killed by signal $name" | tee -a "$log"
+    record killed "$((128 + $2))"
+    exit "$((128 + $2))"
+  }
+  trap 'on_signal TERM 15' TERM
+  trap 'on_signal INT 2' INT
+  trap 'on_signal HUP 1' HUP
   # record <status> <exit code>: keep the result and the full log; a pass is what later runs reuse.
   record() {
     [ -n "$key" ] || return 0
@@ -58,15 +72,25 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   }
   [ -z "$key" ] || echo "check-all: the result and log of this run will be kept in $STORE/$key.{json,log}"
   for ((n = 1; n <= attempts; n++)); do
+    # Test hook: a simulated queue wait, which the fixed budget ignores (check-all.test.sh retry-budget case).
+    [ "$n" -gt 1 ] || [ -z "${CHECK_ALL_QUEUE_TEST_SLEEP:-}" ] || sleep "$CHECK_ALL_QUEUE_TEST_SLEEP"
     rc=0; : >"$began_file"; attempt_start=$SECONDS
-    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
+    # The child runs in the background and we wait for it, so a signal reaches the trap at once instead of after the child.
+    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
+    child=$!
+    wait "$child" || rc=$?
+    wait 2>/dev/null || true  # let tee finish writing the log
     # Exit 75: nothing ran (gave up waiting for a slot), so there is no result to keep.
     if [ "$rc" -eq 0 ]; then record pass 0; exit 0; fi
     # Each retry re-runs everything, so only retry if another run of this length still fits the budget.
-    took=$((SECONDS - attempt_start)); began=$(cat "$began_file"); [ -z "$began" ] || took=$(($(date +%s) - began))
-    if [ "$n" -lt "$attempts" ] && [ $((SECONDS - start + took + pause)) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
+    # The budget counts from the slot-taken time (the first non-empty $began_file), not from before the queue wait:
+    # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
+    took=$((SECONDS - attempt_start)); began=$(cat "$began_file")
+    if [ -n "$began" ]; then [ -n "$slot_at" ] || slot_at=$began; took=$(($(date +%s) - began)); fi
+    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
-      sleep "$pause"
+      # Run the pause in the background and wait for it, so a signal reaches on_signal at once, not up to ${pause}s later.
+      sleep "$pause" & pause_pid=$!; wait "$pause_pid" 2>/dev/null || true
     else
       [ "$rc" -eq 75 ] || record fail "$rc"
       exit "$rc"
@@ -77,9 +101,13 @@ fi
 # BOSSMAN_CHECK_BODY replaces the checks below with a stub command (for check-all.test.sh).
 if [ -n "${BOSSMAN_CHECK_BODY:-}" ]; then bash -c "$BOSSMAN_CHECK_BODY"; exit; fi
 
-pnpm install --frozen-lockfile --prefer-offline >/dev/null
-node --test scripts/*.test.mjs
-node scripts/lint-migrations.mjs
+# CHECK_ALL_SLOT_COMMAND (used by check-quick.sh, with BOSSMAN_CHECK_CHILD=1): wait for a slot exactly like a hand-run check,
+# run that one command while holding it, and exit with its status. None of the full checks run.
+if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
+  pnpm install --frozen-lockfile --prefer-offline >/dev/null
+  node --test scripts/*.test.mjs
+  node scripts/lint-migrations.mjs
+fi
 # The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS checks (1 until a side-by-side pair has passed, then 2) run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
 # A waiter prints its place and an estimated wait. Hand-run checks never give up. A merge check keeps its place for as
@@ -109,6 +137,12 @@ if command -v flock >/dev/null; then
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
   { : >"$qfile"; } 2>/dev/null || lock_unusable "cannot write $qfile"
   trap 'rm -f "$qfile" "$AGEREF"' EXIT
+  # Killed while waiting: leave the queue and free the place for the next one at once. The parent's TERM/INT/HUP
+  # trap (on_signal) then writes the "killed by signal" line and stops this child. Sleeping in the background and
+  # waiting on it makes a signal act immediately instead of after the sleep ends (up to CHECK_ALL_QUEUE_REPORT).
+  # A signal here runs the EXIT trap above, which removes the queue entry, then exits 143 so the parent records it.
+  wait_signal() { sleep "$1" & sleep_pid=$!; wait "$sleep_pid" 2>/dev/null || true; }
+  trap '[ -z "${BOSSMAN_CHECK_CHILD:-}" ] || exit 143' TERM INT HUP
   take_slot() {
     local k
     for ((k = 1; k <= SLOTS; k++)); do
@@ -182,7 +216,7 @@ if command -v flock >/dev/null; then
       echo "check-all: waiting for a free check slot (place $place of $total, $SLOTS run at once); about $(((rounds * typical + 59) / 60)) min to go"
       last_said=$SECONDS
     fi
-    sleep 1
+    wait_signal 1
   done
   if [ "$got" = no ]; then
     # Exit 75 (EX_TEMPFAIL) and this exact wording tell Boss Man nothing ran: it retries the merge instead of sending the ticket back.
@@ -199,6 +233,7 @@ fi
 [ -z "${CHECK_ALL_STARTED_FILE:-}" ] || date +%s >"$CHECK_ALL_STARTED_FILE"
 # Test hook: scripts/check-all.test.sh stops here once the lock is held.
 [ -z "${CHECK_ALL_STOP_AFTER_LOCK:-}" ] || { echo "check-all: lock held"; exit 0; }
+if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
 node scripts/check-in-memory-state.mjs
 # Memory-safe on a shared runner (a 12 GB cgroup shared with other agents, two checks at once): one package at a time,
 # at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),

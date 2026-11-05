@@ -138,6 +138,35 @@ describe("scheduler", () => {
     expect(results.map((r) => r.status)).toEqual(["queued", "queued", "dropped"]);
   });
 
+  it("a resume after a restart is not the agent waking itself, and the self-wake limit still catches a real loop (BOS-479)", async () => {
+    ctx = await setup({ selfWakesPer10Min: 5, maxDepth: 100, agent: 10 });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "start" });
+    await ctx.scheduler.tick();
+    const run = ctx.commands[0]!.runId;
+    for (let i = 0; i < 4; i++) expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "self", causedByRunId: run })).toMatchObject({ status: "queued" });
+    // Two resumes from the restart: neither is dropped, and no "keeps waking itself" card is raised.
+    for (let i = 0; i < 2; i++) expect(await ctx.recovery.onInterrupted(run)).toMatchObject({ status: expect.not.stringMatching(/dropped/) });
+    expect((await ctx.db.select().from(decisions)).filter((d) => /keeps waking itself/.test(d.question))).toHaveLength(0);
+    // Six real self-wakes in total are still stopped, with the alert.
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "self", causedByRunId: run })).toMatchObject({ status: "queued" });
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "self", causedByRunId: run })).toMatchObject({ status: "dropped" });
+    expect((await ctx.db.select().from(decisions)).filter((d) => /keeps waking itself/.test(d.question))).toHaveLength(1);
+  });
+
+  it("a resume wake keeps the wake depth of the run it picks up (BOS-479)", async () => {
+    ctx = await setup({ maxDepth: 100, agent: 10 });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "start" });
+    await ctx.scheduler.tick();
+    const runA = ctx.commands[0]!.runId;
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "follow-up", causedByRunId: runA });
+    await ctx.endRun(runA);
+    await ctx.scheduler.tick();
+    const runB = ctx.commands[1]!.runId;
+    const [parent] = await ctx.db.select().from(wakes).where(eq(wakes.runId, runB));
+    expect(parent!.causationDepth).toBe(1);
+    expect(await ctx.recovery.onInterrupted(runB)).toMatchObject({ causationDepth: 1 });
+  });
+
   it("caps an agent's runs with no ticket, but never the owner's own (R68)", async () => {
     ctx = await setup();
     for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: `d${i}` });
@@ -586,6 +615,24 @@ describe("scheduler", () => {
       // The run that was already going keeps its account.
       expect((await ctx.db.select().from(runs).where(eq(runs.id, firstRun.id)))[0]!.fundingSourceId).toBe(a.id);
       expect((await ctx.db.select().from(notifications)).filter((n) => /New runs now use Max two/.test(n.title))).toHaveLength(1);
+    });
+
+    it("tells the owner once about the switch even when urgent and routine work alternate over several polls (BOS-453)", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      await ctx.req("POST", "/api/scheduler/tick");
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: ctx.ceo.id })).json();
+      await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+      for (let i = 0; i < 4; i++) {
+        await ctx.db.update(runs).set({ endedAt: new Date() });
+        await ctx.db.delete(wakes);
+        // An urgent wake passes at 97% and lands on the first account; a routine wake goes to the second.
+        await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2, ...(i % 2 ? { ticketId: urgent.id } : {}) });
+        await ctx.req("POST", "/api/scheduler/tick");
+      }
+      const notes = (await ctx.db.select().from(notifications)).filter((n) => /New runs now use/.test(n.title));
+      expect(notes.map((n) => n.title)).toEqual(["New runs now use Max two"]);
     });
 
     it("holds routine work when every account is full", async () => {

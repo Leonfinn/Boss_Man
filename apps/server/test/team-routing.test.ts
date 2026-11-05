@@ -15,7 +15,9 @@ import type { Ladder } from "../src/services/alert-ladder.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 const clients: Client[] = [];
-const CEO_RULE = "^systemctl\\s+restart\\b";
+// A routing rule only fires for a request that would otherwise ask (BOS-307, DR-001). A plain shell command is a
+// built-in allow, so the request here is a delete, which the built-ins leave to the owner; the rule moves it to the CEO.
+const CEO_RULE = "^rm\\s+/var/lib/api\\b";
 
 async function setup() {
   let clock = new Date();
@@ -37,17 +39,17 @@ async function setup() {
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
   built.runners.connect(runner!.id, (cmd) => (sent.push(cmd), true));
-  await req("POST", "/api/policy-rules", { companyId, name: "Service restarts go to the CEO", match: { commandPattern: CEO_RULE }, outcome: "ceo" });
+  await req("POST", "/api/policy-rules", { companyId, name: "API deletes go to the CEO", match: { kinds: ["delete"], commandPattern: CEO_RULE }, outcome: "ceo" });
   let seq = 0;
   const start = async (agentId = dev.id) => {
     const runId = randomUUID();
     await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.started", runId, agentId, acpSessionId: "s", model: null } });
     return runId;
   };
-  const ask = async (command = "systemctl restart api") => {
+  const ask = async (command = "rm /var/lib/api/cache") => {
     const runId = await start();
     const requestId = randomUUID();
-    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, title: "Restart the API", kind: "execute", rawInput: { command }, optionKinds: ["allow_once", "reject_once"] } });
+    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, title: "Delete the API cache", kind: "delete", rawInput: { command }, optionKinds: ["allow_once", "reject_once"] } });
     const [d] = await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
     return { d: d!, runId, requestId };
   };
@@ -260,18 +262,26 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(isError(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Got it", note: "I looked at the review and the reviewer is working through it." } }))).toBe(false);
     expect(await ownerNotified(a!.id)).toEqual([]);
 
-    // A second stuck review the CEO leaves alone reaches the owner with what was tried.
+    // A second stuck review the CEO leaves alone stays with the CEO (DR-017 A: a review is the CEO's work),
+    // with its clock stopped, and never falls through to the owner's queue on its own.
     await ctx.db.update(reviewRequests).set({ status: "approved" }).where(eq(reviewRequests.id, first.id));
     await review(2);
     expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
     const open = (await stalled()).find((d) => d.id !== a!.id)!;
-    ctx.advance(31);
-    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    ctx.advance(600);
+    await ctx.alerts.sweep();
+    const held = await reload(open.id);
+    expect(held.tier).toBe("ceo");
+    expect((held.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo", topRung: "ceo" });
+    expect(await queueIds()).not.toContain(open.id);
+    expect((await ownerNotified(open.id)).length).toBe(0);
+    // Only the CEO sending it on (escalate) puts it in front of the owner, with what was tried.
+    const esc = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "escalate", id: open.id, triedFirst: "Checked the reviewer and moved the review on; nobody else is free to take it", steps: ["Move the review to another agent in Settings → Reviews"] } });
+    expect(isError(esc)).toBe(false);
     const owner = await reload(open.id);
     expect(owner.tier).toBe("owner");
-    expect((owner.context as { triedFirst?: string }).triedFirst).toMatch(/the CEO/);
+    expect((owner.context as { triedFirst?: string }).triedFirst).toMatch(/moved the review on/);
     expect(await queueIds()).toContain(open.id);
-    expect((await ownerNotified(open.id)).length).toBe(1);
   });
 
   it("without a Scrum Master it starts at the CEO", async () => {

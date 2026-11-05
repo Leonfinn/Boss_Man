@@ -48,7 +48,7 @@ export function recoveryService(db: Db) {
           : "Boss Man saw no finished steps before the interruption.",
         "Steps after your last save may not have happened, or may have happened without you seeing the result. Before redoing anything with side effects (files, commits, tickets, deploys), check whether it already happened.",
       ].join("\n\n");
-      return wake({ agentId: run.agentId, ticketId: run.ticketId, reason: "resume", priority: 3, note, causedByRunId: runId, resumeRunId: runId });
+      return wake({ agentId: run.agentId, ticketId: run.ticketId, reason: "resume", priority: 3, note, resumeRunId: runId });
     },
   };
 }

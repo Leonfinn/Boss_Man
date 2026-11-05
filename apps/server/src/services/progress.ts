@@ -83,7 +83,7 @@ export async function progressSweep(db: Db, t: Date, deps: ProgressDeps) {
     if (stage === "flag") {
       const row = await deps.alert({
         companyId: run.companyId,
-        kind: "question",
+        kind: "silent_run",
         question: `${agentName ?? "An agent"} has been working on "${title}" for ${ago(silent)} without posting anything on the ticket. Boss Man asked for a status and got none. Check what it is doing, or stop the run.`,
         options: ["Got it"],
         recommended: "Got it",
@@ -120,10 +120,10 @@ export async function progressSweep(db: Db, t: Date, deps: ProgressDeps) {
       const [from] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, r.reviewerAgentId));
       const rule = ruleFor(await effectivePolicy(db, ticket), ticket.risk);
       const ref = r.kind === "code" ? rule.reviewer : rule.kinds?.[r.kind as Exclude<ReviewSlot, "code">];
-      const [to] = ref ? await otherReviewers(db, ticket.companyId, r.kind as ReviewSlot, ref, ticket.assigneeAgentId, [r.reviewerAgentId]) : [];
+      const [to] = ref ? await otherReviewers(db, ticket, r.kind as ReviewSlot, ref, [r.reviewerAgentId]) : [];
       const told = await deps.alert({
         companyId: ticket.companyId,
-        kind: "question",
+        kind: "review_no_verdict",
         question: to
           ? `${from?.name ?? "The reviewer"} ended ${silent!.n} runs on the ${r.kind} review of "${ticket.title}" without giving a verdict, so the review moved to ${to.name}. Nothing to do unless it happens again.`
           : `${from?.name ?? "The reviewer"} ended ${silent!.n} runs on the ${r.kind} review of "${ticket.title}" without giving a verdict, and no other qualified reviewer is free to take it. Look into it, or move the ticket on yourself.`,
@@ -154,7 +154,7 @@ export async function progressSweep(db: Db, t: Date, deps: ProgressDeps) {
       if (!x.note || !x.at || !UNPROVEN_NOTE.test(x.note)) continue;
       const row = await deps.alert({
         companyId,
-        kind: "question",
+        kind: "unproven_cause",
         question: `"${x.title}" has said its cause is only "likely / not proven" for ${ago(t.getTime() - x.at.getTime())}. Reassign it, or call the architect to settle the cause.`,
         options: ["Got it"],
         recommended: "Got it",

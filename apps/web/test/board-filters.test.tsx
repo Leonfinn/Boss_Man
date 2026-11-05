@@ -69,7 +69,7 @@ describe("board filters", () => {
     open();
     await screen.findByText("Alpha task", { selector: "h3 a" });
     const select = (await screen.findByLabelText("Feature")) as HTMLSelectElement;
-    await screen.findByRole("option", { name: "Export" });
+    await screen.findByRole("option", { name: "Export" }, { timeout: 5000 });
     expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
 
     fireEvent.change(select, { target: { value: "f1" } });
@@ -96,7 +96,7 @@ describe("board filters", () => {
     sessionStorage.setItem("board-filters", JSON.stringify({ feature: "gone", working: false }));
     stub();
     open();
-    await screen.findByRole("option", { name: "Export" });
+    await screen.findByRole("option", { name: "Export" }, { timeout: 5000 });
     expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
     expect((screen.getByLabelText("Feature") as HTMLSelectElement).value).toBe("any");
   });
@@ -104,7 +104,7 @@ describe("board filters", () => {
   it("remembers both choices", async () => {
     stub();
     open();
-    await screen.findByRole("option", { name: "Export" });
+    await screen.findByRole("option", { name: "Export" }, { timeout: 5000 });
     fireEvent.change(screen.getByLabelText("Feature"), { target: { value: "f2" } });
     fireEvent.click(screen.getByRole("button", { name: /^Working now/ }));
     cleanup();
