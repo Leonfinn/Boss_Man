@@ -35,6 +35,7 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "watchdog escalation": "scheduled",
   retro: "scheduled",
   "ci passed": "scheduled",
+  check_result: "scheduled",
   "checking an old card": "scheduled",
   "live release": "scheduled",
   // Started by agents.

@@ -75,7 +75,8 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
-import { runnerSocketRoutes } from "./routes/runner-socket.js";
+import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
+import { createMemorySampler } from "./services/memory-sampler.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
@@ -339,7 +340,23 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setMaintenanceHook(maintenance);
   const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
   decisionsSvc.setPermissionLog(permLog);
+  // Memory logging (BOS-410 step 1). Built here so server_status can read it; main.ts starts it on
+  // every process, standby too. Tests never start it, so no timer runs under vitest.
+  const memory = createMemorySampler({
+    everyMs: Number(process.env.BOSSMAN_MEMORY_LOG_MS ?? 0) || undefined,
+    log: (sample) => app.log.info({ memory: sample }, "memory"),
+    extra: () => {
+      let sockets = 0;
+      let socketBuffered = 0;
+      for (const c of app.websocketServer?.clients ?? []) {
+        sockets++;
+        socketBuffered += c.bufferedAmount;
+      }
+      return { sockets, socketBufferedKiB: Math.round(socketBuffered / 1024), runnerEventsWaiting: runnerIngestWaiting() };
+    },
+  });
   const serverStatus = serverStatusService(db, {
+    memory,
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -454,6 +471,7 @@ export async function buildApp(opts: AppOptions) {
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
         })
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
+        .then(() => (event.interrupted ? null : scheduler.afterReviewRun(event.runId)))
         .then(() => scheduler.tick())
         .catch((err) => app.log.error({ err, companyId: runner.companyId }, "run-ended handling failed"));
       // A run ended; ask for a quota refresh. Any provider ends here, but the reading is cached for
@@ -583,6 +601,8 @@ export async function buildApp(opts: AppOptions) {
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
+    // A stalled-review card's actions (BOS-404, BOS-426): take it, hand it to another reviewer, send it back, or leave it.
+    reviewStall: (ctx, answer, byAgentId) => review.reviewStall(ctx, answer, byAgentId),
     // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
     // Decisions show "Checking and merging" while it runs (including lock retries), rather than inviting
     // another approval. A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
@@ -1264,6 +1284,7 @@ export async function buildApp(opts: AppOptions) {
       dueDate: DateStr.nullable(),
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
+      ownerSetup: z.string().max(4000).nullable(),
       noCode: z.boolean(),
       urgent: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
@@ -2569,5 +2590,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, memory, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
 }
