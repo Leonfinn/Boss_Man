@@ -347,7 +347,7 @@ describe("the alert ladder (BOS-64)", () => {
 
   it("the Scrum Master can only settle a plain 'Got it' alert, not one that asks for a choice", async () => {
     await ctx.switchOn();
-    const a = (await ctx.alerts.raise({ companyId: ctx.companyId, question: "Pick one", kind: "approval", options: ["Carry on", "Stop work on it"], recommended: "Stop work on it" }))!;
+    const a = (await ctx.alerts.raise({ companyId: ctx.companyId, question: "Pick one", options: ["Carry on", "Stop work on it"], recommended: "Stop work on it" }))!;
     expect(a.rung).toBe("scrum_master");
     const sm = await client(ctx.sm.id);
     const r = await sm.callTool({ name: "watchdog", arguments: { action: "resolve_alert", alertId: a.id, reason: "looks fine to me" } });

@@ -20,7 +20,16 @@ export const STOP_WORK = "Stop work on it";
  * owner: a stuck review to the CEO first (stopping work is beyond the Scrum Master), a circular
  * failure to the Scrum Master first.
  */
-export function loopGuards(db: Db, opts: { limits?: Partial<LoopLimits>; now?: () => Date; alert?: (input: AlertInput) => Promise<{ id: string } | null> } = {}) {
+export function loopGuards(
+  db: Db,
+  opts: {
+    limits?: Partial<LoopLimits>;
+    now?: () => Date;
+    alert?: (input: AlertInput) => Promise<{ id: string } | null>;
+    /** The funding source an agent's runs use, so a limit card is per account (DR-017 B, BOS-469 point 3). */
+    fundingSourceFor?: (agentId: string | null) => Promise<{ id: string; name: string } | null>;
+  } = {},
+) {
   const limits = { ...DEFAULT_LOOP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -48,16 +57,15 @@ export function loopGuards(db: Db, opts: { limits?: Partial<LoopLimits>; now?: (
           : `it has been sent back ${rounds.length} times`;
       const ask = {
         companyId: t!.companyId,
-        kind: "approval" as const,
         question: `Review of "${t!.title}" looks stuck: ${why}. Send the review back again, or stop work on the ticket?`,
         options: [SEND_BACK, STOP_WORK],
         context: { type: "review_loop", ticketId: input.ticketId, message: input.message, reviewer: input.reviewer },
       };
       const [d] = opts.alert
-        ? [await opts.alert({ ...ask, recommended: STOP_WORK, ticketId: input.ticketId, from: "ceo" })]
+        ? [await opts.alert({ ...ask, kind: "review_loop", recommended: STOP_WORK, ticketId: input.ticketId, from: "ceo" })]
         : await db
             .insert(decisions)
-            .values({ ...ask, recommendedOption: STOP_WORK })
+            .values({ ...ask, kind: "question", recommendedOption: STOP_WORK })
             .returning({ id: decisions.id });
       await addTicketDependency(db, { companyId: t!.companyId, blockedTicketId: input.ticketId, blockerDecisionId: d!.id, actor: { type: "system" }, hold: true, now });
       return { round: rounds.length, escalated: d!.id };
@@ -81,16 +89,56 @@ export function loopGuards(db: Db, opts: { limits?: Partial<LoopLimits>; now?: (
       const n = Number(row?.n ?? 0);
       if (n < limits.circularFailures) return { count: n, circular: false };
       const [t] = input.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, input.ticketId)) : [];
+      // An account limit or auth error is the owner's, one card per account naming the agents who hit it
+      // (DR-015 D, DR-017 B, BOS-469 point 3): the same failure for three agents on one plan is one problem,
+      // not three cards and three CEO runs.
+      const named = accountOutage(input.text);
+      const source: { id: string; name: string } | null = named ? ((opts.fundingSourceFor ? await opts.fundingSourceFor(input.agentId) : null) ?? { id: "company", name: named.name }) : null;
+      const outage = named && source ? { fundingSourceId: source.id, name: source.name, ...(named.window ? { window: named.window } : {}) } : null;
+      const question = `${input.what} has hit the same failure ${n} times in ${Math.round(limits.circularWindowMs / 3_600_000)} hours${t ? ` on "${t.title}"` : ""}. It has been told to try a different approach. Last output: ${input.text.slice(-300)}`;
+      if (outage) {
+        if (opts.alert) {
+          await opts.alert({
+            companyId: input.companyId,
+            kind: "account_limit",
+            question,
+            ticketId: input.ticketId,
+            about: [input.agentId],
+            cause: { account: outage, agents: [input.agentId] },
+          });
+        } else {
+          await db
+            .insert(decisions)
+            .values({ companyId: input.companyId, kind: "question", question, options: ["Got it"], recommendedOption: "Got it", tier: "owner", dedupeKey: `account:${outage.fundingSourceId}:account_limit`, context: { type: "question", decisionsKind: "alert:account_limit", clearWhen: [{ kind: "limitReset", fundingSourceId: outage.fundingSourceId }], items: [{ question, at: now().toISOString() }] } })
+            .onConflictDoNothing();
+        }
+        return { count: n, circular: true };
+      }
       const ask = {
         companyId: input.companyId,
-        question: `${input.what} has hit the same failure ${n} times in ${Math.round(limits.circularWindowMs / 3_600_000)} hours${t ? ` on "${t.title}"` : ""}. It has been told to try a different approach. Last output: ${input.text.slice(-300)}`,
+        question,
         dedupeKey: `circular:${input.ticketId ?? input.agentId}:${signature}`,
       };
-      if (opts.alert) await opts.alert({ ...ask, ticketId: input.ticketId, about: [input.agentId] });
+      if (opts.alert) await opts.alert({ ...ask, kind: "repeated_failure", ticketId: input.ticketId, about: [input.agentId] });
       else await db.insert(decisions).values({ ...ask, kind: "question", options: ["Got it"], recommendedOption: "Got it", context: { type: "question" } }).onConflictDoNothing();
       return { count: n, circular: true };
     },
   };
+}
+
+/**
+ * The account an error is about, when it says the run couldn't use it rather than that the work went
+ * wrong (DR-015 D): a usage limit, an auth error or identity verification. The funding source is on the
+ * error's sender, when it names one ("Claude Max: ..."); otherwise the card is per company, since the
+ * failure signature alone can't say which of the owner's accounts it was.
+ */
+export function accountOutage(text: string): { fundingSourceId: string; name: string; window?: string } | null {
+  const limit = text.match(/(weekly limit|5-hour limit|five-hour limit|rate limit|usage limit|quota|limit reached|limit will reset|out of credit|credit balance)/i);
+  const auth = text.match(/(authentication|unauthori[sz]ed|forbidden|identity verification|invalid api key|logged out|sign in again)/i);
+  if (!limit && !auth) return null;
+  // "<name>: <message>" is how the runner prefixes an error that names the account.
+  const named = text.replace(/^error:\s*/i, "").match(/^([A-Za-z0-9 .'-]{2,40}):\s/);
+  return { fundingSourceId: "company", name: named?.[1] ?? "The owner's account", ...(limit ? { window: `the ${limit[1]!.toLowerCase()}` } : {}) };
 }
 
 /** What a looping agent is told on top of the failure itself. */
