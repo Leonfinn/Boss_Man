@@ -897,6 +897,8 @@ export function schedulerService(
       ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
       ...(skillSet.length ? { skills: skillSet } : {}),
       ...(toolServers.length ? { mcpServers: toolServers } : {}),
+      // The company's fence setting (BOS-325); a runner that can't fence is not asked, and its run goes on unfenced.
+      ...(company.fenceMode !== "off" && deps.runners.can(runner.id, "fence") ? { fence: true } : {}),
     });
     if (!sent) {
       if (w.deployId) await deps.deploys?.unbindRun(w.deployId);

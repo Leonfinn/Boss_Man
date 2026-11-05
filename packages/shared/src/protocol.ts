@@ -312,3 +312,14 @@ export type MigrationsResult =
   | { needed: false; reason: string }
   | { needed: true; number: number; next: number; why: string[]; others: string[] }
   | { needed: null; reason: string };
+
+/**
+ * The company's agent fence setting (BOS-325): off (default), watch (agents run fenced and refusals are logged) or
+ * enforce. "enforce" is not selectable yet: it waits for BOS-323's git fix, so the server refuses it.
+ */
+export const FENCE_MODES = ["off", "watch", "enforce"] as const;
+export type FenceMode = (typeof FENCE_MODES)[number];
+/** Flip once BOS-323 is merged and its test shows the git gap closed. */
+export const FENCE_ENFORCE_AVAILABLE = false;
+/** Tool output a fenced agent gets when the kernel refuses it (Landlock gives EACCES or EPERM, nothing else). */
+export const FENCE_DENIED_PATTERN = /Permission denied|Operation not permitted|\bEACCES\b|\bEPERM\b/i;

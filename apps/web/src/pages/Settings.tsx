@@ -1537,6 +1537,62 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
   );
 }
 
+type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null } | null; sandboxCheckedAt?: string | null };
+
+/** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
+function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const act = useAction();
+  const status = usePoll((signal) => api<FenceStatus>(`/api/companies/${company.id}/runner`, { signal }), 30_000, `fence-${company.id}`);
+  const mode = company.fenceMode ?? "off";
+  const sb = status.data?.sandbox ?? null;
+  const hostLine = !status.data?.registered
+    ? "This company has no runner yet."
+    : !sb
+      ? "This host hasn't reported its fence level yet. It reports each time the runner starts."
+      : sb.level === "unavailable"
+        ? "This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). Agents run as before."
+        : `This host fences agents ${sb.level === "full" ? "fully" : "partly"}${sb.missing.length ? ` (not covered: ${sb.missing.join(", ")})` : ""}.${sb.probe === false ? " Its self-test did not see a write outside the agent's folders refused." : ""} Last checked ${status.data?.sandboxCheckedAt ? when(status.data.sandboxCheckedAt) : "never"}.`;
+  return (
+    <Section id="fence-h" title="Agent fence">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
+      </p>
+      <p style={{ fontSize: 14 }}>{hostLine}</p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="fence-mode">Fence</label>
+        <select
+          id="fence-mode"
+          value={mode}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { fenceMode: e.target.value } });
+              onChanged();
+              return "Saved. It applies to runs that start from now on.";
+            })
+          }
+        >
+          <option value="off">Off: agents run as before</option>
+          <option value="watch">Watch: agents run inside the fence and every refusal is logged</option>
+          <option value="enforce" disabled>
+            Enforce: not available yet (waiting for a security fix, BOS-323)
+          </option>
+        </select>
+      </div>
+      <details style={{ marginTop: 10 }}>
+        <summary>Setting up a host</summary>
+        <ul style={{ fontSize: 14 }}>
+          <li>The fence needs a Linux kernel with Landlock (5.13 or newer, and 6.x for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
+          <li>The runner tests the fence each time it starts. If this page says "can't fence", update the host's kernel, or check that the container's security profile doesn't block Landlock, then restart the runner.</li>
+          <li>A fenced agent has its own temporary folder for each run and can't write to the shared /tmp. A skill that hard-codes /tmp needs to use the folder in $TMPDIR instead.</li>
+          <li>Start with Watch on one company, look at the permission log after a few days, and fix what it shows before anything stricter.</li>
+        </ul>
+      </details>
+      {act.view}
+    </Section>
+  );
+}
+
 type SecondOpinion = { enabled: boolean; baseUrl: string; model: string; secretId: string | null };
 
 /** The optional model second opinion on permission cards (BOS-338): off by default. The key is a secret from the encrypted store. */
@@ -2340,6 +2396,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <AdviceTimeout company={company} onChanged={onChanged} />
             <StandingRules company={company} onChanged={onChanged} />
             <PermissionJudgeSetting company={company} onChanged={onChanged} />
+            <FenceSetting company={company} onChanged={onChanged} />
             <SecondOpinionSetting company={company} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />

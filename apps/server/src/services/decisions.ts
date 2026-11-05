@@ -1641,6 +1641,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       permLog.refusedCall({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
     },
 
+    /** A fenced run's tool call failed with a kernel refusal (BOS-325): logged with the run, agent and ticket. Wording only, never a decision. */
+    async onFenceDenied(runner: { companyId: string }, runId: string, title: string | null) {
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
+      permLog.fenceDenied({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
+    },
+
     setMaintenanceHook(hook: MaintenanceHook) {
       maintenance = hook;
     },
