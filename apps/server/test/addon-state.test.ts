@@ -45,7 +45,7 @@ describe("lintOwnerSteps R9", () => {
   it("matches every word in the table, in sentences and in commands, and nothing else", () => {
     const off = facts({ tailscale: "not_set_up", ntfy: "not_set_up", penpot: "not_set_up" });
     for (const s of ["Run tailscale status.", "Open the ts.net address.", "Your tailnet admin page.", step("Check it:", sh("tailscale status"))]) expect(r9([s], off).refuse.map((f) => f.problem), s).toEqual([expect.stringMatching(/Tailscale/)]);
-    for (const s of ["Open the ntfy app.", "Send a test push.", "Wait for the phone notification."]) expect(r9([s], off).refuse.map((f) => f.problem), s).toEqual([expect.stringMatching(/ntfy/)]);
+    for (const s of ["Open the ntfy app.", "Send a test push.", "Wait for the phone notification.", "Check the test notification arrived."]) expect(r9([s], off).refuse.map((f) => f.problem), s).toEqual([expect.stringMatching(/ntfy/)]);
     expect(r9(["Open PENPOT."], off).refuse).toHaveLength(1);
     // Words that only contain them aren't a match, and neither is a plain push or notification.
     expect(r9(["Push the button, then check notifications in Boss Man.", "Open the tailscaled folder."], off).refuse).toEqual([]);
@@ -55,6 +55,14 @@ describe("lintOwnerSteps R9", () => {
     const off = facts({ tailscale: "not_set_up", ntfy: "not_set_up" });
     expect(r9(["Install Tailscale and log in to your tailnet."], off, "tailscale").refuse).toEqual([]);
     expect(r9(["Install Tailscale, then send a test push."], off, "tailscale").refuse.map((f) => f.problem)).toEqual([expect.stringMatching(/ntfy/)]);
+  });
+
+  it("refuses the 5 Nov card text while ntfy is not set up, and warns about Tailscale while it is unknown", () => {
+    const card = ["Log in at your usual Tailscale address.", "Confirm the test notification reached your phone."];
+    const { refuse, warn } = r9(card, facts({ tailscale: "unknown", ntfy: "not_set_up" }));
+    expect(refuse.map((f) => `${f.step}:${f.rule}`)).toEqual(["2:R9"]);
+    expect(refuse[0]!.problem).toMatch(/relies on ntfy \("test notification"\), which is not set up/);
+    expect(warn).toEqual([expect.objectContaining({ step: 1, rule: "warn", problem: expect.stringMatching(/relies on Tailscale .*can't confirm is running/) })]);
   });
 
   it("is not checked when no facts are given", () => {

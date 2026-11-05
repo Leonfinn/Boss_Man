@@ -67,7 +67,7 @@ export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R9"
  */
 const ADDON_WORDS: Record<Addon, { label: string; re: RegExp }> = {
   tailscale: { label: "Tailscale", re: /\btailscale\b|\bts\.net\b|\btailnet\b/i },
-  ntfy: { label: "ntfy", re: /\bntfy\b|\btest push(?:es)?\b|\bphone notifications?\b/i },
+  ntfy: { label: "ntfy", re: /\bntfy\b|\btest push(?:es)?\b|\btest notifications?\b|\bphone notifications?\b/i },
   penpot: { label: "Penpot", re: /\bpenpot\b/i },
 };
 const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up", stopped: "stopped", needs_login: "waiting for a login", running: "running", unknown: "unknown" };
