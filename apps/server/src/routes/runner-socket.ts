@@ -7,6 +7,11 @@ import type { secretsService } from "../services/secrets.js";
 
 type Runners = ReturnType<typeof runnersService>;
 
+// Runner events received but not yet stored, across every socket on this process (BOS-410). A
+// slow database makes these pile up in memory; the memory sampler logs the count.
+let ingestWaiting = 0;
+export const runnerIngestWaiting = () => ingestWaiting;
+
 export async function runnerSocketRoutes(
   app: FastifyInstance,
   runners: Runners,
@@ -92,8 +97,10 @@ export async function runnerSocketRoutes(
             });
             return;
           case "event":
+            ingestWaiting++;
             queue = queue
               .then(async () => {
+                ingestWaiting--;
                 await runners.ingest(runner, msg.entry);
                 send({ type: "ack", upTo: msg.entry.seq });
               })
