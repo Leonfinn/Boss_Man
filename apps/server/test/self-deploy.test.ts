@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { commandProblem, parseStep } from "../src/services/steps.js";
+import { commandProblem, lintOwnerSteps, parseStep } from "../src/services/steps.js";
 import { companies, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -316,6 +316,32 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const [d] = await c.open();
       expect(d!.options).toEqual(["Deploy", "Not now"]);
       expect((d!.context as { infra?: boolean }).infra).toBeUndefined();
+    });
+
+    it("passes the owner-step lint on every hand-apply card Boss Man can build, and never points to a guide (BOS-417)", async () => {
+      const c = (ctx = await setup());
+      const layouts: Array<Record<string, unknown>> = [{}, LAYOUT, { ...LAYOUT, bluegreen: false }, { ...LAYOUT, liveColour: undefined }, { ...LAYOUT, deployerDir: undefined }, { srcDir: LAYOUT.srcDir }, { bluegreen: true }, { bluegreen: false }];
+      const changes: Array<Record<string, unknown>> = [
+        {},
+        { infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh"] },
+        { paths: ["docker-compose.yml", "apps/launcher/src/main.ts"] },
+        { paths: ["docker-compose.yml", "apps/runner/Dockerfile"], runnerChanged: true },
+        { infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts", "apps/runner/Dockerfile"], runnerChanged: true },
+      ];
+      let cards = 0;
+      for (const layout of layouts)
+        for (const change of changes) {
+          await c.db.delete(decisions);
+          const x = (await stepsOf(c, { ...layout, ...change })) as { handSteps?: string[]; rollback?: string; check?: string };
+          const all = [...x.handSteps!, ...(x.rollback ? [x.rollback] : []), ...(x.check ? [x.check] : [])];
+          const where = JSON.stringify({ layout, change });
+          expect(lintOwnerSteps(all).refuse, where).toEqual([]);
+          expect(all.join("\n"), where).not.toMatch(/docs\/0\d/);
+          cards++;
+        }
+      expect(cards).toBe(40);
+      // The old fallback fails it, so this test would have caught it.
+      expect(lintOwnerSteps(["Boss Man can't tell where it is installed, so no command is shown here. The folder is in docs/06-install-truenas.md; ask us on this ticket for the exact commands."]).refuse).not.toEqual([]);
     });
 
     it("renders every command as its own block holding only the command", async () => {

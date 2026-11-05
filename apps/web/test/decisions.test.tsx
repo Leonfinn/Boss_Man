@@ -479,6 +479,34 @@ describe("model change cards (BOS-128)", () => {
     const call = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer")!;
     expect(JSON.parse(String((call[1] as { body: string }).body))).toEqual({ answer: "Edit", modelConfig: { harness: "opencode", provider: "ollama", model: "qwen3:14b", fundingSourceId: "f2" } });
   });
+
+  it("refuses an edited model the account can't serve before sending it (BOS-477)", async () => {
+    const fetch = vi.fn(async (url: string) => {
+      if (String(url) === "/api/funding-sources") return new Response(JSON.stringify([
+        { id: "f1", name: "Claude Max", kind: "subscription", provider: "anthropic" },
+        { id: "f3", name: "Claude Max 2", kind: "subscription", provider: "anthropic" },
+      ]), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<Decisions decisions={[modelChange()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(screen.getByLabelText("Harness")).toBeTruthy());
+
+    // A DeepSeek model paid from a Claude account is the Brian case: named before saving, and Save is off.
+    fireEvent.change(screen.getByLabelText("Harness"), { target: { value: "opencode" } });
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" } });
+    fireEvent.change(screen.getByLabelText("Paid from"), { target: { value: "f3" } });
+    expect(screen.getByRole("alert").textContent).toContain("Anthropic serves Claude models only");
+    expect((screen.getByRole("button", { name: "Save and approve" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(screen.getByRole("button", { name: "Save and approve" }).closest("form")!);
+    expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(false);
+
+    // A Claude model on the same account is fine.
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "claude-opus-4-5" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByRole("button", { name: "Save and approve" }) as HTMLButtonElement).disabled).toBe(false);
+  });
 });
 
 describe("write my own answer", () => {
