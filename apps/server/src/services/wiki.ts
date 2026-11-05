@@ -10,6 +10,33 @@ import type { WikiSemantic } from "./wiki-semantic.js";
 
 export const MAX_BODY = 200_000;
 
+// BOS-496: the history the owner's screen shows holds this many of the newest versions per
+// request, and the rest are one page back (never dropped). Every save is kept; these only bound
+// how much one response or one tool reply carries.
+export const HISTORY_PAGE = 100;
+export const HISTORY_PAGE_MAX = 500;
+
+// BOS-496: a page change and its saved version must go together. The ways a page changes write
+// the row with a plain UPDATE and then insert the version, which isn't atomic, so two overlapping
+// writers (two agents saving at once, or an older server build beside this one) can leave a change
+// with no version of the text before it — the 4 Nov release-log state, where the wipe was not
+// undoable. Every write in this process queues here, so one save's read, version and page change
+// finish before the next starts. Module-level: a process-wide lock, not per-call state.
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs `fn` once every write queued before it has finished (BOS-496). Use it around any change to
+ * a page body that also saves a version, so the saved versions always match what the page held.
+ */
+export function serialiseWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const run = writeQueue.then(fn, fn);
+  writeQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 export class WikiError extends Error {
   constructor(
     readonly status: number,
@@ -318,19 +345,34 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
     async get(companyId: string, slug: string) {
       const p = await page(companyId, slug);
       const [by] = p.updatedByAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, p.updatedByAgentId)) : [];
-      const revisions = await db
-        .select({ id: wikiRevisions.id, createdAt: wikiRevisions.createdAt, agent: agents.name, runId: wikiRevisions.runId })
-        .from(wikiRevisions)
-        .leftJoin(agents, eq(agents.id, wikiRevisions.agentId))
-        .where(eq(wikiRevisions.pageId, p.id))
-        .orderBy(desc(wikiRevisions.createdAt))
-        .limit(100);
+      const revisions = await this.versions(companyId, slug, { limit: HISTORY_PAGE });
+      const [total] = await db.select({ count: sql<number>`count(*)::int` }).from(wikiRevisions).where(eq(wikiRevisions.pageId, p.id));
       const forTickets = await db
         .select({ id: tickets.id, title: tickets.title })
         .from(ticketArtifacts)
         .innerJoin(tickets, eq(tickets.id, ticketArtifacts.ticketId))
         .where(eq(ticketArtifacts.wikiPageId, p.id));
-      return { ...p, updatedBy: by?.name ?? null, revisions, tickets: forTickets };
+      // revisionCount is the whole history: the screen pages past `revisions` with it (BOS-496).
+      return { ...p, updatedBy: by?.name ?? null, revisions, revisionCount: Number(total?.count ?? 0), tickets: forTickets };
+    },
+
+    /**
+     * A page's saved versions, newest first, in pages of `limit`. The history screen and the wiki
+     * tool read every version this way, so the oldest (the last good one before a wipe) is never
+     * hidden behind a cap (BOS-496).
+     */
+    async versions(companyId: string, slug: string, opts: { offset?: number; limit?: number } = {}) {
+      const p = await page(companyId, slug);
+      const limit = Math.min(Math.max(Math.trunc(opts.limit ?? HISTORY_PAGE), 1), HISTORY_PAGE_MAX);
+      const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+      return db
+        .select({ id: wikiRevisions.id, createdAt: wikiRevisions.createdAt, agent: agents.name, runId: wikiRevisions.runId })
+        .from(wikiRevisions)
+        .leftJoin(agents, eq(agents.id, wikiRevisions.agentId))
+        .where(eq(wikiRevisions.pageId, p.id))
+        .orderBy(desc(wikiRevisions.createdAt))
+        .offset(offset)
+        .limit(limit);
     },
 
     async revision(companyId: string, revisionId: string) {
@@ -354,43 +396,9 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       if (!title) throw new WikiError(400, "A page needs a title.");
       if (input.body.length > MAX_BODY) throw new WikiError(400, `A page can be at most ${MAX_BODY.toLocaleString("en-GB")} characters.`);
       if (input.ticketId) await ownTicket(companyId, input.ticketId);
-      const bySlug = async (slug: string) => (await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))))[0];
-      const given = input.slug?.trim() ? input.slug.split("/").map(slugify).join("/") : null;
-      let existing = given ? await bySlug(given) : undefined;
-      const folder = input.folder !== undefined ? cleanFolder(input.folder) : (existing?.folder ?? (given ? folderOf(given) : ""));
-      let slug: string;
-      if (existing) {
-        // A different folder moves the page; it keeps the last part of its address.
-        slug = folder === existing.folder ? existing.slug : pageSlug(folder, existing.slug.split("/").at(-1)!);
-        const clash = slug !== existing.slug ? await bySlug(slug) : undefined;
-        if (clash) throw new WikiError(409, `There's already a page at ${slug} ("${clash.title}").`);
-      } else {
-        // An explicit slug is the address, whatever the folder (a project's brief keeps its slug when the project is renamed).
-        slug = given ?? pageSlug(folder, title);
-        // Writing a new page where one already is updates that page.
-        existing = await bySlug(slug);
-      }
-      const changed = !existing || existing.title !== title || existing.body !== input.body;
-      // (R-review-lessons) A project brief's Lessons section holds owner-approved lessons; it can
-      // only change through a lesson decision, so any other rewrite of the brief passes over it.
-      if (existing && /^brief-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existing.slug) && lessonsSection(existing.body) && lessonsSection(input.body) !== lessonsSection(existing.body))
-        throw new WikiError(409, "The Lessons section of a project brief is owner-approved and can't be edited here; leave it exactly as it is.");
-      let p = existing;
-      if (!p) {
-        [p] = await db.insert(wikiPages).values({ companyId, slug, folder, title, body: input.body, ticketId: input.ticketId ?? null, updatedByAgentId: input.agentId }).returning();
-      } else if (changed || slug !== p.slug) {
-        [p] = await db.update(wikiPages).set({ slug, folder, title, body: input.body, updatedByAgentId: input.agentId, updatedAt: new Date() }).where(eq(wikiPages.id, p.id)).returning();
-      }
-      if (changed) await db.insert(wikiRevisions).values({ pageId: p!.id, title, body: input.body, agentId: input.agentId, runId: input.runId });
-      if (input.ticketId) {
-        await db
-          .insert(ticketArtifacts)
-          .values({ companyId, ticketId: input.ticketId, kind: "wiki_page", title, wikiPageId: p!.id, agentId: input.agentId, runId: input.runId })
-          .onConflictDoNothing();
-        await record(db, { companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "artifact", summary: `Wrote wiki page "${title}"` });
-      }
-      if (changed) semantic?.enqueue(companyId, p!.id);
-      return { page: p!, created: !existing };
+      // Read, version and write as one step, so a concurrent save cannot slip between reading
+      // the page and saving the new text over it (BOS-496; see serialiseWrite).
+      return serialiseWrite(() => writePage(companyId, input, title));
     },
 
     async remove(companyId: string, slug: string) {
@@ -459,4 +467,53 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       if (!rows.length) throw new WikiError(404, "No such item.");
     },
   };
+
+  /**
+   * The body of `write`, run inside serialiseWrite: find the page, refuse a wipe or a Lessons
+   * change, save the new text, and keep a version of every change.
+   */
+  async function writePage(companyId: string, input: { slug?: string; folder?: string; title: string; body: string; ticketId?: string | null } & Author, title: string) {
+    const bySlug = async (slug: string) => (await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))))[0];
+    const given = input.slug?.trim() ? input.slug.split("/").map(slugify).join("/") : null;
+    let existing = given ? await bySlug(given) : undefined;
+    const folder = input.folder !== undefined ? cleanFolder(input.folder) : (existing?.folder ?? (given ? folderOf(given) : ""));
+    let slug: string;
+    if (existing) {
+      // A different folder moves the page; it keeps the last part of its address.
+      slug = folder === existing.folder ? existing.slug : pageSlug(folder, existing.slug.split("/").at(-1)!);
+      const clash = slug !== existing.slug ? await bySlug(slug) : undefined;
+      if (clash) throw new WikiError(409, `There's already a page at ${slug} ("${clash.title}").`);
+    } else {
+      // An explicit slug is the address, whatever the folder (a project's brief keeps its slug when the project is renamed).
+      slug = given ?? pageSlug(folder, title);
+      // Writing a new page where one already is updates that page.
+      existing = await bySlug(slug);
+    }
+    const changed = !existing || existing.title !== title || existing.body !== input.body;
+    // (R-review-lessons) A project brief's Lessons section holds owner-approved lessons; it can
+    // only change through a lesson decision, so any other rewrite of the brief passes over it.
+    if (existing && /^brief-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existing.slug) && lessonsSection(existing.body) && lessonsSection(input.body) !== lessonsSection(existing.body))
+      throw new WikiError(409, "The Lessons section of a project brief is owner-approved and can't be edited here; leave it exactly as it is.");
+    let p = existing;
+    // The page change and its version go in one transaction: a page is never saved without the
+    // version that records it, so a write can't leave a page whose current text has no saved copy
+    // (BOS-496; the 4 Nov release log had that gap). serialiseWrite still orders the read above.
+    await db.transaction(async (tx) => {
+      if (!p) {
+        [p] = await tx.insert(wikiPages).values({ companyId, slug, folder, title, body: input.body, ticketId: input.ticketId ?? null, updatedByAgentId: input.agentId }).returning();
+      } else if (changed || slug !== p.slug) {
+        [p] = await tx.update(wikiPages).set({ slug, folder, title, body: input.body, updatedByAgentId: input.agentId, updatedAt: new Date() }).where(eq(wikiPages.id, p.id)).returning();
+      }
+      if (changed) await tx.insert(wikiRevisions).values({ pageId: p!.id, title, body: input.body, agentId: input.agentId, runId: input.runId });
+    });
+    if (input.ticketId) {
+      await db
+        .insert(ticketArtifacts)
+        .values({ companyId, ticketId: input.ticketId, kind: "wiki_page", title, wikiPageId: p!.id, agentId: input.agentId, runId: input.runId })
+        .onConflictDoNothing();
+      await record(db, { companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "artifact", summary: `Wrote wiki page "${title}"` });
+    }
+    if (changed) semantic?.enqueue(companyId, p!.id);
+    return { page: p!, created: !existing };
+  }
 }

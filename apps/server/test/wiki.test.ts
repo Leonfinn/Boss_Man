@@ -122,6 +122,35 @@ describe("wiki and ticket outputs (R69)", () => {
     expect((await c.req("POST", base, { title: "Deep", body: "", folder: "a/b/c/d/e/f/g" })).statusCode).toBe(400);
     expect((await c.req("GET", base)).json().map((p: { folder: string }) => p.folder).sort()).toEqual(["Ideas", "Research/Done"]);
   });
+  it("keeps every version restorable, so a big page cut down to a small one can still be brought back from the oldest copy (BOS-496)", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/wiki`;
+    // Over 8000 the read is an outline, and over 40000 the read caps; the old history cap was 100
+    // versions, so a busy page hid the version from before a wipe. A big first version exercised
+    // both read boundaries.
+    const big = `# Release log\n\n${Array.from({ length: 1200 }, (_, i) => `- 2026-10-${String((i % 28) + 1).padStart(2, "0")}: entry ${i} ${"x".repeat(40)}`).join("\n")}`;
+    expect(big.length).toBeGreaterThan(40_000);
+    expect((await c.req("POST", base, { title: "Release log", body: big })).statusCode).toBe(201);
+    // More saves than one history page, so the oldest is past the newest-100 window.
+    for (let i = 0; i < 105; i++) await c.req("PUT", `${base}/release-log`, { title: "Release log", body: `${big}\n- note ${i}` });
+    // The wipe: a small write replaces the whole page.
+    await c.req("PUT", `${base}/release-log`, { title: "Release log", body: "- 2026-11-04: wiped" });
+
+    const page = (await c.req("GET", `${base}/release-log`)).json() as { revisions: Array<{ id: string }>; revisionCount: number };
+    expect(page.revisionCount).toBe(107);
+    // The page carries the newest 100; the rest are one page back, never dropped.
+    expect(page.revisions).toHaveLength(100);
+    const older = (await c.req("GET", `${base}/release-log?versions=1&offset=100`)).json() as Array<{ id: string }>;
+    expect(older).toHaveLength(7);
+    // The oldest version is the big page: it survived and is reachable through the paged history.
+    const oldest = (await c.req("GET", `/api/companies/${c.company.id}/wiki-revisions/${older.at(-1)!.id}`)).json() as { body: string };
+    expect(oldest.body).toBe(big);
+    // Putting it back restores the big text, and the restore is itself a new, undoable version.
+    expect((await c.req("PUT", `${base}/release-log`, { title: "Release log", body: oldest.body })).json()).toMatchObject({ body: big });
+    const after = (await c.req("GET", `${base}/release-log`)).json() as { revisionCount: number };
+    expect(after.revisionCount).toBe(108);
+  });
+
   it("holds the wiki maintainer's upkeep wake so a busy spell of finished tickets starts one run", async () => {
     const c = (ctx = await setup(15 * 60_000));
     const [keeper] = await c.db.select().from(agents).where(and(eqq(agents.companyId, c.company.id), eqq(agents.duty, "wiki")));

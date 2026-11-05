@@ -10,7 +10,8 @@ import { SaveButton, useSaveState } from "../components/SaveButton";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null };
-type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; tickets: Array<{ id: string; title: string }> };
+// revisionCount is every version, which can be more than the first page the page carries (BOS-496).
+type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; revisionCount?: number; tickets: Array<{ id: string; title: string }> };
 type OldVersion = { id: string; title: string; body: string; createdAt: string; agent: string | null };
 
 type Draft = { title: string; body: string; folder: string };
@@ -123,10 +124,25 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   const page = usePoll((signal) => api<PageDetail>(`/api/companies/${companyId}/wiki/${slug}`, { signal }), 30_000, `${companyId}/${slug}`);
   const [editing, setEditing] = useState(false);
   const [history, setHistory] = useState(false);
+  // Versions opened from "Show older versions", older than the first page the page carries (BOS-496).
+  const [older, setOlder] = useState<{ rows: Revision[]; busy: boolean; error: string | null }>({ rows: [], busy: false, error: null });
   const [old, setOld] = useState<OldVersion | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => (setEditing(false), setHistory(false), setOld(null)), [slug]);
+  useEffect(() => (setEditing(false), setHistory(false), setOlder({ rows: [], busy: false, error: null }), setOld(null)), [slug]);
   const p = page.data;
+  const versions = [...(p?.revisions ?? []), ...older.rows];
+  const hasMore = !!p && versions.length < (p.revisionCount ?? p.revisions.length);
+  const showMore = async () => {
+    if (!p) return;
+    setOlder((o) => ({ ...o, busy: true, error: null }));
+    try {
+      const rows = await api<Revision[]>(`/api/companies/${companyId}/wiki/${slug}?versions=1&offset=${versions.length}`);
+      // Drop any overlap, so a save made while paging can't list a version twice.
+      setOlder((o) => ({ rows: [...o.rows, ...rows.filter((r) => !p.revisions.some((x) => x.id === r.id) && !o.rows.some((x) => x.id === r.id))], busy: false, error: null }));
+    } catch (err) {
+      setOlder((o) => ({ ...o, busy: false, error: (err as Error).message }));
+    }
+  };
   // A link can name a section (slug#Heading); land on that heading once the page has rendered.
   useEffect(() => {
     if (!p || !section) return;
@@ -192,7 +208,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
             New page here
           </button>
           <button type="button" className="btn" aria-expanded={history} onClick={() => setHistory((h) => !h)}>
-            History ({p.revisions.length})
+            History ({p.revisionCount ?? p.revisions.length})
           </button>
           <button type="button" className="btn" onClick={() => void remove()}>
             Delete
@@ -202,7 +218,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
       {history && (
         <section aria-label="History" style={{ borderTop: "1px solid var(--line)", paddingTop: 10 }}>
           <ul style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {p.revisions.map((r, i) => (
+            {versions.map((r, i) => (
               <li key={r.id} style={{ fontSize: 14 }}>
                 <button type="button" className="link" onClick={() => void showOld(r.id)}>
                   {when(r.createdAt)}
@@ -218,6 +234,17 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
               </li>
             ))}
           </ul>
+          {/* Every save is kept, so the oldest is always reachable: page further back to find it (BOS-496). */}
+          {hasMore && (
+            <button type="button" className="btn" disabled={older.busy} onClick={() => void showMore()}>
+              {older.busy ? "Loading…" : `Show older versions (${(p.revisionCount ?? versions.length) - versions.length} more)`}
+            </button>
+          )}
+          {older.error && (
+            <p className="error" role="alert">
+              {older.error}
+            </p>
+          )}
         </section>
       )}
       {old && (

@@ -67,7 +67,7 @@ import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
-import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
+import { cleanFolder, HISTORY_PAGE_MAX, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
@@ -1799,6 +1799,12 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
+      // versions=1 lists every saved version of the page, newest first, in pages: the history
+      // screen uses it to reach versions past the newest 100 the page itself carries (BOS-496).
+      if ((req.query as Record<string, string | undefined>).versions === "1") {
+        const q = z.object({ offset: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(HISTORY_PAGE_MAX).optional() }).parse(req.query);
+        return wiki.versions(id, slug, q).catch(wikiErrors(reply));
+      }
       return wiki.get(id, slug).catch(wikiErrors(reply));
     });
     owner.put("/api/companies/:id/wiki/*", async (req, reply) => {

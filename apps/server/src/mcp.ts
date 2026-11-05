@@ -29,7 +29,7 @@ import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { acceptanceCriteriaSchema, describeRoles, missingVerdicts, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
-import { findSection, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
+import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import type { SkillFinding } from "./db/schema.js";
@@ -1682,9 +1682,9 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "wiki",
     {
       description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output), attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output) and history (a page's saved versions, newest first, in pages of 100: pass slug, and offset to page further back; every save is kept and the oldest is reachable). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
       inputSchema: {
-        action: z.enum(["list", "read", "write", "attach"]),
+        action: z.enum(["list", "read", "write", "attach", "history"]),
         q: z.string().max(200).optional(),
         slug: z.string().max(500).optional(),
         folder: z.string().max(400).optional(),
@@ -1696,6 +1696,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         url: z.string().max(2000).optional(),
         section: z.string().max(300).optional(),
         offset: z.number().int().min(0).optional(),
+        limit: z.number().int().min(1).max(HISTORY_PAGE_MAX).optional(),
       },
     },
     async (input) => {
@@ -1747,6 +1748,22 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
             const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, ...by });
             const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
             return text(`${r.created ? "Created" : "Updated"} ${link}${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
+          }
+          case "history": {
+            // Every saved version, newest first, a page at a time (BOS-496): an agent can find the
+            // last good version even when the page has more than one page of history.
+            if (!input.slug) return fail("Give the page's slug.");
+            const p = await wiki.get(scope.companyId, input.slug);
+            const offset = input.offset ?? 0;
+            const rows = await wiki.versions(scope.companyId, p.slug, { offset, limit: input.limit });
+            if (!rows.length)
+              return text(`${p.slug} has ${p.revisionCount} saved ${p.revisionCount === 1 ? "version" : "versions"}${offset ? `; there is none at offset ${offset}` : ""}.`);
+            const more = offset + rows.length < p.revisionCount ? `\n\nMore: wiki history slug="${p.slug}" offset=${offset + rows.length}` : "";
+            return text(
+              `Versions ${offset + 1} to ${offset + rows.length} of ${p.revisionCount}, newest first:\n` +
+                rows.map((r) => `- ${r.id} — ${r.createdAt.toISOString()} by ${r.agent ?? "the owner"}${r.runId ? ` (run ${r.runId})` : ""}`).join("\n") +
+                `\n\nRead one with wiki read slug="${p.slug}" revision="<id>" (the CEO restores a version with wiki restore).${more}`,
+            );
           }
           case "attach": {
             if (!input.ticketId) return fail("Give the ticketId it belongs to.");
