@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OWNER_MESSAGE_COUNT_FROM, OWNER_MESSAGE_MAX } from "@boss-man/shared";
-import { OwnerMessageBox, tooLong } from "../src/components/OwnerMessageBox";
+import { OwnerMessageBox, tooLong, tooLongToSend } from "../src/components/OwnerMessageBox";
 
 afterEach(() => {
   cleanup();
@@ -56,5 +56,13 @@ describe("the owner's message box (BOS-502)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Send as a .txt file" })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send as a .txt file" }));
     await waitFor(() => expect(sent).toEqual([big]));
+  });
+
+  it("counts the attachment lines too, so a near-limit message with an attachment is held", () => {
+    const attachment = "[📎 message.txt](/api/ticket-images/00000000-0000-0000-0000-000000000001)";
+    // Just under the limit on its own: fine to send.
+    expect(tooLongToSend("x".repeat(OWNER_MESSAGE_MAX - 1))).toBe(false);
+    // The send appends the attachment's Markdown, which pushes it over: held, not refused by the server.
+    expect(tooLongToSend("x".repeat(OWNER_MESSAGE_MAX - 1), [attachment])).toBe(true);
   });
 });

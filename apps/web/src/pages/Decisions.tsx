@@ -9,7 +9,7 @@ import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
 import { SkillProposal } from "../components/SkillProposal";
-import { OwnerMessageBox, tooLong } from "../components/OwnerMessageBox";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 
 /** The answer sent when it is too long for the box: the text is in the .txt file the line links. */
 export const ANSWER_IN_FILE = "My answer is too long to type here, so it's in this file (open it to read it whole):";
@@ -1035,7 +1035,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               )}
                             </div>
                             <div className="actions">
-                              <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim() || tooLong(ownWords[d.id] ?? "")}>
+                              <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim() || tooLongToSend(ownWords[d.id] ?? "")}>
                                 Send my answer
                               </button>
                               <button type="button" className="btn" onClick={() => setOwnWords(({ [d.id]: _, ...rest }) => rest)}>

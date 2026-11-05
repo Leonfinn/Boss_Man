@@ -8,7 +8,7 @@ import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
-import { OwnerMessageBox, tooLong } from "../components/OwnerMessageBox";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { linkPieces, type LinkContext } from "../links";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
@@ -238,7 +238,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
                     Ask the CEO
                   </button>
                 )}
-                <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLong(text)}>
+                <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)}>
                   Send
                 </button>
               </form>

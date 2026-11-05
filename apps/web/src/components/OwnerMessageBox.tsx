@@ -114,3 +114,12 @@ export function OwnerMessageBox({
 export function tooLong(text: string) {
   return text.length > OWNER_MESSAGE_MAX;
 }
+
+/**
+ * The same check on what will actually be sent: the typed text plus the attachment lines the send
+ * appends (their Markdown is added to the message). Without this, a message just under the limit
+ * could go over with its attachments and come back from the server as a refused request.
+ */
+export function tooLongToSend(text: string, attachments: string[] = []) {
+  return tooLong(attachments.reduce((t, markdown) => `${t}${t && !t.endsWith("\n") ? "\n" : ""}${markdown}\n`, text));
+}

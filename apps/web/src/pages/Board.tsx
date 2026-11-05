@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
-import { OwnerMessageBox, tooLong } from "../components/OwnerMessageBox";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -155,7 +155,7 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
   const body = () => withAttachments(form.body, img.attached).trim();
   const submit = async (e?: FormEvent) => {
     e?.preventDefault();
-    if (!form.title.trim() || busy || tooLong(body())) return;
+    if (!form.title.trim() || busy || tooLongToSend(body())) return;
     setBusy(true);
     try {
       if (isFeature) await onAddFeature({ title: form.title.trim(), description: body() || null, planWithCeo: form.plan && hasCeo, ...form.goal });
@@ -179,7 +179,7 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
   };
   // Hands the draft to the CEO, who questions the owner in chat and then creates it.
   const grill = async () => {
-    if (!form.title.trim() || busy || tooLong(body())) return;
+    if (!form.title.trim() || busy || tooLongToSend(body())) return;
     setBusy(true);
     try {
       await onGrill({ kind: mode, title: form.title.trim(), description: body() || null });
@@ -313,11 +313,11 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
         </p>
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <button className="btn primary" type="submit" disabled={busy || !form.title.trim() || tooLong(body())}>
+        <button className="btn primary" type="submit" disabled={busy || !form.title.trim() || tooLongToSend(body())}>
           {isFeature ? "Add feature" : agentChosen ? "Add and start" : "Add to backlog"}
         </button>
         {hasCeo && (
-          <button className="btn" type="button" disabled={busy || !form.title.trim() || tooLong(body())} onClick={() => void grill()}>
+          <button className="btn" type="button" disabled={busy || !form.title.trim() || tooLongToSend(body())} onClick={() => void grill()}>
             Let the CEO question me first
           </button>
         )}

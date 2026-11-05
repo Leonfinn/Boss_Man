@@ -4,7 +4,7 @@ import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type 
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
-import { OwnerMessageBox, tooLong } from "../components/OwnerMessageBox";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
@@ -581,7 +581,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 </OwnerMessageBox>
                 <div style={{ display: "flex", gap: 8 }}>
                   {img.button}
-                  <button type="button" className="btn primary" disabled={(draft === (t.body ?? "") && !img.attached.length) || tooLong(draft)} onClick={() => void saveDraft()}>
+                  <button type="button" className="btn primary" disabled={(draft === (t.body ?? "") && !img.attached.length) || tooLongToSend(draft, img.attached)} onClick={() => void saveDraft()}>
                     Save description
                   </button>
                   <button type="button" className="btn" onClick={() => { img.clear(); setDraft(null); }}>

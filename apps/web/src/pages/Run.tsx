@@ -2,7 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, type Company } from "../api";
 import { useImageAttach, withAttachments } from "../components/ImageAttach";
-import { OwnerMessageBox, tooLong } from "../components/OwnerMessageBox";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
 import { outcomeTag, usage, when } from "./Runs";
 
@@ -14,7 +14,7 @@ function Steer({ runId, companyId, ticketId }: { runId: string; companyId: strin
   const img = useImageAttach(companyId, ticketId ?? undefined);
   const send = async (interrupt: boolean) => {
     const outgoing = withAttachments(text, img.attached);
-    if (!outgoing.trim() || tooLong(outgoing)) return;
+    if (!outgoing.trim() || tooLongToSend(outgoing)) return;
     setBusy(true);
     try {
       await api(`/api/runs/${runId}/message`, { method: "POST", body: { text: outgoing, interrupt } });
@@ -71,10 +71,10 @@ function Steer({ runId, companyId, ticketId }: { runId: string; companyId: strin
         {img.attached.length > 0 && <small className="muted">Attached files are sent with the message.</small>}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-        <button className="btn primary" type="submit" disabled={busy || img.busy || tooLong(text)}>
+        <button className="btn primary" type="submit" disabled={busy || img.busy || tooLongToSend(text, img.attached)}>
           Send after this turn
         </button>
-        <button className="btn" type="button" disabled={busy || img.busy || tooLong(text)} onClick={() => void send(true)}>
+        <button className="btn" type="button" disabled={busy || img.busy || tooLongToSend(text, img.attached)} onClick={() => void send(true)}>
           Interrupt and send
         </button>
         <button className="btn" type="button" disabled={busy} onClick={() => void stop()} style={{ marginLeft: "auto", color: "var(--red-ink)" }}>

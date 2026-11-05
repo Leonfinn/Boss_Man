@@ -8,7 +8,7 @@ import { api, type Agent } from "../api";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
 import { ImagePreviews, useImageAttach, withAttachments } from "./ImageAttach";
-import { OwnerMessageBox, tooLong } from "./OwnerMessageBox";
+import { OwnerMessageBox, tooLongToSend } from "./OwnerMessageBox";
 import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
@@ -272,7 +272,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
         </OwnerMessageBox>
         <div className="compose-actions">
           {img.button}
-          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLong(text)}>
+          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)}>
             Send
           </button>
           {live && (
