@@ -122,6 +122,38 @@ describe("one closer for Boss Man's own cards (DR-016, BOS-470)", () => {
     expect((after!.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/room again/i);
   });
 
+  it("leaves an auth-error card open while the account has room in its quota windows, and closes it only on a clean run on that account (BOS-469, security review)", async () => {
+    ctx = await setup();
+    const [source] = await ctx.db
+      .insert(fundingSources)
+      .values({ name: "Claude Max", kind: "subscription", provider: "anthropic" })
+      .returning();
+    // A revoked key leaves the quota windows empty: "room again" is true at once, which is not proof.
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: source!.id, window: "five_hour", utilization: 0.1, resetsAt: new Date(ctx.clock().getTime() + 6 * 3_600_000), observedAt: ctx.clock() });
+    const [card] = await ctx.db
+      .insert(decisions)
+      .values({
+        companyId: ctx.company.id,
+        kind: "question",
+        question: "Brains has hit the same failure 3 times: identity verification is required.",
+        options: ["Got it"],
+        recommendedOption: "Got it",
+        tier: "owner",
+        dedupeKey: `account:${source!.id}:account_limit`,
+        context: { type: "question", decisionsKind: "alert:account_limit", clearWhen: [{ kind: "accountRanOk", fundingSourceId: source!.id }] },
+      })
+      .returning();
+    await ctx.sweep();
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, card!.id)))[0]!.status).toBe("open");
+    // A run on the account that finished cleanly proves the credential works again.
+    const start = ctx.clock();
+    await ctx.db.insert(runsTable).values({ id: crypto.randomUUID(), companyId: ctx.company.id, agentId: ctx.worker.id, fundingSourceId: source!.id, startedAt: start, endedAt: new Date(start.getTime() + 60_000), outcome: "end_turn" });
+    await ctx.sweep();
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, card!.id));
+    expect(after!.status).toBe("withdrawn");
+    expect((after!.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/succeeded/i);
+  });
+
   it("closes a merge-retry card once its ticket is done", async () => {
     ctx = await setup();
     const t = await ctx.ticket({ title: "Fix the footer", assigneeAgentId: ctx.worker.id });

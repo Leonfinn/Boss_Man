@@ -267,15 +267,20 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .map((d) => d.id);
     if (free.length) await db.update(decisions).set({ dedupeKey: null }).where(inArray(decisions.id, free));
 
+    // One open alert per run: a card already with the team (on any rung) is not raised again, whichever key it uses.
+    const alreadyOpen = new Set(open.map((d) => (d.context as { runId?: unknown }).runId).filter((id): id is string => typeof id === "string"));
     let raised = 0;
     for (const [runId, r] of stalled) {
+      if (alreadyOpen.has(runId)) continue;
       const ctx: DecisionContext = { type: "stalled_run", runnerId: r.runnerId!, runId };
       // A stalled run is the Scrum Master's first, then the CEO, then the owner (BOS-119). It goes
       // on the ladder whether or not the watchdog is switched on; without a Scrum Master it starts at the CEO.
       const row = opts.alert
         ? await opts.alert({
             companyId: r.run.companyId,
+            cardKind: "stalled_run",
             kind: "stalled_run",
+            cause: { runId },
             // No event at all: the runner never began it, most likely lost in a runner restart.
             question: r.run.lastEventAt
               ? `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. ${busy.get(runId) ? `It is still inside ${busy.get(runId)}, so it may just be a long command.` : "It may be stuck, or busy with a long command."}`
@@ -319,7 +324,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const doing = run.lastEventAt ? `It last did something ${ago(t.getTime() - run.lastEventAt.getTime())} ago.` : "It hasn't reported anything since it started.";
       const row = await opts.alert({
         companyId: run.companyId,
-        kind: "question",
+        kind: "ticketless_run",
         question: `${agentName ?? "An agent"} has been running for ${ago(t.getTime() - run.startedAt.getTime())} without a ticket ("${run.origin ?? run.purpose ?? "no reason recorded"}"). ${doing} Settle it: stop the run if there is nothing for it to do, or tell it on the ticket it should be on.`,
         options: ["Got it"],
         recommended: "Got it",
@@ -383,7 +388,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           // should only see this if the CEO doesn't settle it (BOS-119).
           const row = await opts.alert({
             companyId: ticket.companyId,
-            kind: "question",
+            kind: "review_stall",
             question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it ${recent.length} times in the last day without giving a verdict. Look into it, or move the ticket on yourself.`,
             options: ["Got it"],
             recommended: "Got it",

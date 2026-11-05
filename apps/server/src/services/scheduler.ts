@@ -590,7 +590,7 @@ export function schedulerService(
       if (x.monitorAttempts >= x.monitorMax) {
         const [{ name: agent } = { name: "The agent" }] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, x.assigneeAgentId));
         await log(`Checked ${x.monitorMax} times and still not resolved: ${x.monitorNote}`);
-        await deps.alert(x.companyId, `${agent} has checked '${x.monitorNote}' ${x.monitorMax} times on '${x.title}' and it still isn't resolved.`, { ticketId: x.id, about: [x.assigneeAgentId] });
+        await deps.alert(x.companyId, `${agent} has checked '${x.monitorNote}' ${x.monitorMax} times on '${x.title}' and it still isn't resolved.`, { kind: "alert", ticketId: x.id, about: [x.assigneeAgentId] });
         continue;
       }
       const n = x.monitorAttempts + 1;
@@ -770,7 +770,7 @@ export function schedulerService(
     const [t] = w.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
     // A "could not start" card closes itself once the runner is back and this wake has started (DR-017 E, BOS-475).
     const clearWhen: ClearWhen[] = /runner offline/i.test(reason) ? [{ kind: "runnerConnected", companyId: w.companyId, wakeId: w.id }] : [];
-    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}`, clearWhen });
+    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { kind: "could_not_start", about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}`, cause: { agents: [w.agentId] }, clearWhen });
   }
 
   /** The owner's ranked Claude subscriptions in order, when this source is one of them (BOS-383). */
@@ -863,6 +863,7 @@ export function schedulerService(
       const told = await db.insert(settings).values({ key: `addon-missing:${runner.id}:${h.name}:${h.missing.join(",")}`, value: true }).onConflictDoNothing().returning();
       if (told.length) await deps.alert(w.companyId, `${agent.name}'s skill "${h.name}" is left out of its runs: it needs the ${h.missing.join(" and ")} add-on, which this company's runner doesn't have working. See Settings → Server and runner.`, {
           // Fixing the runner needs host access: past the Scrum Master's actions, so the CEO first.
+          kind: "alert",
           from: "ceo",
           ticketId: w.ticketId,
         });
@@ -940,6 +941,36 @@ export function schedulerService(
     limits,
     hasRoom,
 
+    /**
+     * Whether the CEO could run right now (DR-015 A, BOS-469 point 1 and 7): an account with room and no
+     * usage/auth failure standing in the way. Used by the alert ladder so a card that stops at the CEO
+     * waits instead of landing on the owner.
+     */
+    async ceoCanRun(companyId: string): Promise<boolean> {
+      const [ceo] = await db.select({ id: agents.id, fundingSourceId: agents.fundingSourceId, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (!ceo) return true;
+      // A clean run since the last usage/auth failure says the account has room again.
+      const since = new Date(now().getTime() - 24 * 3_600_000);
+      const recent = await db
+        .select({ endedAt: runs.endedAt, outcome: runs.outcome, startedAt: runs.startedAt })
+        .from(runs)
+        .where(and(eq(runs.agentId, ceo.id), gt(runs.startedAt, since), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
+        .orderBy(desc(runs.startedAt))
+        .limit(20);
+      const lastFail = recent.findIndex((r) => /error:.*(usage limit|rate limit|weekly limit|5-hour limit|five-hour limit|quota|limit reached|authentication|unauthori[sz]ed|forbidden|identity verification|invalid api key|credit balance)/i.test(r.outcome ?? ""));
+      if (lastFail !== -1 && !recent.slice(0, lastFail).some((r) => r.endedAt && !/^(error|lost|interrupted)/i.test(r.outcome ?? ""))) return false;
+      // The account test the scheduler uses for a routine run: soft hold only, and no window at its limit.
+      if (ceo.fundingSourceId) {
+        const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, ceo.fundingSourceId));
+        if (source) {
+          const samples = await latestQuotaWindows(source.id);
+          const full = holdingWindows(source, samples, now());
+          if (full.length && (source.quotaOverage !== "all" || full.some((s) => s.utilization >= 1))) return false;
+        }
+      }
+      return true;
+    },
+
     /** Queues a wake, or drops it (and tells the owner) if it looks like a loop. */
     async wake(input: WakeInput) {
       const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
@@ -984,7 +1015,9 @@ export function schedulerService(
             ticketId: base.ticketId,
             about: [agent.id, causedByAgentId],
             // One climbing alert per looping agent while it is open, not one (and one CEO run) per dropped wake.
+            kind: "chain_loop",
             dedupeKey: `alert:chain:${agent.id}`,
+            cause: { agents: [agent.id] },
             rewake: { agentId: agent.id, ticketId: base.ticketId, reason: input.reason },
           });
         if (!keep) {
@@ -1003,7 +1036,7 @@ export function schedulerService(
           .where(and(eq(wakes.agentId, agent.id), eq(wakes.causedByAgentId, agent.id), gt(wakes.createdAt, since), sql`${wakes.reason} not in (${sql.join(scheduledReasons, sql`, `)})`));
         if ((recent[0]?.n ?? 0) >= limits.selfWakesPer10Min) {
           const selfAlert = () =>
-            deps.alert(agent.companyId, `${agent.name} keeps waking itself (more than ${limits.selfWakesPer10Min} times in 10 minutes). New self-wakes are ${keep ? "still going through when someone is waiting on them, but look into it" : "being dropped"}.`, { ticketId: base.ticketId, about: [agent.id], dedupeKey: `alert:self:${agent.id}` });
+            deps.alert(agent.companyId, `${agent.name} keeps waking itself (more than ${limits.selfWakesPer10Min} times in 10 minutes). New self-wakes are ${keep ? "still going through when someone is waiting on them, but look into it" : "being dropped"}.`, { kind: "self_wake", ticketId: base.ticketId, about: [agent.id], dedupeKey: `alert:self:${agent.id}` });
           if (!keep) {
             const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `woke itself more than ${limits.selfWakesPer10Min} times in 10 minutes` }).returning();
             await selfAlert();
@@ -1053,7 +1086,7 @@ export function schedulerService(
             await deps.alert(
               agent.companyId,
               `${agent.name} has been started ${limits.ticketlessPerHour} times in the last hour with no ticket (the latest for "${input.reason}"). Further wakes like that are being dropped for the rest of the hour. See Runs for why each one started.`,
-              { about: [agent.id], dedupeKey: `alert:ticketless:${agent.id}` },
+              { kind: "ticketless_limit", about: [agent.id], dedupeKey: `alert:ticketless:${agent.id}` },
             );
           }
           return outcomeOf(row!);
@@ -1225,7 +1258,7 @@ export function schedulerService(
               `${from.name} to ${to.name} (not delivered): ${quote(input.why)}`,
               t ? `Usually one of them is waiting on something only you can give. Answer on ${ref}, or tell one of them in chat what to do.` : "Usually the work has no ticket yet. Create one and assign it, or tell one of them in chat what to do.",
             ].join("\n\n"),
-            { ticketId, about: [from.id, to.id], dedupeKey: `alert:nudges:${[from.id, to.id].sort().join(":")}` },
+            { ticketId, kind: "nudge_loop", about: [from.id, to.id], dedupeKey: `alert:nudges:${[from.id, to.id].sort().join(":")}` },
           );
         }
         return { ok: false, error: `You and ${to.name} have nudged each other ${LOOP_EXCHANGES} times about this in 10 minutes. ${ticketId ? "Put the rest on the ticket" : "Put it on a ticket (create one if needed)"} instead of nudging again.` };
