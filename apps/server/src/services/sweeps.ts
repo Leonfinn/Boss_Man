@@ -9,7 +9,7 @@ import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max
 import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
