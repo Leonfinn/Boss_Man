@@ -195,8 +195,14 @@ INCLUDE="$D/proxy/active.caddy"
 live_colour() {
   local c
   [[ -f $INCLUDE && ! -L $INCLUDE ]] || return 1
-  c="$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\):.*/\1/p' "$INCLUDE" | head -1)"
+  c="$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\)\(-front\)\{0,1\}:.*/\1/p' "$INCLUDE" | head -1)"
   [[ -n $c ]] && echo "$c"
+}
+
+# True when the proxy can reach the colour by its name on the private "front" network (the compose file has it).
+# A real request, not a name lookup: it proves the route the include is about to use.
+front_ready() { # colour
+  compose exec -T proxy wget -q -T 3 -O /dev/null "http://server-$1-front:3100/api/ready" >>"$LOG" 2>&1
 }
 
 # Rewrites the include for a colour: made in the root-only state folder, then renamed over the old one.
@@ -209,7 +215,23 @@ write_include() { # colour
   fi
   [[ $(stat -c %d "$STATE") == "$(stat -c %d "$dir")" ]] || { log "ERROR: $STATE and $dir are on different filesystems; the rename would not be atomic."; return 1; }
   tmp="$(mktemp "$STATE/active.XXXXXX")"
-  cat >"$tmp" <<INC
+  # With the private "front" network (deploy/truenas-bluegreen.yml) the proxy reaches the colour at server-<colour>-front and
+  # tells it the one client address Caddy resolved. Without it (compose files not updated yet) the old form is written,
+  # so a new copy of this script can never break a swap or a rollback on a host that has not moved yet.
+  if front_ready "$1"; then
+    cat >"$tmp" <<INC
+# Written by host-deployer.sh. Do not edit. Live colour: $1
+(active) {
+	reverse_proxy server-$1-front:{args[0]} {
+		header_up X-Forwarded-For {client_ip}
+		health_uri {args[1]}
+		health_interval 2s
+		health_timeout 2s
+	}
+}
+INC
+  else
+    cat >"$tmp" <<INC
 # Written by host-deployer.sh. Do not edit. Live colour: $1
 (active) {
 	reverse_proxy server-$1:{args[0]} {
@@ -219,6 +241,7 @@ write_include() { # colour
 	}
 }
 INC
+  fi
   chmod 644 "$tmp"
   mv -fT "$tmp" "$INCLUDE"
 }

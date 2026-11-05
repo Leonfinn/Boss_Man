@@ -134,6 +134,9 @@ describe("explainPermission", () => {
     expect(explainPermission({ title: "Edit", kind: "edit", rawInput: { file_path: "a.md" } }, "A").summary).toBe("Change the file a.md.");
     expect(explainPermission({ title: "Fetch", kind: "fetch", rawInput: { url: "https://x.dev" } }, "A")).toMatchObject({ title: "A wants to fetch a web page", summary: "Fetch https://x.dev.", effect: "network" });
     expect(explainPermission({ title: "Mystery", kind: "other", rawInput: null }, "A").effect).toBe("unknown");
+    expect(explainPermission({ title: "Mystery", kind: "other", rawInput: null }, "A").summary).not.toMatch(/Warning/);
+    const copy = explainPermission({ title: "mcp__bossrnan__wiki", kind: "other", rawInput: null }, "A");
+    expect(copy.summary).toMatch(/doesn't recognise\. Warning: this name looks like one of Boss Man's own tools/);
   });
 });
 

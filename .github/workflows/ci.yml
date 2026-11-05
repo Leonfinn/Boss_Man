@@ -141,6 +141,23 @@ jobs:
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config -q
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "BOSSMAN_TRUSTED_PROXIES: 172.30.0.2"
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "ipv4_address: 172.30.0.3"
+      - name: Blue/green Tailscale overlay puts Caddy on edge as "server" (docs/20-https-tailscale.md)
+        run: |
+          export POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer
+          F="-f docker-compose.yml -f deploy/truenas-bluegreen.yml -f deploy/tailscale.yml -f deploy/tailscale-bluegreen.yml"
+          docker compose $F --profile runners config -q
+          docker compose $F --profile runners config --format json > merged-bgts.json
+          node -e '
+            const c = JSON.parse(require("fs").readFileSync("merged-bgts.json", "utf8")); const ok = (v, m) => { if (!v) { console.error(m); process.exit(1); } };
+            const p = c.services.proxy;
+            ok(p.networks.edge.aliases.includes("server") && p.networks.edge.ipv4_address === "172.30.0.3", "proxy must be on edge as server at the pinned address");
+            ok(p.networks.front.ipv4_address === "172.30.0.18", "proxy keeps its front address");
+            ok(p.environment.BOSSMAN_CADDY_TRUSTED_PROXIES === "172.30.0.2/32", "Caddy must trust only the Tailscale container");
+            ok(Object.keys(c.services.tailscale.depends_on).join() === "proxy", "tailscale must wait for proxy only");
+            for (const s of ["server-blue", "server-green"]) ok(!c.services[s].networks.edge, s + " must not join edge");
+          '
+          ! grep -q 3101 deploy/tailscale/serve.json
+          ! grep -q AllowFunnel deploy/tailscale/serve.json
       - name: Self-deploy override mounts the two folders and no Docker socket
         run: |
           POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer docker compose -f docker-compose.yml -f deploy/truenas.yml -f deploy/truenas-deployer.yml --profile runners config > merged-deployer.yml
@@ -156,13 +173,40 @@ jobs:
           grep -A4 "aliases:" merged-bg.yml | grep -q "^ *- server$"
           grep -q "source: /mnt/tank/boss-man/deployer/proxy" merged-bg.yml
           test "$(grep -c 'source: /var/run/docker.sock' merged-bg.yml)" = 1
+          # The private "front" network: internal, the proxy has the fixed address, both colours trust exactly that address, runners are not on it.
+          docker compose -f docker-compose.yml -f deploy/truenas.yml -f deploy/truenas-bluegreen.yml --profile runners config --format json > merged-bg.json
+          node -e '
+            const c = JSON.parse(require("fs").readFileSync("merged-bg.json", "utf8"));
+            const ok = (v, m) => { if (!v) { console.error("FAIL: " + m); process.exit(1); } };
+            ok(c.networks.front && c.networks.front.internal === true, "front must be an internal network");
+            const ip = c.services.proxy.networks.front && c.services.proxy.networks.front.ipv4_address;
+            ok(ip === "172.30.0.18", "proxy needs the fixed front address, got " + ip);
+            for (const s of ["server-blue", "server-green"]) {
+              ok(c.services[s].environment.BOSSMAN_TRUSTED_PROXIES === ip, s + " must trust only the proxy front address");
+              ok(c.services[s].networks.front.aliases.includes(s + "-front"), s + " needs its front alias");
+            }
+            for (const [n, s] of Object.entries(c.services)) {
+              if (n.startsWith("runner")) ok(!(s.networks || {}).front, n + " must not be on front");
+            }
+            ok(!c.services.db.networks || !c.services.db.networks.front, "db must not be on front");
+          '
           # Without the file the single server is unchanged.
           docker compose -f docker-compose.yml -f deploy/truenas.yml config | grep -q "^  server:"
       - name: The Caddyfile and a generated include validate with the pinned Caddy
         run: |
           mkdir -p active
+          # Both include forms scripts/host-deployer.sh writes: the front-network one and the older one.
+          printf '(active) {\n\treverse_proxy server-blue-front:{args[0]} {\n\t\theader_up X-Forwarded-For {client_ip}\n\t\thealth_uri {args[1]}\n\t}\n}\n' > active/active.caddy
+          docker run --rm -v "$PWD/deploy/caddy:/etc/caddy:ro" -v "$PWD/active:/etc/caddy-active:ro" caddy:2.11.7 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker run --rm -e BOSSMAN_CADDY_TRUSTED_PROXIES="172.30.0.3/32" -v "$PWD/deploy/caddy:/etc/caddy:ro" -v "$PWD/active:/etc/caddy-active:ro" caddy:2.11.7 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           printf '(active) {\n\treverse_proxy server-blue:{args[0]} {\n\t\thealth_uri {args[1]}\n\t}\n}\n' > active/active.caddy
           docker run --rm -v "$PWD/deploy/caddy:/etc/caddy:ro" -v "$PWD/active:/etc/caddy-active:ro" caddy:2.11.7 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Spoofed forwarded headers through the real Caddyfile (scripts/caddy-edge.test.sh)
+        run: |
+          id=$(docker create caddy:2.11.7)
+          docker cp "$id:/usr/bin/caddy" "$RUNNER_TEMP/caddy"
+          docker rm "$id"
+          CADDY="$RUNNER_TEMP/caddy" scripts/caddy-edge.test.sh
       - name: Shell script tests (deploy.sh, the host deployer, backup and Penpot)
         run: |
           sudo apt-get install -y shellcheck >/dev/null
