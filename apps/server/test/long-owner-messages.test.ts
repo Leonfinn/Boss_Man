@@ -105,6 +105,16 @@ describe("long owner messages (BOS-502)", () => {
     expect(thread.find((m) => m.role === "owner")!.text).toBe(big);
   });
 
+  it("takes a 200k ticket description whole", async () => {
+    const c = (ctx = await setup());
+    const big = log(200_000);
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Describe it" })).json() as { id: string };
+    const r = await c.req("PATCH", `/api/tickets/${t.id}`, { body: big });
+    expect(r.statusCode, r.body.slice(0, 400)).toBe(200);
+    const read = (await c.req("GET", `/api/tickets/${t.id}`)).json() as { body: string };
+    expect(read.body).toBe(big);
+  });
+
   it("takes a 200k decision answer whole", async () => {
     const c = (ctx = await setup());
     const big = log(200_000);
