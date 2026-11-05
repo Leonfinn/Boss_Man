@@ -16,6 +16,7 @@ import { readWatchdogSettings, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
+import type { ClearWhen } from "./alert-clearing.js";
 import { CANCEL_RUN, checkAsk } from "./decisions.js";
 import { ALERT_REASON, SCRUM_MASTER_DUTY, WATCHDOG_REWAKE_REASON, WatchdogError, watchdogPausedUntil, type watchdogService } from "./watchdog.js";
 
@@ -62,9 +63,52 @@ export type AlertInput = {
   recommended?: string;
   context?: Record<string, unknown>;
   dedupeKey?: string;
+  /**
+   * When the card's cause is gone, in a form the server can check (DR-016, BOS-470). The closer
+   * (alert-clearing.ts) closes the card on any tier, the owner's included, with the reason. A raise
+   * without one is filled in from the dedupe key where that names the cause exactly (stalled run,
+   * start failure, runner-offline, self/chain/ticketless loop, usage limit); anything else stays as
+   * it was rather than guessing.
+   */
+  clearWhen?: ClearWhen[];
 };
 
+/** The first part of a raise's cause key, e.g. "start-fail" from "start-fail:<agent>:<wake>". */
+const keyPrefix = (key: string | undefined) => (key ?? "").split(":")[0] ?? "";
+
 type Notify = (agentId: string, input: { ticketId?: string | null; reason: string; note?: string | null; priority?: number }) => Promise<{ id: string; status: string; statusReason?: string | null }>;
+
+/**
+ * The condition for a raise that didn't give one, where its cause key says exactly what would
+ * clear it (DR-017's alert kinds table). Anything else gets none: a condition that is true too
+ * early would hide a live problem, so nothing is guessed from the question's words or a timeout.
+ */
+async function inferClearWhen(input: AlertInput): Promise<ClearWhen[]> {
+  const key = input.dedupeKey;
+  if (!key) return [];
+  const parts = key.split(":");
+  switch (keyPrefix(key)) {
+    case "stalled":
+      return parts[1] ? [{ kind: "runActive", runId: parts[1] }] : [];
+    case "start-fail": {
+      if (!parts[1] || !parts[2]) return [];
+      // The card names the runner-offline case in its question (flagFailedStart only raises it for "runner offline").
+      // The key is "start-fail:<agentId>:<wakeId>"; a wake id has no colons, so the rest is the wake.
+      if (!/runner offline/i.test(input.question)) return [];
+      return [{ kind: "runnerConnected", companyId: input.companyId, wakeId: parts.slice(2).join(":") }];
+    }
+    case "alert": {
+      // The agent is in both the key and `about`; the key is the one this card was built from.
+      const agentId = parts[2];
+      const what = parts[1];
+      return agentId && (what === "self" || what === "chain" || what === "ticketless") ? [{ kind: "agentRanOk", agentId }] : [];
+    }
+    case "limit":
+      return parts[1] ? [{ kind: "limitReset", fundingSourceId: parts[1] }] : [];
+    default:
+      return [];
+  }
+}
 
 export function alertLadder(
   db: Db,
@@ -252,6 +296,7 @@ export function alertLadder(
         rewake: input.rewake ?? null,
         hops: [],
       };
+      const clearWhen = input.clearWhen ?? (await inferClearWhen(input));
       const [d] = await db
         .insert(decisions)
         .values({
@@ -264,7 +309,7 @@ export function alertLadder(
           // Not on any rung's queue until place() puts it there; the owner is not notified before.
           tier: "ceo",
           dedupeKey: input.dedupeKey,
-          context: { type: "question", ...input.context, ladder },
+          context: { type: "question", ...input.context, ladder, ...(clearWhen.length ? { clearWhen } : {}) },
           createdAt: now(),
         })
         .onConflictDoNothing()

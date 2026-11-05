@@ -32,6 +32,7 @@ import { conversationLines } from "./ticket-chat.js";
 import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
+import type { ClearWhen } from "./alert-clearing.js";
 import { AGE_STEP_MS, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
@@ -76,6 +77,8 @@ export const WATCH_REASON = "ticket watch";
 // TREE_REASON (mcp.ts) wakes the watcher when everything in its watched tree has stopped.
 /** An assigned ticket nobody is working on, found by the sweep (R82). */
 export const MISSED_REASON = "missed work";
+/** An urgent ticket in progress that nobody is working on, found by the sweep (BOS-346). */
+export const URGENT_IDLE_REASON = "urgent idle";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 /** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
@@ -245,6 +248,19 @@ export function schedulerService(
     if (!urgent) return false;
     if (source.quotaOverage === "urgent") return true;
     return !full.some((s) => s.utilization >= 1) && !samples.some((s) => s.overageInUse);
+  }
+
+  /**
+   * Whether an account has room for a new run again, by the same test a run launch uses (BOS-383,
+   * BOS-227). The one closer asks this for usage-limit cards, so the card and the scheduler never
+   * disagree about what "back under the limit" means.
+   */
+  async function hasRoom(fundingSourceId: string): Promise<boolean> {
+    const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, fundingSourceId));
+    if (!source) return false;
+    const samples = await latestQuotaWindows(source.id);
+    if (samples.length === 0) return false;
+    return holdingWindows(source, samples, now()).length === 0;
   }
 
   /** For the hold notice: when no other Claude account can take over, how to swap by hand (BOS-383). */
@@ -749,7 +765,9 @@ export function schedulerService(
     if (open) return;
     const [agent] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
     const [t] = w.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
-    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}` });
+    // A "could not start" card closes itself once the runner is back and this wake has started (DR-017 E, BOS-475).
+    const clearWhen: ClearWhen[] = /runner offline/i.test(reason) ? [{ kind: "runnerConnected", companyId: w.companyId, wakeId: w.id }] : [];
+    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}`, clearWhen });
   }
 
   /** The owner's ranked Claude subscriptions in order, when this source is one of them (BOS-383). */
@@ -917,6 +935,7 @@ export function schedulerService(
 
   const self = {
     limits,
+    hasRoom,
 
     /** Queues a wake, or drops it (and tells the owner) if it looks like a loop. */
     async wake(input: WakeInput) {
@@ -924,11 +943,16 @@ export function schedulerService(
       if (!agent) throw new Error("No such agent.");
       let depth = 0;
       let causedByAgentId: string | null = null;
-      if (input.causedByRunId) {
-        const [parent] = await db.select({ depth: wakes.causationDepth }).from(wakes).where(eq(wakes.runId, input.causedByRunId));
-        const [run] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, input.causedByRunId));
-        depth = (parent?.depth ?? 0) + 1;
-        causedByAgentId = run?.agentId ?? null;
+      // Boss Man's own wakes (a resume after a restart, a watchdog sweep) are not an agent waking
+      // itself or another agent: they keep the wake depth of the run they pick up and are left out
+      // of the self-wake count, so a mass restart can't trip the loop brakes (BOS-479).
+      const cls = wakeClassOf(input);
+      const parentRunId = input.causedByRunId ?? (cls === "scheduled" ? input.resumeRunId : null);
+      if (parentRunId) {
+        const [parent] = await db.select({ depth: wakes.causationDepth }).from(wakes).where(eq(wakes.runId, parentRunId));
+        const [run] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, parentRunId));
+        depth = (parent?.depth ?? 0) + (cls === "scheduled" ? 0 : 1);
+        causedByAgentId = input.causedByRunId ? (run?.agentId ?? null) : null;
       }
       // An urgent ticket's wake takes no wait at all (BOS-253) and is never treated as routine: the
       // flag skips quiet hours and batching, but the priority is kept as given, so tick() still runs
@@ -950,7 +974,6 @@ export function schedulerService(
 
       // Someone waiting on this wake is never dropped for looking like a loop (DR-002): the loop
       // limits raise their alert and the wake goes ahead, so a card can't be lost to a loop guard.
-      const cls = wakeClassOf(input);
       const keep = cls === "waiting";
       if (depth > limits.maxDepth) {
         const loopAlert = () =>
@@ -968,12 +991,13 @@ export function schedulerService(
         }
         await loopAlert();
       }
-      if (causedByAgentId === agent.id) {
+      if (causedByAgentId === agent.id && cls !== "scheduled") {
         const since = new Date(now().getTime() - 10 * 60_000);
+        const scheduledReasons = reasonsOfClass("scheduled").map((r) => sql`${r}`);
         const recent = await db
           .select({ n: sql<number>`count(*)::int` })
           .from(wakes)
-          .where(and(eq(wakes.agentId, agent.id), eq(wakes.causedByAgentId, agent.id), gt(wakes.createdAt, since)));
+          .where(and(eq(wakes.agentId, agent.id), eq(wakes.causedByAgentId, agent.id), gt(wakes.createdAt, since), sql`${wakes.reason} not in (${sql.join(scheduledReasons, sql`, `)})`));
         if ((recent[0]?.n ?? 0) >= limits.selfWakesPer10Min) {
           const selfAlert = () =>
             deps.alert(agent.companyId, `${agent.name} keeps waking itself (more than ${limits.selfWakesPer10Min} times in 10 minutes). New self-wakes are ${keep ? "still going through when someone is waiting on them, but look into it" : "being dropped"}.`, { ticketId: base.ticketId, about: [agent.id], dedupeKey: `alert:self:${agent.id}` });
@@ -1247,7 +1271,10 @@ export function schedulerService(
       // low-priority watch can't wait for ever behind a full house (DR-002). The stored priority, and
       // so the quota hold, is untouched. Someone-is-waiting wakes go first. The sort is stable, so
       // equal ranks stay oldest first.
-      const rank = (w: (typeof queue)[number]) => w.priority + (wakeClassOf(w) === "scheduled" ? Math.floor((t.getTime() - w.createdAt.getTime()) / AGE_STEP_MS) : 0);
+      // A wake for an urgent ticket gains 1 more, within its class (BOS-346): the ticket's flag counts, not only the reason.
+      const queuedTicketIds = [...new Set(queue.flatMap((w) => (w.ticketId ? [w.ticketId] : [])))];
+      const urgentIds = new Set(queuedTicketIds.length ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.urgent, true), inArray(tickets.id, queuedTicketIds)))).map((r) => r.id) : []);
+      const rank = (w: (typeof queue)[number]) => w.priority + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0) + (wakeClassOf(w) === "scheduled" ? Math.floor((t.getTime() - w.createdAt.getTime()) / AGE_STEP_MS) : 0);
       const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
       queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a));
 
