@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, netguardSpec, parseAllow, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
@@ -120,6 +120,11 @@ describe("the runner launcher (R55)", () => {
     // BOS-412: weight can be changed, and a hard cap is only set when asked for.
     expect(containerSpec({ ...config(), cpuShares: 256, cpus: 1.5 }, "app-co").HostConfig).toMatchObject({ CpuShares: 256, NanoCpus: 1_500_000_000 });
     expect(containerSpec(config(), "app-co").HostConfig).not.toHaveProperty("NanoCpus");
+    expect(containerSpec({ ...config(), checkSlots: 2 }, "app-co").Env).toContain("BOSSMAN_CHECK_SLOTS=2");
+    expect(containerSpec({ ...config(), checkSlots: 1 }, "app-co").Env.join()).not.toContain("BOSSMAN_CHECK_SLOTS");
+    expect([parseCheckSlots(undefined), parseCheckSlots(""), parseCheckSlots("2")]).toEqual([1, 1, 2]);
+    expect(() => parseCheckSlots("0")).toThrow();
+    expect(() => parseCheckSlots("lots")).toThrow();
     expect(parseCpuShares(undefined)).toBe(512);
     expect(parseCpuShares("1024")).toBe(1024);
     expect(() => parseCpuShares("1")).toThrow();
