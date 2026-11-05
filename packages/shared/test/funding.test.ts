@@ -17,6 +17,14 @@ describe("modelFitProblem (BOS-477)", () => {
     }
   });
 
+  it("accepts the provider-prefixed names OpenCode uses for the chosen provider", () => {
+    expect(modelFitProblem("opencode", "anthropic", "anthropic/claude-sonnet-4-5")).toBeNull();
+    expect(modelFitProblem("opencode", "openai", "openai/gpt-5")).toBeNull();
+    // A prefix for a different provider is not this account's model.
+    expect(modelFitProblem("opencode", "anthropic", "openai/gpt-5")).toContain("Claude models only");
+    expect(modelFitProblem("opencode", "openai", "anthropic/claude-sonnet-4-5")).toContain("OpenAI models only");
+  });
+
   it("lets the agent move to a provider that serves a non-Claude model", () => {
     // The same DeepSeek model is fine on its own provider; only Claude Code says to change provider.
     expect(modelFitProblem("opencode", "synthetic", "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017")).toBeNull();
