@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Ticket } from "../src/pages/Ticket";
@@ -82,5 +82,54 @@ describe("phone ordering hooks (BOS-245)", () => {
     const review = (await screen.findByText("waiting for you")).closest("details")!;
     expect(review.classList.contains("fold")).toBe(true);
     expect(review.classList.contains("review-card")).toBe(true);
+  });
+});
+
+describe("Approve and merge settles the owner's sign-off (BOS-471)", () => {
+  it("sends one press to the approve-merge path and says what it did", async () => {
+    const calls: string[] = [];
+    const at = new Date().toISOString();
+    const ticket = { id: "t1", title: "Fix typo", systemState: "review", risk: "high", repoUrl: "https://github.com/Leonfinn/customer-app.git", defaultBranch: "main", branch: "bm/fix-typo", landing: "merge", verifyCommand: "pnpm test", ownerSignoff: true, signoffWaiting: true, projectId: "p1", project: "App", companyId: "c1", assignee: "Engineer", assigneeAgentId: "a1", createdAt: at, lastActivityAt: at };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST") {
+          calls.push(url);
+          return json({ outcome: "landing", signoffAnswered: true, landing: { state: "running", startedAt: at, command: "pnpm test", startedBy: "the owner" } });
+        }
+        if (url === "/api/tickets/t1") return json(ticket);
+        if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
+        if (url.includes("/features")) return json({ features: [] });
+        if (url.endsWith("/artifacts") || url.endsWith("/reviews") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json({});
+      }),
+    );
+    render(<Ticket id="t1" companies={[company]} />);
+    expect(await screen.findByText(/This is also your sign-off: one press approves, signs off and merges\./)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Approve and merge" }));
+    expect(await screen.findByText(/Signed off\. Checking and merging now\./)).toBeTruthy();
+    expect(calls).toEqual(["/api/tickets/t1/approve-merge"]);
+  });
+
+  it("says it signed off and merged when the answer's own landing already finished", async () => {
+    const at = new Date().toISOString();
+    const ticket = { id: "t1", title: "Fix typo", systemState: "review", risk: "high", repoUrl: "https://github.com/Leonfinn/customer-app.git", defaultBranch: "main", branch: "bm/fix-typo", landing: "merge", verifyCommand: "pnpm test", ownerSignoff: true, signoffWaiting: true, projectId: "p1", project: "App", companyId: "c1", assignee: "Engineer", assigneeAgentId: "a1", createdAt: at, lastActivityAt: at };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        // The sign-off's own answer ran the merge before it returned, so the route hands back no landing.
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST") return json({ outcome: "landing", signoffAnswered: true, landing: null });
+        if (url === "/api/tickets/t1") return json(ticket);
+        if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
+        if (url.includes("/features")) return json({ features: [] });
+        if (url.endsWith("/artifacts") || url.endsWith("/reviews") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json({});
+      }),
+    );
+    render(<Ticket id="t1" companies={[company]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve and merge" }));
+    expect(await screen.findByText(/Signed off and merged\./)).toBeTruthy();
   });
 });

@@ -1,7 +1,7 @@
 // Plain-English explanations of permission requests, worked out from the command itself
 // (no model): what the owner is being asked to allow, and the worst thing it could do.
 
-import { commandOf, DESTRUCTIVE, PUSHING, type PermissionInfo, type PolicyMatch } from "./policy.js";
+import { commandOf, DESTRUCTIVE, looksLikeBossmanTool, PUSHING, type PermissionInfo, type PolicyMatch } from "./policy.js";
 
 export type Effect = "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown";
 
@@ -730,7 +730,10 @@ export function explainPermission(info: PermissionInfo, agent: string): Permissi
   }
   const t = TOOL[info.kind ?? ""];
   const target = text(info.rawInput, "file_path", "filePath", "path", "url") ?? (info.kind === "search" ? text(info.rawInput, "pattern", "query") : null);
-  if (!t) return { title: `${agent} wants to use a tool`, summary: `Uses the tool "${info.title ?? "unnamed"}", which Boss Man doesn't recognise.`, effect: "unknown", reason };
+  if (!t) {
+    const lookalike = looksLikeBossmanTool(info.title) ? ` Warning: this name looks like one of Boss Man's own tools (mcp__bossman__…) but is not one. Read it carefully: it may be a copy made to get past the checks.` : "";
+    return { title: `${agent} wants to use a tool`, summary: `Uses the tool "${info.title ?? "unnamed"}", which Boss Man doesn't recognise.${lookalike}`, effect: "unknown", reason };
+  }
   const noun = t.verb === "Fetch" ? "" : t.verb === "Search" ? " for" : " the file";
   return { title: `${agent} wants to ${t.what}`, summary: `${t.verb}${target ? `${noun} ${target}` : ` (no name given)`}.`, effect: t.effect, reason };
 }
