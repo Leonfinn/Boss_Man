@@ -19,6 +19,10 @@ describe("ticket page layout for a folded Work panel", () => {
     expect(rule(".ticket-layout.props-collapsed > .ticket-props")).toContain("grid-column: 2");
   });
 
+  it("leaves the folded panel column as wide as its content, not the 290px of the open desktop grid", () => {
+    expect(rule(".ticket-layout.props-collapsed")).toContain("minmax(0, 1fr) auto");
+  });
+
   it("returns to one column at the stacking width, so nothing squeezes the description", () => {
     const start = css.indexOf("@media (max-width: 900px)");
     expect(start).toBeGreaterThan(-1);

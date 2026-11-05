@@ -733,11 +733,12 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 #ticket-props-body { display: flex; flex-direction: column; gap: 8px; }
 #ticket-props-body[hidden] { display: none; }
 .props-toggle { min-height: 32px; padding: 0 10px; font-size: 13px; }
-/* Folded, the Work panel is a one-line card: it sits in the narrow right-hand column so the description
-   keeps the main one. Without the rule below, the `.props-collapsed` grid from R76 hands the 1fr share to
-   whichever column comes last in the source, which on a tablet or an unfolded foldable is the panel, and
-   the description gets crushed into roughly 200px (BOS-485). Explicit placement fixes it without touching
-   the phone order. */
+/* Folded, the Work panel is a one-line card: it sits in the narrow right-hand column, which shrinks to its
+   content (`auto`), so the description keeps the main one and desktop width is unchanged. Without the
+   placement rules below, the grid hands the 1fr share to whichever column comes last in the source, which
+   on a tablet or an unfolded foldable is the panel, and the description is crushed into roughly 200px
+   (BOS-485). The explicit placement fixes it without touching the phone order. */
+.ticket-layout.props-collapsed { grid-template-columns: minmax(0, 1fr) auto; }
 .ticket-layout.props-collapsed > .ticket-main { grid-column: 1; grid-row: 1; }
 .ticket-layout.props-collapsed > .ticket-props { grid-column: 2; grid-row: 1; min-width: 0; }
 .ticket-props small { font-size: 12px; }
