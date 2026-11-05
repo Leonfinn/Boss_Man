@@ -266,7 +266,11 @@ case "$a" in
       *"/api/setup"*) [[ -z ${FAKE_SMOKE_FAIL:-} ]] || exit 1; echo '{"needsSetup":false}' ;;
       *) ready "$c" ;;
     esac ;;
-  "exec -T proxy wget -q -T 3 -O /dev/null http://server-"*-front:*) [[ -z ${FAKE_NO_FRONT:-} ]] || exit 1 ;;
+  config) [[ -n ${FAKE_UNDECLARED:-} ]] || echo "aliases: [server-blue-front, server-green-front]" ;;
+  "exec -T proxy wget -q -T 3 -O /dev/null http://server-"*-front:*)
+    echo "front-check" >>"$DL"
+    [[ -z ${FAKE_NO_FRONT:-} ]] || exit 1
+    if [[ -n ${FAKE_FRONT_FLAKY:-} ]]; then n=$(cat "$W/flaky" 2>/dev/null || echo 0); echo $((n + 1)) >"$W/flaky"; ((n >= FAKE_FRONT_FLAKY)) || exit 1; fi ;;
   "exec -T proxy wget"*)
     live=$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\)\(-front\)\{0,1\}:.*/\1/p' "$BOSSMAN_DEPLOYER/proxy/active.caddy")
     [[ ${FAKE_VERIFY_FAIL:-} != "$live" ]] || exit 1
@@ -363,10 +367,23 @@ live_is green
 
 # 16b. A host whose compose files have no front network yet gets the old form.
 bx="$(push apps/server/bgfront)"
-reset_world green "$b1"; FAKE_NO_FRONT=1 bgreq "$bx"; FAKE_NO_FRONT=1 bg
+export FRONT_WAIT=0
+git -C "$T/src" reset -q --hard "$P"; reset_world green "$b1"; FAKE_UNDECLARED=1 FAKE_NO_FRONT=1 bgreq "$bx"; FAKE_UNDECLARED=1 FAKE_NO_FRONT=1 bg
 live_is blue
 grep -q 'reverse_proxy server-blue:{args\[0\]}' "$D/proxy/active.caddy" || fail "no-front host should get the old form: $(cat "$D/proxy/active.caddy")"
 hasnt "$D/proxy/active.caddy" "header_up"
+
+# 16c. A check that fails twice and then passes is retried: the front form is written.
+git -C "$T/src" reset -q --hard "$P"; reset_world green "$b1"; rm -f "$W/flaky"; FAKE_FRONT_FLAKY=2 bgreq "$bx"; FAKE_FRONT_FLAKY=2 bg
+live_is blue
+grep -q 'reverse_proxy server-blue-front:{args\[0\]}' "$D/proxy/active.caddy" || fail "flaky check should still give the front form: $(cat "$D/proxy/active.caddy")"
+
+# 16d. The compose files declare front but the check keeps failing: no downgrade (current form kept), and it is logged.
+git -C "$T/src" reset -q --hard "$P"; reset_world green "$b1"; : >"$DL"; FAKE_NO_FRONT=1 bgreq "$bx"; FAKE_NO_FRONT=1 bg
+live_is blue
+grep -q "keeping the old include form" "$D/deployer.log" || fail "declared-but-failing check not logged: $(tail -5 "$D/deployer.log")"
+[[ -s $D/outbox/proxy-include-note.txt ]] || fail "no include note written"
+rm -f "$D/outbox/proxy-include-note.txt"
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
 
 # 17. Post-swap checks fail inside the window: automatic switch back, rolled_back, webhook.
