@@ -10,6 +10,8 @@ import type { Db } from "../db/client.js";
 import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
 import type { ErrorBuffer } from "./error-buffer.js";
+import type { MemorySampler } from "./memory-sampler.js";
+import type { StallSummary } from "./stall-monitor.js";
 
 export type ServerStatusDeps = {
   /** "leader", "standby" or "single" (leader.ts). */
@@ -25,10 +27,14 @@ export type ServerStatusDeps = {
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
   errors: ErrorBuffer;
+  /** Event-loop stalls, GC pauses and memory (stall-monitor.ts, BOS-432). Server-wide; route patterns only, no ids. */
+  stalls?: () => StallSummary;
   /** The last hour of permission decisions for one company (permission-log.ts, BOS-306). */
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
+  /** Where this process's memory sits, server-wide like commit (memory-sampler.ts, BOS-410). */
+  memory?: Pick<MemorySampler, "status">;
   commit: string;
   startedAt: Date;
   now?: () => Date;
@@ -123,7 +129,11 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           commit: short(deps.commit),
           startedAt: deps.startedAt.toISOString(),
           uptimeSeconds: ageSeconds(deps.startedAt, at),
+          // This process only (the colour that answered), in MiB; no company data (BOS-410).
+          memory: deps.memory ? deps.memory.status() : null,
         },
+        // Freezes over 1 s with memory, GC and requests in flight (BOS-432), plus the memory reading now.
+        stalls: deps.stalls?.() ?? null,
         deploy: {
           enabled: !!deploy?.enabled,
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),

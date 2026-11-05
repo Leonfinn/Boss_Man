@@ -274,7 +274,7 @@ On the Secrets page, choose **Claude setup-token** and paste the token. Agents g
 
 Choose **Generate Token** and copy it; Gitea shows it only once. The token can do what your Gitea user can, so a user with write access to the repo is enough. (Labels from Gitea 28.0.0's [`access_tokens.tmpl`](https://github.com/go-gitea/gitea/blob/v28.0.0/templates/shared/user/access_tokens.tmpl); see also Gitea's [scopes documentation](https://docs.gitea.com/development/oauth2-provider#scopes).)
 
-On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Agents get it as `GIT_TOKEN`, and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check on the Projects page, tells you whether it can push.
+On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Boss Man's runner holds it as `GIT_TOKEN` (agents' sessions never see it, so an agent can't push by itself), and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check on the Projects page, tells you whether it can push.
 
 **When work is approved** (the Projects page) is either **Merge into the default branch** (R46) or **Open a pull request** (R59). If the default branch is protected so that only pull requests can change it, choose the pull request option; a direct push would be refused and the ticket would go back to the agent with the error.
 
@@ -762,6 +762,35 @@ docker compose exec -T server-blue cat /proc/1/cmdline | tr '\0' ' '; echo; curl
 - **The proxy keeps restarting** (`Restarting (255)`, and `docker logs boss-man-proxy-1` says `exec /usr/bin/caddy: operation not permitted`). The `caddy` program in the official image carries a file capability (bind to low ports). With every capability dropped and none added back, Linux refuses to run it at all. The compose file now gives back that one capability (`cap_add: [NET_BIND_SERVICE]`); a checkout from before 23 Oct 2026 lacks it. Bring the checkout up to `main`, then `docker compose up -d --no-deps proxy`.
 - **"Update failed: … blue did not step down. Switched back to blue automatically."** The live colour was built from an image that starts the server through the `tsx` command. That command runs the server as a child process and passes on only SIGINT and SIGTERM, so the hand-over signal (SIGUSR1) never arrives. Images from `5d983a16` on start `node --import tsx` directly. Rebuild the live colour in place (above) once; swaps work after that. The automatic switch-back left the live colour untouched. Any migration the attempt ran was expand-only, so the old code keeps working with it.
 - **Runner shows Offline after the cutover.** Its log (`docker logs -t --since 1h boss-man-runner-<company> 2>&1 | tail`) shows `getaddrinfo ENOTFOUND server` while the proxy is down. It reconnects by itself within 30 seconds of the proxy coming up.
+
+**The private "front" network (an install that is already running blue/green).** The compose file now gives the proxy and the two colours a private network, `front`, where the proxy has a fixed address (172.30.0.18). The proxy reaches the live colour there as `server-<colour>-front`, and the colours believe the forwarded client address only from that one address. Nothing else can use that network: not the runners, not Tailscale. Defaults: `BOSSMAN_FRONT_SUBNET=172.30.0.16/28`, `BOSSMAN_FRONT_PROXY_IP=172.30.0.18`, `BOSSMAN_FRONT_RANGE=172.30.0.24/29`. The deployer refuses this change (it edits `deploy/` and `scripts/`), so apply it by hand, on staging first:
+
+1. Check the subnet is free: `docker network ls -q | xargs docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'` must not list anything inside 172.30.0.16/28. If it does, set all three `BOSSMAN_FRONT_*` variables in `.env` to a free block (the range must sit inside the subnet and not contain the proxy address).
+2. Back up (`.env` and the database, as in step 2 above), then `git fetch origin main && git merge --ff-only origin/main`.
+3. Copy the new deployer: `cp scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh`. It works with the old and the new compose files: it only writes the new form of the include when the proxy can reach `server-<colour>-front`.
+4. Recreate the proxy and the live colour (a few seconds of downtime; the standby colour picks up the change at the next swap): `docker compose up -d --no-deps --force-recreate proxy server-blue` (use the live colour's name).
+5. Check that the network lists the proxy (172.30.0.18) and the colours, and nothing else: `docker network inspect boss-man_front --format '{{range .Containers}}{{.Name}} {{.IPv4Address}} {{end}}'`. Then put the live colour's include in the new form, by running a swap or by hand:
+
+~~~sh
+cat > $D/proxy/active.caddy.new <<'INC'
+# Written by host-deployer.sh. Do not edit. Live colour: blue
+(active) {
+	reverse_proxy server-blue-front:{args[0]} {
+		header_up X-Forwarded-For {client_ip}
+		health_uri {args[1]}
+		health_interval 2s
+		health_timeout 2s
+	}
+}
+INC
+chmod 644 $D/proxy/active.caddy.new && mv -fT $D/proxy/active.caddy.new $D/proxy/active.caddy
+docker compose exec -T proxy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && docker compose exec -T proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+curl -s http://192.168.68.67:3101/api/ready; echo
+~~~
+
+6. What changes for people: the server now sees each device's real address (before, every device looked like the proxy), so the login attempt limit counts per device.
+
+**Undo the front network.** Revert the commit (or check out the previous `deploy/truenas-bluegreen.yml` and `deploy/caddy/Caddyfile`), put back the previous deployer copy, rewrite the include in the old form (the snippet in step 3 above, with the live colour's name), then `docker compose up -d --no-deps --force-recreate proxy server-<live colour>`. An old deployer cannot read the new form of the include, so the rewrite is required.
 
 **Go back to the previous release after the 15 minutes** (the old colour has been stopped, its image is still there until the next swap). As root on the NAS, from the deployer folder:
 
