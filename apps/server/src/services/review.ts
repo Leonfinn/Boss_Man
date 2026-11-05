@@ -22,6 +22,8 @@ export class ReviewError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** True when asking again could work (the runner was busy or silent), as opposed to a host that is not set up. */
+    readonly retryable = false,
   ) {
     super(message);
   }
@@ -270,9 +272,9 @@ export function reviewService(
           branches: others.map((o) => ({ ticketId: o.ticketId, branch: o.branch })),
         }), MERGE_WAIT_MS);
       } catch (err) {
-        throw new ReviewError(409, `Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged: ${(err as Error).message} Try approving it again.`);
+        throw new ReviewError(409, `Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged: ${(err as Error).message} Try approving it again.`, true);
       }
-      if (!Array.isArray(r.carried)) throw new ReviewError(409, "Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged. Try approving it again.");
+      if (!Array.isArray(r.carried)) throw new ReviewError(409, "Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged. Try approving it again.", true);
       ids = r.carried.map((c) => c.ticketId);
       contained = new Set(r.carried.filter((c) => c.contained).map((c) => c.ticketId));
     } else {
@@ -871,13 +873,32 @@ export function reviewService(
       // A branch that also carries another open ticket's unmerged work can't go on the target: that
       // work hasn't been reviewed, signed off or checked at its own risk (BOS-130). One approval is
       // never enough for two tickets, so this is checked before anything runs or is pushed.
+      // A runner that is busy or silent is waited for: the check is asked again by itself, with a longer pause each
+      // time (the ticket stays in review and keeps saying it is active), before the merge stops with a card.
       let carried: CarriedInfo[];
-      try {
-        carried = await carriedBetween(runner.id, t, defaultBranch, gitHost, gitApiBase);
-      } catch (err) {
-        if (!(err instanceof ReviewError)) throw err;
-        const r = await refuseUnchecked(t, err);
-        return { outcome: r.outcome, delivered: r.delivered, detail: r.detail };
+      for (let retry = 1; ; retry++) {
+        try {
+          carried = await whileActive(() => carriedBetween(runner.id, t, defaultBranch, gitHost, gitApiBase));
+          break;
+        } catch (err) {
+          if (!(err instanceof ReviewError)) throw err;
+          if (!err.retryable) {
+            const r = await refuseUnchecked(t, err);
+            return { outcome: r.outcome, delivered: r.delivered, detail: r.detail };
+          }
+          if (retry > INFRA_RETRY_ATTEMPTS) {
+            // Retries used up: one "Run the check again" card, and the ticket stays in review so running it
+            // again does not reset the reviews (BOS-460 stalled overnight on a reset request).
+            await wait(t, `Not merged: the runner didn't answer the check for other tickets' unmerged work (${err.message}). Nothing was merged.`);
+            await raiseCheckStuck(db, t, "carried-work check", "the runner didn't answer the check for other tickets' unmerged work", err.message);
+            return { outcome: "check_stuck", delivered: null, detail: { unchecked: err.message } };
+          }
+          const pause = INFRA_RETRY_BASE_MS * 2 ** (retry - 1);
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The runner didn't answer the check for other tickets' unmerged work; asking again (try ${retry} of ${INFRA_RETRY_ATTEMPTS}, in ${Math.max(1, Math.round(pause / 1000))}s). Nothing to do.` });
+          await whileActive(() => new Promise((resolve) => setTimeout(resolve, pause)));
+          const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+          if (now?.state !== "review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the check waited for the runner, so it was not retried." } };
+        }
       }
       // Approved tickets whose whole branch this one holds (the fast-forward case, BOS-372) land together with it.
       const together: CarriedInfo[] = [];

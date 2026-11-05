@@ -882,3 +882,32 @@ describe("the ordered permission table (BOS-307)", () => {
     expect(shadowedRoutingRules([ssh, del, byTitle, cmdOnly, mixed, ...broadAllow]).map((r) => r.name)).toEqual(["ask before ssh", "t", "c", "m"]);
   });
 });
+
+describe("a folder path as the tool name (BOS-495)", () => {
+  const allowAll = [{ name: "Allow everything", match: { kinds: ["other", "read", "execute"] }, outcome: "allow" as const }];
+  const ask = (title: string | null, rawInput: unknown, kind: string | null = "other") => ({ title, kind, rawInput });
+
+  it("denies each of the three shapes seen on 4 Nov, whatever the rules say", () => {
+    const shapes = ["/home/node/workspaces/tickets/1863e155-aaaa/apps/server/src/services", "/home/node/runner-data", "/tmp/brian-bos493"];
+    for (const title of shapes) {
+      for (const rawInput of [null, {}, { command: "" }, { directories: [title], patterns: [`${title}/*`] }]) {
+        for (const rules of [[], allowAll]) expect(evaluatePermission(ask(title, rawInput), rules), `${title} ${JSON.stringify(rawInput)}`).toMatchObject({ outcome: "deny" });
+      }
+      expect(evaluatePermission(ask(title, null, null), []).outcome).toBe("deny");
+    }
+  });
+
+  it("also catches home, relative and Windows paths", () => {
+    for (const t of ["~/x", "~", "./a", "../a", "C:\\Users\\x"]) expect(evaluatePermission(ask(t, {}), []).outcome, t).toBe("deny");
+  });
+
+  it("leaves real requests alone", () => {
+    // execute: the title is the command; a command in the input; read/edit titles are file paths; tool names.
+    expect(evaluatePermission(ask("/usr/bin/ls /tmp", {}, "execute"), []).rule).not.toMatch(/folder path/);
+    expect(evaluatePermission(ask("/home/node/x", { command: "ls /tmp" }), []).rule).not.toMatch(/folder path/);
+    expect(evaluatePermission(ask("/home/node/x.ts", { filePath: "/home/node/x.ts" }, "read"), []).outcome).toBe("allow");
+    expect(evaluatePermission(ask("mcp__bossman__wiki", {}), []).outcome).toBe("allow");
+    expect(evaluatePermission(ask("Fetch the docs", {}), []).rule).not.toMatch(/folder path/);
+    expect(evaluatePermission(ask(null, {}), []).rule).not.toMatch(/folder path/);
+  });
+});
