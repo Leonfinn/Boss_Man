@@ -84,7 +84,7 @@ export function splitSections(body: string): Section[] {
 /** The section a reader asked for, by heading or heading path, case-insensitive; the first match wins. */
 export function findSection(sections: Section[], wanted: string) {
   const w = wanted.trim().toLowerCase().replace(/\s*>\s*/g, " > ");
-  return sections.find((s) => s.path.toLowerCase() === w) ?? sections.find((s) => s.heading.toLowerCase() === w);
+  return sections.find((s) => s.path.toLowerCase() === w) ?? sections.find((s) => s.path.toLowerCase().endsWith(` > ${w}`)) ?? sections.find((s) => s.heading.toLowerCase() === w);
 }
 
 /** The headings a body has, in order, ignoring "intro" (text before the first heading). */
@@ -114,6 +114,76 @@ export function shrinkRefusal(before: string, after: string): string | null {
     ".",
   ].join("");
   return `${parts} To add to a long page, use append. If you really mean to replace it, an agent may send the whole new body with replace: true (only the CEO or the owner may do that on a page someone else created).`;
+}
+
+/** The lines that make up an entry, trimmed: a line starting "- " or "* " is a list item, so it sits on its own. */
+const entryLines = (entry: string) =>
+  entry
+    .replace(/\s+$/g, "")
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""));
+/** Space between an entry and the text around it: a blank line, or just the list's own break when both are list items. */
+const GLUE = "\n\n";
+
+/** Where an appended entry goes: under a named heading (newest first by default), or at the top/bottom of the page. */
+export type AppendPosition = "top" | "bottom" | "oldest";
+
+/**
+ * A page body with `entry` added (BOS-430), leaving every other character as it was. Under a heading,
+ * the entry sits just below the heading line (newest first) or at the end of that heading's own text
+ * (oldest). With no heading, it goes at the very top or the very bottom of the page. Throws when the
+ * heading isn't on the page, so an append never silently lands somewhere unexpected.
+ */
+export function appendToBody(body: string, entry: string, heading: string | undefined, position: AppendPosition): string {
+  const lines = entryLines(entry);
+  const text = lines.join("\n");
+  const isList = (l: string) => /^[-*] /.test(l);
+  // A list entry that opens a list sits straight after its heading; one that joins a list needs no blank line.
+  const glueAfterHeading = (firstLineAfter: string | undefined) => (isList(lines[0]!) && !isList(firstLineAfter ?? "") ? "\n" : GLUE);
+  if (!heading) {
+    if (position === "top") {
+      // Keep a page's leading "# Title" heading first: an entry never lands above it.
+      const title = /^# [^\n]*\n/.exec(body)?.[0];
+      if (!title) return `${text}${GLUE}${body}`;
+      const rest = body.slice(title.length);
+      const first = rest.replace(/^\s+/, "").split("\n")[0];
+      if (isList(lines[0]!) && !isList(first ?? "")) return `${title}${text}\n${rest.replace(/^\s+/, "")}`;
+      return `${title.trimEnd()}${GLUE}${text}${GLUE}${rest.replace(/^\s+/, "")}`;
+    }
+    // The very end of the page: after the last section's own text, so an entry never lands under another heading.
+    const secs = splitSections(body);
+    const last = secs.at(-1);
+    const end = last && last.level > 0 ? last.ownEnd : body.length;
+    const before = body.slice(0, end).replace(/\s+$/g, "");
+    const after = body.slice(end).replace(/^\s+/g, "");
+    if (after) return `${before}\n${text}\n\n${after}`;
+    const joins = isList(lines[0]!) && isList(before.split("\n").at(-1) ?? "");
+    return body ? `${before}${joins ? "\n" : GLUE}${text}\n` : `${text}\n`;
+  }
+  const sections = splitSections(body);
+  const s = findSection(sections, heading);
+  if (!s) {
+    const choices = headingsOf(body).map((h) => `"${h.path}"`);
+    throw new WikiError(404, `There's no heading "${heading}" on that page. Its headings are: ${choices.length ? choices.join(", ") : "(none)"}.`);
+  }
+  // Oldest: at the end of the section's own text, before its sub-headings, so an entry never lands inside one.
+  if (position === "oldest") {
+    // At the end of the section's own text (its sub-headings, if any, come after the entry), so it joins the list.
+    const before = body.slice(0, s.ownEnd).replace(/\s+$/g, "");
+    const after = body.slice(s.ownEnd).replace(/^\s+/g, "");
+    const joins = isList(lines[0]!) && isList(before.split("\n").at(-1) ?? "");
+    return `${before}${joins ? "\n" : GLUE}${text}\n${after ? `\n${after}` : ""}`;
+  }
+  // Newest first: the entry goes first at the top of the section, keeping the heading's own blank line above it.
+  const headingLineEnd = body.indexOf("\n", s.start);
+  if (headingLineEnd === -1) return `${body}${GLUE}${text}\n`;
+  const lineEnd = (s.end > s.start ? body.lastIndexOf("\n", s.end - 1) : -1) + 1 || body.length;
+  const headingLine = body.slice(s.start, headingLineEnd);
+  const afterHeading = body.slice(headingLineEnd + 1, lineEnd).replace(/^\s+/, "");
+  const first = afterHeading.split("\n")[0];
+  const gap = glueAfterHeading(first);
+  const rest = afterHeading ? `${gap}${afterHeading}` : "";
+  return `${body.slice(0, s.start)}${headingLine}${gap}${text}${rest ? `${gap}${afterHeading}` : ""}${body.slice(lineEnd)}`;
 }
 
 /** [[slug]] and [[slug#Section heading]] in a page body: the slugs it links to. */
@@ -347,13 +417,13 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
     async get(companyId: string, slug: string) {
       const p = await page(companyId, slug);
       const [by] = p.updatedByAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, p.updatedByAgentId)) : [];
+      // Every version, newest first, each with its size so a wiped page can be told from a full one (BOS-430).
       const revisions = await db
-        .select({ id: wikiRevisions.id, createdAt: wikiRevisions.createdAt, agent: agents.name, runId: wikiRevisions.runId })
+        .select({ id: wikiRevisions.id, title: wikiRevisions.title, createdAt: wikiRevisions.createdAt, agent: agents.name, agentId: wikiRevisions.agentId, runId: wikiRevisions.runId, size: sql<number>`length(${wikiRevisions.body})` })
         .from(wikiRevisions)
         .leftJoin(agents, eq(agents.id, wikiRevisions.agentId))
         .where(eq(wikiRevisions.pageId, p.id))
-        .orderBy(desc(wikiRevisions.createdAt))
-        .limit(100);
+        .orderBy(desc(wikiRevisions.createdAt));
       const forTickets = await db
         .select({ id: tickets.id, title: tickets.title })
         .from(ticketArtifacts)
@@ -439,9 +509,62 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       return { page: p!, created: !existing };
     },
 
+    /**
+     * Adds an entry to a page without re-sending the whole body (BOS-430). This is how a running log is
+     * meant to grow: the page is read here, the entry inserted with appendToBody, and the result saved as
+     * an ordinary write (so it keeps a version and the Lessons and shrink rules still apply). Throws when
+     * the page or the named heading is missing, rather than creating a partial page.
+     */
+    async append(companyId: string, input: { slug: string; entry: string; heading?: string; position?: AppendPosition; title?: string; ticketId?: string | null; isCeo?: boolean } & Author) {
+      const p = await page(companyId, input.slug);
+      if (!input.entry.trim()) throw new WikiError(400, "Give the entry to add.");
+      const position = input.position ?? "top";
+      const body = appendToBody(p.body, input.entry, input.heading, position);
+      const title = input.title?.trim() || p.title;
+      // An append only adds text, so it never trips the shrink guard; it keeps a version like any save.
+      const r = await this.write(companyId, { slug: p.slug, folder: p.folder, title, body, ticketId: input.ticketId ?? null, isCeo: !!input.isCeo, agentId: input.agentId, runId: input.runId });
+      const where = input.heading ? ` under "${input.heading}"` : position === "bottom" ? " at the end" : " at the top";
+      return { ...r, size: body.length, where };
+    },
+
     async remove(companyId: string, slug: string) {
       const p = await page(companyId, slug);
       await db.delete(wikiPages).where(eq(wikiPages.id, p.id));
+    },
+
+    /**
+     * A page's versions for the wiki tool's history action (BOS-430): every version, newest first, each
+     * with its size and who saved it. Unlike the page screen this is never capped, so a long release log
+     * still shows the version from before a wipe.
+     */
+    async history(companyId: string, slug: string) {
+      const p = await page(companyId, slug);
+      const revisions = await db
+        .select({ id: wikiRevisions.id, createdAt: wikiRevisions.createdAt, agent: agents.name, agentId: wikiRevisions.agentId, runId: wikiRevisions.runId, size: sql<number>`length(${wikiRevisions.body})` })
+        .from(wikiRevisions)
+        .leftJoin(agents, eq(agents.id, wikiRevisions.agentId))
+        .where(eq(wikiRevisions.pageId, p.id))
+        .orderBy(desc(wikiRevisions.createdAt));
+      return { slug: p.slug, title: p.title, size: p.body.length, revisions };
+    },
+
+    /**
+     * Puts an old version back as the page's current text (BOS-430). The restore is saved through write,
+     * so it is itself a new version (and can be undone) and keeps the Lessons rules. Only the CEO or the
+     * page's last writer may restore: a restore is a replace, and one agent must not overwrite another's
+     * page behind their back. The version must belong to this page, not just this company.
+     */
+    async restore(companyId: string, input: { slug: string; revisionId: string } & Author & { isCeo?: boolean }) {
+      const p = await page(companyId, input.slug);
+      const [rev] = await db.select().from(wikiRevisions).where(and(eq(wikiRevisions.id, input.revisionId), eq(wikiRevisions.pageId, p.id)));
+      if (!rev) throw new WikiError(404, "That version isn't one of this page's. Use history to see its versions.");
+      const isCeo = !!input.isCeo;
+      const lastWriter = p.updatedByAgentId;
+      const mine = !!input.agentId && lastWriter === input.agentId;
+      if (!isCeo && !mine)
+        throw new WikiError(403, "Only the CEO or the page's last writer can put an old version back. Ask the CEO, or the agent who last wrote it.");
+      const r = await this.write(companyId, { slug: p.slug, folder: p.folder, title: rev.title, body: rev.body, replace: true, isCeo, agentId: input.agentId, runId: input.runId });
+      return { ...r, size: rev.body.length };
     },
 
     /** Links a repo file or a web address to a ticket as something it produced. */

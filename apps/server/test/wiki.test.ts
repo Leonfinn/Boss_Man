@@ -241,3 +241,112 @@ describe("wiki shrink guard (BOS-430)", () => {
     await expect(c.wiki.write(c.company.id, { slug: "index", title: "Index", body: "## Releases\n\n- v30", replace: true, isCeo: true, agentId: ceo!.id, runId: null })).resolves.toMatchObject({ created: false });
   });
 });
+
+describe("wiki append, history and restore (BOS-430)", () => {
+  const log = ["# Release log", "", "## 2026-11-03", "", "- 23:15: shipped v1.2.0", "- 17:00: shipped v1.1.9", "", "## 2026-11-02", "", "- 12:00: shipped v1.1.8"].join("\n");
+
+  it("append adds one entry under a heading (newest first) and leaves every other character alone", async () => {
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { title: "Release log", body: log, agentId: c.worker.id, runId: null });
+    const r = await c.wiki.append(c.company.id, { slug: "release-log", entry: "- 09:00: shipped v1.3.0", heading: "2026-11-03", agentId: c.worker.id, runId: null });
+    expect(r.page.body).toBe(log.replace("## 2026-11-03\n\n- 23:15", "## 2026-11-03\n\n- 09:00: shipped v1.3.0\n\n- 23:15"));
+    // Older entries are untouched, and the append keeps a version like any save.
+    const after = await c.wiki.get(c.company.id, "release-log");
+    expect(after.revisions).toHaveLength(2);
+    expect((await c.wiki.revision(c.company.id, after.revisions[0]!.id)).body).toBe(r.page.body);
+  });
+
+  it("append at the top or the end, and a clear error for a heading that isn't there", async () => {
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { title: "Log", body: log, agentId: c.worker.id, runId: null });
+    expect((await c.wiki.append(c.company.id, { slug: "log", entry: "Newest", position: "top", agentId: c.worker.id, runId: null })).page.body).toBe(`# Release log\n\nNewest\n\n${log.slice("# Release log\n\n".length)}`);
+    expect((await c.wiki.append(c.company.id, { slug: "log", entry: "Oldest", position: "bottom", agentId: c.worker.id, runId: null })).page.body).toBe(`# Release log\n\nNewest\n\n${log.slice("# Release log\n\n".length)}\n\nOldest\n`);
+    // A list entry at a section's end joins the list, and one under a heading opens that section's list.
+    const ended = (await c.wiki.append(c.company.id, { slug: "log", entry: "- 08:00: x", heading: "2026-11-02", position: "oldest", agentId: c.worker.id, runId: null })).page.body;
+    expect(ended).toContain("## 2026-11-02\n\n- 12:00: shipped v1.1.8\n\nOldest\n\n- 08:00: x");
+    expect(ended.endsWith("- 08:00: x\n")).toBe(true);
+    await expect(c.wiki.append(c.company.id, { slug: "log", entry: "- x", heading: "No such heading", agentId: c.worker.id, runId: null })).rejects.toThrow(/no heading "No such heading".*headings are/);
+    // append never creates a page, so a typo in the slug can't start a partial one.
+    await expect(c.wiki.append(c.company.id, { slug: "nope", entry: "- x", agentId: c.worker.id, runId: null })).rejects.toThrow(/no wiki page/);
+    expect((await c.wiki.get(c.company.id, "log")).revisions).toHaveLength(4);
+  });
+
+  it("history lists every version with its size, past the 100 the page screen used to show", async () => {
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { title: "Busy", body: "v0", agentId: c.worker.id, runId: null });
+    for (let i = 1; i <= 120; i++) await c.wiki.write(c.company.id, { slug: "busy", title: "Busy", body: `v${i}`, agentId: c.worker.id, runId: null });
+    const screen = await c.wiki.get(c.company.id, "busy");
+    const h = await c.wiki.history(c.company.id, "busy");
+    expect(h.revisions).toHaveLength(121);
+    expect(screen.revisions).toHaveLength(121);
+    expect(h.revisions[0]).toMatchObject({ size: 4 });
+    expect(h.revisions.at(-1)).toMatchObject({ size: 2 });
+    expect(h.size).toBe(4);
+  });
+
+  it("restore puts an old version back as a new version; only the CEO or the page's last writer may", async () => {
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { title: "Release log", body: log, agentId: c.worker.id, runId: null });
+    const [full] = (await c.wiki.history(c.company.id, "release-log")).revisions;
+    // An agent wipes it with an explicit replace (which history lets it do on its own page).
+    await c.wiki.write(c.company.id, { slug: "release-log", title: "Release log", body: "- 23:15: shipped v1.2.0", replace: true, agentId: c.worker.id, runId: null });
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Other" })).json() as { id: string };
+    await expect(c.wiki.restore(c.company.id, { slug: "release-log", revisionId: full!.id, agentId: other.id, runId: null })).rejects.toThrow(/last writer/);
+    const back = await c.wiki.restore(c.company.id, { slug: "release-log", revisionId: full!.id, agentId: c.worker.id, runId: null });
+    expect(back.page.body).toBe(log);
+    const h = await c.wiki.history(c.company.id, "release-log");
+    expect(h.revisions).toHaveLength(3);
+    expect((await c.wiki.revision(c.company.id, h.revisions[0]!.id)).body).toBe(log);
+    // A version of another page is refused, even in the same company.
+    await c.wiki.write(c.company.id, { title: "Other page", body: "x", agentId: c.worker.id, runId: null });
+    const [elsewhere] = (await c.wiki.history(c.company.id, "other-page")).revisions;
+    await expect(c.wiki.restore(c.company.id, { slug: "release-log", revisionId: elsewhere!.id, agentId: c.worker.id, runId: null })).rejects.toThrow(/one of this page's/);
+  });
+
+  it("the wiki tool exposes append, history and restore, and restore is the CEO's or the last writer's", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "t", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    expect(textOf(await client.callTool({ name: "wiki", arguments: { action: "write", slug: "release-log", title: "Release log", body: log, ticketId: t.id } }))).toContain("Created");
+    expect(textOf(await client.callTool({ name: "wiki", arguments: { action: "append", slug: "release-log", entry: "- 09:00: shipped v1.3.0", heading: "2026-11-03", ticketId: t.id } }))).toContain('under "2026-11-03"');
+    const listed = textOf(await client.callTool({ name: "wiki", arguments: { action: "history", slug: "release-log" } }));
+    expect(listed).toContain("versions");
+    expect(listed).toMatch(/\d+ chars|characters/);
+    expect(textOf(await client.callTool({ name: "wiki", arguments: { action: "append", slug: "release-log", entry: "- x", heading: "Nope" } }))).toContain("no heading");
+    await client.close();
+    // The last writer (the worker) may restore it through the tool; the page comes back whole.
+    const [first] = (await c.wiki.history(c.company.id, "release-log")).revisions.slice(-1);
+    const client2 = await c.mcp(c.starts()[0]!.runId);
+    expect(textOf(await client2.callTool({ name: "wiki", arguments: { action: "restore", slug: "release-log", revisionId: first!.id } }))).toContain("Restored");
+    await client2.close();
+    expect((await c.wiki.get(c.company.id, "release-log")).body).toBe(log);
+  });
+
+  it("the owner's restore route brings a version back, and refuses one from another page", async () => {
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { title: "Release log", body: log, agentId: c.worker.id, runId: null });
+    const [full] = (await c.wiki.history(c.company.id, "release-log")).revisions;
+    await c.wiki.write(c.company.id, { slug: "release-log", title: "Release log", body: "- 23:15: shipped v1.2.0", replace: true, agentId: c.worker.id, runId: null });
+    const res = await c.req("POST", `/api/companies/${c.company.id}/wiki-restore`, { slug: "release-log", revisionId: full!.id });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ body: log });
+    expect((await c.req("POST", `/api/companies/${c.company.id}/wiki-restore`, { slug: "log-not-there", revisionId: full!.id })).statusCode).toBe(404);
+  });
+});
+
+describe("wiki history is never lost by import (BOS-430)", () => {
+  it("an imported page starts with a version, so its first edit keeps the imported text", async () => {
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { folder: "Runbooks", title: "Deploy", body: "Thursday 23:00.", agentId: c.worker.id, runId: null });
+    const zip = Buffer.from((await c.req("GET", `/api/companies/${c.company.id}/export?wiki=1&tickets=none`)).rawPayload).toString("base64");
+    const imported = await c.req("POST", "/api/companies/import", { zip, name: "Copy Co" });
+    expect(imported.statusCode).toBe(201);
+    const { companyId } = imported.json() as { companyId: string };
+    const page = (await c.req("GET", `/api/companies/${companyId}/wiki/runbooks/deploy`)).json();
+    expect(page.body).toBe("Thursday 23:00.");
+    expect(page.revisions).toHaveLength(1);
+    expect(page.revisions[0].size).toBe("Thursday 23:00.".length);
+    expect((await c.req("GET", `/api/companies/${companyId}/wiki-revisions/${page.revisions[0].id}`)).json().body).toBe("Thursday 23:00.");
+  });
+});

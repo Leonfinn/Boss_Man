@@ -1719,6 +1719,13 @@ export async function buildApp(opts: AppOptions) {
       const { id, slug } = SlugParams.parse(req.params);
       return wiki.remove(id, slug).then(() => reply.code(204).send(), wikiErrors(reply));
     });
+    // Put an old version back (BOS-430): a new version of its own, so the restore can be undone.
+    // The page's slug goes in the body, as a page address can hold folders and Fastify's wildcard must be last.
+    owner.post("/api/companies/:id/wiki-restore", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ slug: z.string().min(1).max(500), revisionId: Uuid }).parse(req.body);
+      return wiki.restore(id, { ...b, agentId: null, runId: null, isCeo: true }).then((r) => r.page, wikiErrors(reply));
+    });
     owner.get("/api/companies/:id/wiki-revisions/:rev", async (req, reply) => {
       const { id, rev } = z.object({ id: Uuid, rev: Uuid }).parse(req.params);
       return wiki.revision(id, rev).catch(wikiErrors(reply));
