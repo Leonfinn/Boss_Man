@@ -1,6 +1,6 @@
 // Runner daemon: one per company. Dials out to the Boss Man server, runs agents over ACP
 // on its commands, and journals every event until the server has it (R31).
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
 import { runnerFence, sandboxSelfTest } from "./fence.js";
@@ -9,14 +9,17 @@ import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
+import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
 const env = process.env;
 const wsUrl = env.BOSSMAN_URL ?? "ws://server:3100/api/runner/connect";
 const httpBase = wsUrl.replace(/^ws/, "http").replace(/\/api\/runner\/connect$/, "");
-// The token comes from a file (a Docker secret) or the environment.
-const token = env.BOSSMAN_RUNNER_TOKEN_FILE ? readFileSync(env.BOSSMAN_RUNNER_TOKEN_FILE, "utf8").trim() : env.BOSSMAN_RUNNER_TOKEN?.trim();
-if (!token) throw new Error("Set BOSSMAN_RUNNER_TOKEN_FILE or BOSSMAN_RUNNER_TOKEN to the token from POST /api/companies/:id/runner.");
+// A token in the environment sits in /proc/<pid>/environ, which the kernel keeps for the life of the
+// process and a session's fence can't take away without also taking /proc away from its tools
+// (BOS-322). The file is the only route that stays out of a session's reach, so refuse rather than
+// run with a token any session can read.
+const token = safeRunnerToken(env);
 
 const dataDir = env.BOSSMAN_RUNNER_DATA ?? "/home/node/runner-data";
 mkdirSync(dataDir, { recursive: true });

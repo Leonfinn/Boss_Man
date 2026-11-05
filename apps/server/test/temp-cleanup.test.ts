@@ -36,14 +36,14 @@ async function setup() {
   let seq = 0;
   /** An agent's run asks to run a shell command; returns the decision it made, if any. */
   // With a ticket, the runner reports it started the run in that ticket's worktree, unless workspace says otherwise.
-  const ask = async (command: string, agentId = dev.id, opts: { ticketId?: string; rawInput?: Record<string, unknown>; workspace?: false | { ticketId: string } } = {}) => {
+  const ask = async (command: string, agentId = dev.id, opts: { ticketId?: string; rawInput?: Record<string, unknown>; workspace?: false | { ticketId: string }; tool?: { title: string; kind: string; rawInput: unknown } } = {}) => {
     const runId = randomUUID();
     const requestId = randomUUID();
     await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.started", runId, agentId, acpSessionId: "s", model: null } });
     if (opts.ticketId) await db.update(runs).set({ ticketId: opts.ticketId }).where(eq(runs.id, runId));
     const ws = opts.workspace === false ? null : (opts.workspace ?? (opts.ticketId ? { ticketId: opts.ticketId } : null));
     if (ws) await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.workspace", runId, ticketId: ws.ticketId, branch: `bossman/${ws.ticketId}`, baseCommit: "abc123", created: false, restoredPatch: false } });
-    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, title: "Create branch worktree and install deps", kind: "execute", rawInput: { command, ...opts.rawInput }, optionKinds: ["allow_once", "reject_once"] } });
+    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, ...(opts.tool ?? { title: "Create branch worktree and install deps", kind: "execute", rawInput: { command, ...opts.rawInput } }), optionKinds: ["allow_once", "reject_once"] } });
     const [d] = await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
     return { d, runId, requestId };
   };
@@ -147,6 +147,28 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
     const { d } = await ctx.ask(CLEANUP);
     expect(d).toMatchObject({ tier: "owner", recommendedOption: "Allow once" });
     expect((d!.context as { ladder?: unknown }).ladder).toBeUndefined();
+  });
+});
+
+describe("unrecognised tools go to the CEO first (BOS-295)", () => {
+  const tool = (title: string) => ({ tool: { title, kind: "other", rawInput: {} } });
+
+  it("waits with the CEO, with a warning on a lookalike name, and the CEO is woken", async () => {
+    const plain = (await ctx.ask("", ctx.dev.id, tool("mcp__frobnicator__run"))).d;
+    expect(plain).toMatchObject({ tier: "ceo", status: "open" });
+    expect(plain!.question).not.toMatch(/Warning/);
+    expect((await ctx.decisions.queue()).map((q) => q.id)).not.toContain(plain!.id);
+    const look = (await ctx.ask("", ctx.dev.id, tool("mcp__bossrnan__wiki"))).d;
+    expect(look).toMatchObject({ tier: "ceo" });
+    expect(look!.question).toMatch(/doesn't recognise.*Warning: this name looks like one of Boss Man's own tools/);
+    const wake = (await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id))).find((w) => w.note?.includes("bossrnan"));
+    expect(wake!.note).toMatch(/doesn't recognise this tool/);
+  });
+
+  it("goes to the owner when the CEO itself asks, or the CEO is paused", async () => {
+    expect((await ctx.ask("", ctx.ceo.id, tool("mcp__frobnicator__run"))).d).toMatchObject({ tier: "owner" });
+    await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.ceo.id));
+    expect((await ctx.ask("", ctx.dev.id, tool("mcp__frobnicator__run"))).d).toMatchObject({ tier: "owner" });
   });
 });
 

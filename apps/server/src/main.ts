@@ -16,6 +16,8 @@ const leader = createLeader({
   url: env.DATABASE_URL,
   enabled: env.BOSSMAN_LEADER_LOCK !== "0",
   role: env.BOSSMAN_ROLE === "standby" ? "standby" : "auto",
+  // Heartbeats in a row with no reply before stepping down (BOS-432). 1 = the old step-down-at-once behaviour.
+  maxMisses: Number(env.BOSSMAN_LEADER_MISSES) >= 1 ? Number(env.BOSSMAN_LEADER_MISSES) : 2,
   log: (m) => console.warn(m),
 });
 

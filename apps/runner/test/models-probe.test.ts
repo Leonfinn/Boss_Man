@@ -47,6 +47,17 @@ describe("models.probe", () => {
     expect(config.provider.ollama.options.baseURL).toBe("http://192.168.1.2:11434/v1");
   });
 
+  it("withholds the git credential from a probe too, in any form git reads it (BOS-322)", async () => {
+    // The probe spawns the adapter with the run's secrets; the adapter reports the env it actually got.
+    const report = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-env-report.mjs");
+    const secrets = { GIT_TOKEN: "ghp_probe_token", GIT_USERNAME: "bot", GIT_CONFIG_COUNT: "1", GIT_CONFIG_VALUE_0: "Authorization: Basic x", GH_TOKEN: "gh_probe", GITHUB_TOKEN: "ghub_probe", ANTHROPIC_API_KEY: "sk-ant-probe" };
+    const err = await probeModels("opencode", secrets, { adapterBin: report, timeoutMs: 10_000 }).catch((e: Error) => e);
+    const line = String((err as Error).message).split("gitnames=")[1]!.split("\n")[0]!;
+    const [names, control] = line.split(";control=");
+    expect(names).toBe("");
+    expect(control).toBe("sk-ant-probe");
+  });
+
   it("reports why the agent died, not just that the connection closed", async () => {
     const crash = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-crash.mjs");
     await expect(probeModels("opencode", {}, { adapterBin: crash, timeoutMs: 10_000 })).rejects.toThrow(/exited \(code 1\)\. EACCES: permission denied, mkdir/);
