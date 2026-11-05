@@ -1511,7 +1511,9 @@ export function schedulerService(
           // Another pass already took it; leave its state alone.
           if ("claimed" in launched) continue;
           await wait(launched.reason);
-          await flagFailedStart(w, launched.reason);
+          // "Runner offline" clears by itself: the wake stays queued and starts when the runner is
+          // back, and the runner watch (BOS-467) is the one alert about an offline runner (BOS-480).
+          if (launched.reason !== "runner offline") await flagFailedStart(w, launched.reason);
           continue;
         }
         result.launched++;

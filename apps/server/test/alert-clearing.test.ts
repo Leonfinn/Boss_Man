@@ -184,13 +184,24 @@ describe("one closer for Boss Man's own cards (DR-016, BOS-470)", () => {
     const t = await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
     ctx.offline();
     await ctx.scheduler.tick();
-    // The scheduler's own raise: a "runner offline" start failure carries the runnerConnected condition.
-    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"));
-    expect(card!.question).toMatch(/could not start.*runner offline/i);
-    expect((card!.context as { clearWhen?: Array<{ kind: string; wakeId?: string }> }).clearWhen?.[0]).toMatchObject({ kind: "runnerConnected", companyId: ctx.company.id });
-    // Put it on the owner's tier, as DR-017 E requires it to clear there too.
-    await ctx.db.update(decisions).set({ tier: "owner" }).where(eq(decisions.id, card!.id));
+    // Since BOS-480 the scheduler raises no card for "runner offline" (the runner watch, BOS-467, is that alert).
+    expect(await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"))).toEqual([]);
     const [wake] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    // Cards raised before BOS-480 are still open on live data, so the closer must still clear them.
+    // Shape as flagFailedStart raised it, on the owner's tier, as DR-017 E requires it to clear there too.
+    const [card] = await ctx.db
+      .insert(decisions)
+      .values({
+        companyId: ctx.company.id,
+        kind: "question",
+        question: `Ceo could not start on "Checkout error states" (wake: assigned): runner offline. Boss Man will keep trying; look into it if the reason does not clear.`,
+        options: ["Got it"],
+        recommendedOption: "Got it",
+        tier: "owner",
+        dedupeKey: `start-fail:${ctx.ceo.id}:${wake!.id}`,
+        context: { type: "question", clearWhen: [{ kind: "runnerConnected", companyId: ctx.company.id, wakeId: wake!.id }] },
+      })
+      .returning();
     // The runner reconnects but the wake hasn't started yet: the card stays (a reconnected runner alone fixes nothing).
     ctx.online();
     await ctx.sweep();
