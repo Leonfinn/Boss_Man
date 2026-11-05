@@ -1,17 +1,17 @@
 // Reviews by kind: when a ticket enters review, every review the tier requires (the code review plus
 // any security, infra or adversarial ones) is requested at once. The CEO may order them; each
 // verdict is kept; the ticket passes only when all approve or the CEO has overruled the rest.
-import { and, desc, eq, inArray, isNull, like, max, ne, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like, max, min, ne, or, sql, type AnyColumn } from "drizzle-orm";
 import { KIND_FOCUS, REVIEW_KINDS, ruleFor, slotRef, ticketRef, type ReviewerRefValue, type ReviewSlot } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
+import { activity, agents, companies, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { readVerdicts } from "@boss-man/shared";
 import { effectivePolicy, otherReviewers, resolveKindReviewer } from "./review-policy.js";
 
 export type ReviewRow = typeof reviewRequests.$inferSelect;
 type Ticket = typeof tickets.$inferSelect;
-export type Notify = (agentId: string, input: { reason: string; note: string; priority: number; causedByRunId?: string | null }) => Promise<unknown>;
+export type Notify = (agentId: string, input: { reason: string; note: string; priority: number; ticketId?: string | null; causedByRunId?: string | null }) => Promise<unknown>;
 export const REVIEW_REASON = "review requested";
 const SETTLED = ["approved", "overruled"];
 
@@ -20,11 +20,57 @@ export const reviewAskPrefix = (ticketId: string) => `- ${ticketId} `;
 /** The SQL pattern matching `reviewAskPrefix` in a wake note. */
 export const reviewAskPattern = (ticketId: string) => `${reviewAskPrefix(ticketId)}%`;
 
+/**
+ * True when a run ended on its own (DR-017, decision F): a run cut off by a runner restart ("interrupted")
+ * or one the server gave up on ("lost: ...") never got to answer, so it is not a missed verdict for either
+ * no-verdict detector. One list for both, so they can't drift apart.
+ */
+export function endedNormally(outcome: string | null | undefined): boolean {
+  return !!outcome && outcome !== "interrupted" && !outcome.startsWith("lost:");
+}
+
+/** The SQL condition matching `endedNormally` for a run outcome column. */
+export const endedNormallySql = (outcome: AnyColumn) => sql`${outcome} is not null and ${outcome} <> 'interrupted' and ${outcome} not like 'lost:%'`;
+
 /** The rows of the ticket's newest round. */
 export async function latestRows(db: Db, ticketId: string): Promise<ReviewRow[]> {
   const [m] = await db.select({ n: max(reviewRequests.round) }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId));
   if (!m?.n) return [];
   return db.select().from(reviewRequests).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.round, m.n))).orderBy(reviewRequests.seq, reviewRequests.kind);
+}
+
+/**
+ * When the ticket's current review round began (BOS-433): the moment its newest round opened. A ticket
+ * that was sent back and came to review again opens a new round, so wakes and runs from the rounds
+ * before it say nothing about this one. Nothing for a ticket with no reviews yet.
+ */
+export async function roundStartedAt(db: Db, ticketId: string): Promise<Date | null> {
+  const [m] = await db.select({ n: max(reviewRequests.round) }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId));
+  if (!m?.n) return null;
+  const [at] = await db.select({ at: min(reviewRequests.createdAt) }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.round, m.n)));
+  return at?.at ?? null;
+}
+
+/** The activity kind a "Leave it another hour" answer writes (BOS-426, BOS-433 fix B). */
+export const REVIEW_WAIT = "review_wait";
+
+/**
+ * Record that the CEO or owner left this review another quiet period, so the stall sweep leaves it
+ * alone until then (BOS-426, BOS-433 fix B). Without it the answer only freed the card's key and the
+ * next sweep raised the same card again within a minute. The review's id is on the row's detail, so
+ * the sweep reads it back through {@link reviewWaitedSince}.
+ */
+export async function recordReviewWait(db: Db, row: { companyId: string; ticketId: string; reviewId: string; at: Date; agentId?: string | null }) {
+  await record(db, { companyId: row.companyId, agentId: row.agentId ?? null, ticketId: row.ticketId, kind: REVIEW_WAIT, summary: "The review was left another hour.", detail: { reviewId: row.reviewId }, at: row.at });
+}
+
+/** When this review was last left another hour, or null if it never was. */
+export async function reviewWaitedSince(db: Db, reviewId: string): Promise<Date | null> {
+  const [row] = await db
+    .select({ at: max(activity.at) })
+    .from(activity)
+    .where(and(eq(activity.kind, REVIEW_WAIT), sql`${activity.detail}->>'reviewId' = ${reviewId}`));
+  return row?.at ?? null;
 }
 
 /** Pending reviews whose turn it is. Seq 0 is never held back and holds nobody; a numbered review waits for the lower numbers to approve or be overruled. */
@@ -38,6 +84,39 @@ export function evaluate(rows: ReviewRow[]): "waiting" | "failed" | "passed" {
 }
 
 const seqOf = (order: string[] | null | undefined, kind: string) => (order?.indexOf(kind) ?? -1) + 1;
+
+/** The ticket ids a review wake's note lists, in the order it lists them. The list is what the reviewer was asked to cover. */
+export const reviewTicketsOf = (note: string | null | undefined) => [...(note ?? "").matchAll(/^- ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) /gm)].map((m) => m[1]!);
+
+/**
+ * A review wake that listed several tickets and ended having answered only some of them (BOS-433, fix B):
+ * the tickets still open with that reviewer and no verdict are queued again, one wake per ticket, so the
+ * run that ends finishes the job rather than the sweep noticing an hour later. Returns the tickets re-woken.
+ * The reviewer's own verdict on any of them means that one is done; the others wait for the next run.
+ */
+export async function requeueUnansweredReviews(db: Db, input: { reviewerAgentId: string; ticketIds: string[]; causedByRunId?: string | null }, notify: Notify): Promise<string[]> {
+  const requeued: string[] = [];
+  for (const ticketId of [...new Set(input.ticketIds)]) {
+    const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+    if (!t || t.systemState !== "review") continue;
+    // The rows still waiting for this reviewer in the current round: a verdict (or a skip) has moved them on.
+    const mine = activeRows(await latestRows(db, ticketId)).filter((r) => r.reviewerAgentId === input.reviewerAgentId);
+    if (!mine.length) continue;
+    for (const r of mine) {
+      // The ticket is named on the wake as well as in its note, so several tickets re-queued at once stay
+      // separate wakes (one per ticket) rather than merging into one.
+      await notify(input.reviewerAgentId, {
+        reason: REVIEW_REASON,
+        priority: 3,
+        ticketId: t.id,
+        causedByRunId: input.causedByRunId ?? null,
+        note: `${reviewAskPrefix(t.id)}"${t.title}": still waiting for your ${r.kind} review (round ${r.round}). You were woken about more than one ticket last time and this one is left.\n  Read the changes with the review tool (action diff), then give your verdict with action submit.`,
+      });
+    }
+    requeued.push(ticketId);
+  }
+  return requeued;
+}
 
 /** Wakes the reviewers of these rows, one wake per agent however many reviews it holds. */
 export async function wakeReviewers(db: Db, t: Ticket, rows: ReviewRow[], notify: Notify, skip: Array<string | null> = [], causedByRunId?: string | null) {
