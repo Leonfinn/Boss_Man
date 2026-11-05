@@ -73,7 +73,8 @@ import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
-import { runnerSocketRoutes } from "./routes/runner-socket.js";
+import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
+import { createMemorySampler } from "./services/memory-sampler.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
@@ -334,7 +335,23 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setMaintenanceHook(maintenance);
   const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
   decisionsSvc.setPermissionLog(permLog);
+  // Memory logging (BOS-410 step 1). Built here so server_status can read it; main.ts starts it on
+  // every process, standby too. Tests never start it, so no timer runs under vitest.
+  const memory = createMemorySampler({
+    everyMs: Number(process.env.BOSSMAN_MEMORY_LOG_MS ?? 0) || undefined,
+    log: (sample) => app.log.info({ memory: sample }, "memory"),
+    extra: () => {
+      let sockets = 0;
+      let socketBuffered = 0;
+      for (const c of app.websocketServer?.clients ?? []) {
+        sockets++;
+        socketBuffered += c.bufferedAmount;
+      }
+      return { sockets, socketBufferedKiB: Math.round(socketBuffered / 1024), runnerEventsWaiting: runnerIngestWaiting() };
+    },
+  });
   const serverStatus = serverStatusService(db, {
+    memory,
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -1257,6 +1274,7 @@ export async function buildApp(opts: AppOptions) {
       dueDate: DateStr.nullable(),
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
+      ownerSetup: z.string().max(4000).nullable(),
       noCode: z.boolean(),
       urgent: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
@@ -2564,5 +2582,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, launcher: launch, memory, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
 }

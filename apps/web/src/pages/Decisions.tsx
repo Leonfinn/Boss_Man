@@ -22,6 +22,7 @@ const KIND: Record<string, { label: string; tone: string }> = {
   deploy: { label: "Production deploy", tone: "red" },
   self_deploy: { label: "Boss Man update", tone: "blue" },
   owner_todo: { label: "Waiting for you", tone: "amber" },
+  owner_setup: { label: "Ready to use", tone: "green" },
   rule_proposal: { label: "Proposed rule", tone: "blue" },
   skill: { label: "Skill", tone: "blue" },
 };
