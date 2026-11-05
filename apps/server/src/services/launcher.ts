@@ -47,7 +47,19 @@ export function toolServerAddress(url: string): string | null {
 }
 
 /** host:port of a project's git remote (http 80, https 443, ssh 22 unless it names a port), or null for a local path or anything the guard can't allow. */
+/** The launcher's own check for an allow entry (apps/launcher/src/spec.ts): one bad entry makes it refuse the whole list, so never send one it would refuse. */
+const LAUNCHER_ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
+function sendable(addr: string | null): string | null {
+  if (!addr || !LAUNCHER_ALLOW_ENTRY.test(addr)) return null;
+  const [host, port] = [addr.slice(0, addr.lastIndexOf(":")), Number(addr.slice(addr.lastIndexOf(":") + 1))];
+  return port >= 1 && port <= 65535 && !host.endsWith(".") ? addr : null;
+}
+
 export function gitHostAddress(repoUrl: string): string | null {
+  return sendable(rawGitHostAddress(repoUrl));
+}
+
+function rawGitHostAddress(repoUrl: string): string | null {
   const scp = /^[\w.-]+@([A-Za-z0-9.-]+):(?!\/\/)/.exec(repoUrl);
   if (scp) return `${scp[1]}:22`;
   try {
@@ -120,6 +132,27 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
         await call("PUT", `/runners/${await slugFor(companyId)}/allow`, { allow: await allowFor(companyId) });
       } catch {
         /* the next runner start sends the list again */
+      }
+    },
+
+    /**
+     * At server start (leader only): sends every launched company's runner its allow list once, so a runner that outlived a deploy gets the git hosts without a restart.
+     * A launcher that is still coming up (503/502) is tried again; a company with no runner (404) is skipped. Best effort: never throws.
+     */
+    async syncAll(retryMs = 15_000, attempts = 4) {
+      if (!opts) return;
+      const rows = await db.select().from(settings).where(like(settings.key, `${SLUG_KEY}%`)).catch(() => []);
+      for (const row of rows) {
+        const companyId = row.key.slice(SLUG_KEY.length);
+        for (let i = 0; i < attempts; i++) {
+          try {
+            await call("PUT", `/runners/${row.value as string}/allow`, { allow: await allowFor(companyId) });
+            break;
+          } catch (err) {
+            if (!(err instanceof LauncherError) || err.status === 404 || i === attempts - 1) break;
+            await new Promise((r) => setTimeout(r, retryMs));
+          }
+        }
       }
     },
 
