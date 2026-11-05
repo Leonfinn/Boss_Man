@@ -28,6 +28,9 @@ export type AlertCause = {
   agents?: Array<string | null | undefined>;
   /** The run a stalled/self/heartbeat alert is about, when its key doesn't carry it. */
   runId?: string | null;
+  /** A runner boot (DR-017 B): everything a restart leaves behind folds into one card per boot. */
+  runnerId?: string;
+  bootId?: string;
 };
 
 export type AlertKindRow = {
@@ -117,9 +120,16 @@ export const ALERT_KINDS = {
   unproven_cause: {
     topRung: "ceo",
   },
+  // Everything a runner restart leaves behind (DR-017 B, BOS-480): one card per runner boot, not one per run.
+  runner_boot: {
+    topRung: "ceo",
+    groupBy: (c) => (c.runnerId && c.bootId ? `runner-boot:${c.runnerId}:${c.bootId}` : null),
+    title: (_c, n) => `${n} run${n === 1 ? "" : "s"} didn't start after a runner restart`,
+  },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
     topRung: "ceo",
+    title: (_c, n) => `Boss Man has ${n} alert${n === 1 ? "" : "s"} of the same kind`,
   },
   // An alert only the owner can settle (a secret, a sign-off, host access).
   owner: {

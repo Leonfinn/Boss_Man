@@ -294,14 +294,18 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .map((d) => d.id);
     if (free.length) await db.update(decisions).set({ dedupeKey: null }).where(inArray(decisions.id, free));
 
+    // One open alert per run: a card already with the team (on any rung) is not raised again, whichever key it uses.
+    const alreadyOpen = new Set(open.filter((d) => !closed.has(d.id)).map((d) => (d.context as { runId?: unknown }).runId).filter((id): id is string => typeof id === "string"));
     let raised = 0;
     for (const [runId, r] of stalled) {
+      if (alreadyOpen.has(runId)) continue;
       const ctx: DecisionContext = { type: "stalled_run", runnerId: r.runnerId!, runId };
       // A stalled run is the Scrum Master's first, then the CEO, then the owner (BOS-119). It goes
       // on the ladder whether or not the watchdog is switched on; without a Scrum Master it starts at the CEO.
       const row = opts.alert
         ? await opts.alert({
             companyId: r.run.companyId,
+            cardKind: "stalled_run",
             kind: "stalled_run",
             cause: { runId },
             // No event at all: the runner never began it, most likely lost in a runner restart.

@@ -70,6 +70,8 @@ export type AlertInput = {
   kind?: AlertKind;
   /** The account, run or agents the alert is about, for its cause key and closer (DR-017 B, DR-016). */
   cause?: AlertCause;
+  /** The decisions-table kind ("question", "approval", "stalled_run"); defaults to a plain question. */
+  cardKind?: "question" | "approval" | "stalled_run";
   rewake?: Ladder["rewake"];
   /** A duty alert goes to the Scrum Master even while the watchdog is off. */
   duty?: boolean;
@@ -362,7 +364,9 @@ export function alertLadder(
     async append(open: typeof decisions.$inferSelect, input: AlertInput, heading?: (cause: AlertCause, count: number) => string): Promise<void> {
       const ctx = open.context as { items?: Array<{ question: string; at: string; agents?: string[] }>; pageUrl?: string } & Record<string, unknown>;
       const items = [...(ctx.items ?? []), { question: input.question, at: now().toISOString(), ...(input.cause?.agents?.length ? { agents: input.cause.agents.filter((x): x is string => !!x) } : {}) }];
-      const question = heading ? heading(input.cause ?? {}, items.length) : open.question;
+      // The cause carries every agent named so far, so the heading says how many, not just the last one.
+      const agents = [...new Set(items.flatMap((i) => i.agents ?? []))];
+      const question = heading ? heading({ ...input.cause, agents }, items.length) : open.question;
       await db
         .update(decisions)
         .set({ question, context: { ...(open.context as object), items, lastAppendedAt: now().toISOString() } })
@@ -376,9 +380,12 @@ export function alertLadder(
       const row = kindRow(kindId, input.from);
       const start = kindStart(input.from);
       const ceiling = kindCeiling(kindId, input.from);
-      const groupKey = input.dedupeKey ?? row.groupBy?.(cause) ?? null;
+      // `foldKey` is the cause key (only kinds with a groupBy fold, DR-017 B); `groupKey` is that or the
+      // caller's own dedupe key, so a repeat of one alert never raises a second card.
+      const foldKey = row.groupBy?.(cause) ?? null;
+      const groupKey = foldKey ?? input.dedupeKey ?? null;
       /** The card's own kind, kept in its context as `decisionsKind` so a fold finds only its own kind. */
-      const decisionsKind = groupKey ? `alert:${kindId ?? "alert"}` : (input.context?.decisionsKind as string | undefined);
+      const decisionsKind = foldKey ? `alert:${kindId ?? "alert"}` : (input.context?.decisionsKind as string | undefined);
       const ladder: Ladder = {
         rung: start,
         since: now().toISOString(),
@@ -394,11 +401,11 @@ export function alertLadder(
       };
       // One cause, one card (DR-017 B, BOS-469 points 3 and 6): a raise whose cause key matches an open card
       // adds its item to that card and no wake is sent. Only cards of the same kind fold together.
-      if (groupKey) {
+      if (foldKey) {
         const [open] = await db
           .select()
           .from(decisions)
-          .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'decisionsKind' = ${decisionsKind}`, sql`${decisions.context}->'ladder'->>'groupBy' = ${groupKey}`))
+          .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'decisionsKind' = ${decisionsKind}`, sql`${decisions.context}->'ladder'->>'groupBy' = ${foldKey}`))
           .limit(1);
         if (open) {
           await this.append(open, input, row.title);
@@ -409,7 +416,7 @@ export function alertLadder(
         .insert(decisions)
         .values({
           companyId: input.companyId,
-          kind: "question",
+          kind: input.cardKind ?? "question",
           question: input.question,
           options: input.options ?? [GOT_IT],
           recommendedOption: input.recommended ?? GOT_IT,
@@ -417,7 +424,14 @@ export function alertLadder(
           // Not on any rung's queue until place() puts it there; the owner is not notified before.
           tier: "ceo",
           dedupeKey: groupKey,
-          context: { type: "question", ...(decisionsKind ? { decisionsKind } : {}), ...input.context, ...(row.clearWhen && kindId ? { clearWhen: row.clearWhen(cause) } : {}), ladder },
+          context: {
+            type: "question",
+            ...(decisionsKind ? { decisionsKind } : {}),
+            ...(groupKey ? { items: [{ question: input.question, at: now().toISOString(), ...(cause.agents?.length ? { agents: cause.agents.filter((x): x is string => !!x) } : {}) }] } : {}),
+            ...input.context,
+            ...(row.clearWhen && kindId ? { clearWhen: row.clearWhen(cause) } : {}),
+            ladder,
+          },
           createdAt: now(),
         })
         .onConflictDoNothing()
@@ -438,12 +452,13 @@ export function alertLadder(
       for (const { d, watchdog } of open) {
         const ladder = (d.context as { ladder: Ladder }).ladder;
         const minutes = ladder.minutes ?? readWatchdogSettings(watchdog).alertMinutes;
-        if ((await dueAt(d.companyId, ladder, minutes)) > now().getTime()) continue;
         // A card parked with the CEO is offered to it again as soon as the reason has gone (BOS-469 point 7).
+        // Its clock is stopped, so this is checked before the timeout rather than after it.
         if (ladder.parked) {
           if (await offerAgain(d, ladder)) moved++;
           continue;
         }
+        if ((await dueAt(d.companyId, ladder, minutes)) > now().getTime()) continue;
         if (await place(d, ladder, RUNGS[RUNGS.indexOf(ladder.rung) + 1]!, `${LABEL[ladder.rung]} didn't settle it within ${minutes} minutes`)) moved++;
       }
       return { moved };
@@ -524,7 +539,9 @@ export function alertLadder(
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
       const bad = checkAsk(input);
       if (bad) throw new WatchdogError(422, bad);
-      if (!(await place(d, ladder, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
+      // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
+      // card may reach the owner (DR-017 A), so the ceiling doesn't apply to a deliberate escalation.
+      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
       return { id: d.id };
     },
   };

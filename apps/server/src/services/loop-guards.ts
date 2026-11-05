@@ -62,10 +62,10 @@ export function loopGuards(
         context: { type: "review_loop", ticketId: input.ticketId, message: input.message, reviewer: input.reviewer },
       };
       const [d] = opts.alert
-        ? [await opts.alert({ ...ask, kind: "review_loop", recommended: STOP_WORK, ticketId: input.ticketId, from: "ceo" })]
+        ? [await opts.alert({ ...ask, cardKind: "approval", kind: "review_loop", recommended: STOP_WORK, ticketId: input.ticketId, from: "ceo" })]
         : await db
             .insert(decisions)
-            .values({ ...ask, kind: "question", recommendedOption: STOP_WORK })
+            .values({ ...ask, kind: "approval", recommendedOption: STOP_WORK })
             .returning({ id: decisions.id });
       await addTicketDependency(db, { companyId: t!.companyId, blockedTicketId: input.ticketId, blockerDecisionId: d!.id, actor: { type: "system" }, hold: true, now });
       return { round: rounds.length, escalated: d!.id };
