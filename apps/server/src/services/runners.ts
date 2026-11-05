@@ -56,16 +56,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     if (ended?.fundingSourceId && outcome && /weekly limit/i.test(outcome)) {
       await funding.recordQuota(ended.fundingSourceId, [{ provider: "anthropic", window: "seven_day", utilization: 1, resetsAt: new Date(at.getTime() + 60 * 60_000), status: "rejected", overageInUse: false }], at);
     }
-    // A finished run's own questions are moot: its permission requests and stall alerts leave the
-    // queue, and a stall alert says why it went (BOS-217): the run ended by itself.
-    const note = `the run ended normally at ${at.toISOString().slice(11, 16)}`;
-    const withdrawn = { by: "system", note, at: at.toISOString() };
-    const stalledAlerts = await db
-      .update(decisions)
-      .set({ status: "withdrawn", dedupeKey: null, context: sql`jsonb_set(${decisions.context}, '{withdrawn}', ${`${JSON.stringify(withdrawn)}`}::jsonb, true)` })
-      .where(and(eq(decisions.status, "open"), eq(decisions.kind, "stalled_run"), sql`${decisions.context}->>'runId' = ${runId}`))
-      .returning({ companyId: decisions.companyId, question: decisions.question });
-    for (const d of stalledAlerts) await record(db, { companyId: d.companyId, kind: "decision_withdrawn", summary: `Boss Man closed "${d.question.slice(0, 120)}" by itself: ${note}`, at });
+    // A finished run's own questions are moot: its permission requests leave the queue, and its
+    // stall alert is closed by the one closer on `runActive`, which says why it went (DR-016, BOS-470).
     await db
       .update(decisions)
       .set({

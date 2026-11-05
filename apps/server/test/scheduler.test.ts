@@ -138,6 +138,35 @@ describe("scheduler", () => {
     expect(results.map((r) => r.status)).toEqual(["queued", "queued", "dropped"]);
   });
 
+  it("a resume after a restart is not the agent waking itself, and the self-wake limit still catches a real loop (BOS-479)", async () => {
+    ctx = await setup({ selfWakesPer10Min: 5, maxDepth: 100, agent: 10 });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "start" });
+    await ctx.scheduler.tick();
+    const run = ctx.commands[0]!.runId;
+    for (let i = 0; i < 4; i++) expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "self", causedByRunId: run })).toMatchObject({ status: "queued" });
+    // Two resumes from the restart: neither is dropped, and no "keeps waking itself" card is raised.
+    for (let i = 0; i < 2; i++) expect(await ctx.recovery.onInterrupted(run)).toMatchObject({ status: expect.not.stringMatching(/dropped/) });
+    expect((await ctx.db.select().from(decisions)).filter((d) => /keeps waking itself/.test(d.question))).toHaveLength(0);
+    // Six real self-wakes in total are still stopped, with the alert.
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "self", causedByRunId: run })).toMatchObject({ status: "queued" });
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "self", causedByRunId: run })).toMatchObject({ status: "dropped" });
+    expect((await ctx.db.select().from(decisions)).filter((d) => /keeps waking itself/.test(d.question))).toHaveLength(1);
+  });
+
+  it("a resume wake keeps the wake depth of the run it picks up (BOS-479)", async () => {
+    ctx = await setup({ maxDepth: 100, agent: 10 });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "start" });
+    await ctx.scheduler.tick();
+    const runA = ctx.commands[0]!.runId;
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "follow-up", causedByRunId: runA });
+    await ctx.endRun(runA);
+    await ctx.scheduler.tick();
+    const runB = ctx.commands[1]!.runId;
+    const [parent] = await ctx.db.select().from(wakes).where(eq(wakes.runId, runB));
+    expect(parent!.causationDepth).toBe(1);
+    expect(await ctx.recovery.onInterrupted(runB)).toMatchObject({ causationDepth: 1 });
+  });
+
   it("caps an agent's runs with no ticket, but never the owner's own (R68)", async () => {
     ctx = await setup();
     for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: `d${i}` });

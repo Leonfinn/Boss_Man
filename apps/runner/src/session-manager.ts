@@ -15,7 +15,7 @@ import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-m
 import { probeModels } from "./models-probe.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { gitAuthEnv, RepoLockTimeout, type Workspaces } from "./workspace.js";
+import { RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -149,6 +149,18 @@ export const stderrTail = (stderr: string) =>
 // The add-ons' settings from the image (docs/12) go through too: without them an agent's agent-browser
 // can't find Chromium or start it without its sandbox, and Playwright can't find WebKit.
 export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
+
+/**
+ * Secrets only the daemon may hold: git authentication, in any of the ways git reads it from the
+ * environment (a token or credentials, an askpass helper, an ssh command, or the config variables
+ * that build a header), plus the forge tokens Claude Code and other tools push with on their own.
+ */
+const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|GH_TOKEN|GITHUB_TOKEN|GITEA_TOKEN)$/;
+
+/** A run's granted secrets without the git credential, for the agent's own environment. */
+export function withoutGitCredentials(secrets: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(secrets).filter(([k]) => !GIT_CREDENTIAL_NAMES.test(k)));
+}
 
 const require = createRequire(import.meta.url);
 /** OpenCode is its own ACP agent: `opencode acp`, from the opencode-ai npm package (the Dockerfile puts it on PATH). */
@@ -419,8 +431,9 @@ export class SessionManager {
     const base = this.opts.baseEnv ?? process.env;
     const env: NodeJS.ProcessEnv = {};
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
-    // A granted GIT_TOKEN reaches git through the environment only, for the agent's pushes too (R38).
-    Object.assign(env, secrets, gitAuthEnv(secrets), { DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
+    // The git credential stays with the daemon, which pushes and fetches itself (BOS-322): the session gets
+    // every other granted secret, and a push from inside it fails fast instead of prompting.
+    Object.assign(env, withoutGitCredentials(secrets), { GIT_TERMINAL_PROMPT: "0", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
     if (cmd.agentKind === "claude" && cmd.model && !CLAUDE_ALIASES.has(cmd.model)) {
       // ACP refuses unlisted models; pinning the alias at launch works (spike S2).
       env.ANTHROPIC_DEFAULT_OPUS_MODEL = cmd.model;
