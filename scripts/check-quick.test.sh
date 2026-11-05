@@ -103,6 +103,10 @@ notlogged "vitest related" "broad skip"
 logged "pnpm --filter @boss-man/server typecheck" "broad skip keeps typecheck"
 run 0 "forced related" env CHECK_QUICK_FORCE_RELATED=1
 logged "vitest related --run src/mcp.ts" "forced"
+# The merge gate runs check-quick with BOSSMAN_MERGE_CHECK=1: it must still run the related tests for mcp.ts.
+run 0 "merge check runs broad tests" env BOSSMAN_MERGE_CHECK=1
+logged "vitest related --run src/mcp.ts" "merge check"
+! grep -q "SKIP related" "$t/out" || fail "merge check skipped: $(cat "$t/out")"
 g checkout -q -B many origin/main
 many=(); for i in $(seq 1 16); do many+=("apps/server/src/m$i.ts"); done; commit "${many[@]}"
 run 0 "16 files is broad" env
