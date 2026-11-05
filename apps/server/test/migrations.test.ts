@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateDrizzleJson, generateMigration } from "drizzle-kit/api";
 import { describe, expect, it } from "vitest";
-import * as schema from "../src/db/schema";
+import * as schema from "../src/db/schema.js";
 
 const drizzleDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const journalPath = path.join(drizzleDir, "meta/_journal.json");
