@@ -9,6 +9,7 @@ import { openPglite } from "../src/db/client.js";
 import { agents, notifications, runners, skillProposals, tickets, wakes } from "../src/db/schema.js";
 import { and, eq as eqq } from "drizzle-orm";
 import { issueRunToken } from "../src/mcp.js";
+import { splitSections } from "../src/services/wiki.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -331,6 +332,8 @@ describe("wiki append, history and restore (BOS-430)", () => {
     const r = await c.wiki.append(c.company.id, { slug: "t", entry: "````\nx\n```\n````", heading: "A", agentId: c.worker.id, runId: null });
     expect(r.page.body).toContain("````\nx\n```\n````");
     expect(r.page.body).toContain("## B\ny");
+    // Round 8 (Rod, Jane): the page reader must agree with the append check, so heading B is still a heading.
+    expect(splitSections(r.page.body).map((s) => s.heading)).toEqual(["T", "A", "B"]);
   });
 
   it("append finds headings on a page with Windows (CRLF) line endings", async () => {

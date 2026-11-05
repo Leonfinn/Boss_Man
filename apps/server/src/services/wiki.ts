@@ -84,14 +84,15 @@ export function endsInOpenFence(lines: string[]): boolean {
 export function splitSections(body: string): Section[] {
   const out: Section[] = [];
   const stack: Section[] = [];
-  let fence: string | null = null;
+  let fence: { char: string; len: number } | null = null;
   let pos = 0;
   // A page pasted with Windows (CRLF) line endings still has headings; the trailing "\r" would stop the
   // heading regex from matching (adversarial round 6). Offsets still count in the original body.
   for (const raw of body.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     const f = fenceLine(line);
-    if (f) fence = fence === null ? f.char : fence === f.char ? null : fence;
+    // Same rule as endsInOpenFence: close only on the opener's mark with a run at least as long (round 8).
+    if (f) fence = fence === null ? f : fence.char === f.char && f.len >= fence.len ? null : fence;
     const m = fence === null && !f ? /^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/.exec(line) : null;
     if (m) {
       const level = m[1]!.length;
