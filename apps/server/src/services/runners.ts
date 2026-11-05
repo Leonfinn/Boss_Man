@@ -6,7 +6,7 @@ import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerComman
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { costEvents, decisions, engagements, runnerEvents, runners, runs, settings, tickets } from "../db/schema.js";
+import { costEvents, decisions, engagements, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
 /** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
@@ -70,6 +70,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       })
       .where(eq(runs.id, runId))
       .returning({ companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
+    // The run is over, so its token goes with it (BOS-513).
+    await db.delete(runTokens).where(eq(runTokens.runId, runId));
     // A finished run's own questions are moot: its permission requests leave the queue, and its
     // stall alert is closed by the one closer on `runActive`, which says why it went (DR-016, BOS-470).
     await db
