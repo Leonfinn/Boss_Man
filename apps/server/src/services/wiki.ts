@@ -223,7 +223,7 @@ export const LINK_LOOKUPS = 20;
  * reading at most LINK_SCAN_CHARS characters of it.
  */
 export function wikilinkSlugs(text: string, max = LINK_LOOKUPS): string[] {
-  const seen = new Set<string>();
+  const seen = new Set<string>();  // not state: filled and dropped inside this call.
   const out: string[] = [];
   for (const m of text.slice(0, LINK_SCAN_CHARS).matchAll(/\[\[([^\]#|]*)(?:#[^\]]*)?\]\]/g)) {
     const slug = m[1]!.trim();
