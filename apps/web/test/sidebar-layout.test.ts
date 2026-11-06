@@ -98,6 +98,17 @@ describe.skipIf(!browser)("side menu layout (rendered)", () => {
       // Taller content scrolls inside the menu rather than spilling past the window.
       expect(m.overflowY).toBe("auto");
       expect(m.scrollH).toBeGreaterThan(m.height);
+      // Rod's optional point: with 100vh the menu can run under the phone's toolbar, so the last
+      // item must still be reachable by scrolling the menu itself (not stuck out of view).
+      const reachable = await page.evaluate(() => {
+        const nav = document.querySelector("nav.side") as HTMLElement;
+        nav.scrollTop = nav.scrollHeight;
+        const last = nav.lastElementChild as HTMLElement;
+        const r = last.getBoundingClientRect();
+        const box = nav.getBoundingClientRect();
+        return r.bottom <= box.bottom + 1 && r.top >= box.top - 1;
+      });
+      expect(reachable).toBe(true);
     } finally {
       await page.close();
     }
