@@ -54,6 +54,13 @@ WORKDIR /app/apps/server
 # The commit this image was built from, shown by /api/health (docker build --build-arg BOSSMAN_COMMIT=<sha>).
 ARG BOSSMAN_COMMIT=dev
 ENV NODE_ENV=production PORT=3100 BOSSMAN_WEB_DIR=/app/web BOSSMAN_COMMIT=$BOSSMAN_COMMIT
+# BOS-410: the live server held 5-15 GiB in glibc's main [heap] (brk) while V8's heap and Buffers were ~100 MiB.
+# glibc raises its mmap threshold up to 32 MiB after freeing big blocks, so later Buffer bursts land in brk, and
+# brk only shrinks from the top: one small live block above them pins the lot. A fixed threshold keeps every
+# block of 128 KiB or more in its own mapping, handed back on free (local repro: 1030 MiB -> 52 MiB rss).
+# If memory is really held, it then shows as other anonymous maps in the memory log instead of [heap].
+# Undo: redeploy the previous image (any explicit value also turns glibc's dynamic threshold off, so it can't be "unset" from compose).
+ENV MALLOC_MMAP_THRESHOLD_=131072
 EXPOSE 3100
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
   CMD node -e "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
