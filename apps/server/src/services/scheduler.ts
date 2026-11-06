@@ -99,6 +99,9 @@ const LOOP_EXCHANGES = 4;
 export const CARRY_ON_MS = 15 * 60_000;
 const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
 
+/** Wakes held for a full subscription window: re-checked every pass, so adding or reordering an account releases them (BOS-449). */
+const QUOTA_HOLD_LIKE = "subscription % nearly used up%";
+
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
@@ -1326,7 +1329,7 @@ export function schedulerService(
       const queue = await db
         .select()
         .from(wakes)
-        .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)))))
+        .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t), like(wakes.statusReason, QUOTA_HOLD_LIKE)))))
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
       if (queue.length === 0) return result;
       // Priority order, but a wake Boss Man scheduled gains 1 for every 15 minutes it has waited, so a
@@ -1385,6 +1388,11 @@ export function schedulerService(
 
       for (const w of queue) {
         const defer = async (reason: string, notBefore: Date | null) => {
+          // A quota-held wake is looked at again every pass (BOS-449); only write when something changed.
+          if (w.status === "deferred" && w.statusReason === reason && (w.notBefore?.getTime() ?? null) === (notBefore?.getTime() ?? null)) {
+            result.deferred++;
+            return;
+          }
           await db.update(wakes).set({ status: "deferred", statusReason: reason, notBefore }).where(eq(wakes.id, w.id));
           result.deferred++;
         };
@@ -1520,7 +1528,11 @@ export function schedulerService(
               const resets = checked.map((c) => c.full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null));
               const until = resets.reduce<Date | null>((m, r) => (r && (!m || r < m) ? r : m), null);
               const first = checked[0]!;
-              await defer(`subscription ${first.full.map((s) => s.window).join(", ")} window nearly used up`, until);
+              const skipped = pool.filter((a) => !usable.includes(a));
+              // An agent's own account with no order cannot switch to the ranked ones (BOS-449): say so.
+              const [otherRanked] = source.fallbackRank == null && source.provider === "anthropic" ? await db.select({ id: fundingSources.id }).from(fundingSources).where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "anthropic"), isNotNull(fundingSources.fallbackRank))).limit(1) : [];
+              const unranked = otherRanked ? ` (${source.name} has no order, so it cannot switch accounts: set its order on the Funding page)` : "";
+              await defer(`subscription ${first.full.map((s) => s.window).join(", ")} window nearly used up${unranked}${skipped.length ? ` (${skipped.map((a) => a.name).join(", ")} skipped: no login)` : ""}`, until);
               continue;
             }
             if (pool.length) {
