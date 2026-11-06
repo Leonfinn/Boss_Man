@@ -79,6 +79,37 @@ describe("opencode agent kind", () => {
     expect(dump.config.permission).toMatchObject({ edit: "deny", bash: "deny", webfetch: "deny" });
     expect(dump.model).toBeNull();
   });
+
+  it("holds a new OpenCode run while the database is vacuumed, then starts it (BOS-616)", async () => {
+    const dump = path.join(mkdtempSync(path.join(tmpdir(), "bm-oc-")), "dump.json");
+    const order: string[] = [];
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const manager = new SessionManager({
+      mcpUrl: "http://127.0.0.1:9/mcp",
+      baseEnv: { PATH: process.env.PATH },
+      adapterBins: { opencode: fake },
+      resolveEnv: async () => ({ DUMP: dump }),
+      emit: (e) => {
+        if (e.type === "run.started") order.push("started");
+        if (e.type === "runner.log" && e.message.includes("database is compacted")) order.push("waiting");
+        if (e.type === "run.ended") done();
+      },
+    });
+    const vacuum = manager.whileOpencodeIdle(async () => {
+      manager.handle({ type: "run.start", runId: "r3", agentId: "a1", agentKind: "opencode", model: null, cwd: mkdtempSync(path.join(tmpdir(), "bm-oc-ws-")), prompt: "hi", mcpToken: "t" } as never);
+      expect(await manager.whileOpencodeIdle(async () => "second")).toBeNull(); // one hold at a time
+      await new Promise((r) => setTimeout(r, 500));
+      order.push("vacuumed");
+      return "first";
+    });
+    expect(await vacuum).toBe("first");
+    await ended;
+    manager.shutdown();
+    expect(order).toEqual(["waiting", "vacuumed", "started"]);
+    // Idle again: the next hold runs.
+    expect(await manager.whileOpencodeIdle(async () => "again")).toBe("again");
+  });
 });
 
 // Real binary: OPENCODE_BIN=/path/to/opencode pnpm test. Offline; the key is a dummy that only makes the provider appear.

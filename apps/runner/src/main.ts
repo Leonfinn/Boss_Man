@@ -104,7 +104,8 @@ const housekeeping = async () => {
 };
 
 // OpenCode never deletes its old sessions (BOS-616): drop ones untouched for
-// BOSSMAN_OPENCODE_SESSION_DAYS (default 14, 0 = off), 50 per database per pass.
+// BOSSMAN_OPENCODE_SESSION_DAYS (default 14, 0 = off), 50 per database per pass, then give the
+// space back (one VACUUM per database while no OpenCode run is live, small steps after that).
 const opencodeKeepDays = keepDaysFrom(env.BOSSMAN_OPENCODE_SESSION_DAYS);
 let pruning = false;
 const pruneOpencode = async () => {
@@ -115,9 +116,11 @@ const pruneOpencode = async () => {
       keepDays: opencodeKeepDays,
       dataHomes: opencodeDataHomes(env, path.join(dataDir, "agents")),
       activeSessionIds: () => sessions.activeSessionIds(),
+      whileOpencodeIdle: (fn) => sessions.whileOpencodeIdle(fn),
       log,
     });
-    if (r.deleted || r.failed) log(`OpenCode sessions older than ${opencodeKeepDays} days: ${r.deleted} deleted, ${r.failed} failed`);
+    if (r.deleted || r.failed || r.reclaimedBytes > 0)
+      log(`OpenCode sessions older than ${opencodeKeepDays} days: ${r.deleted} deleted, ${r.failed} failed, ${Math.round(r.reclaimedBytes / 1024 ** 2)} MB given back`);
   } catch (err) {
     log(`OpenCode session prune failed: ${(err as Error).message}`);
   } finally {

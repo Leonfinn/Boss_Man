@@ -3,11 +3,18 @@
 // This removes sessions nobody has touched for a while, a few at a time, through OpenCode's own
 // `opencode session delete` so the rows it owns (events included) go the way OpenCode expects and a
 // schema change in a new OpenCode can't leave half a session behind. The delete waits for the
-// database lock like any other OpenCode writer, so it is safe while runs are live. It never runs a
-// VACUUM: the freed pages are reused by new sessions, so the file stops growing instead of shrinking.
+// database lock like any other OpenCode writer, so it is safe while runs are live.
+//
+// Giving the space back: SQLite only shrinks a file with VACUUM. Once per database, at a moment
+// when no OpenCode run is live (new ones are held meanwhile, because OpenCode gives up on a lock
+// after 5 s), the database is switched to incremental auto-vacuum with one full VACUUM. After that
+// every pass returns the freed pages in small `incremental_vacuum` steps, each a short write that
+// live runs wait out. All SQLite work runs in a worker thread so a long VACUUM can't stall the
+// runner's connection to the server.
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync, statfsSync } from "node:fs";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
 
 export interface OpencodePruneOptions {
   /** Sessions not updated for this many days go; 0 or less turns the prune off. */
@@ -23,13 +30,85 @@ export interface OpencodePruneOptions {
   bin?: string;
   now?: number;
   log?: (m: string) => void;
+  /**
+   * Runs fn with no OpenCode run live and new ones held until it settles; resolves null without
+   * running it when a run is live. Without it the one-off VACUUM is never attempted.
+   */
+  whileOpencodeIdle?: <T>(fn: () => Promise<T>) => Promise<T | null>;
+  /** Free bytes on the disk holding a folder (for tests); the VACUUM needs about twice the file. */
+  freeBytes?: (dir: string) => number;
+  /** Pages per incremental_vacuum step (default 2000, 8 MB at 4 KB pages) and steps per pass (default 64). */
+  stepPages?: number;
+  maxSteps?: number;
 }
 
 export interface OpencodePruneResult {
   databases: number;
   deleted: number;
   failed: number;
+  /** Bytes the database files gave back this pass. */
+  reclaimedBytes: number;
+  /** Databases switched to incremental auto-vacuum this pass. */
+  converted: number;
 }
+
+interface VacuumReport {
+  mode: number;
+  converted: boolean;
+  steps: number;
+  freedBytes: number;
+  bytes: number;
+}
+
+// Runs in a worker thread (node:sqlite is synchronous). Pragmas only: nothing here depends on OpenCode's schema.
+const VACUUM_WORKER = `
+const { parentPort, workerData } = require("node:worker_threads");
+const { DatabaseSync } = require("node:sqlite");
+const { file, convert, stepPages, maxSteps } = workerData;
+const db = new DatabaseSync(file);
+try {
+  const get = (p) => Object.values(db.prepare("pragma " + p).get())[0];
+  db.exec("pragma busy_timeout = 10000");
+  const pageSize = get("page_size");
+  const before = get("page_count");
+  let mode = get("auto_vacuum");
+  let converted = false;
+  if (mode === 0 && convert) {
+    db.exec("pragma auto_vacuum = 2");
+    db.exec("vacuum");
+    db.exec("pragma wal_checkpoint(TRUNCATE)");
+    mode = get("auto_vacuum");
+    converted = mode === 2;
+  }
+  let steps = 0;
+  if (mode === 2) {
+    while (steps < maxSteps && get("freelist_count") > 0) {
+      db.exec("pragma incremental_vacuum(" + stepPages + ")");
+      steps++;
+    }
+    if (steps) db.exec("pragma wal_checkpoint(PASSIVE)");
+  }
+  const after = get("page_count");
+  parentPort.postMessage({ mode, converted, steps, freedBytes: (before - after) * pageSize, bytes: after * pageSize });
+} finally {
+  db.close();
+}
+`;
+
+function vacuumInWorker(file: string, convert: boolean, stepPages: number, maxSteps: number): Promise<VacuumReport> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(VACUUM_WORKER, { eval: true, workerData: { file, convert, stepPages, maxSteps }, stderr: true });
+    let report: VacuumReport | null = null;
+    worker.once("message", (m: VacuumReport) => (report = m));
+    worker.once("error", reject);
+    worker.once("exit", (code) => (report ? resolve(report) : reject(new Error(`the vacuum worker exited with code ${code}`))));
+  });
+}
+
+const defaultFreeBytes = (dir: string) => {
+  const s = statfsSync(dir);
+  return s.bavail * s.bsize;
+};
 
 export const DEFAULT_KEEP_DAYS = 14;
 const DEFAULT_BATCH = 50;
@@ -62,7 +141,7 @@ function run(bin: string, args: string[], env: NodeJS.ProcessEnv, cwd: string): 
 }
 
 export async function pruneOpencodeSessions(opts: OpencodePruneOptions): Promise<OpencodePruneResult> {
-  const result: OpencodePruneResult = { databases: 0, deleted: 0, failed: 0 };
+  const result: OpencodePruneResult = { databases: 0, deleted: 0, failed: 0, reclaimedBytes: 0, converted: 0 };
   if (!(opts.keepDays > 0)) return result;
   const bin = opts.bin ?? "opencode";
   const batch = opts.batch ?? DEFAULT_BATCH;
@@ -100,6 +179,36 @@ export async function pruneOpencodeSessions(opts: OpencodePruneOptions): Promise
         log(`OpenCode session prune: couldn't delete ${id}: ${r.stderr.trim().slice(0, 300)}`);
       }
     }
+    await reclaim(path.join(dataHome, "opencode", "opencode.db"), opts, result, log);
   }
   return result;
 }
+
+/** Gives freed pages back to the disk: small steps on a converted database, the one-off conversion when OpenCode is idle. */
+async function reclaim(file: string, opts: OpencodePruneOptions, result: OpencodePruneResult, log: (m: string) => void) {
+  const stepPages = Math.max(1, Math.floor(opts.stepPages ?? 2000));
+  const maxSteps = Math.max(1, Math.floor(opts.maxSteps ?? 64));
+  try {
+    const r = await vacuumInWorker(file, false, stepPages, maxSteps);
+    result.reclaimedBytes += Math.max(0, r.freedBytes);
+    if (r.mode !== 0 || !opts.whileOpencodeIdle) return;
+    const size = statSync(file).size;
+    const free = (opts.freeBytes ?? defaultFreeBytes)(path.dirname(file));
+    // VACUUM writes a compacted copy to a temp file and back through the WAL: up to twice the file.
+    if (free < 2 * size + 1024 ** 3) {
+      log(`OpenCode session prune: ${file} needs one VACUUM to give space back, but only ${gib(free)} is free and it needs ${gib(2 * size + 1024 ** 3)}`);
+      return;
+    }
+    const started = Date.now();
+    const done = await opts.whileOpencodeIdle(() => vacuumInWorker(file, true, stepPages, maxSteps));
+    if (!done) return; // an OpenCode run is live: try again next pass
+    result.reclaimedBytes += Math.max(0, done.freedBytes);
+    if (done.converted) result.converted++;
+    log(`OpenCode session prune: switched ${file} to incremental vacuum in ${Math.round((Date.now() - started) / 1000)} s (${gib(size)} -> ${gib(done.bytes)})`);
+  } catch (err) {
+    result.failed++;
+    log(`OpenCode session prune: couldn't reclaim space in ${file}: ${String((err as Error)?.message ?? err).slice(0, 300)}`);
+  }
+}
+
+const gib = (n: number) => `${(n / 1024 ** 3).toFixed(1)} GB`;
