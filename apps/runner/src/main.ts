@@ -6,6 +6,7 @@ import { checkClaude } from "./claude-check.js";
 import { applyCheckSlots, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
+import { keepDaysFrom, opencodeDataHomes, pruneOpencodeSessions } from "./opencode-prune.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
 import { safeRunnerToken } from "./token.js";
@@ -98,6 +99,29 @@ const housekeeping = async () => {
     connection.emit({ type: "runner.disk", ...report });
   } catch (err) {
     log(`workspace clean-up failed: ${(err as Error).message}`);
+  }
+  await pruneOpencode();
+};
+
+// OpenCode never deletes its old sessions (BOS-616): drop ones untouched for
+// BOSSMAN_OPENCODE_SESSION_DAYS (default 14, 0 = off), 50 per database per pass.
+const opencodeKeepDays = keepDaysFrom(env.BOSSMAN_OPENCODE_SESSION_DAYS);
+let pruning = false;
+const pruneOpencode = async () => {
+  if (pruning || opencodeKeepDays <= 0) return;
+  pruning = true;
+  try {
+    const r = await pruneOpencodeSessions({
+      keepDays: opencodeKeepDays,
+      dataHomes: opencodeDataHomes(env, path.join(dataDir, "agents")),
+      activeSessionIds: () => sessions.activeSessionIds(),
+      log,
+    });
+    if (r.deleted || r.failed) log(`OpenCode sessions older than ${opencodeKeepDays} days: ${r.deleted} deleted, ${r.failed} failed`);
+  } catch (err) {
+    log(`OpenCode session prune failed: ${(err as Error).message}`);
+  } finally {
+    pruning = false;
   }
 };
 void housekeeping();

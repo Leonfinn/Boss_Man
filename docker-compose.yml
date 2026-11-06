@@ -49,6 +49,8 @@ x-runner: &runner
     BOSSMAN_RUNNER_TOKEN_FILE: /run/secrets/runner_token
     # Full checks at once (BOS-542): the compose runner never received this, only the launcher passed it on.
     BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
+    # Days the runner keeps OpenCode sessions before deleting them (BOS-616): empty = 14, 0 = never.
+    BOSSMAN_OPENCODE_SESSION_DAYS: ${BOSSMAN_OPENCODE_SESSION_DAYS:-}
   # Agents run code: keep the container unprivileged and bounded. Never mount docker.sock;
   # use a deploy target with a socket proxy instead (R14).
   cap_drop: [ALL]
@@ -150,6 +152,7 @@ services:
       BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
       BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
       BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-1}
+      BOSSMAN_OPENCODE_SESSION_DAYS: ${BOSSMAN_OPENCODE_SESSION_DAYS:-}
       BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
       BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key

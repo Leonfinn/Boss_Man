@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DockerError } from "../src/docker.js";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
@@ -126,6 +126,12 @@ describe("the runner launcher (R55)", () => {
     expect([parseCheckSlots(undefined), parseCheckSlots(""), parseCheckSlots("2")]).toEqual([1, 1, 2]);
     expect(() => parseCheckSlots("0")).toThrow();
     expect(() => parseCheckSlots("lots")).toThrow();
+    // BOS-616: the OpenCode session retention reaches the runner only when set; 0 (never delete) is passed on too.
+    expect(containerSpec(config(), "app-co").Env.join()).not.toContain("BOSSMAN_OPENCODE_SESSION_DAYS");
+    expect(containerSpec({ ...config(), opencodeSessionDays: 0 }, "app-co").Env).toContain("BOSSMAN_OPENCODE_SESSION_DAYS=0");
+    expect([parseOpencodeSessionDays(undefined), parseOpencodeSessionDays(" "), parseOpencodeSessionDays("0"), parseOpencodeSessionDays("30")]).toEqual([undefined, undefined, 0, 30]);
+    expect(() => parseOpencodeSessionDays("-1")).toThrow();
+    expect(() => parseOpencodeSessionDays("two weeks")).toThrow();
     expect(parseCpuShares(undefined)).toBe(512);
     expect(parseCpuShares("1024")).toBe(1024);
     expect(() => parseCpuShares("1")).toThrow();

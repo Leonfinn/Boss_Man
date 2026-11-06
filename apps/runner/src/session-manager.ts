@@ -254,6 +254,11 @@ export class SessionManager {
     return this.runs.size;
   }
 
+  /** The agent session ids live runs are using (the OpenCode prune leaves these alone). */
+  activeSessionIds(): string[] {
+    return [...this.runs.values()].flatMap((r) => (r.sessionId ? [r.sessionId] : []));
+  }
+
   /** Process group ids of active runs, one per adapter. */
   processGroups(): number[] {
     return [...this.runs.values()].flatMap((r) => (r.child.pid ? [r.child.pid] : []));

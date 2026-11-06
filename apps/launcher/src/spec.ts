@@ -42,6 +42,8 @@ export type LauncherConfig = {
   guardAllow?: string[];
   /** BOSSMAN_CHECK_SLOTS: full checks (merge gate and hand runs) a runner may run at once, 1 to 16. Unset = 1; the runner needs about 3 GB of its memory limit per extra slot. */
   checkSlots?: number;
+  /** BOSSMAN_OPENCODE_SESSION_DAYS: the runner deletes OpenCode sessions untouched this many days (BOS-616). Unset = the runner's default (14); 0 = never. */
+  opencodeSessionDays?: number;
   /** How long to wait for a new guard to load its rules (default 20 s). */
   guardReadyMs?: number;
 };
@@ -79,7 +81,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
   return {
     Image: IMAGE,
     User: "1000:1000",
-    Env: [`BOSSMAN_URL=${cfg.serverUrl}`, `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`, ...(cfg.checkSlots && cfg.checkSlots > 1 ? [`BOSSMAN_CHECK_SLOTS=${cfg.checkSlots}`] : [])],
+    Env: [`BOSSMAN_URL=${cfg.serverUrl}`, `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`, ...(cfg.checkSlots && cfg.checkSlots > 1 ? [`BOSSMAN_CHECK_SLOTS=${cfg.checkSlots}`] : []), ...(cfg.opencodeSessionDays !== undefined ? [`BOSSMAN_OPENCODE_SESSION_DAYS=${cfg.opencodeSessionDays}`] : [])],
     Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug },
     HostConfig: {
       Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${tokenFile(cfg, slug)}:${TOKEN_TARGET}:ro`],
@@ -127,6 +129,13 @@ export function parsePids(v: string | undefined, fallback = 4096): number {
 export function parseCheckSlots(v: string | undefined): number {
   if (!v || v.trim() === "") return 1;
   if (!/^\d{1,2}$/.test(v.trim()) || Number(v) < 1 || Number(v) > 16) throw new Error(`BOSSMAN_CHECK_SLOTS should be a whole number from 1 to 16, not ${v}`);
+  return Number(v);
+}
+
+/** Days an OpenCode session is kept on a runner: a whole number from 0 (never delete) to 3650; unset = the runner's default. */
+export function parseOpencodeSessionDays(v: string | undefined): number | undefined {
+  if (!v || v.trim() === "") return undefined;
+  if (!/^\d{1,4}$/.test(v.trim()) || Number(v) > 3650) throw new Error(`BOSSMAN_OPENCODE_SESSION_DAYS should be a whole number of days from 0 to 3650, not ${v}`);
   return Number(v);
 }
 
