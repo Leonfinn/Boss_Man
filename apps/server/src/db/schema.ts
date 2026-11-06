@@ -421,7 +421,8 @@ export const decisions = pgTable("decisions", {
   staleReason: text("stale_reason"),
 },
   // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
-  (t) => [index("decisions_status").on(t.status)],
+  // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.
+  (t) => [index("decisions_status").on(t.status), index("decisions_company_status").on(t.companyId, t.status)],
 );
 
 export const engagementStatus = pgEnum("engagement_status", [

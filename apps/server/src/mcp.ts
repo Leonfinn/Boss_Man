@@ -11,7 +11,7 @@ import { z } from "zod";
 import { AGENT_TEMPLATES, FEATURE_STATUSES, FUNDING_PROVIDERS, HARNESSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, tickets as ticketsTable, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
@@ -39,6 +39,7 @@ import { AgentError, type agentsService } from "./services/agents.js";
 import { describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
 import { resolveReviewer, securityReviewers } from "./services/review-policy.js";
 import { latestRows } from "./services/review-kinds.js";
+import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
 import type { alertLadder } from "./services/alert-ladder.js";
@@ -82,6 +83,11 @@ async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: str
     .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), or(eq(ticketDependencies.blockedTicketId, ticketId), scope.agentId ? eq(decisionsTable.raisedByAgentId, scope.agentId) : sql`false`)))
     .limit(1);
   if (covering.length) return null;
+  // A ticket owed the owner's sign-off whose card is missing: Boss Man raises the card itself rather than leave
+  // the warning in the agent's run (BOS-503). Agents can't see decision state, so they couldn't act on it.
+  const [t] = await db.select().from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+  const restored = t ? await restoreSignoffCard(db, t, "an agent's reply asked the owner to review it") : null;
+  if (restored) return `This ticket passed every review and waits on the owner's sign-off, but its card was missing, so Boss Man raised it (card ${restored}). It is in the owner's Decisions and the board's Your review lane; you don't need to raise one.`;
   return "This reply asks the owner to do something, but no open decision covers it — the owner doesn't watch tickets, so this won't reach their queue or the Your review lane. Call raise_decision with blocksTicketId set to this ticket, with what you tried first and the steps they need. The reply is still posted.";
 }
 /** A lossless cap: at most n chars of s from offset; when there's more, says how much and how to get it. */
@@ -1028,11 +1034,15 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
                   // Merge state, server-built (DR-014): an open sign-off card can sit beside a merge already running, so say which.
                   const mergeTicket = ctx.type === "risk_review" || ctx.type === "check_stuck" ? (r.context as { ticketId?: string }).ticketId : undefined;
                   const merge = mergeTicket ? await review.mergeState(mergeTicket) : null;
+                  // Where the sign-off stands, worked out from the reviews and the recorded sign-off (BOS-503, DR-021).
+                  const [signoffTicket] = ctx.type === "risk_review" && mergeTicket ? await db.select().from(ticketsTable).where(eq(ticketsTable.id, mergeTicket)) : [];
+                  const signoff = signoffTicket ? signoffLine(await signoffState(db, signoffTicket)) : null;
                   return [
                     `${r.id}: ${ctx.tempCleanup ? "TEMP-FILE CLEANUP: " : ctx.workingCopy ? "WORKING-COPY CLEANUP: " : ""}[${r.kind}/${r.tier}]`,
                     `Question: ${untrusted("decision card", r.question)}`,
                     `Ticket: ${tickets.join(", ") || "none"} · Raised by: ${r.agentName ?? "Boss Man"} · Age: ${ago(r.createdAt)} · Score: ${Math.round(r.score)}`,
                     ...(merge ? [`Merge state: ${merge}`] : []),
+                    ...(signoff ? [signoff] : []),
                     ...(r.reasons?.length ? [`Why it ranks here: ${r.reasons.join("; ")}`] : []),
                     `Options: ${(r.options as string[]).join(" | ") || "none"} (recommended: ${r.recommendedOption ?? "none"})`,
                     ...(ctx.explain?.command ? [`Command: ${untrusted("decision card command", ctx.explain.command)}`] : []),
@@ -1365,14 +1375,19 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const pics = await db.select({ id: ticketImages.id, name: ticketImages.name, caption: ticketImages.caption }).from(ticketImages).where(and(eq(ticketImages.ticketId, ticketId), eq(ticketImages.companyId, scope.companyId), sql`${ticketImages.type} like 'image/%'`)).orderBy(asc(ticketImages.createdAt));
       const t = row.t;
       const note = stateNoteLine(t, new Date());
-      // One page covers the whole thing, description through conversation, so a long owner message is
-      // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
+      // The sign-off in plain words, from the decisions themselves (BOS-503): agents can't see decision state otherwise.
+      const signoff = t.systemState === "review" ? signoffLine(await signoffState(db, t)) : null;
+      const signoffLog = await signoffHistory(db, ticketId);
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
+      // One page covers the whole thing, description through conversation, so a long owner message is
+      // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const head = [
         `# ${t.title}`,
         `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
         ...(note ? [note] : []),
+        ...(signoff ? [signoff] : []),
+        ...(signoffLog ? [signoffLog] : []),
         ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
         ...(ciLine ? [ciLine] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
@@ -2731,7 +2746,9 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       ? await db
           .select({ companyId: runTokens.companyId, agentId: runTokens.agentId, runId: runTokens.runId })
           .from(runTokens)
-          .where(and(eq(runTokens.tokenHash, hashToken(token)), gt(runTokens.expiresAt, new Date())))
+          // A token works only while its own run is live (BOS-513): a copy left in a file stops working when the run ends. A token whose run row is missing is refused too (inner join).
+          .innerJoin(runsTable, eq(runsTable.id, runTokens.runId))
+          .where(and(eq(runTokens.tokenHash, hashToken(token)), gt(runTokens.expiresAt, new Date()), isNull(runsTable.endedAt)))
       : [];
     if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });
 
