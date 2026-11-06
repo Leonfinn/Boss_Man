@@ -340,7 +340,9 @@ describe("stale blockers (R21)", () => {
       await ctx.req("PATCH", `/api/tickets/${waiting.id}`, { state: "done" });
       loose = waiting;
     }
-    const at = ctx.clock();
+    // Ended over an hour ago: a run that ended cleanly within the hour is the company making progress,
+    // which rightly changes what the no-progress sweep (BOS-593) reads; these are only meant to be unrelated.
+    const at = new Date(ctx.clock().getTime() - 2 * HOUR);
     for (let i = 0; i < 6; i++) await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: loose.id, status: "succeeded", startedAt: at, lastEventAt: at, endedAt: at } as never);
     expect(await measure()).toEqual(two);
 
