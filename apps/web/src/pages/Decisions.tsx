@@ -703,6 +703,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question} refs={d.refs} /></h2>
                         {d.context.text ? <MoreText label="New rules" text={d.context.text} /> : <p>This clears the standing rules.</p>}
                       </>
+                    ) : d.context?.type === "owner_setup" ? (
+                      // The server's question repeats the steps as plain numbered text (raiseOwnerSetup), so any
+                      // command block in them showed as raw ``` lines (BOS-550). The steps show once, as blocks, under
+                      // "What to do"; the heading is only the first line.
+                      <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>

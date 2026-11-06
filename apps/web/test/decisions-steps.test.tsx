@@ -79,4 +79,15 @@ describe("labelled fences render as command blocks, wherever they sit (BOS-550)"
     fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("D=$(sed -n 's/^DEPLOYER=//p' .env)"));
   });
+
+  it("a 'Ready to use' card shows no raw fence anywhere: its question's copy of the steps is not shown as text", () => {
+    // raiseOwnerSetup writes the steps into the question as "1. <step>" lines as well as into context.steps.
+    const steps = ["Turn it on:\n```sh host=\"app01\" as=\"root\"\nsystemctl start thing\n```", "Settings → Thing → Save"];
+    const d: Decision = { ...card(steps), question: `"Thing" is live. To start using it:\n\n${steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`, options: ["Done"], context: { type: "owner_setup", steps } };
+    const { container } = render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
+    expect(container.textContent).not.toMatch(/```|host=|as="/);
+    expect(screen.getByText(/"Thing" is live\. To start using it:/)).toBeTruthy();
+    expect(line(/^On app01, as root\.$/)).toBeTruthy();
+    expect(screen.getAllByText("systemctl start thing")).toHaveLength(1);
+  });
 });
