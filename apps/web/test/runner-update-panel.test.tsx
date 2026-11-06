@@ -58,3 +58,43 @@ describe("Settings → Runner update: the live state first, a past problem as hi
     expect(history.textContent).not.toContain("PROBLEM");
   });
 });
+
+describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
+  const launcher = { slug: "boss-man-co", container: { state: "running", status: "Up 5 seconds", image: "boss-man-runner:latest" } };
+  const panel = (liveRow: object) => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("/runner")) return json({ registered: true, runnerId: "r1", connected: false, lastSeenAt: live.at, imageVersion: live.imageVersion, diskUsedBytes: null, addons: null, launcher, report: { live: liveRow, last: null } });
+      return json([]);
+    }));
+    render(<Runner company={company} />);
+  };
+
+  it("says Updating and keeps Start, Restart and Stop disabled while the swap runs", async () => {
+    panel({ ok: true, state: "updating", text: "Updating: swapping to the new runner. It starts by itself; no need to press anything." });
+    expect(await screen.findByText(/^Updating: swapping to the new runner/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Reconnect runner" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Restart" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Stop" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("a failed swap says so, and Start is pressable again", async () => {
+    panel({ ok: false, state: "failed", text: "Update failed: the new runner would not start. Press Start runner below." });
+    const line = await screen.findByText(/^Update failed:/);
+    expect(line.className).toContain("red");
+    expect((screen.getByRole("button", { name: "Reconnect runner" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("the fleet list tags a swapping runner Updating and a frozen one Paused", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("/api/runner-report")) return json({ live: [{ ...live, connected: false, swap: { retryAt: null, tries: 0 } }, { ...live, slug: "b", name: "B Co", connected: false, guard: { reason: "guard exited", since: null } }], update: null });
+      if (url.endsWith("/api/maintenance")) return json({ on: true, deadline: "2026-11-06T12:30:00.000Z", runs: 0, companies: 0 });
+      return json([]);
+    }));
+    render(<RunnerUpdate />);
+    const now = await screen.findByTestId("runner-live");
+    expect(now.textContent).toContain("Updating");
+    expect(now.textContent).toContain("Paused: network guard");
+    expect(now.textContent).toContain("guard exited");
+    expect(now.textContent).not.toContain("Not connected");
+  });
+});
