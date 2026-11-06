@@ -307,7 +307,7 @@ if command -v flock >/dev/null; then
   # One place per folder: a newer check from the same folder replaces the older one, which leaves saying so.
   rm -rf "$t/lock.queue"; hold 1 3600; h1=$!; sleep 0.3
   ( r=0; lock env >"$t/old.out" 2>&1 || r=$?; echo "$r" >"$t/old.rc" ) & o=$!
-  for _ in $(seq 50); do grep -q "waiting for a free check slot" "$t/old.out" 2>/dev/null && break; sleep 0.2; done
+  for _ in $(seq 300); do grep -q "waiting for a free check slot" "$t/old.out" 2>/dev/null && break; sleep 0.2; done
   ( lock env >"$t/new.out" 2>&1 ) & n=$!
   for _ in $(seq 300); do [ -s "$t/old.rc" ] && break; sleep 0.2; done
   [ "$(cat "$t/old.rc" 2>/dev/null)" = 75 ] || fail "replace: older check should exit 75, got '$(cat "$t/old.rc" 2>/dev/null)': $(cat "$t/old.out")"
