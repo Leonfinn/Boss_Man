@@ -168,32 +168,46 @@ refresh_available() {
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
-# Host facts (BOS-427): the machine's own name and, for the folders it knows, their owner, group and mode,
-# read with `stat` only (never their contents). The server's owner-card lint (R6) uses this to refuse a step
-# that would run as the owner's login and hit a folder that login can't read. Every folder is optional: one
-# that isn't there is skipped, and a stat that fails is skipped too, so a host on another layout still gets a
-# record. The file is written mode 644 (no secrets in it) and only replaced when it changed.
+# Host facts (BOS-427, BOS-541): the machine's own name and, for the folders it knows, their owner, group, mode
+# and role, read with `stat` only (never their contents). The server's owner-card lint (R6) uses this to refuse a
+# step that would run as the owner's login and hit a folder that login can't read, or would open a backup, data
+# or secrets folder to everyone. The role is what the folder IS on this host, not what its name looks like: the
+# install folder holds the database backups by default, so it carries the "backups" role too. Every folder is
+# optional: one that isn't there is skipped, and a stat that fails is skipped too, so a host on another layout
+# still gets a record. The file is written mode 644 (no secrets in it) and only replaced when it changed.
 write_host_facts() {
   local f="$OUTBOX/host.json"
   ((DRY)) && { log "[dry-run] would write $f"; return 0; }
   local name; name="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost)"
   name="${name%%[[:space:]]*}"
   [[ $name =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || name="localhost"
-  local rows="" sep="" p o g m
+  local rows="" sep="" p d o g m r
   # The install folder (the deployer's parent), the deployer folder, backups, data and the checkout's secrets.
-  local -a folders=("$D/.." "$D" "${BOSSMAN_BACKUP_DIR:-$D/..}" "${BOSSMAN_DATA:-/srv/boss-man/data}" "$REPO/secrets")
+  # One folder can have more than one role (the install folder holds the backups by default), so paths repeat.
+  local -a folders=("$D/..:install" "${BOSSMAN_BACKUP_DIR:-$D/..}:backups" "$D:deployer" "${BOSSMAN_DATA:-/srv/boss-man/data}:data" "$REPO/secrets:secrets")
+  # Roles by path, in a fixed order (private ones first), so the same host always gets the same row.
+  local -A roles=()
   for p in "${folders[@]}"; do
-    [[ -n $p && -d $p ]] || continue
-    p="$(cd "$p" 2>/dev/null && pwd)" || continue
+    r="${p##*:}" d="${p%:*}"
+    [[ -n $d && -d $d ]] || continue
+    d="$(cd "$d" 2>/dev/null && pwd)" || continue
+    [[ -n $d ]] || continue
+    case " ${roles[$d]:-} " in *" $r "*) continue ;; esac
+    case $r in
+      backups | data | secrets) roles[$d]="$r${roles[$d]:+ ${roles[$d]}}" ;;
+      *) roles[$d]="${roles[$d]:+${roles[$d]} }$r" ;;
+    esac
+  done
+  while IFS= read -r p; do
     [[ -n $p ]] || continue
     o="$(stat -c %U "$p" 2>/dev/null || stat -c %u "$p" 2>/dev/null)" || continue
     g="$(stat -c %G "$p" 2>/dev/null || stat -c %g "$p" 2>/dev/null)" || continue
     m="$(stat -c %a "$p" 2>/dev/null)" || continue
     [[ $m =~ ^[0-7]{3,4}$ ]] || continue
-    # Avoid listing the same folder twice (install and backups can be the same folder).
-    [[ $rows == *"\"path\": $(jstr "$p")"* ]] && continue
-    rows+="$sep{\"path\": $(jstr "$p"), \"owner\": $(jstr "$o"), \"group\": $(jstr "$g"), \"mode\": \"$m\"}"; sep=", "
-  done
+    local rl="" rlsep=""
+    for r in ${roles[$p]}; do rl+="$rlsep$(jstr "$r")"; rlsep=", "; done
+    rows+="$sep{\"path\": $(jstr "$p"), \"owner\": $(jstr "$o"), \"group\": $(jstr "$g"), \"mode\": \"$m\", \"roles\": [$rl]}"; sep=", "
+  done < <(printf '%s\n' "${!roles[@]}" | LC_ALL=C sort)
   printf '{"version": 1, "name": %s, "writtenAt": %s, "ownership": [%s]}\n' "$(jstr "$name")" "$(jstr "$(now)")" "$rows" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
