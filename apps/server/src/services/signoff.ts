@@ -78,13 +78,16 @@ export async function priorSignoff(db: Db, t: { id: string; risk: RiskTier | nul
  */
 export async function derivedSignoff(db: Db, t: Ticket, head?: string | null): Promise<DerivedSignoff> {
   if (!ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) return { state: "not_needed" };
-  // The owner's own approval (the ticket page or review page, with no card) is the sign-off when it is the
-  // ticket's newest review verdict: approve() records it moments before the merge starts.
   const [latest] = await db.select({ reviewer: ticketReviews.reviewer, verdict: ticketReviews.verdict, at: ticketReviews.createdAt }).from(ticketReviews).where(eq(ticketReviews.ticketId, t.id)).orderBy(desc(ticketReviews.createdAt)).limit(1);
-  if (latest?.reviewer === "the owner" && latest.verdict === "approved") return { state: "signed_off", at: latest.at, head: null };
+  const rows = await latestRows(db, t.id);
+  // The owner's own approval (the ticket page or review page, with no card) is the sign-off when it is the
+  // ticket's newest review verdict and no review round started after it: approve() records it moments before
+  // the merge starts. It still counts while that round's reviews are open (the owner may approve over them), but
+  // an approval from an earlier round never signs off the next one (Freddy's round-1 finding: it used to).
+  const roundStart = rows.length ? Math.max(...rows.map((r) => r.createdAt.getTime())) : 0;
+  if (latest?.reviewer === "the owner" && latest.verdict === "approved" && latest.at.getTime() >= roundStart) return { state: "signed_off", at: latest.at, head: null };
   const prior = await priorSignoff(db, t, head ?? null);
   if (head && prior.reuse) return { state: "signed_off", at: new Date(prior.reuse.at), head: prior.reuse.head };
-  const rows = await latestRows(db, t.id);
   // With no review requests (a policy with no review kinds), the approval itself is the round: an agent's approval
   // as the ticket's newest verdict, recorded by review.approve before it raised the card.
   let since: Date;
@@ -229,7 +232,8 @@ export async function signoffClearedReason(db: Db, ticketId: string): Promise<st
   if (d.state === "waiting") return null;
   if (d.state === "signed_off") return "the owner signed it off";
   if (d.state === "not_needed") return "its risk no longer needs the owner's sign-off";
-  return "a new review round started";
+  // reviews_pending: a new review round started, or a review in this round asked for changes.
+  return "its reviews are open again (a new review round started, or a review asked for changes)";
 }
 
 /**

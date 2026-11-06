@@ -7,7 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, decisions, reviewRequests, runners, runs, ticketDependencies, ticketReviews, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -249,6 +249,25 @@ describe("owner sign-off cards (BOS-503)", () => {
     expect(a ?? b).toBeTruthy();
     await c.sweeps.run();
     expect(await c.cards(t.id, "open")).toHaveLength(1);
+  });
+
+  it("the owner's own approval from an earlier round doesn't sign off the next round (Freddy, round 1)", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    const { derivedSignoff } = await import("../src/services/signoff.js");
+    // Round 1 (requested 5 h ago): the owner approved on the page (no card), then the merge failed and the work went back.
+    await c.db.update(reviewRequests).set({ createdAt: new Date(Date.now() - 5 * 3_600_000) }).where(eq(reviewRequests.ticketId, t.id));
+    await c.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "the owner", verdict: "approved", createdAt: new Date(Date.now() - 3 * 3_600_000) });
+    expect((await derivedSignoff(c.db, await c.row(t.id))).state).toBe("signed_off");
+    // Round 2 starts: the old approval no longer counts, and nothing merges it.
+    await c.db.insert(reviewRequests).values({ ticketId: t.id, kind: "code", reviewerAgentId: c.senior.id, round: 2, seq: 0, status: "pending", createdAt: new Date(Date.now() - 3_600_000) });
+    expect((await derivedSignoff(c.db, await c.row(t.id))).state).toBe("reviews_pending");
+    await expect(c.review.land(t.id, "Boss Man")).rejects.toThrow(/sign-off/);
+    // Round 2 passes: it waits on the owner again, with one card, and still isn't merged.
+    await c.db.update(reviewRequests).set({ status: "approved", decidedAt: new Date(Date.now() - 1_800_000) }).where(and(eq(reviewRequests.ticketId, t.id), eq(reviewRequests.round, 2)));
+    expect((await derivedSignoff(c.db, await c.row(t.id))).state).toBe("waiting");
+    expect(await c.sweeps.run()).toMatchObject({ signoffCards: 1, unmergedApprovals: 0 });
+    expect(c.merges()).toBe(0);
   });
 
   it("a medium-risk ticket (no sign-off) is not touched", async () => {
