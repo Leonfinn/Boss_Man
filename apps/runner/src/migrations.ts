@@ -145,7 +145,8 @@ export function parseNameStatus(out: string): Array<{ status: string; path: stri
 }
 
 /** The gate's wording for what to do about a journal problem; drizzle gives no error of its own. */
-const JOURNAL_FIX = "To fix: merge origin/<target> into your branch, renumber your migration to the next free number (NNNN), set its journal \"when\" to Date.now(), then run drizzle-kit generate to confirm it reports no changes.";
+// Hand renumbering left main's snapshot chain broken (BOS-519); regenerating sets the number, when and snapshot parent together.
+const JOURNAL_FIX = "To fix: merge origin/<target> into your branch, delete your migration's .sql, meta/NNNN_snapshot.json and journal entry, then run drizzle-kit generate again; node scripts/lint-migrations.mjs checks the result (docs/10-migrations.md).";
 /** A journal entry may not be dated further ahead than this: a made-up future time would make every later migration look older and be skipped. */
 export const JOURNAL_FUTURE_SLACK_MS = 10 * 60_000;
 

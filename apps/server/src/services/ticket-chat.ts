@@ -4,12 +4,13 @@
 import { and, asc, desc, eq, isNull, ne, or } from "drizzle-orm";
 import { systemAuthor, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, runs, skillProposals, ticketMessages, tickets } from "../db/schema.js";
+import { agents, ownerReplies, runs, skillProposals, ticketMessages, tickets } from "../db/schema.js";
 import { RunError, type runsService } from "./runs.js";
 import { record } from "./activity.js";
 import { stampPost } from "./progress.js";
 import { ownerActed } from "./stale-requests.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
+import type { OwnerRepliesService } from "./owner-replies.js";
 
 /** How many recent messages a run's prompt carries. */
 export const PROMPT_HISTORY = 12;
@@ -26,7 +27,7 @@ export class TicketChatError extends Error {
 
 type NotifyHook = (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>;
 
-export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsService>; notify: NotifyHook }) {
+export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsService>; notify: NotifyHook; replies?: OwnerRepliesService }) {
   async function ticket(ticketId: string, companyId?: string) {
     const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
     if (!t || (companyId && t.companyId !== companyId)) throw new TicketChatError(404, "No ticket with that ID in your company.");
@@ -36,10 +37,27 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
   return {
     async list(ticketId: string) {
       await ticket(ticketId);
+      // Each owner message carries its waiting-for-an-answer state (BOS-425) under it: how it
+      // reached the agent, whether its agent is working on this ticket now, and how many times
+      // Boss Man has asked for an answer.
       const items = await db
-        .select({ id: ticketMessages.id, author: ticketMessages.author, agentId: ticketMessages.agentId, agent: agents.name, runId: ticketMessages.runId, text: ticketMessages.text, delivery: ticketMessages.delivery, createdAt: ticketMessages.createdAt })
+        .select({
+          id: ticketMessages.id,
+          author: ticketMessages.author,
+          agentId: ticketMessages.agentId,
+          agent: agents.name,
+          runId: ticketMessages.runId,
+          text: ticketMessages.text,
+          delivery: ticketMessages.delivery,
+          createdAt: ticketMessages.createdAt,
+          replyState: ownerReplies.state,
+          replyReminders: ownerReplies.reminders,
+          replyClearedAt: ownerReplies.clearedAt,
+          replyClearedBy: ownerReplies.clearedBy,
+        })
         .from(ticketMessages)
         .leftJoin(agents, eq(agents.id, ticketMessages.agentId))
+        .leftJoin(ownerReplies, eq(ownerReplies.messageId, ticketMessages.id))
         .where(eq(ticketMessages.ticketId, ticketId))
         .orderBy(asc(ticketMessages.createdAt))
         .limit(500);
@@ -64,13 +82,25 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
         .where(and(eq(runs.ticketId, ticketId), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
         .orderBy(desc(runs.startedAt))
         .limit(1);
-      let delivery: "live" | "woken" | "unassigned" = "unassigned";
+      // A target busy on another ticket has no free slot, so the message waits its turn (it is
+      // "queued" behind that work, which the ticket says under the message). Only another ticket
+      // counts: a live run on this one took the message already.
+      const target = opts.agentId ?? t.assigneeAgentId;
+      const [busyElsewhere] = target
+        ? await db
+            .select({ id: runs.id })
+            .from(runs)
+            .where(and(eq(runs.agentId, target), isNull(runs.endedAt), ne(runs.ticketId, ticketId), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
+            .limit(1)
+        : [];
+      let delivery: "live" | "woken" | "queued" | "unassigned" = "unassigned";
       let runId: string | null = null;
       let agentId: string | null = null;
       // The owner can ask someone other than the agent working it, e.g. the CEO.
       const other = opts.agentId && opts.agentId !== (live ? live.agentId : t.assigneeAgentId) ? opts.agentId : null;
       if (other) {
         delivery = "woken";
+        if (busyElsewhere) delivery = "queued";
         agentId = other;
       } else if (live) {
         try {
@@ -84,11 +114,14 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
           throw err;
         }
       } else if (t.assigneeAgentId) {
-        delivery = "woken";
+        delivery = busyElsewhere ? "queued" : "woken";
         agentId = t.assigneeAgentId;
       }
       // Stored before the wake, so the new run's prompt already carries it.
       const [m] = await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId, author: "owner", agentId, runId, text, delivery }).returning();
+      // The awaiting-reply marker (BOS-425): an agent's ticket_reply on this ticket clears it, and
+      // a run that received it and ended silently re-wakes its agent.
+      await deps.replies?.opened({ companyId: t.companyId, ticketId, messageId: m!.id, agentId, delivery, runId });
       await record(db, { companyId: t.companyId, ticketId, kind: "message", summary: `Owner wrote: ${text}` });
       // The owner acted: anything else we told them about this ticket may be out of date (BOS-123).
       // The assignee is woken by the message already, so they get one note, not two.
@@ -120,6 +153,8 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
         .insert(ticketMessages)
         .values({ companyId: input.companyId, ticketId: input.ticketId, author: "agent", agentId: input.agentId, runId: input.runId, text: input.text.slice(0, MAX_TEXT) })
         .returning();
+      // An answer on the ticket answers the owner's open messages on it (BOS-425).
+      await deps.replies?.clearOnReply({ ticketId: input.ticketId, agentId: input.agentId });
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "message", summary: `Replied: ${input.text}` });
       // The run has posted: its silence is measured from now (BOS-314).
       await stampPost(db, { runId: input.runId, ticketId: input.ticketId });
@@ -132,6 +167,9 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       const [r] = await db.select({ companyId: runs.companyId, ticketId: runs.ticketId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(eq(runs.id, runId));
       if (!r?.ticketId || r.purpose === "chat") return;
       await db.insert(ticketMessages).values({ companyId: r.companyId, ticketId: r.ticketId, author: "agent", agentId: r.agentId, runId, text: text.slice(0, MAX_TEXT), delivery: "end_of_run" });
+      // A closing message is the owner's answer too (the run ended saying it): it clears the marker,
+      // so a run that did answer is never woken again for silence (BOS-425).
+      await deps.replies?.clearOnReply({ ticketId: r.ticketId, agentId: r.agentId });
     },
 
   };

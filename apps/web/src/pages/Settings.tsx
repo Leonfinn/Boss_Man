@@ -1829,7 +1829,7 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
 }
 
 type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
-type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate; healthy?: boolean };
 
 /** How many agents may run at once, in total and per company; the per-agent limit is fixed at one. */
 function RunLimits() {
@@ -1896,7 +1896,11 @@ function RunnerUpdate() {
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
       <p role="status" style={{ fontSize: 14 }}>
-        {m.last ? (
+        {m.last && m.healthy && !m.on ? (
+          <>
+            <span className="tag">OK</span> Every runner is connected on the newest image. (The update on {when(m.last.at)} had a problem that has since cleared.)
+          </>
+        ) : m.last ? (
           <>
             <span className={m.last.ok ? "tag" : "tag red"}>{m.last.ok ? "OK" : "PROBLEM"}</span> Last update {when(m.last.at)}: {m.last.title}. {m.last.body}
           </>
