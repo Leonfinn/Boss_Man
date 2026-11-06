@@ -604,10 +604,11 @@ function closingParen(text: string, open: number): number {
 }
 
 /**
- * A command with every accepted umask subshell cut out: what is left runs under the terminal's own umask. Any
- * other parenthesis (a plain subshell, `$(…)`) becomes a command separator, so the git inside it is still seen.
+ * A command with its subshells cut out: every one, or with `only` just those it matches (the accepted umask
+ * subshells), so what is left runs under the terminal's own umask. Any parenthesis not cut (a plain subshell,
+ * `$(…)`) becomes a command separator, so the git inside it is still seen.
  */
-function outsideUmaskSubshells(command: string): string {
+function outsideSubshells(command: string, only?: RegExp): string {
   let out = "";
   for (let i = 0; i < command.length; i++) {
     const c = command[i]!;
@@ -620,7 +621,7 @@ function outsideUmaskSubshells(command: string): string {
     }
     if (c === "(") {
       const end = closingParen(command, i);
-      if (end !== -1 && UMASK_SUBSHELL.test(command.slice(i, end + 1))) {
+      if (end !== -1 && (!only || only.test(command.slice(i, end + 1)))) {
         out += " ; ";
         i = end;
         continue;
@@ -633,16 +634,19 @@ function outsideUmaskSubshells(command: string): string {
 
 /**
  * R14: refuse a git command that writes the checkout outside a `(umask 022 && …)` subshell, and a `umask` set
- * outside one. A word split, not a parser: git hidden in a quoted `sh -c` string is not seen.
+ * at the top level, where it stays set in the owner's terminal. A umask inside any subshell ends with it, so
+ * `(umask 077; pg_dump … >backup)`, the private-backup form our own scripts use, passes. A word split, not a
+ * parser: git hidden in a quoted `sh -c` string is not seen.
  */
 export function gitUmaskFindings(step: number, command: string): LintFinding[] {
   const out: LintFinding[] = [];
-  for (const words of simpleCommands(outsideUmaskSubshells(command))) {
+  for (const words of simpleCommands(outsideSubshells(command))) {
     const prog = readCommand(words).prog;
-    if (prog?.name === "umask" && prog.args.length) {
-      out.push({ step, rule: "R14", problem: `sets umask outside a subshell, so it stays set in the owner's terminal: ${command.slice(0, 120)}. Put it with the git command it is for, as (umask 022 && cd <folder> && git …)` });
-      continue;
-    }
+    if (prog?.name === "umask" && prog.args.length)
+      out.push({ step, rule: "R14", problem: `sets umask outside a subshell, so it stays set in the owner's terminal: ${command.slice(0, 120)}. Put it with the command it is for, in a subshell: (umask 022 && cd <folder> && git …)` });
+  }
+  for (const words of simpleCommands(outsideSubshells(command, UMASK_SUBSHELL))) {
+    const prog = readCommand(words).prog;
     if (prog?.name !== "git") continue;
     let j = words.findIndex((w) => w.split("/").pop() === "git") + 1;
     while (j < words.length && words[j]!.startsWith("-")) j += GIT_VALUE_OPTS.has(words[j]!) ? 2 : 1;

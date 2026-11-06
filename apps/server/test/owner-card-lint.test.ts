@@ -244,6 +244,16 @@ describe("R14: git that writes the checkout runs in a (umask 022 && …) subshel
     expect(r14("umask")).toEqual([]);
   });
 
+  it("passes a umask inside any subshell, such as the private backup our scripts make, but still refuses its git", () => {
+    // The form deploy.sh, rebuild-live.sh and host-deployer.sh use for backups: the 077 ends with the subshell.
+    expect(r14("(umask 077; cd /srv/bm/src && docker compose exec -T db pg_dump -U bossman bossman | gzip >/srv/bm/backups/b.sql.gz)")).toEqual([]);
+    expect(lintOwnerSteps([step("Back up:", sh("(umask 077 && tar czf /srv/bm/backups/src.tgz -C /srv/bm src)", H))]).refuse).toEqual([]);
+    // A git that writes, inside a subshell whose umask isn't 022, is refused once: for the git, not the umask.
+    expect(r14("(umask 077 && cd /srv/bm/src && git checkout main)").map((f) => f.problem.split(" ")[2])).toEqual(["checkout"]);
+    // Only the top-level umask of a mixed command is refused.
+    expect(r14("umask 022; (umask 077; tar czf /srv/bm/backups/src.tgz -C /srv/bm src)")).toHaveLength(1);
+  });
+
   it("passes git that writes nothing, and parentheses inside quotes", () => {
     for (const c of ["cd /srv/bm/src && git fetch origin && git rev-parse HEAD", "git -C /srv/bm/src status", "git log --oneline -5", "git stash list", "git worktree list", "git diff abc1234 def5678"]) expect(r14(c), c).toEqual([]);
     expect(r14(`(umask 022 && cd /srv/bm/src && git merge --ff-only abc1234 && echo "done (ok)") && docker compose exec -T server-blue node -e "fetch('x').then(r=>console.log(r))"`)).toEqual([]);
