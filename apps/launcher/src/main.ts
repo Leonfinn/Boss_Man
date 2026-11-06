@@ -7,7 +7,7 @@
 //   BOSSMAN_RUNNER_CPU_SHARES  CPU weight per runner against 1024 for the server and database (default 512)
 //   BOSSMAN_CHECK_SLOTS         full checks a runner may run at once (default 1; each extra one needs about 3 GB of runner memory)
 //   BOSSMAN_RUNNER_CPUS    optional hard CPU cap per runner, e.g. 4 (default none)
-//   BOSSMAN_RESERVED_THREADS  threads kept back for the server, database and proxy: auto (default: 2 on hosts with 6+ threads), off, or a number
+//   BOSSMAN_RESERVED_THREADS  threads kept back for the server, database and proxy: off (default), auto (2 on hosts with 6+ threads), or a number
 //   BOSSMAN_NETGUARD       auto (default), enforce or off: the network guard that keeps runners off private networks
 //   BOSSMAN_NETGUARD_ALLOW extra host:port entries (space separated) every runner may reach on the private networks
 //   BOSSMAN_LAUNCHER_KEY_FILE  the key the server sends; made on first start if missing

@@ -33,11 +33,14 @@ export function formatCpuList(ids: number[]): string {
 
 export type CpuSetting = { mode: "auto" } | { mode: "off" } | { mode: "count"; threads: number };
 
-/** BOSSMAN_RESERVED_THREADS: auto (default), off or 0, or a number of threads to keep back. */
+/**
+ * BOSSMAN_RESERVED_THREADS: off or 0 (default), auto, or a number of threads to keep back.
+ * Off by default (BOS-586): the measured UI freezes were not CPU starvation, so reserving is opt-in.
+ */
 export function parseReservedThreads(v: string | undefined): CpuSetting {
   const t = (v ?? "").trim().toLowerCase();
-  if (t === "" || t === "auto") return { mode: "auto" };
-  if (t === "off" || t === "0") return { mode: "off" };
+  if (t === "" || t === "off" || t === "0") return { mode: "off" };
+  if (t === "auto") return { mode: "auto" };
   if (!/^\d{1,3}$/.test(t)) throw new Error(`BOSSMAN_RESERVED_THREADS should be auto, off or a number of threads, not ${v}`);
   return { mode: "count", threads: Number(t) };
 }

@@ -145,8 +145,8 @@ services:
       BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
       BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
       BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
-      # Threads kept back for the server, database and proxy (BOS-586): auto = 2 on hosts with 6+ threads, off, or a number.
-      BOSSMAN_RESERVED_THREADS: ${BOSSMAN_RESERVED_THREADS:-auto}
+      # Threads kept back for the server, database and proxy (BOS-586): off (default), auto = 2 on hosts with 6+ threads, or a number.
+      BOSSMAN_RESERVED_THREADS: ${BOSSMAN_RESERVED_THREADS:-off}
       BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-1}
       BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
       BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}

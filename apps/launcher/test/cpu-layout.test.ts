@@ -49,7 +49,10 @@ describe("planReserve", () => {
     expect(planReserve({ mode: "count", threads: 4 }, range(4)).reason).toContain("fewer than");
   });
   it("parses the setting", () => {
-    expect(parseReservedThreads(undefined)).toEqual({ mode: "auto" });
+    // Off unless asked for (BOS-586 CEO decision: the freezes were not CPU starvation).
+    expect(parseReservedThreads(undefined)).toEqual({ mode: "off" });
+    expect(parseReservedThreads("")).toEqual({ mode: "off" });
+    expect(parseReservedThreads("auto")).toEqual({ mode: "auto" });
     expect(parseReservedThreads("off")).toEqual({ mode: "off" });
     expect(parseReservedThreads("0")).toEqual({ mode: "off" });
     expect(parseReservedThreads("4")).toEqual({ mode: "count", threads: 4 });
