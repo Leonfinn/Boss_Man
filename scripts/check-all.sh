@@ -101,6 +101,9 @@ fi
 # BOSSMAN_CHECK_BODY replaces the checks below with a stub command (for check-all.test.sh).
 if [ -n "${BOSSMAN_CHECK_BODY:-}" ]; then bash -c "$BOSSMAN_CHECK_BODY"; exit; fi
 
+# Clear old test scratch out of /tmp (older than 6 h, held by no process); best effort, never fails the check.
+"$(dirname "${BASH_SOURCE[0]}")/sweep-tmp.sh" || true
+
 # CHECK_ALL_SLOT_COMMAND (used by check-quick.sh, with BOSSMAN_CHECK_CHILD=1): wait for a slot exactly like a hand-run check,
 # run that one command while holding it, and exit with its status. None of the full checks run.
 if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
