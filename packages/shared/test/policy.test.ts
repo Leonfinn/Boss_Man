@@ -144,8 +144,8 @@ describe("helpers", () => {
       expect(recommendedVerdict(exec(c)), c).toBe("deny");
     }
     expect(recommendedVerdict(exec(`git status && git push origin bossman/${ticket}`))).toBe("deny");
-    // rm -rf inside a sed script is text being edited, not run; inside bash -c it runs.
-    expect(recommendedVerdict(exec(`sed "s|trap 'rm -rf \\"\\$t\\"' EXIT|:|" a.sh > /tmp/x.sh && bash /tmp/x.sh`))).toBe("allow");
+    // rm -rf inside a sed script may run (sed '1e rm -rf x'), so only a data-only program's quotes are skipped (BOS-116 review).
+    expect(recommendedVerdict(exec(`sed "s|trap 'rm -rf \\"\\$t\\"' EXIT|:|" a.sh > /tmp/x.sh && bash /tmp/x.sh`))).toBe("deny");
     expect(recommendedVerdict(exec("git commit -m 'stop rm -rf in scripts'"))).toBe("allow");
     expect(recommendedVerdict(exec("bash -c 'rm -rf /'"))).toBe("deny");
     expect(recommendedVerdict(exec("eval \"rm -rf $d\""))).toBe("deny");
@@ -415,6 +415,13 @@ describe("working-copy cleanup (BOS-120)", () => {
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
       expect(cleanupScope(c), c).toBeNull();
     }
+  });
+
+  it("sends a working-copy delete spelled to dodge the text patterns to the owner (BOS-116)", () => {
+    for (const c of [
+      "r\\m -rf dist", "\\rm -rf dist", "rm \\\n -rf dist", "command rm -rf dist", '"rm" -rf dist',
+      "rm -rf dist; truncate -s0 x", "rm -f x; python3 -c 'import shutil; shutil.rmtree(\"/x\")'",
+    ]) expect(route(c), c).toEqual({ outcome: "owner", rule: "Destructive commands go to the owner", position: 3 });
   });
 
   it("only reads a command written as one string: an argv array runs without a shell", () => {
