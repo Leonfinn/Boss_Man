@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { lintJournal, lintSql } from "./lint-migrations.mjs";
 import { findUnannotated } from "./check-in-memory-state.mjs";
 
@@ -120,4 +121,34 @@ test("the lint fails two files, or two journal entries, on one number", () => {
   assert.deepEqual(lintNumberClash([file(75, "a")], entries([journalEntry(75, "a")])), []);
   assert.match(lintNumberClash([file(75, "a")], entries([]))[0], /not listed in _journal.json/);
   assert.match(lintNumberClash([], entries([journalEntry(75, "a")]))[0], /has no 0075_a.sql/);
+});
+
+// BOS-519: main's snapshot chain forked and lost snapshots, so drizzle-kit generate misnumbered migrations.
+import { lintSnapshots, readSnapshots } from "./lint-migrations.mjs";
+
+test("snapshots: a linear chain passes, and every way it broke on main fails", () => {
+  const Z = "00000000-0000-0000-0000-000000000000";
+  const journal = (...pairs) => ({ entries: pairs.map(([idx, num]) => ({ idx, tag: `${String(num).padStart(4, "0")}_x${num}`, when: 100 + idx })) });
+  const snaps = (...pairs) => new Map(pairs.map(([num, id, prevId]) => [`${String(num).padStart(4, "0")}_snapshot.json`, { id, prevId }]));
+  const ok = journal([0, 0], [1, 3], [7, 7]);
+  assert.deepEqual(lintSnapshots(ok, snaps([0, "a", Z], [3, "b", "a"], [7, "c", "b"])), []);
+  // two snapshots on one parent (generate refuses to run)
+  assert.ok(lintSnapshots(ok, snaps([0, "a", Z], [3, "b", "a"], [7, "c", "a"])).some((p) => /0003_snapshot.json, 0007_snapshot.json: share prevId a/.test(p)));
+  // a journal entry without a snapshot
+  assert.match(lintSnapshots(ok, snaps([0, "a", Z], [7, "c", "b"])).join("\n"), /"0003_x3" has no meta\/0003_snapshot.json/);
+  // a snapshot chained to something other than the entry before it
+  assert.match(lintSnapshots(ok, snaps([0, "a", Z], [3, "b", "a"], [7, "c", "zzz"])).join("\n"), /0007_snapshot.json: prevId is zzz, but the entry before it \("0003_x3"\) has snapshot id b/);
+  // a snapshot no entry uses
+  assert.match(lintSnapshots(ok, snaps([0, "a", Z], [3, "b", "a"], [7, "c", "b"], [9, "d", "c"])).join("\n"), /meta\/0009_snapshot.json: no journal entry uses it/);
+  // last idx below the highest number: generate would name the next migration 0003
+  const low = journal([0, 0], [1, 3], [2, 7]);
+  assert.match(lintSnapshots(low, snaps([0, "a", Z], [3, "b", "a"], [7, "c", "b"])).join("\n"), /idx 2, below the highest migration number 7, so drizzle-kit generate would name the next migration 0003/);
+  // idx going backwards
+  assert.match(lintSnapshots(journal([0, 0], [5, 3], [4, 7]), snaps([0, "a", Z], [3, "b", "a"], [7, "c", "b"])).join("\n"), /idx 4, not greater than "0003_x3" \(5\)/);
+});
+
+test("snapshots: the repo's own drizzle folder is a clean chain", () => {
+  const dir = new URL("../apps/server/drizzle/", import.meta.url).pathname;
+  const journal = JSON.parse(readFileSync(`${dir}meta/_journal.json`, "utf8"));
+  assert.deepEqual(lintSnapshots(journal, readSnapshots(dir)), []);
 });

@@ -1,6 +1,6 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState, type TaskSize } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
@@ -47,10 +47,12 @@ type TicketPatch = {
   createdByAgentId?: string | null;
   /** Start in plan mode until a plan is approved (R40). */
   planFirst?: boolean;
-  /** Acceptance criteria (R?): 1 to 10 non-empty strings; empty means none. */
-  acceptanceCriteria?: string[];
+  /** Acceptance criteria: 1 to 10 non-empty ones; empty means none. A plain string is checked before merge, `{ text, after: "merge" }` after it. */
+  acceptanceCriteria?: Criterion[];
   /** Research, wiki, docs or deploy-only work: an empty diff is fine. */
   noCode?: boolean;
+  /** What the owner has to do once this is live, in plain words by button path (DR-011); null clears it. */
+  ownerSetup?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
   urgent?: boolean;
   /** Move past a full column anyway. */
@@ -344,6 +346,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           customFields: input.customFields ?? {},
           acceptanceCriteria: input.acceptanceCriteria ?? [],
           noCode: input.noCode ?? false,
+          ownerSetup: input.ownerSetup?.trim() || null,
           urgent: input.urgent ?? false,
           lastActivityAt: now(),
           risk: input.risk ?? null,
@@ -522,6 +525,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const refusal = startRefusal({ systemState: t.systemState, createdAt: t.createdAt, lastActivityAt: t.lastActivityAt }, deps, { agentId: patch.byAgentId, role: who?.role ?? null });
         if (refusal) throw new WorkError(409, refusal);
       }
+      // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
+      if (patch.ownerSetup !== undefined) fields.ownerSetup = patch.ownerSetup?.trim() || null;
       if (dest) Object.assign(fields, { projectId: dest.id });
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
       // starts and before a plan is approved turns it on for high and critical, off otherwise.

@@ -6,6 +6,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { notifications, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { TREE_REASON, WATCH_REASON } from "../src/services/scheduler.js";
+import { createBackground } from "../src/background.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { issueRunToken } from "../src/mcp.js";
@@ -37,8 +38,15 @@ async function setup() {
   const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: clock.toISOString(), event });
   const starts = () => sent.filter((c): c is Extract<RunnerCommand, { type: "run.start" }> => c.type === "run.start");
   const advance = (minutes: number) => (clock = new Date(clock.getTime() + minutes * 60_000));
+  // The scenario test moves the app's clock in step with real time, so the timed loops below are exact.
+  const setClock = (d: Date) => (clock = d);
   const watchWakes = () => db.select().from(wakes).where(eq(wakes.reason, WATCH_REASON));
-  return { ...built, db, close, req, base, company, scrum, project, emit, starts, advance, watchWakes, now: () => clock };
+  // The production loops run the queue pass every 5 s and the slower watch/monitor pass every 30 s (BOS-414).
+  const passes = async () => {
+    await built.scheduler.slow();
+    await built.scheduler.tick();
+  };
+  return { ...built, db, close, req, base, company, scrum, project, emit, starts, advance, setClock, watchWakes, passes, now: () => clock };
 }
 
 describe("ticket watchers (R80)", () => {
@@ -47,12 +55,12 @@ describe("ticket watchers (R80)", () => {
     const blocker = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Pick a payments provider" })).json() as { id: string };
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Add checkout" })).json() as { id: string };
     await c.req("POST", `/api/tickets/${t.id}/dependencies`, { ticketId: blocker.id });
-    await c.scheduler.tick();
+    await c.passes();
     expect(await c.watchWakes()).toEqual([]);
 
     const on = await c.req("PUT", `/api/tickets/${t.id}/watcher`, { agentId: c.scrum.id, everyMinutes: 30 });
     expect(on.json()).toMatchObject({ watcherAgentId: c.scrum.id, watchEveryMinutes: 30, watchedAt: null });
-    await c.scheduler.tick();
+    await c.passes();
     const [first] = c.starts().filter((s) => s.agentId === c.scrum.id);
     expect(first).toBeDefined();
     // A watch run is on the one ticket it reports on (BOS-268) without touching its branch or moving it.
@@ -74,12 +82,12 @@ describe("ticket watchers (R80)", () => {
 
     // Not again until 30 minutes have passed.
     c.advance(20);
-    await c.scheduler.tick();
+    await c.passes();
     expect(await c.watchWakes()).toHaveLength(1);
     // Due, and something changed, so it reports again.
     await c.db.update(tickets).set({ title: "Add checkout flow" }).where(eq(tickets.id, t.id));
     c.advance(11);
-    await c.scheduler.tick();
+    await c.passes();
     expect(await c.watchWakes()).toHaveLength(2);
   });
 
@@ -90,12 +98,12 @@ describe("ticket watchers (R80)", () => {
     const round = async (change?: () => Promise<unknown>) => {
       await change?.();
       c.advance(11);
-      await c.scheduler.tick();
+      await c.passes();
       const run = c.starts().filter((s) => s.agentId === c.scrum.id).at(-1);
       if (run) await c.emit({ type: "run.ended", runId: run.runId, stopReason: "end_turn", error: null });
       return (await c.watchWakes()).length;
     };
-    await c.scheduler.tick();
+    await c.passes();
     expect(await c.watchWakes()).toHaveLength(1);
     // Nothing changed: no run, but it's still checked on schedule.
     expect(await round()).toBe(1);
@@ -116,15 +124,15 @@ describe("ticket watchers (R80)", () => {
     await c.db.update(tickets).set({ watcherAgentId: c.scrum.id, watchEveryMinutes: 15, monitorAt: new Date("2030-01-01") }); // a scheduled check keeps the tree from counting as stopped
     // The watcher is busy elsewhere: its waiting run gathers every ticket that falls due.
     await c.req("PATCH", `/api/agents/${c.scrum.id}`, { paused: true });
-    await c.scheduler.tick();
+    await c.passes();
     let [w] = await c.watchWakes();
     expect(w!.note).toContain(`Watch ticket ${a.id}`);
     expect(w!.note).toContain(`Watch ticket ${b.id}`);
     c.advance(16);
-    await c.scheduler.tick();
+    await c.passes();
     expect(await c.watchWakes()).toHaveLength(1);
     await c.req("PATCH", `/api/agents/${c.scrum.id}`, { paused: false });
-    await c.scheduler.tick();
+    await c.passes();
     const run = c.starts().find((s) => s.agentId === c.scrum.id)!;
     expect(run.prompt).toContain('"Ticket A"');
     expect(run.prompt).toContain('"Ticket B"');
@@ -134,15 +142,44 @@ describe("ticket watchers (R80)", () => {
     c.advance(1);
     await c.req("PATCH", `/api/tickets/${a.id}`, { state: "done" });
     await c.req("PUT", `/api/tickets/${b.id}/watcher`, { agentId: null });
-    await c.scheduler.tick();
+    await c.passes();
     [, w] = await c.watchWakes();
     expect(w!.note).toBe(`Watch ticket ${a.id}`);
     const last = c.starts().filter((s) => s.agentId === c.scrum.id).at(-1)!;
     expect(last.prompt).toContain("(now done: give a final update)");
     await c.emit({ type: "run.ended", runId: last.runId, stopReason: "end_turn", error: null });
     c.advance(120);
-    await c.scheduler.tick();
+    await c.passes();
     expect(await c.watchWakes()).toHaveLength(2);
+  });
+
+  it("reports a watch due between two slower passes on the next one, within 30 s (BOS-414)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Add checkout" })).json() as { id: string };
+    // Reported at T, so the 10-minute interval brings it due next; paused, so the wake waits where it's easy to see.
+    await c.req("PUT", `/api/tickets/${t.id}/watcher`, { agentId: c.scrum.id, everyMinutes: 10 });
+    await c.db.update(tickets).set({ watchedAt: c.now(), watchFingerprint: "0:nothing yet" }).where(eq(tickets.id, t.id));
+    await c.req("PATCH", `/api/agents/${c.scrum.id}`, { paused: true });
+    // As in main.ts: a queue pass every 5 s, and the slower watch/monitor pass six beats (30 s) later.
+    const beat = async () => {
+      c.advance(5 / 60);
+      await c.scheduler.tick();
+    };
+    c.advance(10 * 60 / 60);
+    for (let i = 0; i < 5; i++) await beat();
+    // Due just after the fifth queue pass: 25 s after the previous slower pass, still before the next one.
+    c.advance(1 / 60);
+    expect(await c.watchWakes()).toHaveLength(0); // nothing reported yet: it is only just due
+    // The next slower pass at 30 s reports it, so it never waits longer than one pass interval.
+    await c.scheduler.slow();
+    const [w] = await c.watchWakes();
+    expect(await c.watchWakes()).toHaveLength(1);
+    expect(w).toMatchObject({ note: `Watch ticket ${t.id}` });
+    // The tree-stopped brief is not fired for a tree that already has its report coming (BOS-414).
+    expect(await c.db.select().from(wakes).where(eq(wakes.reason, TREE_REASON))).toHaveLength(0);
+    // The queue passes after it make no second report.
+    for (let i = 0; i < 3; i++) await beat();
+    expect(await c.watchWakes()).toHaveLength(1);
   });
 
   it("only takes an agent from the ticket's company, and isn't held back by the no-ticket limit", async () => {
@@ -155,7 +192,7 @@ describe("ticket watchers (R80)", () => {
     await c.req("PUT", `/api/tickets/${t.id}/watcher`, { agentId: c.scrum.id, everyMinutes: 10 });
     await c.db.update(tickets).set({ monitorAt: new Date("2030-01-01") }).where(eq(tickets.id, t.id));
     for (let i = 0; i < 8; i++) {
-      await c.scheduler.tick();
+      await c.passes();
       const run = c.starts().filter((s) => s.agentId === c.scrum.id).at(-1);
       if (run) await c.emit({ type: "run.ended", runId: run.runId, stopReason: "end_turn", error: null });
       await c.db.update(tickets).set({ title: `Add checkout ${i}` }).where(eq(tickets.id, t.id));
@@ -183,10 +220,10 @@ describe("ticket watchers (R80)", () => {
     // The first report is due too and goes first; the tree wake runs once that run has ended.
     async function treeRun(c: Awaited<ReturnType<typeof setup>>) {
       const find = () => c.starts().find((x) => x.agentId === c.scrum.id && x.prompt.includes("has stopped"));
-      await c.scheduler.tick();
+      await c.passes();
       if (!find()) {
         await endRuns(c);
-        await c.scheduler.tick();
+        await c.passes();
       }
       return find();
     }
@@ -204,14 +241,14 @@ describe("ticket watchers (R80)", () => {
       await endRuns(c);
 
       c.advance(5);
-      await c.scheduler.tick();
+      await c.passes();
       expect(await treeWakes(c)).toHaveLength(1);
       // The sweep leaves a stopped watched tree to its watcher.
       expect((await c.db.select().from(tickets).where(eq(tickets.id, root.id)))[0]!.watchStoppedFp).not.toBeNull();
 
       await c.req("PATCH", `/api/tickets/${kid.id}`, { state: "ready" });
       c.advance(5);
-      await c.scheduler.tick();
+      await c.passes();
       expect(await treeWakes(c)).toHaveLength(2);
     });
 
@@ -219,28 +256,28 @@ describe("ticket watchers (R80)", () => {
       const c = (ctx = await setup());
       const { root, kid } = await tree(c);
       const [live] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.scrum.id, ticketId: kid.id }).returning();
-      await c.scheduler.tick();
+      await c.passes();
       expect(await treeWakes(c)).toEqual([]);
       await c.db.update(runs).set({ endedAt: c.now() }).where(eq(runs.id, live!.id));
 
       await c.db.update(tickets).set({ monitorAt: farFuture }).where(eq(tickets.id, kid.id));
-      await c.scheduler.tick();
+      await c.passes();
       expect(await treeWakes(c)).toEqual([]);
       await c.db.update(tickets).set({ monitorAt: null }).where(eq(tickets.id, kid.id));
 
       await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.scrum.id, ticketId: root.id, reason: "message", status: "deferred", notBefore: farFuture });
-      await c.scheduler.tick();
+      await c.passes();
       expect(await treeWakes(c)).toEqual([]);
       await c.db.delete(wakes);
 
       // Work in review waits on its reviewer.
       await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, kid.id));
-      await c.scheduler.tick();
+      await c.passes();
       expect(await treeWakes(c)).toEqual([]);
 
       await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.watcherAgentId, c.scrum.id));
       await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, kid.id));
-      await c.scheduler.tick();
+      await c.passes();
       expect(await treeWakes(c)).toEqual([]);
     });
 

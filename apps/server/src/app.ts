@@ -11,6 +11,7 @@ import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRE
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
+import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -20,7 +21,7 @@ import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
 import { modelProbeService } from "./services/model-probe.js";
-import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
+import { assetPathOf, PRECOMPRESSED_SUFFIX_LIST, parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
@@ -28,11 +29,15 @@ import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
+import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { addonsService, unknownAddons } from "./services/addons.js";
+import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
+import { hostFactsService } from "./services/host-facts.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
@@ -64,16 +69,18 @@ import { SkillError, skillsService } from "./services/skills.js";
 import { hashFiles } from "./services/skill-files.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
+import { ownerRepliesService } from "./services/owner-replies.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
-import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
+import { cleanFolder, HISTORY_PAGE_MAX, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
-import { runnerSocketRoutes } from "./routes/runner-socket.js";
+import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
+import { createMemorySampler } from "./services/memory-sampler.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
@@ -167,8 +174,14 @@ async function serveWeb(app: FastifyInstance, root: string) {
     wildcard: false,
     cacheControl: false,
     index: ["index.html"],
+    // The build writes a .br/.gz sibling next to each asset (BOS-411), so a request that accepts one is
+    // answered from disk with no CPU per request. A sidecar is never a route of its own: only the
+    // negotiation below may pick it, so nobody downloads one as a file. @fastify/static hands setHeaders
+    // the sibling's path, so the immutable rule is applied to the original name.
+    preCompressed: true,
+    globIgnore: PRECOMPRESSED_SUFFIX_LIST.map((suffix) => `**/*${suffix}`),
     setHeaders(res, file) {
-      res.header("cache-control", file.includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
+      res.header("cache-control", assetPathOf(file).includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
     },
   });
   app.addHook("onSend", async (req, reply) => {
@@ -187,7 +200,9 @@ async function serveWeb(app: FastifyInstance, root: string) {
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
   // Trust only the exact proxy addresses given (the Tailscale Serve hop), never every hop.
-  const app = Fastify({ logger: opts.logger ?? false, trustProxy: opts.trustedProxies?.length ? opts.trustedProxies : false });
+  // An owner's message can be a whole log (up to OWNER_MESSAGE_MAX characters, more once JSON-encoded and
+  // with attachments added); the default 1 MiB body limit would refuse it before validation ever ran.
+  const app = Fastify({ logger: opts.logger ?? false, trustProxy: opts.trustedProxies?.length ? opts.trustedProxies : false, bodyLimit: 4 * 1024 * 1024 });
   // Keep recent server errors for the CEO's server_status tool (BOS-224), redacted.
   const errorBuffer = createErrorBuffer();
   const logError = app.log.error.bind(app.log);
@@ -197,7 +212,9 @@ export async function buildApp(opts: AppOptions) {
     return logError(...(args as Parameters<typeof logError>));
   }) as typeof app.log.error;
   await app.register(cookie);
-  await app.register(websocket);
+  // A long owner message (up to OWNER_MESSAGE_MAX, plus the prompt around it) travels over the runner socket;
+  // the default 1 MiB frame limit could cut it off, so allow room for it.
+  await app.register(websocket, { options: { maxPayload: 4 * 1024 * 1024 } });
 
   // Event-loop stalls and GC pauses, with memory and what was in flight (BOS-432): logged, and shown in server_status.
   const stalls = createStallMonitor({ runnerSockets: () => app.websocketServer?.clients.size ?? 0, log: (line) => app.log.warn(line) });
@@ -230,6 +247,12 @@ export async function buildApp(opts: AppOptions) {
   const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
+  // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
+  // card reads it through addonFacts, and a failed read is "unknown" for all (warnings only), never a refused card.
+  const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), now: opts.now });
+  const addonFacts = () => addonsSvc.facts().catch(() => unknownAddons("Boss Man couldn't read the add-on state just now"));
+  // The socket peer, not req.ip: the edge is the hop itself, and X-Forwarded-For is the client's to set.
+  app.addHook("onRequest", async (req) => addonsSvc.noteRequest(req.socket.remoteAddress));
   const leader = opts.leader ?? createLeader();
   // A standby holds no runner: on demotion every runner socket is closed with 1013 ("try again later"), and they retry.
   leader.onDemote(() => {
@@ -252,7 +275,9 @@ export async function buildApp(opts: AppOptions) {
     notify: (agentId, input) => scheduler.notify(agentId, input),
     log: (m) => app.log.warn(m),
   });
-  const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, log: (m) => app.log.warn(m) });
+  // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
+  const hostFacts = hostFactsService({ dir: opts.deployerDir, log: (m) => app.log.warn(m) });
+  const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), log: (m) => app.log.warn(m) });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
@@ -332,14 +357,38 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   decisionsSvc.setMaintenanceHook(maintenance);
+  // Settings → Runner leads with the live state and keeps a past problem only as history (BOS-465).
+  const runnerReport = runnerReportService(db, maintenance, {
+    isConnected: (id) => runners.isConnected(id),
+    connectedSince: (id) => runners.connectedSince(id),
+    launcher: (companyId) => launch.status(companyId),
+  });
   const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
   decisionsSvc.setPermissionLog(permLog);
+  // Memory logging (BOS-410 step 1). Built here so server_status can read it; main.ts starts it on
+  // every process, standby too. Tests never start it, so no timer runs under vitest.
+  const memory = createMemorySampler({
+    everyMs: Number(process.env.BOSSMAN_MEMORY_LOG_MS ?? 0) || undefined,
+    log: (sample) => app.log.info({ memory: sample }, "memory"),
+    extra: () => {
+      let sockets = 0;
+      let socketBuffered = 0;
+      for (const c of app.websocketServer?.clients ?? []) {
+        sockets++;
+        socketBuffered += c.bufferedAmount;
+      }
+      return { sockets, socketBufferedKiB: Math.round(socketBuffered / 1024), runnerEventsWaiting: runnerIngestWaiting() };
+    },
+  });
   const serverStatus = serverStatusService(db, {
+    memory,
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
     connectedSince: (id) => runners.connectedSince(id),
     deploy: () => selfDeploy.overview(),
+    // Both colours, the same probe as GET /api/bluegreen (DR-020 E). `build` is defined further down; this only runs per request.
+    colours: () => probeColours(colour(), build),
     hold: async () => {
       const h = await getHold(db);
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
@@ -349,6 +398,7 @@ export async function buildApp(opts: AppOptions) {
     permissions: (companyId: string) => permLog.summary(companyId),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
+    addons: addonFacts,
     commit: process.env.BOSSMAN_COMMIT || "dev",
     startedAt: new Date(STARTED_AT),
     now: opts.now,
@@ -360,7 +410,14 @@ export async function buildApp(opts: AppOptions) {
   const runsSvc = runsService(db, { runners, now: opts.now });
   decisionsSvc.setCancelHook((runId) => runsSvc.cancel(runId));
   runsSvc.setWakeHook((w) => scheduler.wake(w));
-  const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w) });
+  // The owner's unanswered ticket messages (BOS-425). The scheduler and the alert ladder are built
+  // further down, so the hooks look them up when they run, not when this is built.
+  const ownerReplies = ownerRepliesService(db, {
+    notify: (agentId, w) => scheduler.notify(agentId, w),
+    alert: (input) => alerts.raise(input),
+    now: opts.now,
+  });
+  const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w), replies: ownerReplies });
   const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
   app.addHook("onClose", async () => semantic.stop());
   const wiki = wikiService(db, semantic);
@@ -448,7 +505,10 @@ export async function buildApp(opts: AppOptions) {
           const [run] = await db.select().from(runsTable).where(eq(runsTable.id, event.runId));
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
         })
+        // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
+        .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
+        .then(() => (event.interrupted ? null : scheduler.afterReviewRun(event.runId)))
         .then(() => scheduler.tick())
         .catch((err) => app.log.error({ err, companyId: runner.companyId }, "run-ended handling failed"));
       // A run ended; ask for a quota refresh. Any provider ends here, but the reading is cached for
@@ -463,6 +523,8 @@ export async function buildApp(opts: AppOptions) {
   const clearing = alertClearing(db, {
     isConnected: (runnerId) => runners.isConnected(runnerId),
     hasRoom: (fundingSourceId) => scheduler.hasRoom(fundingSourceId),
+    addons: addonFacts,
+    release: (ticketId) => decisionsSvc.release(ticketId),
     now: opts.now,
   });
   // A runner coming back clears "could not start … runner offline" cards at once, on any tier
@@ -502,6 +564,8 @@ export async function buildApp(opts: AppOptions) {
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),
+    // The owner's messages on tickets that nobody has answered (BOS-425).
+    ownerReplies: (t) => ownerReplies.sweep(t),
   });
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
@@ -535,6 +599,7 @@ export async function buildApp(opts: AppOptions) {
   });
   // The Scrum Master watchdog (BOS-58): its sweep runs on the leader's timer (main.ts), its actions through the Scrum Master's MCP tool.
   const watchdog = watchdogService(db, {
+    addons: addonFacts,
     notify: (agentId, input) => scheduler.notify(agentId, input),
     nudge: (input) => scheduler.nudge(input),
     raise: (input) => decisionsSvc.raise(input),
@@ -543,6 +608,7 @@ export async function buildApp(opts: AppOptions) {
     // A trip means the Scrum Master is the problem: straight to the owner.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
+    hosts: () => hostFacts.hosts(),
     localHour: (t) => Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ }).format(t)),
     now: opts.now,
     log: (m) => app.log.error(m),
@@ -551,11 +617,13 @@ export async function buildApp(opts: AppOptions) {
   const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, skillProposals, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setRetroHook(retro);
   const alerts = alertLadder(db, {
+    addons: addonFacts,
     notify: (agentId, input) => scheduler.notify(agentId, input),
     answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
     watchdog,
     nudge: (input) => scheduler.nudge(input),
     ceoCanRun: (companyId) => scheduler.ceoCanRun(companyId),
+    hosts: () => hostFacts.hosts(),
     clearExpired: async () => {
       const n = await clearing.check();
       if (n) await notes.syncDecisions();
@@ -577,6 +645,8 @@ export async function buildApp(opts: AppOptions) {
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
+    // A stalled-review card's actions (BOS-404, BOS-426): take it, hand it to another reviewer, send it back, or leave it.
+    reviewStall: (ctx, answer, byAgentId) => review.reviewStall(ctx, answer, byAgentId),
     // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
     // Decisions show "Checking and merging" while it runs (including lock retries), rather than inviting
     // another approval. A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
@@ -609,7 +679,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, addons: addonFacts }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -728,21 +798,7 @@ export async function buildApp(opts: AppOptions) {
   await app.register(async (owner) => {
     owner.addHook("preHandler", requireOwner);
     /** Blue/green at a glance: each colour's own /api/health over the compose network, or down when it doesn't answer. */
-    owner.get("/api/bluegreen", async () => {
-      const self = colour();
-      if (!self) return { enabled: false };
-      const peek = async (c: string) => {
-        if (c === self) return { ...build(), colour: c, up: true };
-        try {
-          const r = await fetch(`http://server-${c}:3100/api/health`, { signal: AbortSignal.timeout(2000) });
-          const h = (await r.json()) as { role?: string; commit?: string; startedAt?: string };
-          return { colour: c, up: r.ok, role: h.role ?? null, commit: h.commit ?? null, startedAt: h.startedAt ?? null };
-        } catch {
-          return { colour: c, up: false, role: null, commit: null, startedAt: null };
-        }
-      };
-      return { enabled: true, self, colours: await Promise.all(["blue", "green"].map(peek)) };
-    });
+    owner.get("/api/bluegreen", async () => probeColours(colour(), build));
 
     owner.get("/api/me", async () => {
       const [o] = await db.select({ username: owners.username }).from(owners);
@@ -1045,7 +1101,8 @@ export async function buildApp(opts: AppOptions) {
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
       const launcher = await launch.status(id);
       if (!r) return { registered: false, launcher };
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, launcher };
+      const report = await runnerReport.companyPanel(id);
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, launcher, report };
     });
 
     // The runner's container through the launcher (R55): start or reconnect (a new token), restart, stop.
@@ -1246,7 +1303,8 @@ export async function buildApp(opts: AppOptions) {
     const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
     const TicketFields = z.object({
       title: z.string().trim().min(1).max(200),
-      body: z.string().max(20_000).nullable(),
+      // The description is an owner message box too: a pasted log goes in whole (BOS-502).
+      body: z.string().max(OWNER_MESSAGE_MAX).nullable(),
       columnId: Uuid,
       state: State,
       outcome: z.enum(["completed", "cancelled"]),
@@ -1257,6 +1315,7 @@ export async function buildApp(opts: AppOptions) {
       dueDate: DateStr.nullable(),
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
+      ownerSetup: z.string().max(4000).nullable(),
       noCode: z.boolean(),
       urgent: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
@@ -1554,7 +1613,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/tickets/:id/messages", async (req, reply) => ticketChat.list(IdParam.parse(req.params).id).catch(ticketChatErrors(reply)));
     owner.post("/api/tickets/:id/messages", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { text, interrupt, agentId } = z.object({ text: z.string().trim().min(1).max(4000), interrupt: z.boolean().optional(), agentId: z.string().uuid().optional() }).parse(req.body);
+      const { text, interrupt, agentId } = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional(), agentId: z.string().uuid().optional() }).parse(req.body);
       return ticketChat
         .ownerSays(id, text, { interrupt, agentId })
         .then((m) => reply.code(201).send(m))
@@ -1776,6 +1835,8 @@ export async function buildApp(opts: AppOptions) {
     // A page's address can hold folders ("research/agent-landscape"), so it's the rest of the path.
     const SlugParams = z.object({ id: Uuid, "*": z.string().min(1).max(500) }).transform((p) => ({ id: p.id, slug: p["*"] }));
     const PageBody = z.object({ title: z.string().trim().min(1).max(200), body: z.string().max(MAX_BODY), folder: z.string().max(400).optional() });
+    // The owner's own editor may replace a page outright; the shrink guard is for agents (BOS-430).
+    const OwnerPageBody = PageBody.extend({ replace: z.boolean().optional() });
     // The CEO-style brief, built when asked and never stored as a page (R84).
     owner.get("/api/companies/:id/brief", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1799,15 +1860,28 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
+      // versions=1 lists every saved version of the page, newest first, in pages: the history
+      // screen uses it to reach versions past the newest 100 the page itself carries (BOS-496).
+      if ((req.query as Record<string, string | undefined>).versions === "1") {
+        const q = z.object({ offset: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(HISTORY_PAGE_MAX).optional() }).parse(req.query);
+        return wiki.versions(id, slug, q).catch(wikiErrors(reply));
+      }
       return wiki.get(id, slug).catch(wikiErrors(reply));
     });
     owner.put("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
-      return wiki.write(id, { ...PageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
+      return wiki.write(id, { ...OwnerPageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
     });
     owner.delete("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
       return wiki.remove(id, slug).then(() => reply.code(204).send(), wikiErrors(reply));
+    });
+    // Put an old version back (BOS-430): a new version of its own, so the restore can be undone.
+    // The page's slug goes in the body, as a page address can hold folders and Fastify's wildcard must be last.
+    owner.post("/api/companies/:id/wiki-restore", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ slug: z.string().min(1).max(500), revisionId: Uuid }).parse(req.body);
+      return wiki.restore(id, { ...b, agentId: null, runId: null, isCeo: true }).then((r) => r.page, wikiErrors(reply));
     });
     owner.get("/api/companies/:id/wiki-revisions/:rev", async (req, reply) => {
       const { id, rev } = z.object({ id: Uuid, rev: Uuid }).parse(req.params);
@@ -1954,7 +2028,7 @@ export async function buildApp(opts: AppOptions) {
     const CustomerIn = z.object({ name: Text(200), email: z.string().trim().email().max(320).nullable().optional(), segment: z.string().trim().max(100).nullable().optional() });
     const FeatureFields = z.object({
       title: Text(200),
-      description: z.string().max(20_000).nullable(),
+      description: z.string().max(OWNER_MESSAGE_MAX).nullable(),
       status: z.enum(FEATURE_STATUSES),
       areaId: Uuid.nullable(),
       parentId: Uuid.nullable(),
@@ -2101,14 +2175,14 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.post("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { text, agentId } = z.object({ text: z.string().trim().min(1).max(4000), agentId: Uuid.optional() }).parse(req.body);
+      const { text, agentId } = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), agentId: Uuid.optional() }).parse(req.body);
       return chat.send(id, text, agentId).then((m) => reply.code(201).send(m), chatErrors(reply));
     });
 
     // "Let the CEO question me first": the Board's add form sends its draft here instead of creating it.
     owner.post("/api/companies/:id/chat/grill", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ kind: z.enum(["task", "feature"]), title: z.string().trim().min(1).max(200), description: z.string().trim().max(10_000).nullable().optional(), projectId: Uuid.optional() }).parse(req.body);
+      const b = z.object({ kind: z.enum(["task", "feature"]), title: z.string().trim().min(1).max(200), description: z.string().trim().max(OWNER_MESSAGE_MAX).nullable().optional(), projectId: Uuid.optional() }).parse(req.body);
       return chat.grill(id, b).then((r) => reply.code(201).send(r), chatErrors(reply));
     });
 
@@ -2310,6 +2384,8 @@ export async function buildApp(opts: AppOptions) {
 
     // The runner update hold (docs/09-self-deploy.md, phase 2): the banner's numbers, a manual start, and cancel.
     owner.get("/api/maintenance", async () => maintenance.status());
+    // The Settings → Runner update panel: the live state first, then the last update as history (BOS-465).
+    owner.get("/api/runner-report", async () => runnerReport.updatePanel());
     owner.post("/api/maintenance/start", async (req, reply) => {
       const { minutes } = z.object({ minutes: z.number().int().min(1).max(1440).optional() }).parse(req.body ?? {});
       if (!launch.enabled) return reply.code(409).send({ error: "no_launcher", message: "Draining needs the launcher (BOSSMAN_LAUNCHER=1); without it runners are restarted by scripts/update-runner.sh --now." });
@@ -2353,7 +2429,7 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig } = z
         .object({
-          answer: z.string().trim().min(1).max(4000),
+          answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
           note: z.string().trim().max(2000).optional(),
           reasonLink: z.string().trim().max(400).optional(),
@@ -2541,7 +2617,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/runs", async (req) => runsSvc.active(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
     owner.post("/api/runs/:id/message", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ text: z.string().trim().min(1).max(20_000), interrupt: z.boolean().optional() }).parse(req.body);
+      const b = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional() }).parse(req.body);
       return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
     });
     owner.get("/api/runs/recent", async (req) => {
@@ -2562,5 +2638,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, memory, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
 }

@@ -4,13 +4,14 @@ import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type 
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
 import { TicketRelated } from "../components/TicketRelated";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
-import { readVerdicts } from "@boss-man/shared";
+import { criterionText, criteriaText, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
 import { usePoll } from "../hooks";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
@@ -75,31 +76,43 @@ function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<st
     <Fold title="Done when" hint={criteria.length ? `${criteria.length} ${criteria.length === 1 ? "criterion" : "criteria"}` : undefined}>
       {rows.length > 0 && (
         <ul data-testid="criteria" style={{ margin: 0, paddingLeft: 18 }}>
-          {rows.map((r) => (
-            <li key={r.criterion} data-testid="criterion" data-verdict={r.verdict ?? "none"}>
+          {rows.map((r, i) => (
+            <li key={r.criterion} data-testid="criterion" data-verdict={r.verdict ?? "none"} data-after={isAfterMerge(criteria[i]!) ? "merge" : undefined}>
               <span data-testid="verdict" style={{ color: r.verdict === "pass" ? "var(--green-ink)" : r.verdict === "fail" ? "var(--red-ink)" : undefined, fontWeight: 600 }}>{VERDICT_MARK[r.verdict ?? "none"]}</span> {r.criterion}
+              {isAfterMerge(criteria[i]!) && <small className="muted"> · on a real host, checked after merge</small>}
             </li>
           ))}
         </ul>
       )}
-      {t.systemState === "review" && criteria.length > 0 && rows.some((r) => !r.verdict) && (
-        <p className="muted" style={{ fontSize: 14, margin: 0 }}>Not every criterion has the author's pass or fail; the reviewer has been told that.</p>
+      {t.systemState === "review" && criteria.some((c) => !isAfterMerge(c)) && rows.some((r, i) => !isAfterMerge(criteria[i]!) && !r.verdict) && (
+        <p className="muted" style={{ fontSize: 14, margin: 0 }}>Not every criterion to check before merge has the author's pass or fail; the reviewer has been told that. The "on a real host" ones are checked after merge and don't hold up the review.</p>
       )}
       <CriteriaEdit
-        key={criteria.join("\n")}
+        key={criteria.map((c) => `${criterionText(c)}|${isAfterMerge(c) ? 1 : 0}`).join("\n")}
         initial={criteria}
         busy={busy}
-        save={(csv) => patch({ acceptanceCriteria: csv.map((l) => l.trim()).filter(Boolean) })}
+        save={(next) => patch({ acceptanceCriteria: next })}
       />
     </Fold>
   );
 }
 
 /** One non-empty line per criterion; saving nothing clears them. */
-function CriteriaEdit({ initial, save, busy }: { initial: string[]; save: (lines: string[]) => void; busy: boolean }) {
-  const [text, setText] = useState(initial.join("\n"));
+function CriteriaEdit({ initial, save, busy }: { initial: Criterion[]; save: (next: Criterion[]) => void; busy: boolean }) {
+  const [text, setText] = useState(criteriaText(initial).join("\n"));
+  // Which lines are only checked once the work is live, by their position in the list.
+  const [after, setAfter] = useState<Set<number>>(() => new Set(initial.flatMap((c, i) => (isAfterMerge(c) ? [i] : []))));
   const [open, setOpen] = useState(initial.length === 0);
   const next = () => setText((p) => (p ? `${p}\n` : ""));
+  // Built from the current lines in order, so a tick on line 2 follows line 2 even as lines are edited.
+  const built = (): Criterion[] =>
+    text
+      .split("\n")
+      .map((l, i) => ({ line: l.trim(), on: after.has(i) }))
+      .filter((x) => x.line)
+      .map((x) => (x.on ? { text: x.line, after: "merge" as const } : x.line));
+  const same = JSON.stringify(built()) === JSON.stringify(initial.map((c) => (isAfterMerge(c) ? { text: criterionText(c), after: "merge" } : criterionText(c))));
+  const lines = text.split("\n");
   return open ? (
     <div className="field">
       <label htmlFor="t-criteria" style={{ fontWeight: 600 }}>
@@ -114,9 +127,24 @@ function CriteriaEdit({ initial, save, busy }: { initial: string[]; save: (lines
         onChange={(e) => setText(e.target.value)}
         style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
       />
-      <small className="muted">Up to 10; leave empty to set none. The agent must report pass or fail for each when it asks for review.</small>
+      <small className="muted">Up to 10; leave empty to set none. The agent must report pass or fail for each before merge when it asks for review.</small>
+      {lines.some((l) => l.trim()) && (
+        <fieldset style={{ border: "1px solid var(--line-strong)", borderRadius: 8, padding: "6px 10px", margin: 0 }}>
+          <legend style={{ fontSize: 13 }} className="muted">
+            On a real host (checked after merge)
+          </legend>
+          {lines.map((l, i) =>
+            l.trim() ? (
+              <label key={i} style={{ display: "block", fontSize: 14 }}>
+                <input type="checkbox" checked={after.has(i)} onChange={(e) => setAfter((s) => { const n = new Set(s); if (e.target.checked) n.add(i); else n.delete(i); return n; })} /> {l.trim()}
+              </label>
+            ) : null,
+          )}
+          <small className="muted">Tick the checks only the real host can settle: reviewers skip them, and the ticket stays open after the merge until they're reported.</small>
+        </fieldset>
+      )}
       <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-        <button type="button" className="btn primary" disabled={busy || text === initial.join("\n")} onClick={() => save(text.split("\n"))}>
+        <button type="button" className="btn primary" disabled={busy || same} onClick={() => save(built())}>
           Save criteria
         </button>
         {initial.length > 0 && (
@@ -132,6 +160,53 @@ function CriteriaEdit({ initial, save, busy }: { initial: string[]; save: (lines
   ) : (
     <button type="button" className="link" style={{ alignSelf: "flex-start", padding: 0 }} onClick={() => setOpen(true)}>
       Edit criteria
+    </button>
+  );
+}
+
+/** The owner's setup steps (DR-011): what they do once this change is live, written by whoever built it. */
+function OwnerSetup({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => void; busy: boolean }) {
+  const steps = (t.ownerSetup ?? "").trim();
+  return (
+    <Fold title="After it goes live, you'll need to" hint={steps ? steps.split("\n").filter(Boolean).length + " step" + (steps.split("\n").filter(Boolean).length === 1 ? "" : "s") : undefined}>
+      <OwnerSetupEdit key={steps} initial={steps} busy={busy} save={(v) => patch({ ownerSetup: v })} />
+    </Fold>
+  );
+}
+
+/** One step per line; saving nothing clears them. */
+function OwnerSetupEdit({ initial, save, busy }: { initial: string; save: (v: string) => void; busy: boolean }) {
+  const [text, setText] = useState(initial);
+  const [open, setOpen] = useState(!initial);
+  return open ? (
+    <div className="field">
+      <label htmlFor="t-owner-setup" style={{ fontWeight: 600 }}>
+        What you have to do, one step per line
+      </label>
+      <textarea
+        id="t-owner-setup"
+        rows={3}
+        maxLength={4_000}
+        placeholder={"Settings → Funding → Add account, then sign in to the second plan"}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
+      />
+      <small className="muted">In plain words, by the buttons you'd click, one step per line. Boss Man shows this as a card only once the change is actually running. Leave empty if there's nothing for you to do.</small>
+      <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+        <button type="button" className="btn primary" disabled={busy || text === initial} onClick={() => save(text.trim())}>
+          Save steps
+        </button>
+        {initial && (
+          <button type="button" className="btn" onClick={() => setOpen(false)}>
+            Done
+          </button>
+        )}
+      </div>
+    </div>
+  ) : (
+    <button type="button" className="link" style={{ alignSelf: "flex-start", padding: 0 }} onClick={() => setOpen(true)}>
+      Edit steps
     </button>
   );
 }
@@ -285,6 +360,17 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     img.clear();
     setDraft(null);
   };
+  // Too long for a description: put the text in a .txt file, link it in the description, so the agent can open it.
+  const saveDraftAsFile = async (long: string) => {
+    try {
+      const markdown = await img.uploadText(long, "description.txt");
+      await patch({ body: withAttachments("The text was too long for the description box, so it's in this file:\n\n", [markdown]).trim() });
+      img.clear();
+      setDraft(null);
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
   const assign = (value: string) =>
     patch(value === "owner" ? { assigneeAgentId: null, assignedToOwner: true } : { assigneeAgentId: value || null, assignedToOwner: false });
   const [range, setRange] = useState<"base" | "last_turn">("base");
@@ -424,7 +510,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     setBusy(true);
     try {
       const r = await api<{ outcome: string }>(`/api/tickets/${id}/pull-request/merge`, { method: "POST" });
-      setNote({ ok: true, text: r.outcome === "merged" ? "Merged; the task is done." : "Still waiting on the host." });
+      setNote({ ok: true, text: r.outcome === "merged" ? "Merged; the task is done, or left open only for its on-a-real-host checks." : "Still waiting on the host." });
       ticket.reload();
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
@@ -551,29 +637,25 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               )
             ) : (
               <>
-                <label htmlFor="t-body" className="sr-only">
-                  Description, in Markdown
-                </label>
-                <textarea
+                <OwnerMessageBox
                   id="t-body"
+                  label="Description, in Markdown"
                   rows={12}
-                  maxLength={20_000}
                   autoFocus
                   placeholder="What should be done, and what counts as finished."
                   value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
+                  onChange={setDraft}
                   onPaste={img.onPaste}
-                  style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
-                />
-                <ImagePreviews attached={img.attached} onRemove={img.remove} />
-                {img.error && (
-                  <p className="error" role="alert">
-                    {img.error}
-                  </p>
-                )}
+                  onSendAsFile={saveDraftAsFile}
+                  attaching={img.busy}
+                  error={img.error}
+                  textareaStyle={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
+                >
+                  {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+                </OwnerMessageBox>
                 <div style={{ display: "flex", gap: 8 }}>
                   {img.button}
-                  <button type="button" className="btn primary" disabled={draft === (t.body ?? "") && !img.attached.length} onClick={() => void saveDraft()}>
+                  <button type="button" className="btn primary" disabled={(draft === (t.body ?? "") && !img.attached.length) || tooLongToSend(draft, img.attached)} onClick={() => void saveDraft()}>
                     Save description
                   </button>
                   <button type="button" className="btn" onClick={() => { img.clear(); setDraft(null); }}>
@@ -601,6 +683,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </label>
 
           <DoneWhen t={t} patch={patch} busy={busy} />
+          <OwnerSetup t={t} patch={patch} busy={busy} />
 
           <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch && !t.noCode ? "code on its branch" : "nothing yet"}>
             <TicketOutputs items={made} companyId={t.companyId} ticketId={t.id} prefix={t.ref?.replace(/-\d+$/, "") ?? null} onChanged={outputs.reload} code={t.mergeCommit ? { merged: t.mergeCommit } : t.branch && !t.noCode ? { branch: t.branch } : null} />

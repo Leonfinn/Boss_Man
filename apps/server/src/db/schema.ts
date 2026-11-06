@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -338,10 +338,14 @@ export const tickets = pgTable(
     /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
     monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
-    /** The ticket's acceptance criteria (1 to 10 non-empty strings), checked against at review; empty means none. */
-    acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
+    /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
+    acceptanceCriteria: jsonb("acceptance_criteria").$type<Criterion[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
+    /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
+    ownerSetup: text("owner_setup"),
+    /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
+    ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
@@ -363,7 +367,14 @@ export const tickets = pgTable(
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number), check("tickets_size_scale", sql`${t.size} is null or ${t.size} in (1, 2, 3, 5, 8)`)],
+  (t) => [
+    index("tickets_company_state").on(t.companyId, t.systemState),
+    uniqueIndex("tickets_company_number").on(t.companyId, t.number),
+    check("tickets_size_scale", sql`${t.size} is null or ${t.size} in (1, 2, 3, 5, 8)`),
+    // Read on every scheduler pass (watchDue and monitorDue, every 5 s). BOS-407.
+    index("tickets_watcher").on(t.watcherAgentId).where(sql`${t.watcherAgentId} is not null`),
+    index("tickets_monitor_at").on(t.monitorAt).where(sql`${t.monitorAt} is not null`),
+  ],
 );
 
 // ---------- Decisions and engagements ----------
@@ -395,7 +406,10 @@ export const decisions = pgTable("decisions", {
   /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
   staleAt: timestamp("stale_at", { withTimezone: true }),
   staleReason: text("stale_reason"),
-});
+},
+  // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
+  (t) => [index("decisions_status").on(t.status)],
+);
 
 export const engagementStatus = pgEnum("engagement_status", [
   "requested",
@@ -453,6 +467,8 @@ export const ticketDependencies = pgTable(
       "ticket_dependencies_one_blocker",
       sql`num_nonnulls(${t.blockerTicketId}, ${t.blockerEngagementId}, ${t.blockerDecisionId}) = 1`,
     ),
+    index("ticket_dependencies_blocked").on(t.blockedTicketId),
+    index("ticket_dependencies_blocker").on(t.blockerTicketId),
   ],
 );
 
@@ -551,7 +567,15 @@ export const runs = pgTable("runs", {
   lastPostAt: timestamp("last_post_at", { withTimezone: true }),
   /** When Boss Man asked the silent run for a status, so it is asked once (BOS-314). */
   silentSteeredAt: timestamp("silent_steered_at", { withTimezone: true }),
-});
+}, (t) => [
+    index("runs_ticket_open").on(t.ticketId, t.endedAt),
+    // The hot reads (BOS-407): who is working now, a ticket's runs, each agent's latest run and the recent list.
+    index("runs_live").on(t.companyId).where(sql`${t.endedAt} is null`),
+    index("runs_ticket_started").on(t.ticketId, t.startedAt),
+    index("runs_agent_started").on(t.agentId, t.startedAt.desc()),
+    index("runs_ended").on(t.endedAt.desc()).where(sql`${t.endedAt} is not null`),
+  ],
+);
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
 export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
@@ -941,7 +965,8 @@ export const nudges = pgTable(
     dropped: boolean("dropped").notNull().default(false),
     createdAt: createdAt(),
   },
-  (t) => [index("nudges_pair").on(t.fromAgentId, t.toAgentId, t.createdAt)],
+  // A run's origin asks which nudge delivered its wake (BOS-407).
+  (t) => [index("nudges_pair").on(t.fromAgentId, t.toAgentId, t.createdAt), index("nudges_wake").on(t.wakeId)],
 );
 
 // ---------- Notifications (R44) ----------
@@ -970,7 +995,12 @@ export const notifications = pgTable(
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
-  (t) => [index("notifications_agent_time").on(t.agentId, t.createdAt), index("notifications_time").on(t.createdAt)],
+  (t) => [
+    index("notifications_agent_time").on(t.agentId, t.createdAt),
+    index("notifications_time").on(t.createdAt),
+    // Every /api/notifications GET marks the unread ones for settled decisions (BOS-407).
+    index("notifications_unread_decision").on(t.decisionId).where(sql`${t.readAt} is null`),
+  ],
 );
 
 /**
@@ -1122,6 +1152,38 @@ export const ticketMessages = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("ticket_messages_ticket_time").on(t.ticketId, t.createdAt)],
+);
+
+/**
+ * An owner message on a ticket that is waiting for an answer (BOS-425). One row per message; it
+ * stays open until an agent replies on the ticket, the owner's message needs no reply, or the
+ * CEO has answered on the target's behalf. `state` is what the ticket shows under the message.
+ */
+export const ownerReplies = pgTable(
+  "owner_replies",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id").notNull().references(() => ticketMessages.id, { onDelete: "cascade" }),
+    /** Who the owner wrote to: the agent working the ticket, or the one they picked. */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** How it reached them: "delivered" into a live run or woken now, or "queued" behind their other work. */
+    state: text("state").notNull(),
+    /** The run it went into, if any. */
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    /** Reminders sent so far: 1 the top-priority one after a run ended without a reply, then the 5 and 10 minute ones. */
+    reminders: integer("reminders").notNull().default(0),
+    /** Set when it is not the target but a stand-in who answered, or who was asked to (the CEO, or the Scrum Master). */
+    standInAgentId: uuid("stand_in_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The CEO/SM alert raised at 10 minutes, if any (BOS-425). */
+    alertDecisionId: uuid("alert_decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    /** Set when an agent replied on the ticket (the message is answered), or the CEO answered for the target. */
+    clearedAt: timestamp("cleared_at", { withTimezone: true }),
+    clearedBy: text("cleared_by"),
+  },
+  (t) => [index("owner_replies_open").on(t.companyId, t.clearedAt, t.createdAt)],
 );
 
 // ---------- Feature requests ----------

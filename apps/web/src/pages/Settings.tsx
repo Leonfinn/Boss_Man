@@ -12,7 +12,8 @@ import { toBase64 } from "./Skills";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
-type RunnerStatus = ({ registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null }) & { launcher?: Launched };
+type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
+type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; report?: CompanyReport | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
 type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
@@ -130,18 +131,24 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           Boss Man's launcher runs this company's runner as the container <code className="mono">boss-man-runner-{launched.slug}</code>, locked down, with its files under <code className="mono">companies/{launched.slug}</code> in your data folder.
         </p>
         <dl className="facts" role="status">
-          <dt>Connection</dt>
-          <dd>
-            {connected ? (
-              <span className="tag green">Connected</span>
-            ) : c?.state === "running" ? (
-              <span className="tag amber">Starting…</span>
-            ) : c ? (
-              <span className="tag amber">{c.state[0]!.toUpperCase() + c.state.slice(1)}</span>
+          <dt>Now</dt>
+          <dd data-testid="runner-now">
+            {s?.report ? (
+              <span className={s.report.live.ok ? undefined : "tag red"}>{s.report.live.text}</span>
             ) : (
-              <span className="tag">Not started</span>
-            )}{" "}
-            {s?.registered && <Since connected={!!connected} at={s.lastSeenAt} />}
+              <>
+                {connected ? (
+                  <span className="tag green">Connected</span>
+                ) : c?.state === "running" ? (
+                  <span className="tag amber">Starting…</span>
+                ) : c ? (
+                  <span className="tag amber">{c.state[0]!.toUpperCase() + c.state.slice(1)}</span>
+                ) : (
+                  <span className="tag">Not started</span>
+                )}{" "}
+                {s?.registered && <Since connected={!!connected} at={s.lastSeenAt} />}
+              </>
+            )}
           </dd>
           {/* Docker's own words, e.g. "Up 14 hours (healthy)": how long the container has run, not the connection. */}
           {c && (
@@ -157,6 +164,11 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </dl>
+        {s?.report?.last && (
+          <div data-testid="company-update-history">
+            <UpdateHistory r={s.report.last} />
+          </div>
+        )}
         {launched.error && (
           <p className="error" role="alert">
             {launched.error}
@@ -192,9 +204,15 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
       {s && !s.registered && <p>This company has no runner yet. A runner is the container its agents work in; it connects out to this server, so it needs no open ports.</p>}
       {s?.registered && (
         <dl className="facts" role="status">
-          <dt>Connection</dt>
-          <dd>
-            {s.connected ? <span className="tag green">Connected</span> : <span className="tag amber">Offline</span>} <Since connected={s.connected} at={s.lastSeenAt} />
+          <dt>Now</dt>
+          <dd data-testid="runner-now">
+            {s.report ? (
+              <span className={s.report.live.ok ? undefined : "tag red"}>{s.report.live.text}</span>
+            ) : (
+              <>
+                {s.connected ? <span className="tag green">Connected</span> : <span className="tag amber">Offline</span>} <Since connected={s.connected} at={s.lastSeenAt} />
+              </>
+            )}
           </dd>
           {s.imageVersion && (
             <>
@@ -209,6 +227,11 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </dl>
+      )}
+      {s?.registered && s.report?.last && (
+        <div data-testid="company-update-history">
+          <UpdateHistory r={s.report.last} />
+        </div>
       )}
       {token ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1721,7 +1744,6 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
 }
 
 type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
-type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
 
 /** How many agents may run at once, in total and per company; the per-agent limit is fixed at one. */
 function RunLimits() {
@@ -1774,28 +1796,86 @@ function RunLimits() {
   );
 }
 
+type UpdateRow = { at: string; title: string; body: string; state: "ok" | "resolved" | "problem"; todo: string | null };
+type LiveRow = { slug: string; name: string; registered: boolean; connected: boolean; at: string | null; imageVersion: string | null; fault: string | null };
+type Report = { live: LiveRow[]; update: UpdateRow | null };
+type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+
+/** The last update as history: grey and "Resolved" once the runner has come back on its image, red only for something wrong now (BOS-465). */
+function UpdateHistory({ r }: { r: UpdateRow }) {
+  if (r.state === "ok")
+    return (
+      <p style={{ fontSize: 14 }} data-testid="update-history">
+        <span className="tag">OK</span> Last update {when(r.at)}: {r.title}. {r.body}
+      </p>
+    );
+  if (r.state === "resolved")
+    return (
+      <p style={{ fontSize: 14 }} data-testid="update-history">
+        <span className="tag grey">Resolved</span> Last update {when(r.at)}: it finished with problems ({r.body}), but the runner has since reconnected on the new image.
+      </p>
+    );
+  return (
+    <p style={{ fontSize: 14 }} data-testid="update-history">
+      <span className="tag red">PROBLEM</span> Last update {when(r.at)}: {r.title}. {r.body} <strong>{r.todo}</strong>
+    </p>
+  );
+}
+
+/** The live state of one company's runner, leading the panel: connected or not, and since when. */
+function LiveState({ r }: { r: LiveRow }) {
+  const connected = r.registered && r.connected;
+  return (
+    <li style={{ listStyle: "none" }}>
+      <strong>{r.name}</strong>{" "}
+      {connected ? <span className="tag green">Connected</span> : <span className="tag red">Not connected</span>}{" "}
+      <span className="muted">
+        {connected ? "since" : r.at ? "last seen" : ""} {r.at ? when(r.at) : ""}
+        {connected && r.imageVersion ? ` · image ${r.imageVersion}` : ""}
+        {r.fault ? ` · ${r.fault}` : ""}
+      </span>
+    </li>
+  );
+}
+
 /** Drain-then-swap for runner updates: start it by hand (after scripts/update-runner.sh built the image) or cancel one that is running. */
-function RunnerUpdate() {
+export function RunnerUpdate() {
   const view = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-settings");
+  const report = usePoll((signal) => api<Report>("/api/runner-report", { signal }), 5_000, "runner-report");
   const act = useAction();
   const m = view.data;
   if (!m) return null;
+  const r = report.data;
   return (
     <Section id="drain-h" title="Runner update">
+      {r && (
+        <div role="status" data-testid="runner-live">
+          <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Now</h3>
+          {r.live.length ? (
+            <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+              {r.live.map((l) => (
+                <LiveState key={l.slug} r={l} />
+              ))}
+            </ul>
+          ) : (
+            <p className="muted" style={{ fontSize: 14 }}>No company has a runner yet.</p>
+          )}
+        </div>
+      )}
       <p className="muted" style={{ fontSize: 14 }}>
         {m.on
           ? `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
-      <p role="status" style={{ fontSize: 14 }}>
-        {m.last ? (
-          <>
-            <span className={m.last.ok ? "tag" : "tag red"}>{m.last.ok ? "OK" : "PROBLEM"}</span> Last update {when(m.last.at)}: {m.last.title}. {m.last.body}
-          </>
+      <div>
+        {r?.update ? (
+          <UpdateHistory r={r.update} />
         ) : (
-          <span className="muted">No runner update has finished here yet.</span>
+          <p className="muted" style={{ fontSize: 14 }}>
+            No runner update has finished here yet.
+          </p>
         )}
-      </p>
+      </div>
       <div>
         <button
           type="button"

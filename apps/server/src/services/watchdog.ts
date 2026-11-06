@@ -6,10 +6,11 @@
 import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { readWatchdogSettings, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, companies, decisions, engagements, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
+import { activity, agents, companies, decisions, engagements, notifications, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
-import { checkAsk } from "./decisions.js";
-import type { CardLint } from "./steps.js";
+import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
+import type { AddonFacts } from "./addons.js";
+import type { CardLint, HostFacts } from "./steps.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
@@ -57,6 +58,8 @@ type Notify = (agentId: string, input: { ticketId?: string | null; reason: strin
 type Nudge = (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string; wakeId: string } | { ok: false; error: string }>;
 
 export type WatchdogDeps = {
+  /** Add-on facts for the card lint's R9 (DR-023). Absent: R9 is not checked. */
+  addons?: () => Promise<AddonFacts>;
   notify: Notify;
   nudge: Nudge;
   raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint }) => Promise<{ id: string }>;
@@ -67,6 +70,8 @@ export type WatchdogDeps = {
   alert: (companyId: string, question: string) => Promise<unknown>;
   notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string }) => Promise<unknown>;
   now?: () => Date;
+  /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
+  hosts?: () => Promise<HostFacts[]>;
   /** The owner's local hour (0-23) at a moment; the daily summary goes out from 8. Defaults to UTC. */
   localHour?: (t: Date) => number;
   log?: (msg: string) => void;
@@ -1080,7 +1085,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
-      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps });
+      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
@@ -1141,6 +1146,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
           const [d] = await db.select().from(decisions).where(eq(decisions.id, after.decisionId!));
           if (!d || d.status !== "open") throw new WatchdogError(409, "The owner has already answered it (or it was withdrawn), so it can't be taken back.");
           await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(eq(decisions.id, d.id));
+          await markDecisionNotificationRead(db, d.id);
           await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
           // Back to where it was, if nothing else holds it now.
           const [t] = await db.select().from(tickets).where(eq(tickets.id, a.ticketId!));

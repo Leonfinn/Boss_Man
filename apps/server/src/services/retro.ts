@@ -36,6 +36,7 @@ import { activity, agentSkills, agents, companies, costEvents, decisions, projec
 import { record } from "./activity.js";
 import { checkPolicy, legacyMarks } from "./review-policy.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, lessonsFrom, lessonsPageRow, normalizeLesson, removeLessonLine } from "./project-brief.js";
+import { serialiseWrite } from "./wiki.js";
 import { hashFiles } from "./skill-files.js";
 import { skillMarkdown, skillName, type skillsService } from "./skills.js";
 import type { skillProposalsService } from "./skill-proposals.js";
@@ -898,11 +899,17 @@ export function retroService(
         for (const id of (after.assignedAgentIds ?? []) as string[]) await deps.skills.take(c.companyId, installed.skill?.name ?? after.name, id);
         if (before.skillId) await db.update(skillsTable).set({ description: before.description, files: before.files, sizeBytes: (before.files as Array<{ content: string }>).reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0), updatedAt: now() }).where(eq(skillsTable.id, before.skillId));
       } else if (c.lever === "lesson") {
-        const page = await lessonsPageRow(db, c.companyId, c.targetRole!.slice("project:".length));
-        if (!page) return;
-        const body = removeLessonLine(page.body, after.lesson);
-        await db.update(wikiPages).set({ body, updatedAt: now() }).where(eq(wikiPages.id, page.id));
-        await db.insert(wikiRevisions).values({ pageId: page.id, title: page.title, body });
+        // Queued with every wiki write, so the version saved below matches what the page held (BOS-496).
+        await serialiseWrite(async () => {
+          const page = await lessonsPageRow(db, c.companyId, c.targetRole!.slice("project:".length));
+          if (!page) return;
+          const body = removeLessonLine(page.body, after.lesson);
+          // The page change and its version are one transaction, so neither lands without the other (BOS-496).
+          await db.transaction(async (tx) => {
+            await tx.update(wikiPages).set({ body, updatedAt: now() }).where(eq(wikiPages.id, page.id));
+            await tx.insert(wikiRevisions).values({ pageId: page.id, title: page.title, body });
+          });
+        });
       }
     },
 
