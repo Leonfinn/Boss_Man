@@ -1,6 +1,6 @@
 {
   "id": "0194062d-95a9-4073-80a6-76602755e7f7",
-  "prevId": "b7b30b78-8edf-4bd8-9e17-56afc610ec93",
+  "prevId": "bf20d22c-36b4-4b09-bc67-b9bf001c7936",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1254,7 +1254,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6}'::jsonb"
+          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -5716,6 +5716,18 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "last_post_at": {
+          "name": "last_post_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "silent_steered_at": {
+          "name": "silent_steered_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -7774,6 +7786,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "last_post_at": {
+          "name": "last_post_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "state_note_stale_at": {
           "name": "state_note_stale_at",
           "type": "timestamp with time zone",
@@ -9775,8 +9793,8 @@
   "policies": {},
   "views": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   }
 }

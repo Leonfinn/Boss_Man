@@ -31,12 +31,11 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 ## Steps
 
 1. Open the Tailscale admin console, **DNS** page. Turn on **MagicDNS**, then under **HTTPS Certificates** click **Enable HTTPS**. Note your tailnet name (it ends in `.ts.net`).
-2. On the **Settings > Keys** page, click **Generate auth key**. Leave **Reusable** off, set a short expiry, and copy the key. Do not paste it anywhere except step 4.
-3. On the Docker host, check the default private range is free, and make the state folder (use your `BOSSMAN_DATA` folder):
+2. On the **Settings > Keys** page, click **Generate auth key**. Leave **Reusable** off and **Ephemeral** off (an ephemeral machine disappears when it goes offline), set a short expiry, and copy the key. Do not paste it anywhere except step 4. **Use a key, not the interactive login link:** the Tailscale container gives up on a pending login link after about a minute and restarts, which discards the link, so a login you approve a little late never completes (see "Troubleshooting").
+3. On the Docker host, check the default private range is free (Docker creates the Tailscale state folder under your `BOSSMAN_DATA` itself on first start, so there is nothing to make by hand):
 
    ```sh
    docker network ls -q | xargs docker network inspect --format "{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}" | grep 172.30.0 || echo free
-   mkdir -p "$BOSSMAN_DATA/tailscale"
    ```
 
    If it prints a network instead of `free`, or `ip -4 route` shows 172.30.0.x in use, set `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP` and `BOSSMAN_EDGE_SERVER_IP` in `.env` (see above) before step 5.
@@ -45,13 +44,27 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    ```sh
    cp .env .env.bak
    sed -i "s#^COMPOSE_FILE=.*#&:deploy/tailscale.yml#" .env
-   echo "TS_AUTHKEY=tskey-auth-PASTE-YOUR-KEY" >> .env
+   # the leading space keeps this line out of shell history in bash by default (zsh needs HIST_IGNORE_SPACE; or edit .env in an editor instead)
+    echo "TS_AUTHKEY=tskey-auth-PASTE-YOUR-KEY" >> .env
    chmod 600 .env
    ```
 
    If `.env` has no `COMPOSE_FILE` line, add `COMPOSE_FILE=docker-compose.yml:deploy/tailscale.yml`.
    You do not need to touch `BOSSMAN_INSECURE_COOKIES`: once the sidecar file is in use, Boss Man chooses Secure per request and ignores that line. The feedback portal port is plain http, so its cookie stays non-Secure.
-5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. After it is up you can delete the `TS_AUTHKEY` line from `.env`: the login is kept in the state folder, and an empty key is fine. If the line stays, the key is spent after first use and does no harm.
+5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. Then run the check in step 5a.
+
+   **Remove the key from `.env` once it is logged in:** delete the `TS_AUTHKEY=` line (`sed -i '/^TS_AUTHKEY=/d' .env`), then `docker compose up -d tailscale`. The login is kept in the state folder, so an empty key is fine. A spent one-time key does no harm, but it should not sit in a file.
+
+5a. Check it is stable. Run these from the Boss Man folder (the one with `docker-compose.yml`); they need nothing from your `.env` (the first line only sets a helper variable). `RestartCount` must stay at 0 (or stop growing), `BackendState` must say `"Running"` (not `"NeedsLogin"`), and the state file must be well over 1000 bytes (a login that never completed leaves about 120 bytes):
+
+   ```sh
+   C=$(docker compose ps -q tailscale)
+   docker inspect --format 'RestartCount={{.RestartCount}} Status={{.State.Status}} ExitCode={{.State.ExitCode}}' "$C"
+   docker compose exec tailscale stat -c "tailscaled.state: %s bytes" /var/lib/tailscale/tailscaled.state
+   docker compose exec tailscale tailscale status --json | grep -m1 BackendState
+   ```
+
+   Run it again after two minutes; `RestartCount` must not have gone up. Then prove the login survives a restart: run `docker compose restart tailscale`, wait 30 seconds, and run the block again. `BackendState` must still be `"Running"` with no new login link in `docker compose logs tailscale`.
 6. In the Tailscale admin console the machine `boss-man` appears. Check Serve is on and Funnel is off:
 
    ```sh
@@ -68,6 +81,12 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 9. In Boss Man, open **Notifications** and set **Boss Man's address on your phone** to the ts.net address, so notification links open it.
 
 To undo: `docker compose stop tailscale`, remove `:deploy/tailscale.yml` from `COMPOSE_FILE` (or restore `.env.bak`), then `docker compose up -d server`. The LAN address is unaffected throughout.
+
+## Troubleshooting
+
+- **The Tailscale container restarts every ~2 minutes (exit code 0), `RestartCount` keeps rising, `tailscaled.state` stays about 120 bytes, and every start logs `NeedsLogin` with a new login link.** Cause: no auth key was set, so the container waits for an interactive login. Tailscale's start-up script allows about 60 seconds for the whole start, including that wait; when it runs out, the container exits cleanly and Docker restarts it with a fresh, different login link. A link opened from an earlier start is dead, and the machine shows in the admin console as approved but disconnected. Fix: delete that machine in the admin console, do steps 2 to 5 with an auth key, and re-run step 5a. (Source: `cmd/containerboot` in the Tailscale repository, which applies a 60-second `bootCtx` to the login step; not reproduced on a live Docker host from this ticket, so confirm with step 5a.)
+- `failed to symlink socket: file exists` in the log on every restart is harmless: it is left over from the previous start.
+- **Interactive login as a fallback (no key available):** run `docker compose up -d tailscale && docker compose logs -f tailscale`, open the newest `https://login.tailscale.com/a/...` link within about 50 seconds and approve it straight away. If the container restarts first, the link is dead; use the newest one. Prefer a key.
 
 ## Backing up and moving to a new host
 
