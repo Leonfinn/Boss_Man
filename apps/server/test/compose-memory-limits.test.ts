@@ -69,6 +69,8 @@ describe("compose memory limits", () => {
     const launcherEnv = parse(readFileSync(path.join(root, "docker-compose.yml"), "utf8")).services.launcher.environment;
     expect(launcherEnv.BOSSMAN_RUNNER_CPU_SHARES).toContain("BOSSMAN_RUNNER_CPU_SHARES:-512");
     expect(launcherEnv.BOSSMAN_RUNNER_CPUS).toContain("BOSSMAN_RUNNER_CPUS");
+    // The compose runner passes the check-slot setting on too (BOS-542); empty by default, so an unset setting leaves a hand-made proof file alone.
+    expect(String(runner.environment.BOSSMAN_CHECK_SLOTS)).toBe("${BOSSMAN_CHECK_SLOTS:-}");
   });
 
   it("tool servers are the first to be killed", () => {
