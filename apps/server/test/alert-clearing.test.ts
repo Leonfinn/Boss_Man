@@ -7,7 +7,7 @@ import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { clearWhenOf } from "../src/services/alert-clearing.js";
-import { activity, decisions, fundingSources, quotaSamples, runners, runs as runsTable, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, decisions, fundingSources, notifications, quotaSamples, runners, runs as runsTable, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -16,7 +16,7 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup(o: { trustedProxies?: string[] } = {}) {
+async function setup(o: { trustedProxies?: string[]; fetch?: typeof fetch } = {}) {
   const { db, close } = await openPglite();
   let offset = 0;
   const clock = () => new Date(Date.now() + offset);
@@ -305,6 +305,34 @@ describe("an add-on's setup card closes itself once the add-on works (DR-023 D, 
     expect((await row(ctx, card.id)).status).toBe("open");
     const [held] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
     expect(held!.systemState).toBe("blocked");
+  });
+
+  it("keeps an ntfy setup card open while ntfy is not set up, unknown or stopped, and closes it once a push goes through", async () => {
+    // No push may leave the test: any the app sends get a 200 here.
+    ctx = await setup({ fetch: async () => new Response("", { status: 200 }) });
+    const t = await ctx.ticket({ title: "Phone pushes", assigneeAgentId: ctx.worker.id });
+    const card = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.worker.id, question: "Turn on phone pushes?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: t.id, triedFirst: "Needs the owner's phone", steps: ["Install the ntfy app."], setsUp: "ntfy" });
+    const status = async () => (await row(ctx!, card.id)).status;
+    const push = { requested: "page", level: "page", title: "x", link: "#/decisions" } as const;
+
+    await ctx.sweeps.run(); // not_set_up
+    expect(await status()).toBe("open");
+    await ctx.notes.setSettings({ ...(await ctx.notes.getSettings()), ntfy: { url: "https://ntfy.example", topic: "bm", tokenSecretId: null } });
+    await ctx.sweeps.run(); // unknown: set up, nothing pushed yet
+    expect(await status()).toBe("open");
+    ctx.advance(60_000);
+    await ctx.db.insert(notifications).values({ ...push, createdAt: ctx.clock(), pushError: "ntfy answered 401" });
+    await ctx.sweeps.run(); // stopped
+    expect(await status()).toBe("open");
+
+    ctx.advance(60_000);
+    await ctx.db.insert(notifications).values({ ...push, createdAt: ctx.clock(), pushedAt: ctx.clock() });
+    await ctx.sweeps.run(); // running, after the card
+    const after = await row(ctx, card.id);
+    expect(after.status).toBe("withdrawn");
+    expect((after.context as { withdrawn?: { by: string; note: string } }).withdrawn).toMatchObject({ by: "system", note: expect.stringMatching(/^ntfy is running \(the last phone push went through, at \d\d:\d\d\)$/) });
+    const [freed] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(freed!.systemState).toBe("ready");
   });
 
   it("ignores an add-on name it doesn't know rather than guess", () => {
