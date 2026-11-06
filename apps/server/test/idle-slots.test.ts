@@ -6,7 +6,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runnerEvents, runners, runs, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { deploys, deployTargets, runnerEvents, runners, runs, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { CARRY_ON_NOTE, IDLE_SLOT_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
 
 const MIN = 60_000;
@@ -88,6 +88,13 @@ describe("re-waking runs a restart cut off (BOS-574)", () => {
     const stopped = await c.run(b.id, stoppedTicket, { lastEventAgoMs: MIN });
     // The owner stops Bob's run while the runner is offline: nobody can confirm, so the server ends it.
     expect(await c.runs.cancel(stopped.id)).toMatchObject({ endedHere: true });
+    // A deploy's run lost the same way is not picked up: its deploy fails, and only a new approval restarts it (BOS-480).
+    const d = await c.hire("Deployer");
+    const deployTicket = await c.working("Deploy it", d.id, 0);
+    const deployRun = await c.run(d.id, deployTicket, { lastEventAgoMs: 50 * MIN });
+    const [target] = await c.db.insert(deployTargets).values({ companyId: c.company.id, name: "Site", kind: "ssh", endpoint: "deploy@example.invalid" }).returning();
+    const [deploy] = await c.db.insert(deploys).values({ companyId: c.company.id, targetId: target!.id, ref: "main" }).returning();
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: d.id, ticketId: deployTicket, reason: "deploy approved", status: "launched", runId: deployRun.id, deployId: deploy!.id });
 
     await c.sweeps.run();
     await c.flush();
