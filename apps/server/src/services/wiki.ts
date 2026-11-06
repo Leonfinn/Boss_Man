@@ -13,6 +13,33 @@ export const MAX_BODY = 200_000;
 /** One appended entry: a log line, not a page. Keeps a single append cheap (BOS-430). */
 export const MAX_ENTRY = 20_000;
 
+// BOS-496: the history the owner's screen shows holds this many of the newest versions per
+// request, and the rest are one page back (never dropped). Every save is kept; these only bound
+// how much one response or one tool reply carries.
+export const HISTORY_PAGE = 100;
+export const HISTORY_PAGE_MAX = 500;
+
+// BOS-496: a page change and its saved version must go together. The ways a page changes write
+// the row with a plain UPDATE and then insert the version, which isn't atomic, so two overlapping
+// writers (two agents saving at once, or an older server build beside this one) can leave a change
+// with no version of the text before it — the 4 Nov release-log state, where the wipe was not
+// undoable. Every write in this process queues here, so one save's read, version and page change
+// finish before the next starts. Module-level: a process-wide lock, not per-call state.
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs `fn` once every write queued before it has finished (BOS-496). Use it around any change to
+ * a page body that also saves a version, so the saved versions always match what the page held.
+ */
+export function serialiseWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const run = writeQueue.then(fn, fn);
+  writeQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 export class WikiError extends Error {
   constructor(
     readonly status: number,
@@ -502,18 +529,40 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       const p = await page(companyId, slug);
       const [by] = p.updatedByAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, p.updatedByAgentId)) : [];
       // Every version, newest first, each with its size so a wiped page can be told from a full one (BOS-430).
+      // revisionCount is the whole history, so the screen can page past `revisions` to the oldest (BOS-496).
       const revisions = await db
         .select({ id: wikiRevisions.id, title: wikiRevisions.title, createdAt: wikiRevisions.createdAt, agent: agents.name, agentId: wikiRevisions.agentId, runId: wikiRevisions.runId, size: sql<number>`length(${wikiRevisions.body})` })
         .from(wikiRevisions)
         .leftJoin(agents, eq(agents.id, wikiRevisions.agentId))
         .where(eq(wikiRevisions.pageId, p.id))
         .orderBy(desc(wikiRevisions.createdAt));
+      const [total] = await db.select({ count: sql<number>`count(*)::int` }).from(wikiRevisions).where(eq(wikiRevisions.pageId, p.id));
       const forTickets = await db
         .select({ id: tickets.id, title: tickets.title })
         .from(ticketArtifacts)
         .innerJoin(tickets, eq(tickets.id, ticketArtifacts.ticketId))
         .where(eq(ticketArtifacts.wikiPageId, p.id));
-      return { ...p, updatedBy: by?.name ?? null, revisions, tickets: forTickets };
+      // revisionCount is the whole history: the screen pages past `revisions` with it (BOS-496).
+      return { ...p, updatedBy: by?.name ?? null, revisions, revisionCount: Number(total?.count ?? 0), tickets: forTickets };
+    },
+
+    /**
+     * A page's saved versions, newest first, in pages of `limit`. The history screen and the wiki
+     * tool read every version this way, so the oldest (the last good one before a wipe) is never
+     * hidden behind a cap (BOS-496).
+     */
+    async versions(companyId: string, slug: string, opts: { offset?: number; limit?: number } = {}) {
+      const p = await page(companyId, slug);
+      const limit = Math.min(Math.max(Math.trunc(opts.limit ?? HISTORY_PAGE), 1), HISTORY_PAGE_MAX);
+      const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+      return db
+        .select({ id: wikiRevisions.id, createdAt: wikiRevisions.createdAt, agent: agents.name, runId: wikiRevisions.runId, size: sql<number>`length(${wikiRevisions.body})` })
+        .from(wikiRevisions)
+        .leftJoin(agents, eq(agents.id, wikiRevisions.agentId))
+        .where(eq(wikiRevisions.pageId, p.id))
+        .orderBy(desc(wikiRevisions.createdAt))
+        .offset(offset)
+        .limit(limit);
     },
 
     async revision(companyId: string, revisionId: string) {
@@ -547,74 +596,11 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       const title = input.title.trim();
       if (!title) throw new WikiError(400, "A page needs a title.");
       if (input.body.length > MAX_BODY) throw new WikiError(400, `A page can be at most ${MAX_BODY.toLocaleString("en-GB")} characters.`);
-      if (input.ticketId) {
-        await ownTicket(conn, companyId, input.ticketId);
-        // The skill-review guard lives here, not only in the tools, so every path that links a page to a
-        // ticket is covered: write, append, restore and anything added later (BOS-430, security round 1).
-        const refusal = await reviewTicketWriteRefusal(conn, companyId, input.ticketId, input.agentId ?? null);
-        if (refusal) throw new WikiError(403, refusal);
-      }
-      const bySlug = async (slug: string) => (await conn.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))))[0];
-      const given = input.slug?.trim() ? input.slug.split("/").map(slugify).join("/") : null;
-      let existing = given ? await bySlug(given) : undefined;
-      const folder = input.folder !== undefined ? cleanFolder(input.folder) : (existing?.folder ?? (given ? folderOf(given) : ""));
-      let slug: string;
-      if (existing) {
-        // A different folder moves the page; it keeps the last part of its address.
-        slug = folder === existing.folder ? existing.slug : pageSlug(folder, existing.slug.split("/").at(-1)!);
-        const clash = slug !== existing.slug ? await bySlug(slug) : undefined;
-        if (clash) throw new WikiError(409, `There's already a page at ${slug} ("${clash.title}").`);
-      } else {
-        // An explicit slug is the address, whatever the folder (a project's brief keeps its slug when the project is renamed).
-        slug = given ?? pageSlug(folder, title);
-        // Writing a new page where one already is updates that page.
-        existing = await bySlug(slug);
-      }
-      const changed = !existing || existing.title !== title || existing.body !== input.body;
-      // (R-review-lessons) A project brief's Lessons section holds owner-approved lessons; it can
-      // only change through a lesson decision, so any other rewrite of the brief passes over it.
-      if (existing && /^brief-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existing.slug) && lessonsSection(existing.body) && lessonsSection(input.body) !== lessonsSection(existing.body))
-        throw new WikiError(409, "The Lessons section of a project brief is owner-approved and can't be edited here; leave it exactly as it is.");
-      // (BOS-430) No agent write may wipe a long page or its headings by accident: a rewrite that
-      // removes a lot of text or any heading needs replace: true, and only the CEO or the owner may
-      // replace a page someone else created.
-      if (existing) {
-        // The history baseline only matters to a write that cuts the page from what it holds now. A
-        // write that grows the page (or an append) can't be a wipe in progress, so after a deliberate
-        // trim (replace: true) the page is editable again instead of staying locked at its old peak
-        // (BOS-430, adversarial round 3).
-        const baseline = input.body.length < existing.body.length ? await largestEver(conn, existing.id, existing.body.length) : existing.body.length;
-        const refusal = input.replace ? null : shrinkRefusalAgainst(existing.body, baseline, input.body);
-        if (refusal) throw new WikiError(409, refusal);
-        if (input.replace && !input.isCeo && input.agentId) {
-          const [first] = await conn
-            .select({ agentId: wikiRevisions.agentId })
-            .from(wikiRevisions)
-            .where(eq(wikiRevisions.pageId, existing.id))
-            .orderBy(asc(wikiRevisions.createdAt))
-            .limit(1);
-          // No revision row (or a first version with no agent) means the owner made the page, so an
-          // ordinary agent may not replace it either. Only the CEO may (BOS-430, security round 1).
-          // A restore is the exception: it has already checked that this agent is the page's last writer.
-          const creator = first?.agentId ?? null;
-          if (creator !== input.agentId && !input.fromRestore) throw new WikiError(403, "Only the CEO or the owner can replace a page another agent created. Add to it with append, or ask the CEO to replace it.");
-        }
-      }
-      let p = existing;
-      if (!p) {
-        [p] = await conn.insert(wikiPages).values({ companyId, slug, folder, title, body: input.body, ticketId: input.ticketId ?? null, updatedByAgentId: input.agentId }).returning();
-      } else if (changed || slug !== p.slug) {
-        [p] = await conn.update(wikiPages).set({ slug, folder, title, body: input.body, updatedByAgentId: input.agentId, updatedAt: new Date() }).where(eq(wikiPages.id, p.id)).returning();
-      }
-      if (changed) await conn.insert(wikiRevisions).values({ pageId: p!.id, title, body: input.body, agentId: input.agentId, runId: input.runId });
-      if (input.ticketId) {
-        await conn
-          .insert(ticketArtifacts)
-          .values({ companyId, ticketId: input.ticketId, kind: "wiki_page", title, wikiPageId: p!.id, agentId: input.agentId, runId: input.runId })
-          .onConflictDoNothing();
-      }
-      if (changed) semantic?.enqueue(companyId, p!.id);
-      return { page: p!, created: !existing };
+      // Writes inside a caller's transaction (append, restore) already hold the page and must not
+      // queue again, or they would wait on a slot the queue can't hand them. A plain write reads the
+      // page, checks the guards and saves through `serialiseWrite` and its own transaction (BOS-496).
+      if (conn !== db) return writeWithinTx(conn, companyId, input, title);
+      return serialiseWrite(() => db.transaction((tx) => writeWithinTx(tx, companyId, input, title)));
     },
 
     /**
@@ -748,4 +734,81 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       if (!rows.length) throw new WikiError(404, "No such item.");
     },
   };
+
+  /**
+   * The body of `writeWithin`, run through `conn`. A plain write calls it inside one transaction
+   * and the write queue, so the page change and its saved version land together and no concurrent
+   * save can slip between the read and the write (BOS-496). An append or a restore passes its own
+   * transaction, which already holds the page.
+   */
+  async function writeWithinTx(conn: Db, companyId: string, input: WriteInput, title: string) {
+    if (input.ticketId) {
+      await ownTicket(conn, companyId, input.ticketId);
+      // The skill-review guard lives here, not only in the tools, so every path that links a page to a
+      // ticket is covered: write, append, restore and anything added later (BOS-430, security round 1).
+      const refusal = await reviewTicketWriteRefusal(conn, companyId, input.ticketId, input.agentId ?? null);
+      if (refusal) throw new WikiError(403, refusal);
+    }
+    const bySlug = async (slug: string) => (await conn.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))))[0];
+    const given = input.slug?.trim() ? input.slug.split("/").map(slugify).join("/") : null;
+    let existing = given ? await bySlug(given) : undefined;
+    const folder = input.folder !== undefined ? cleanFolder(input.folder) : (existing?.folder ?? (given ? folderOf(given) : ""));
+    let slug: string;
+    if (existing) {
+      // A different folder moves the page; it keeps the last part of its address.
+      slug = folder === existing.folder ? existing.slug : pageSlug(folder, existing.slug.split("/").at(-1)!);
+      const clash = slug !== existing.slug ? await bySlug(slug) : undefined;
+      if (clash) throw new WikiError(409, `There's already a page at ${slug} ("${clash.title}").`);
+    } else {
+      // An explicit slug is the address, whatever the folder (a project's brief keeps its slug when the project is renamed).
+      slug = given ?? pageSlug(folder, title);
+      // Writing a new page where one already is updates that page.
+      existing = await bySlug(slug);
+    }
+    const changed = !existing || existing.title !== title || existing.body !== input.body;
+    // (R-review-lessons) A project brief's Lessons section holds owner-approved lessons; it can
+    // only change through a lesson decision, so any other rewrite of the brief passes over it.
+    if (existing && /^brief-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existing.slug) && lessonsSection(existing.body) && lessonsSection(input.body) !== lessonsSection(existing.body))
+      throw new WikiError(409, "The Lessons section of a project brief is owner-approved and can't be edited here; leave it exactly as it is.");
+    // (BOS-430) No agent write may wipe a long page or its headings by accident: a rewrite that
+    // removes a lot of text or any heading needs replace: true, and only the CEO or the owner may
+    // replace a page someone else created.
+    if (existing) {
+      // The history baseline only matters to a write that cuts the page from what it holds now. A
+      // write that grows the page (or an append) can't be a wipe in progress, so after a deliberate
+      // trim (replace: true) the page is editable again instead of staying locked at its old peak
+      // (BOS-430, adversarial round 3).
+      const baseline = input.body.length < existing.body.length ? await largestEver(conn, existing.id, existing.body.length) : existing.body.length;
+      const refusal = input.replace ? null : shrinkRefusalAgainst(existing.body, baseline, input.body);
+      if (refusal) throw new WikiError(409, refusal);
+      if (input.replace && !input.isCeo && input.agentId) {
+        const [first] = await conn
+          .select({ agentId: wikiRevisions.agentId })
+          .from(wikiRevisions)
+          .where(eq(wikiRevisions.pageId, existing.id))
+          .orderBy(asc(wikiRevisions.createdAt))
+          .limit(1);
+        // No revision row (or a first version with no agent) means the owner made the page, so an
+        // ordinary agent may not replace it either. Only the CEO may (BOS-430, security round 1).
+        // A restore is the exception: it has already checked that this agent is the page's last writer.
+        const creator = first?.agentId ?? null;
+        if (creator !== input.agentId && !input.fromRestore) throw new WikiError(403, "Only the CEO or the owner can replace a page another agent created. Add to it with append, or ask the CEO to replace it.");
+      }
+    }
+    let p = existing;
+    if (!p) {
+      [p] = await conn.insert(wikiPages).values({ companyId, slug, folder, title, body: input.body, ticketId: input.ticketId ?? null, updatedByAgentId: input.agentId }).returning();
+    } else if (changed || slug !== p.slug) {
+      [p] = await conn.update(wikiPages).set({ slug, folder, title, body: input.body, updatedByAgentId: input.agentId, updatedAt: new Date() }).where(eq(wikiPages.id, p.id)).returning();
+    }
+    if (changed) await conn.insert(wikiRevisions).values({ pageId: p!.id, title, body: input.body, agentId: input.agentId, runId: input.runId });
+    if (input.ticketId) {
+      await conn
+        .insert(ticketArtifacts)
+        .values({ companyId, ticketId: input.ticketId, kind: "wiki_page", title, wikiPageId: p!.id, agentId: input.agentId, runId: input.runId })
+        .onConflictDoNothing();
+    }
+    if (changed) semantic?.enqueue(companyId, p!.id);
+    return { page: p!, created: !existing };
+  }
 }

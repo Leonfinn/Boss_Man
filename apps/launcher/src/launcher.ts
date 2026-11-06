@@ -26,6 +26,15 @@ export type GuardStatus = "on" | "off" | "unavailable";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Removes a container. `docker.remove` already treats a concurrent removal ("removal … is already
+ * in progress") as success-in-progress: it waits for that one to finish and only fails if the
+ * container is still there afterwards.
+ */
+async function removeSettled(docker: Docker, id: string) {
+  await docker.remove(id);
+}
+
 /** The guard didn't come up. `hostCannot`: it said so itself (exit code 3), so retrying won't help. */
 class GuardUnavailable extends Error {
   constructor(
@@ -95,7 +104,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     if (mode === "off") return;
     try {
       const old = await guardOf(slug);
-      if (old) await docker.remove(old.Id);
+      if (old) await removeSettled(docker, old.Id);
       mkdirSync(netguardDir(cfg, slug), { recursive: true, mode: 0o755 });
       await docker.start(await docker.create(netguardName(slug), netguardSpec(cfg, slug, runnerId)));
       await guardReady(slug);
@@ -126,7 +135,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     for (const [sub] of MOUNTS) mkdirSync(path.join(companyDir(cfg, slug), sub), { recursive: true, mode: 0o700 });
     if (!existsSync(path.join(netguardDir(cfg, slug), "allow"))) writeAllow(slug, []);
     const old = await ours(slug);
-    if (old) await docker.remove(old.Id);
+    if (old) await removeSettled(docker, old.Id);
     const id = await docker.create(containerName(slug), containerSpec(cfg, slug));
     await docker.start(id);
     try {
@@ -180,7 +189,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       const c = await ours(slug);
       const g = await guardOf(slug);
       if (g) await docker.remove(g.Id);
-      if (c) await docker.remove(c.Id);
+      if (c) await removeSettled(docker, c.Id);
       unavailable.delete(slug);
       healing.delete(slug);
       noRetry.delete(slug);

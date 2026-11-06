@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { DockerError } from "../src/docker.js";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
 import { containerSpec, netguardSpec, parseAllow, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
@@ -437,4 +438,34 @@ describe("the runner launcher (R55)", () => {
     expect(parseGuardMode(undefined)).toBe("auto");
     expect(() => parseGuardMode("maybe")).toThrow();
   });
+
+  it("treats a removal racing another ('already in progress') as success once the container is gone, and a problem only if it is still there", async () => {
+    const cfg = config();
+    const fake = fakeDocker();
+    const settle = new Map<string, boolean>();
+    // A stand-in for Docker's answer while another removal of the same container is finishing: the remove waits,
+    // and the container is gone a moment later (finished = true) or stays and the remove fails (finished = false).
+    const racing: Docker = {
+      ...fake.docker,
+      async remove(id) {
+        if (!settle.has(id)) return fake.docker.remove(id);
+        await new Promise((r) => setTimeout(r, 1000));
+        if (settle.get(id)) {
+          for (const [name, c] of fake.containers) if (c.id === id) fake.containers.delete(name);
+          return;
+        }
+        throw new DockerError(409, "Removing the runner failed: Docker is still removing the old container after a minute. Wait a minute and run the update again.");
+      },
+    };
+    const api = launcher(cfg, racing);
+    await api.put("app-co", TOKEN);
+    const old = fake.containers.get("boss-man-runner-app-co")!.id;
+
+    // Gone by the time it is looked at: the new runner is made and the old one is not reported as a failure.
+    settle.set(old, true);
+    fake.containers.delete("boss-man-netguard-app-co");
+    await expect(api.recreate("app-co")).resolves.toMatchObject({ slug: "app-co" });
+    const fresh = fake.containers.get("boss-man-runner-app-co")!.id;
+    expect(fresh).not.toBe(old);
+  }, 20_000);
 });
