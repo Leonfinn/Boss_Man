@@ -6,7 +6,7 @@ import { KIND_FOCUS, REVIEW_KINDS, ruleFor, slotRef, ticketRef, type ReviewerRef
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
-import { readVerdicts } from "@boss-man/shared";
+import { isAfterMerge, readVerdicts } from "@boss-man/shared";
 import { effectivePolicy, otherReviewers, resolveKindReviewer } from "./review-policy.js";
 
 export type ReviewRow = typeof reviewRequests.$inferSelect;
@@ -123,10 +123,13 @@ export async function wakeReviewers(db: Db, t: Ticket, rows: ReviewRow[], notify
   const byAgent: Record<string, ReviewRow[]> = {};
   for (const r of rows) if (r.reviewerAgentId && !skip.includes(r.reviewerAgentId)) (byAgent[r.reviewerAgentId] ??= []).push(r);
   // The ticket's criteria with the author's pass/fail, so the reviewer checks the work against them.
+  // An after-merge criterion can only be settled once the work is live, so it is listed apart and
+  // can't fail the review (DR-024 #5).
+  const after = t.acceptanceCriteria.some(isAfterMerge);
   const checklist = t.acceptanceCriteria.length
     ? readVerdicts(t.acceptanceCriteria, t.stateNote)
-        .map((r) => `  - [${r.verdict ?? "not reported"}] ${r.criterion}`)
-        .join("\n") + "\n  If one fails, request changes and say which."
+        .map((r, i) => `  - [${r.verdict ?? "not reported"}] ${r.criterion}${isAfterMerge(t.acceptanceCriteria[i]!) ? " (checked after merge: don't fail the review on it)" : ""}`)
+        .join("\n") + `\n  If a before-merge one fails, request changes and say which.${after ? " Review can approve with the after-merge ones still unreported; the ticket keeps them open until they pass." : ""}`
     : "";
   for (const [agentId, mine] of Object.entries(byAgent)) {
     const asks = mine.map((r) => `  Your ${r.kind} review, round ${r.round}: look at ${KIND_FOCUS[r.kind as ReviewSlot]}.`).join("\n");
