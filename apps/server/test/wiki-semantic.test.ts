@@ -39,8 +39,8 @@ async function setup(failing = { on: false }) {
   const { company } = (await req("POST", "/api/companies", { name: "Acme" })).json() as { company: { id: string } };
   const secret = (await req("POST", "/api/secrets", { name: "embeddings key", kind: "generic", value: KEY })).json() as { secret: { id: string } };
   const settings = (over: object = {}) => req("PUT", `/api/companies/${company.id}/wiki-semantic`, { enabled: true, baseUrl: "https://openrouter.ai/api/v1", model: "google/gemini-embedding-001", secretId: secret.secret.id, ...over });
-  const write = async (title: string, body: string) => {
-    const r = await built.wiki.write(company.id, { title, body, agentId: null, runId: null });
+  const write = async (title: string, body: string, replace = false) => {
+    const r = await built.wiki.write(company.id, { title, body, replace, agentId: null, runId: null });
     await built.semantic.drain();
     return r.page;
   };
@@ -59,7 +59,8 @@ describe("semantic wiki search", () => {
     await s.write("Handbook", "# Handbook\nintro text\n## Login\nhow to sign in\n## Billing\nsend a new invoice");
     expect(s.inputs.flat()).toHaveLength(1);
     expect(s.inputs[0]![0]).toContain("new invoice");
-    await s.write("Handbook", "# Handbook\nintro text\n## Billing\nsend a new invoice");
+    // Removing the Login section is a deliberate rewrite, so it needs replace: true (BOS-430).
+    await s.write("Handbook", "# Handbook\nintro text\n## Billing\nsend a new invoice", true);
     expect((await s.rows()).map((r) => r.sectionPath).sort()).toEqual(["Handbook", "Handbook > Billing"]);
     expect((await s.rows())[0]!.pageId).toBe(p.id);
     expect(s.auth.every((a) => a === `Bearer ${KEY}`)).toBe(true);

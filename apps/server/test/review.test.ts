@@ -772,3 +772,83 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     expect((await c.db.select().from(wakes)).find((x) => x.reason === "carried check failed")).toBeUndefined();
   });
 });
+
+describe("the owner's sign-off is tied to the commit it approved (DR-013)", () => {
+  const OK = { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 };
+  // The owner signs off a high-risk ticket at head bbbb…, and the merge then fails (a conflict), so it goes back.
+  const signedOffThenFailed = async () => {
+    const c = (ctx = await setup({ answers: { verify: OK, merge: { status: "conflicts", files: ["src/limit.ts"] } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { risk: "high" });
+    expect(await c.review.submit(c.ticket.id, { verdict: "approved", reviewer: "Senior Developer", reviewerAgentId: c.ceo.id })).toMatchObject({ outcome: "owner_review" });
+    const [card] = await openCards(c);
+    expect(card!.context).toMatchObject({ head: "b".repeat(40), risk: "high" });
+    expect((await c.req("POST", `/api/decisions/${card!.id}/answer`, { answer: "Approve and merge" })).statusCode).toBe(200);
+    const [answered] = await c.db.select().from(decisions).where(eq(decisions.id, card!.id));
+    expect(answered!.context).toMatchObject({ signedOff: { head: "b".repeat(40), risk: "high", by: "owner" } });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("in_progress");
+    c.answers.merge = { status: "merged", commit: "c".repeat(40) };
+    return { c, card: card! };
+  };
+  const openCards = async (c: Awaited<ReturnType<typeof setup>>) =>
+    (await c.db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "risk_review");
+  // The ticket comes back to review and its reviewer approves again.
+  const reApprove = async (c: Awaited<ReturnType<typeof setup>>) => {
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, c.ticket.id));
+    return c.review.submit(c.ticket.id, { verdict: "approved", reviewer: "Senior Developer", reviewerAgentId: c.ceo.id });
+  };
+
+  it("(a) reuses the sign-off when the reviews pass again on the same commit: no new card, the merge runs", async () => {
+    const { c } = await signedOffThenFailed();
+    expect(await reApprove(c)).toMatchObject({ outcome: "merged" });
+    expect(await openCards(c)).toHaveLength(0);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("done");
+    const [ev] = (await c.db.select().from(activity).where(eq(activity.ticketId, c.ticket.id))).filter((a) => a.kind === "signoff_reused");
+    expect(ev!.summary).toMatch(/owner's sign-off from .* UTC was reused: Senior Developer approved the same commit bbbbbbbb/);
+  });
+
+  it("(b) asks again on a new commit, and the card names the commit the owner approved before", async () => {
+    const { c } = await signedOffThenFailed();
+    c.answers.diff = { ...DIFF, head: "d".repeat(40) };
+    expect(await reApprove(c)).toMatchObject({ outcome: "owner_review" });
+    const [card] = await openCards(c);
+    expect(card!.question).toMatch(/You approved an earlier version \(bbbbbbbb\) on .* UTC; the code has changed since\./);
+    expect(card!.context).toMatchObject({ head: "d".repeat(40) });
+  });
+
+  it("(c) asks again after the owner sent it back, even on the same commit", async () => {
+    const { c } = await signedOffThenFailed();
+    // Re-approved once more and sent back on the new card.
+    expect(await reApprove(c)).toMatchObject({ outcome: "merged" });
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, c.ticket.id));
+    c.answers.diff = { ...DIFF, head: "d".repeat(40) };
+    expect(await reApprove(c)).toMatchObject({ outcome: "owner_review" });
+    const [card] = await openCards(c);
+    expect((await c.req("POST", `/api/decisions/${card!.id}/answer`, { answer: "Send it back" })).statusCode).toBe(200);
+    // The old sign-off's commit comes back unchanged: still a new card.
+    c.answers.diff = DIFF;
+    expect(await reApprove(c)).toMatchObject({ outcome: "owner_review" });
+    expect(await openCards(c)).toHaveLength(1);
+  });
+
+  it("(c) asks again after the owner sent it back from the review page, even on the same commit", async () => {
+    const { c } = await signedOffThenFailed();
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, c.ticket.id));
+    expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "changes_requested", summary: "Not like this." })).statusCode).toBeLessThan(300);
+    expect(await reApprove(c)).toMatchObject({ outcome: "owner_review" });
+    expect(await openCards(c)).toHaveLength(1);
+  });
+
+  it("(d) asks again when the risk was raised after the sign-off", async () => {
+    const { c } = await signedOffThenFailed();
+    await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { risk: "critical" });
+    expect(await reApprove(c)).toMatchObject({ outcome: "owner_review" });
+    expect(await openCards(c)).toHaveLength(1);
+  });
+
+  it("never reuses a sign-off when the runner can't say which commit it is", async () => {
+    const { c } = await signedOffThenFailed();
+    c.answers.diff = { ...DIFF, head: "" };
+    expect(await reApprove(c)).toMatchObject({ outcome: "owner_review" });
+  });
+});

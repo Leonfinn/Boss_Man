@@ -16,7 +16,8 @@ services:
     restart: unless-stopped
     hostname: ${TS_HOSTNAME:-boss-man}
     environment:
-      # Only needed the first time: the login is then kept in the state folder, so an empty value is fine.
+      # Set a one-time auth key (Tailscale admin > Settings > Keys) for the first start; remove it from .env afterwards, the login is kept in the state folder.
+      # Without a key containerboot waits for an interactive login, gives up after ~60 s, exits 0 and restarts with a new login link, so the login never completes (docs/20-https-tailscale.md, Troubleshooting).
       TS_AUTHKEY: ${TS_AUTHKEY:-}
       TS_AUTH_ONCE: "true"
       TS_STATE_DIR: /var/lib/tailscale
