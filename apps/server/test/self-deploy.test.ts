@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -38,7 +38,16 @@ async function setup(opts: { deployer?: boolean } = {}) {
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   await req("POST", "/api/companies", { name: "App Co" });
-  const outbox = (name: string, body: unknown) => writeFile(path.join(dir, "outbox", name), JSON.stringify(body));
+  // The poller skips a pass when a file keeps its size and mtime (BOS-414), and a file system stamps mtime
+  // to a coarse tick: two same-sized writes within one tick looked untouched (BOS-560). Each write gets
+  // its own mtime, a second later than the last, so a rewrite is always a change, however fast the runner.
+  let stamp = Date.now() / 1000;
+  const outbox = async (name: string, body: unknown) => {
+    const file = path.join(dir, "outbox", name);
+    await writeFile(file, JSON.stringify(body));
+    stamp += 1;
+    await utimes(file, stamp, stamp);
+  };
   const available = (over: Record<string, unknown> = {}) =>
     outbox("available.json", { version: 1, checkedAt: "2026-10-20T12:00:00Z", deployed: A, tip: B, commits: [{ sha: B, subject: "Add rate limiting" }], paths: ["apps/server/src/x.ts"], infraPaths: [], runnerChanged: false, ...over });
   const status = (over: Record<string, unknown>) =>
