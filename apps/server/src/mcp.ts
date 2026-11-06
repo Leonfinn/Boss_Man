@@ -362,7 +362,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
-      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${criteriaWarning(acceptanceCriteria)}`);
+      // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
+      const thin = noCode ? "" : thinTicketWarning(body, assignee);
+      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${criteriaWarning(acceptanceCriteria)}${thin}`);
     },
   );
 
@@ -1271,6 +1273,16 @@ function criteriaChecklist(criteria: readonly Criterion[], note: string | null):
 const criteriaWarning = (criteria: readonly Criterion[] | undefined) => {
   const w = criteria?.length ? afterMergeLint(criteria) : "";
   return w ? `\n\nHeads-up: ${w}` : "";
+};
+
+/**
+ * The heads-up a code ticket gets when it will be hard to pick up (BOS-595): no description, so the
+ * person who gets it has only a title to go on, or no assignee, so it waits in the backlog for someone
+ * to take it. It still creates the ticket; the warning is a nudge to fill the gap, not a refusal.
+ */
+const thinTicketWarning = (body: string | null | undefined, assignee: string | undefined) => {
+  const gaps = [!body?.trim() ? "no description (say what done looks like)" : "", !assignee ? "no assignee" : ""].filter(Boolean);
+  return gaps.length ? `\n\nHeads-up: this ticket has ${gaps.join(" and ")}. Add the missing part with update_ticket so whoever takes it can start without asking.` : "";
 };
 
 /** What a verdict (or an overrule) did, in a sentence for the reviewer. */
@@ -2629,7 +2641,9 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
       try {
         const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);
-        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${criteriaWarning(input.acceptanceCriteria)}`);
+        // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
+        const thin = input.noCode ? "" : thinTicketWarning(input.body, input.assignee);
+        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${criteriaWarning(input.acceptanceCriteria)}${thin}`);
       } catch (err) {
         return workFail(err);
       }

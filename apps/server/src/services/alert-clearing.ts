@@ -4,9 +4,9 @@
 // its own card, not overruling a person. Agent-raised questions have no conditions and are left to
 // a person, except an add-on's setup card (raise_decision with setsUp, DR-023 D, BOS-522), which goes
 // once that add-on is seen working.
-import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { decisions, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
 
@@ -16,6 +16,12 @@ export type ClearWhen =
   | { kind: "agentRanOk"; agentId: string }
   | { kind: "ticketDone"; ticketId: string }
   | { kind: "ticketLeft"; ticketId: string; state: string }
+  /**
+   * A roadmap feature that had no open ticket now has one (BOS-595): the work for it is underway, so
+   * the CEO's card has done its job. A sub-task alone doesn't count: it belongs to a parent already
+   * counted, so this looks at top-level tickets only.
+   */
+  | { kind: "featureHasTicket"; featureId: string }
   /** Start-failure cards name the wake that failed: the runner must be connected and that wake must have started (BOS-475 E). */
   | { kind: "runnerConnected"; companyId: string; wakeId?: string }
   /** Usage-limit cards: the account has room again (the same test as the scheduler's account pick). */
@@ -56,6 +62,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "ticketLeft":
         if (typeof c.ticketId === "string" && typeof c.state === "string") out.push({ kind: "ticketLeft", ticketId: c.ticketId, state: c.state });
+        break;
+      case "featureHasTicket":
+        if (typeof c.featureId === "string") out.push({ kind: "featureHasTicket", featureId: c.featureId });
         break;
       case "runnerConnected":
         if (typeof c.companyId === "string") out.push({ kind: "runnerConnected", companyId: c.companyId, ...(typeof c.wakeId === "string" ? { wakeId: c.wakeId } : {}) });
@@ -125,6 +134,16 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         const [t] = await db.select({ state: tickets.systemState, title: tickets.title }).from(tickets).where(eq(tickets.id, c.ticketId));
         if (!t) return "the ticket is no longer on record";
         return t.state !== c.state ? `the ticket "${t.title}" is ${t.state === "done" ? "finished" : `now ${t.state.replace("_", " ")}`}` : null;
+      }
+      case "featureHasTicket": {
+        const [f] = await db.select({ title: features.title }).from(features).where(eq(features.id, c.featureId));
+        if (!f) return "the feature is no longer on record";
+        const [t] = await db
+          .select({ id: tickets.id })
+          .from(tickets)
+          .where(and(eq(tickets.featureId, c.featureId), isNull(tickets.parentTicketId), ne(tickets.systemState, "done")))
+          .limit(1);
+        return t ? `"${f.title}" now has an open ticket` : null;
       }
       case "runnerConnected": {
         const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, c.companyId));
