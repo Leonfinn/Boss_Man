@@ -8,7 +8,7 @@ import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
-import { movedLogFile, moveStore, oldStoreInHome, storeEnv, storeUnderPnpmHome } from "./store.js";
+import { movedLogFile, moveStore, oldStoreInHome, storeEnv } from "./store.js";
 import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
@@ -52,7 +52,7 @@ mkdirSync(storeDir, { recursive: true });
 // disk; a store pnpm left in HOME before this is moved into the shared one once.
 Object.assign(env, storeEnv(storeDir));
 const oldStore = oldStoreInHome(env.HOME ?? "/home/node");
-if (oldStore !== storeUnderPnpmHome(storeDir)) moveStore(oldStore, storeUnderPnpmHome(storeDir), movedLogFile(workspacesRoot), log);
+if (path.resolve(oldStore) !== path.resolve(storeDir)) moveStore(oldStore, storeDir, movedLogFile(workspacesRoot), log);
 const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, storeDir);
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
