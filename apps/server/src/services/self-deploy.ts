@@ -197,8 +197,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const cmd = (c: string) => sh(c, { host: host!, as: "root" });
     // git writes the checkout with the terminal's umask; under a root shell's 077 the image built from it can't
     // read its own code (the 6 Nov outage, DR-028). A subshell, never a bare umask: 022 left set in the owner's root
-    // terminal would make their later hand-made backups world-readable. The card lint's R14 refuses any other form.
-    const git = (c: string) => `(umask 022 && cd ${src} && ${c})`;
+    // terminal would make their later hand-made backups world-readable. So the pin and the blue/green rollback below
+    // each run as one (umask 022 && cd <src> && git …) subshell, and the card lint's R14 refuses any other form.
+    // (The same two lines as BOS-562's, byte for byte, so the two branches merge in either order.)
     // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
     const noSrc = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
     const noHost = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
@@ -214,7 +215,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       handSteps.push(
         src && shaOk
           ? host
-            ? step(`On the machine that runs Boss Man, pin the approved commit ${commit} with this command. The last line it prints must be exactly that commit; if it prints anything else, stop and tell us.`, cmd(git(`git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD`)))
+            ? step(`On the machine that runs Boss Man, pin the approved commit ${commit} with this command. The last line it prints must be exactly that commit; if it prints anything else, stop and tell us.`, cmd(`(umask 022 && cd ${src} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD)`))
             : noHost
           : noSrc,
       );
@@ -268,7 +269,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         ? host
           ? step(
               bg ? "To go back, run this on the machine that runs Boss Man:" : "To go back, run this on the machine that runs Boss Man (code only, never the database):",
-              cmd(bg ? `${git(`git checkout ${fromCommit}`)} && cd ${src} && scripts/rebuild-live.sh` : `cd ${src} && scripts/deploy.sh --rollback`),
+              cmd(bg ? `(umask 022 && cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh)` : `cd ${src} && scripts/deploy.sh --rollback`),
               rollbackNote,
             )
           : `To go back, ${noHost} ${rollbackNote}`

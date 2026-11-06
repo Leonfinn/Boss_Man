@@ -253,7 +253,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     // The card still checks that the new server took charge, and how to recover it.
     expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-green");
     expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader") });
-    expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("\n(umask 022 && cd /srv/bm/src && git checkout " + A + ") && cd /srv/bm/src && scripts/rebuild-live.sh\n") });
+    expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("\n(umask 022 && cd /srv/bm/src && git checkout " + A + " && scripts/rebuild-live.sh)\n") });
   });
 
   describe("hand-apply cards (BOS-269)", () => {
