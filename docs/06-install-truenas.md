@@ -893,6 +893,10 @@ ntfy action buttons make your phone call Boss Man directly, over Boss Man's http
 
 Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook in **Settings > Notifications**.
 
+### Blue/green installs
+
+With blue/green the two Boss Man colours are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command (and in the rollback command). It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings in step 6 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
+
 ### Any Docker host
 
 The same steps work on plain Linux Docker, a Proxmox VM and a Proxmox container (LXC), because ntfy rides on the Tailscale container from section 10b, which runs in Tailscale's userspace mode and needs no `/dev/net/tun`. Nothing here is specific to TrueNAS. Host differences (such as how to back up or add a tun device) are in `docs/20-https-tailscale.md`. Moving to a new host: copy `$BOSSMAN_DATA` (it includes `ntfy` and `tailscale`), bring up section 10b, then run step 3 again. Users, tokens and the phone subscription carry over.
