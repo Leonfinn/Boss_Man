@@ -1583,11 +1583,13 @@ export function schedulerService(
     /** Frees a finished ticket's worktree on its company's runner, keeping its branch (R38). */
     async releaseWorkspace(ticketId: string) {
       const [t] = await db
-        .select({ companyId: tickets.companyId, projectId: tickets.projectId, repoUrl: projects.repoUrl })
+        .select({ companyId: tickets.companyId, projectId: tickets.projectId, repoUrl: projects.repoUrl, state: tickets.systemState })
         .from(tickets)
         .innerJoin(projects, eq(projects.id, tickets.projectId))
         .where(eq(tickets.id, ticketId));
       if (!t?.repoUrl) return false;
+      // Merged work that still has live checks to show keeps its working copy until it is really done.
+      if (t.state !== "done") return false;
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
       return runner ? deps.runners.send(runner.id, { type: "workspace.release", projectId: t.projectId, ticketId }) : false;
     },

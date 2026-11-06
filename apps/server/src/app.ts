@@ -20,7 +20,7 @@ import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
 import { modelProbeService } from "./services/model-probe.js";
-import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
+import { assetPathOf, PRECOMPRESSED_SUFFIX_LIST, parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
@@ -69,7 +69,7 @@ import { ownerRepliesService } from "./services/owner-replies.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
-import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
+import { cleanFolder, HISTORY_PAGE_MAX, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
@@ -170,8 +170,14 @@ async function serveWeb(app: FastifyInstance, root: string) {
     wildcard: false,
     cacheControl: false,
     index: ["index.html"],
+    // The build writes a .br/.gz sibling next to each asset (BOS-411), so a request that accepts one is
+    // answered from disk with no CPU per request. A sidecar is never a route of its own: only the
+    // negotiation below may pick it, so nobody downloads one as a file. @fastify/static hands setHeaders
+    // the sibling's path, so the immutable rule is applied to the original name.
+    preCompressed: true,
+    globIgnore: PRECOMPRESSED_SUFFIX_LIST.map((suffix) => `**/*${suffix}`),
     setHeaders(res, file) {
-      res.header("cache-control", file.includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
+      res.header("cache-control", assetPathOf(file).includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
     },
   });
   app.addHook("onSend", async (req, reply) => {
@@ -1823,6 +1829,12 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
+      // versions=1 lists every saved version of the page, newest first, in pages: the history
+      // screen uses it to reach versions past the newest 100 the page itself carries (BOS-496).
+      if ((req.query as Record<string, string | undefined>).versions === "1") {
+        const q = z.object({ offset: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(HISTORY_PAGE_MAX).optional() }).parse(req.query);
+        return wiki.versions(id, slug, q).catch(wikiErrors(reply));
+      }
       return wiki.get(id, slug).catch(wikiErrors(reply));
     });
     owner.put("/api/companies/:id/wiki/*", async (req, reply) => {
