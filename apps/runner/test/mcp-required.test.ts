@@ -6,7 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
-import { checkBossManTools, SessionManager } from "../src/session-manager.js";
+import { SessionManager } from "../src/session-manager.js";
+import { checkBossManTools } from "../src/mcp-preflight.js";
 import { startMcpServer } from "./mcp-server.js";
 
 const fake = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-opencode.mjs");
@@ -46,12 +47,12 @@ describe("Boss Man tools preflight (BOS-552)", () => {
     expect((events.find((e) => e.type === "run.ended") as { error: string | null }).error).toBeNull();
   });
 
-  it("retries a moment-late server instead of failing the run at once", async () => {
-    let calls = 0;
-    const events = await run({ mcpRequired: true, check: async () => (++calls === 1 ? { ok: false, reason: "timed out" } : { ok: true, tools: ["x"] }) });
-    expect(calls).toBe(2);
-    expect(events.find((e) => e.type === "run.started")).toBeDefined();
-  });
+  it("without an injected check, a dead server stops the run loudly (real preflight + tools check)", async () => {
+    const events = await run({ mcpRequired: true, mcpUrl: "http://127.0.0.1:9/mcp" });
+    const ended = events.find((e) => e.type === "run.ended") as { error: string | null };
+    expect(ended.error).toContain("couldn't reach the Boss Man tools");
+    expect(events.find((e) => e.type === "run.started")).toBeUndefined();
+  }, 60_000);
 
   it("stops an mcpRequired run loudly when the agent can't use HTTP MCP at all", async () => {
     const events = await run({ mcpRequired: true, caps: { sse: true }, check: async () => ({ ok: true, tools: ["x"] }) });

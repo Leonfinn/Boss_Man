@@ -11,55 +11,19 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
+import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
-/**
- * Asks the Boss Man MCP server for its tool list, the same way an agent would (BOS-552). OpenCode
- * silently drops an MCP server it can't reach at session/new, so a run with mcpRequired must check
- * first: a server that answers with tools is healthy, anything else stops the run instead of letting
- * it work blind. Returns the tool names on success, or a short reason on failure.
- */
-export async function checkBossManTools(url: string, token: string): Promise<{ ok: boolean; tools?: string[]; reason?: string }> {
-  const client = new Client({ name: "bossman-preflight", version: "0.0.1" }, { capabilities: {} });
-  try {
-    const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } });
-    await client.connect(transport);
-    const listed = await client.listTools();
-    const tools = (listed.tools ?? []).map((t) => t.name);
-    if (!tools.length) return { ok: false, reason: "it answered but listed no tools" };
-    return { ok: true, tools };
-  } catch (err) {
-    return { ok: false, reason: String((err as Error)?.message ?? err).slice(0, 200) };
-  } finally {
-    await client.close().catch(() => {});
-  }
-}
-
 /** How long one preflight attempt may take before it counts as failed, and how many attempts a run makes. */
 const MCP_PREFLIGHT_TIMEOUT_MS = 10_000;
 const MCP_PREFLIGHT_ATTEMPTS = 3;
 const MCP_PREFLIGHT_DELAY_MS = 2_000;
-
-/** A preflight attempt that hangs counts as a failure, so a stuck server can't hold a run forever. */
-async function withTimeout<T extends { ok: boolean; reason?: string }>(work: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false, reason: `no answer within ${Math.round(ms / 1000)}s` } as T), ms);
-  });
-  try {
-    return await Promise.race([work, timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 export type SessionManagerOptions = {
   emit: (event: RunnerEvent) => void;
@@ -840,12 +804,16 @@ export class SessionManager {
           finish(null, `This run was stopped because ${cmd.agentKind} doesn't support HTTP MCP servers, so it would start without the Boss Man tools.`);
           return;
         }
-        const check = this.opts.checkBossManTools ?? checkBossManTools;
-        let result = await withTimeout(check(this.opts.mcpUrl, cmd.mcpToken), MCP_PREFLIGHT_TIMEOUT_MS);
-        for (let attempt = 1; !result.ok && attempt < MCP_PREFLIGHT_ATTEMPTS && this.runs.has(cmd.runId); attempt++) {
-          await new Promise((r) => setTimeout(r, MCP_PREFLIGHT_DELAY_MS));
+        // Wait out a brief stall first (BOS-403's helper), then require the tools to actually list.
+        // A test-provided check drives both steps itself, so it isn't run against the real URL.
+        const injected = this.opts.checkBossManTools;
+        let result: { ok: boolean; reason?: string };
+        if (injected) {
+          result = await injected(this.opts.mcpUrl, cmd.mcpToken);
+        } else {
+          const reach = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: MCP_PREFLIGHT_TIMEOUT_MS * MCP_PREFLIGHT_ATTEMPTS, attemptTimeoutMs: MCP_PREFLIGHT_TIMEOUT_MS, delayMs: MCP_PREFLIGHT_DELAY_MS });
           if (!this.runs.has(cmd.runId)) return;
-          result = await withTimeout(check(this.opts.mcpUrl, cmd.mcpToken), MCP_PREFLIGHT_TIMEOUT_MS);
+          result = reach.ok ? await checkBossManTools(this.opts.mcpUrl, cmd.mcpToken) : { ok: false, reason: reach.lastError ?? "no answer" };
         }
         if (!result.ok) {
           finish(null, `This run was stopped because it couldn't reach the Boss Man tools (${result.reason ?? "no answer"}), so it would have worked blind. It runs again when the server is reachable.`);
