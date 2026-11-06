@@ -53,6 +53,12 @@ const bg = createBackground(
     { name: "watch and monitor", everyMs: Number(env.BOSSMAN_SLOW_MS ?? 30_000), run: () => scheduler.slow() },
     // New decisions reach the owner's notifications (R44).
     { name: "notification sync", everyMs: Number(env.BOSSMAN_NOTIFY_MS ?? 5000), run: () => notes.syncDecisions() },
+    // After a server takes charge: restart approved, unmerged merges (DR-026). Gives up after 30 minutes; the 66-minute merge sweep is the net after that. // leader-only
+    { name: "resume merges", everyMs: Number(env.BOSSMAN_RESUME_MERGES_MS ?? 10_000), run: async () => {
+      if (!resumeMergesSince) return;
+      const r = await sweeps.resumeMergesOnPromotion(resumeMergesSince);
+      if (!r.waiting || Date.now() - resumeMergesSince.getTime() > 30 * 60_000) resumeMergesSince = null;
+    } },
     // Stale-blocker, stalled-run and missed-work sweeps.
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
@@ -80,7 +86,10 @@ const bg = createBackground(
   (err, name) => app.log.error({ err }, `${name} failed`),
 );
 // Background work follows leadership; runner sockets are closed by buildApp on demotion.
+// A server that takes charge holds no merges: it restarts every approved, unmerged one (DR-026). The loop below keeps asking until the update hold is off and the runners are connected.
+let resumeMergesSince: Date | null = null;
 leader.onPromote(() => {
+  resumeMergesSince = new Date();
   bg.startBackground();
   void launcher.syncAll(); // once per promotion: runners that outlived a deploy get their allow list (git hosts) without a restart
 });
