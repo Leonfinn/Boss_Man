@@ -77,6 +77,23 @@ describe("merge queue screen (BOS-587)", () => {
     expect(data.waiting.find((r: { ticketId: string }) => r.ticketId === wait.id)).toMatchObject({ state: "waiting_for_slot" });
   });
 
+  it("flags a ticket waiting over an hour as stuck for age, with its minutes over 60", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Waiting too long" })).json() as { id: string };
+    // Approved 61 minutes ago: the ticket is in review, and nothing has touched it since.
+    const waited = new Date(Date.now() - 61 * 60_000);
+    await c.db.update(tickets).set({ systemState: "review", lastActivityAt: waited, stateChangedAt: waited }).where(eq(tickets.id, t.id));
+    const data = await queue(c);
+    const row = data.waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
+    expect(row).toMatchObject({ state: "waiting_for_slot", stuck: true });
+    expect(row.minutes).toBeGreaterThanOrEqual(60);
+    // A ticket only a few minutes old is not stuck.
+    const fresh = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Just arrived" })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, fresh.id));
+    const again = await queue(c);
+    expect(again.waiting.find((r: { ticketId: string }) => r.ticketId === fresh.id)).toMatchObject({ state: "waiting_for_slot", stuck: false });
+  });
+
   it("shows running work, and puts it in no waiting list", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Merging now" })).json() as { id: string };

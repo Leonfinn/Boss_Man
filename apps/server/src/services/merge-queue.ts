@@ -255,10 +255,13 @@ export function mergeQueueService(
         const card = cards.get(r.id);
         const check = checks.get(r.id);
         const failedCheck = check ? !check.passed : false;
-        const sinceApproval = mins(t.getTime() - r.lastActivityAt.getTime());
-        const base = { ticketId: r.id, ref: ticketRef(prefix, r.number), title: r.title, minutes: sinceApproval, risk: riskOf(r.risk), urgent: r.urgent, failedCheck };
+        // How long it has waited, in milliseconds so the "over an hour" limit compares like with like
+        // (the ticket shows whole minutes). The last activity is the best stamp we have for an approval.
+        const waitedMs = t.getTime() - r.lastActivityAt.getTime();
+        const overAnHour = waitedMs > WAITING_LIMIT_MS;
+        const base = { ticketId: r.id, ref: ticketRef(prefix, r.number), title: r.title, minutes: mins(waitedMs), risk: riskOf(r.risk), urgent: r.urgent, failedCheck };
         if (card?.type === "risk_review") {
-          waiting.push({ ...base, state: "waiting_for_sign_off", label: "waiting for your sign-off", stuck: sinceApproval > WAITING_LIMIT_MS || failedCheck, next: "Boss Man merges it as soon as you answer the sign-off.", actor: "owner", decisionId: card.id });
+          waiting.push({ ...base, state: "waiting_for_sign_off", label: "waiting for your sign-off", stuck: overAnHour || failedCheck, next: "Boss Man merges it as soon as you answer the sign-off.", actor: "owner", decisionId: card.id });
           continue;
         }
         if (card?.type === "check_stuck") {
@@ -266,11 +269,11 @@ export function mergeQueueService(
           continue;
         }
         if (card) {
-          waiting.push({ ...base, state: "waiting_for_decision", label: "waiting for a decision", stuck: sinceApproval > WAITING_LIMIT_MS || failedCheck, next: "Open the card in Decisions.", actor: card.tier === "ceo" ? "ceo" : "owner", decisionId: card.id });
+          waiting.push({ ...base, state: "waiting_for_decision", label: "waiting for a decision", stuck: overAnHour || failedCheck, next: "Open the card in Decisions.", actor: card.tier === "ceo" ? "ceo" : "owner", decisionId: card.id });
           continue;
         }
         if (r.pullRequestUrl && r.pullRequestNote) {
-          waiting.push({ ...base, state: "waiting_host", label: `pull request waiting on the host: ${r.pullRequestNote.slice(0, 120)}`, stuck: sinceApproval > WAITING_LIMIT_MS || failedCheck, next: "Boss Man checks the host again every couple of minutes.", actor: "system", decisionId: null });
+          waiting.push({ ...base, state: "waiting_host", label: `pull request waiting on the host: ${r.pullRequestNote.slice(0, 120)}`, stuck: overAnHour || failedCheck, next: "Boss Man checks the host again every couple of minutes.", actor: "system", decisionId: null });
           continue;
         }
         if (failedCheck) {
@@ -278,10 +281,10 @@ export function mergeQueueService(
           continue;
         }
         if (queue?.mode === "server" && queue.waiting > 0) {
-          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue.waiting} ahead)`, stuck: sinceApproval > WAITING_LIMIT_MS, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
+          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue.waiting} ahead)`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
           continue;
         }
-        waiting.push({ ...base, state: "waiting_for_slot", label: "waiting for a check slot", stuck: sinceApproval > WAITING_LIMIT_MS, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
+        waiting.push({ ...base, state: "waiting_for_slot", label: "waiting for a check slot", stuck: overAnHour, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
       }
       waiting.sort((a, b) => Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);
 
