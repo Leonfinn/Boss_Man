@@ -97,16 +97,29 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     return ended;
   }
 
+  /** The first SQLSTATE five-character code found on the error or the errors it wraps, if any. */
+  function sqlStateOf(err: unknown): string | null {
+    for (let e = err as { code?: unknown; cause?: unknown } | null, i = 0; e && i < 3; e = e.cause as { code?: unknown; cause?: unknown } | null, i++) {
+      if (typeof e.code === "string" && /^[0-9A-Z]{5}$/.test(e.code)) return e.code;
+    }
+    return null;
+  }
+
   /**
-   * Whether an error is a data or constraint error (SQLSTATE class 22 or 23), which the same event
-   * will hit on every resend: the payload or the row it points at is wrong, not the connection. Those
-   * must not be retried for ever (BOS-584), unlike a dropped connection or a serialization failure.
+   * Whether an error can never succeed, so retrying it would stall every later event for this company
+   * (acks are cumulative): the event is kept, marked and acked instead (BOS-584, BOS-606).
+   *
+   * - SQLSTATE class 22/23 is a data or constraint error: the payload or the row it points at is wrong.
+   * - No SQLSTATE at all is a code bug or a malformed payload (a TypeError, a plain Error): it fails
+   *   the same way on every resend, so it must not hold the stream for ever (BOS-606).
+   *
+   * Anything else is a Postgres-coded failure, which is retried: connection (08) and serialization (40)
+   * are transient, and any other code can't be known to repeat.
    */
   function isPermanentApplyError(err: unknown): boolean {
-    for (let e = err as { code?: unknown; cause?: unknown } | null, i = 0; e && i < 3; e = e.cause as { code?: unknown; cause?: unknown } | null, i++) {
-      if (typeof e.code === "string" && /^2[23]/.test(e.code)) return true;
-    }
-    return false;
+    const code = sqlStateOf(err);
+    if (code === null) return true;
+    return /^2[23]/.test(code);
   }
 
   /**

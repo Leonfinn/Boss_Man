@@ -38,7 +38,8 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     // Make the quota reading markEnded records fail once.
     const real = c.funding.recordQuota.bind(c.funding);
     const failOnce = vi.spyOn(c.funding, "recordQuota").mockImplementationOnce(async () => {
-      throw new Error("database hiccup");
+      // A transient database failure carries a SQLSTATE code, so the resend is retried (BOS-606).
+      throw Object.assign(new Error("database hiccup"), { code: "08006" });
     });
 
     const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.ended" as const, runId: c.runId, stopReason: null, error: "You've hit your weekly limit · resets later" } };
@@ -78,7 +79,8 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
     const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
     vi.spyOn(c.funding, "recordCost").mockImplementationOnce(async () => {
-      throw new Error("cost insert failed");
+      // A transient database failure carries a SQLSTATE code, so the resend is retried (BOS-606).
+      throw Object.assign(new Error("cost insert failed"), { code: "08006" });
     });
     await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("cost insert failed");
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(0);
@@ -90,7 +92,8 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
   });
 
-  it("records a quota reading and the event in one go", async () => {    const c = (ctx = await setup());
+  it("records a quota reading and the event in one go", async () => {
+    const c = (ctx = await setup());
     const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
     const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.quota" as const, fundingSourceId: fs!.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 40, resetsAt: "2026-11-07T14:00:00Z" } } } } } as never };
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
@@ -130,5 +133,44 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     expect(await c.db.select().from(runnerEvents).where(eq(runnerEvents.runnerId, c.runnerRow.id))).toHaveLength(1); // only run.started
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
     expect(await c.db.select().from(costEvents)).toHaveLength(1);
+  });
+
+  it("still retries a serialization failure on the resend (not marked as failed) (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    // A serialization failure (40001) is transient: the event is not stored, so the resend applies it.
+    vi.spyOn(c.funding, "recordCost").mockImplementationOnce(async () => {
+      throw Object.assign(new Error("could not serialize access"), { code: "40001" });
+    });
+    await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("could not serialize access");
+    expect(await c.db.select().from(runnerEvents).where(eq(runnerEvents.runnerId, c.runnerRow.id))).toHaveLength(1); // only run.started
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(costEvents)).toHaveLength(1);
+  });
+
+  it("keeps and acks an event whose apply throws a plain Error on every attempt, so the stream moves on (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    // A code bug or malformed payload: no SQLSTATE, and it fails the same way on every resend.
+    const always = vi.spyOn(c.funding, "recordCost").mockImplementation(async () => {
+      throw new TypeError("cannot read properties of undefined");
+    });
+
+    // It is stored and acked (true) on the first try, not retried for ever.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
+    expect(await c.db.select().from(costEvents)).toHaveLength(0);
+    const [failed] = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")));
+    expect(failed?.summary).toMatch(/Runner event 2 \(run\.cost\)/);
+
+    // A resend of the same seq is a duplicate, and it never stalls the events behind it.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
+    expect(always).toHaveBeenCalledTimes(1);
+    const ended = { seq: 3, at: new Date().toISOString(), event: { type: "run.ended" as const, runId: c.runId, stopReason: "end_turn", error: null } };
+    expect(await c.runners.ingest(c.runnerRow, ended)).toBe(true);
+    const [run] = await c.db.select().from(runs).where(eq(runs.id, c.runId));
+    expect(run!.endedAt).not.toBeNull();
   });
 });
