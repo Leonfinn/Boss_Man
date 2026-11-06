@@ -342,6 +342,10 @@ export const tickets = pgTable(
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
+    /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
+    ownerSetup: text("owner_setup"),
+    /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
+    ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
@@ -551,7 +555,7 @@ export const runs = pgTable("runs", {
   lastPostAt: timestamp("last_post_at", { withTimezone: true }),
   /** When Boss Man asked the silent run for a status, so it is asked once (BOS-314). */
   silentSteeredAt: timestamp("silent_steered_at", { withTimezone: true }),
-});
+}, (t) => [index("runs_ticket_open").on(t.ticketId, t.endedAt)]);
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
 export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
@@ -1122,6 +1126,38 @@ export const ticketMessages = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("ticket_messages_ticket_time").on(t.ticketId, t.createdAt)],
+);
+
+/**
+ * An owner message on a ticket that is waiting for an answer (BOS-425). One row per message; it
+ * stays open until an agent replies on the ticket, the owner's message needs no reply, or the
+ * CEO has answered on the target's behalf. `state` is what the ticket shows under the message.
+ */
+export const ownerReplies = pgTable(
+  "owner_replies",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id").notNull().references(() => ticketMessages.id, { onDelete: "cascade" }),
+    /** Who the owner wrote to: the agent working the ticket, or the one they picked. */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** How it reached them: "delivered" into a live run or woken now, or "queued" behind their other work. */
+    state: text("state").notNull(),
+    /** The run it went into, if any. */
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    /** Reminders sent so far: 1 the top-priority one after a run ended without a reply, then the 5 and 10 minute ones. */
+    reminders: integer("reminders").notNull().default(0),
+    /** Set when it is not the target but a stand-in who answered, or who was asked to (the CEO, or the Scrum Master). */
+    standInAgentId: uuid("stand_in_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The CEO/SM alert raised at 10 minutes, if any (BOS-425). */
+    alertDecisionId: uuid("alert_decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    /** Set when an agent replied on the ticket (the message is answered), or the CEO answered for the target. */
+    clearedAt: timestamp("cleared_at", { withTimezone: true }),
+    clearedBy: text("cleared_by"),
+  },
+  (t) => [index("owner_replies_open").on(t.companyId, t.clearedAt, t.createdAt)],
 );
 
 // ---------- Feature requests ----------

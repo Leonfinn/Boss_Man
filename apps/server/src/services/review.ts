@@ -1,19 +1,19 @@
 // Review (R39): the review state carries the ticket's diff against its base, line comments
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
-import { and, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, RISK_TIERS, riskOf, ruleFor, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, RISK_TIERS, riskOf, ruleFor, slotRef, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
-import { effectivePolicy } from "./review-policy.js";
-import { activeRows, decide, evaluate, latestRows, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, supersedeSignoffs } from "./decisions.js";
+import { effectivePolicy, otherReviewers } from "./review-policy.js";
+import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
+import { APPROVE_MERGE, CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import { checkGate, checkPriority } from "./check-gate.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
@@ -163,6 +163,38 @@ export function isSignoffPending(err: unknown): boolean {
 
 export type GitTemplates = { commit: string; pr: string };
 type NotifyHook = (agentId: string, input: { reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
+
+type SignedOff = { head: string; risk: string | null; at: string };
+
+/** "4 Nov 07:35 UTC", for a sign-off named on a card or event. */
+const when = (iso: string) => {
+  const d = new Date(iso);
+  return `${d.getUTCDate()} ${d.toLocaleString("en-GB", { month: "short", timeZone: "UTC" })} ${iso.slice(11, 16)} UTC`;
+};
+
+/**
+ * The owner's last sign-off on this ticket, and whether it covers `head` (DR-013). It is reused only when the newest
+ * answered sign-off card is an "Approve and merge" for the same commit, nobody sent the ticket back since (the card's
+ * "Send it back" makes a newer answered card; the review page and reviewers leave a changes-requested ticket_reviews
+ * row), and the risk is no higher than what the owner saw. `earlier` names the last signed-off commit for a new card.
+ */
+async function priorSignoff(db: Db, t: { id: string; risk: RiskTier | null }, head: string | null): Promise<{ reuse: SignedOff | null; earlier: SignedOff | null }> {
+  const cards = await db
+    .select({ answer: decisions.answer, context: decisions.context })
+    .from(decisions)
+    .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${t.id}`))
+    .orderBy(desc(decisions.answeredAt));
+  const signed = cards.find((c) => c.answer === APPROVE_MERGE && (c.context as { signedOff?: SignedOff }).signedOff);
+  const earlier = signed ? (signed.context as { signedOff: SignedOff }).signedOff : null;
+  if (!earlier || !head || cards[0] !== signed || earlier.head !== head) return { reuse: null, earlier };
+  if (!earlier.risk || RISK_TIERS.indexOf(riskOf(t.risk)) > RISK_TIERS.indexOf(earlier.risk as RiskTier)) return { reuse: null, earlier };
+  const [sentBack] = await db
+    .select({ id: ticketReviews.id })
+    .from(ticketReviews)
+    .where(and(eq(ticketReviews.ticketId, t.id), eq(ticketReviews.verdict, "changes_requested"), gt(ticketReviews.createdAt, new Date(earlier.at))))
+    .limit(1);
+  return { reuse: sentBack ? null : earlier, earlier };
+}
 
 /** The owner decides what to do with a check that couldn't finish; the ticket stays in review and the loop detector never hears of it. */
 async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title: string }, command: string, reason: string, output: string) {
@@ -645,18 +677,27 @@ export function reviewService(
       if (o.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
         // One open sign-off card per ticket: this round replaces any older one (BOS-446).
         await supersedeSignoffs(db, ticketId, { by: "system", note: "Replaced by a newer sign-off card after a new review round.", at: new Date().toISOString() });
+        // The owner signs off a commit, not a ticket (DR-013). A runner that can't say the head never reuses a sign-off.
+        const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
+        const prior = await priorSignoff(db, t, head);
+        if (prior.reuse) {
+          await record(db, { companyId: t.companyId, agentId: o.reviewerAgentId, ticketId, kind: "signoff_reused", summary: `The owner's sign-off from ${when(prior.reuse.at)} was reused: ${o.reviewer} approved the same commit ${head!.slice(0, 8)}, so it merges without asking again.` });
+          if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
+          return { verdict: "approved" as const, ...(await this.landVisible(ticketId, o.reviewer, o.causedByRunId)) };
+        }
+        const earlier = prior.earlier ? `\n\nYou approved an earlier version (${prior.earlier.head.slice(0, 8)}) on ${when(prior.earlier.at)}; the code has changed since.` : "";
         const [d] = await db
           .insert(decisions)
           .values({
             companyId: t.companyId,
             kind: "approval",
-            question: `${o.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?`,
+            question: `${o.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?${earlier}`,
             options: ["Approve and merge", "Send it back"],
             recommendedOption: "Approve and merge",
             raisedByAgentId: o.reviewerAgentId,
             tier: "owner",
             dedupeKey: `risk-review:${ticketId}:${Date.now()}`,
-            context: { type: "risk_review", ticketId, reviewer: o.reviewer },
+            context: { type: "risk_review", ticketId, reviewer: o.reviewer, ...(head ? { head, risk: riskOf(t.risk) } : {}) },
           })
           .returning({ id: decisions.id });
         await addTicketDependency(db, { companyId: t.companyId, blockedTicketId: ticketId, blockerDecisionId: d!.id, actor: { type: "system" } });
@@ -815,6 +856,54 @@ export function reviewService(
       const { t } = await ticketWithRepo(ticketId);
       await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true, internal: true });
       return tellAgent({ ...t, systemState: "in_progress" }, text, "review", causedByRunId);
+    },
+
+    /**
+     * A stalled-review card's action (BOS-404, BOS-426, BOS-433 fix B): the review the card names is still
+     * open, so do what the CEO or owner chose and record it on the ticket. Returns false when the review
+     * has moved on (a verdict landed, the round changed, the ticket left review), so the card can be kept open.
+     */
+    async reviewStall(ctx: Extract<DecisionContext, { type: "review_stall" }>, answer: string, byAgentId: string | null): Promise<boolean> {
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, ctx.ticketId));
+      if (!t || t.systemState !== "review") return false;
+      const [r] = await db.select().from(reviewRequests).where(and(eq(reviewRequests.id, ctx.reviewId), eq(reviewRequests.ticketId, t.id)));
+      if (!r || r.status !== "pending") return false;
+      const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, ctx.reviewerAgentId));
+      const [by] = byAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, byAgentId)) : [];
+      const actor = by?.name ?? "The owner";
+      if (answer === TAKE_REVIEW) {
+        // The CEO who took it is the reviewer now; a verdict from them is their own call.
+        if (!byAgentId) return false;
+        await db.update(reviewRequests).set({ reviewerAgentId: byAgentId }).where(eq(reviewRequests.id, r.id));
+        await record(db, { companyId: t.companyId, agentId: byAgentId, ticketId: t.id, kind: "review_handover", summary: `${actor} took the ${r.kind} review from ${who?.name ?? "the reviewer"}.` });
+        if (wake) await wakeReviewers(db, t, [{ ...r, reviewerAgentId: byAgentId }], (id, i) => wake!(id, i));
+        return true;
+      }
+      if (answer === REASSIGN_REVIEW) {
+        const rule = ruleFor(await effectivePolicy(db, t), t.risk);
+        const ref = slotRef(rule, r.kind as ReviewSlot);
+        const [to] = ref ? (await otherReviewers(db, t, r.kind as ReviewSlot, ref, [r.reviewerAgentId ?? ""])).filter((a) => a.id !== byAgentId) : [];
+        if (!to) throw new ReviewError(409, "No other qualified reviewer is free to take it. Take it yourself, send it back to the author, or leave it another hour.");
+        await db.update(reviewRequests).set({ reviewerAgentId: to.id }).where(eq(reviewRequests.id, r.id));
+        await record(db, { companyId: t.companyId, agentId: byAgentId, ticketId: t.id, kind: "review_handover", summary: `${actor} gave the ${r.kind} review to ${to.name}, from ${who?.name ?? "the reviewer"}.` });
+        if (wake) await wakeReviewers(db, t, [{ ...r, reviewerAgentId: to.id }], (id, i) => wake!(id, i));
+        return true;
+      }
+      if (answer === SEND_BACK_FOR_MERGE) {
+        await skipPending(db, [r]);
+        await record(db, { companyId: t.companyId, agentId: byAgentId, ticketId: t.id, kind: "review_stall", summary: `${actor} sent the ticket back: ${who?.name ?? "the reviewer"} never gave the ${r.kind} review.` });
+        await this.sendBack(t.id, `${actor} sent this back because the ${r.kind} review never got a verdict. Check the branch still merges cleanly with the default branch (a stale branch can block a reviewer), bring it up to date, then move the ticket back to review.`, actor);
+        return true;
+      }
+      if (answer === WAIT_ANOTHER_HOUR) {
+        // Nothing now, but the sweep must know it was left: it skips this review until the quiet time has
+        // passed again, so the same card isn't raised within a minute (BOS-426, BOS-433 fix B). Both the
+        // ticket's own line and the marker the sweep reads are written here.
+        await record(db, { companyId: t.companyId, agentId: byAgentId, ticketId: t.id, kind: "review_stall", summary: `${actor} left the ${r.kind} review another hour with ${who?.name ?? "the reviewer"}.` });
+        await recordReviewWait(db, { companyId: t.companyId, ticketId: t.id, reviewId: r.id, at: new Date(), agentId: byAgentId });
+        return true;
+      }
+      return false;
     },
 
     /**

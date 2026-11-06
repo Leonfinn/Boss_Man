@@ -91,9 +91,11 @@ describe("evaluatePermission defaults", () => {
     expect(evaluatePermission({ title: "git push origin main", kind: "other", rawInput: { command: "git push origin main" } }, []).outcome).toBe("owner");
   });
 
-  it("refuses a request whose title is a folder path, e.g. OpenCode's external_directory (BOS-495 supersedes BOS-295)", () => {
-    const oc = { title: "/home/x", kind: "other", rawInput: { filepath: "/home/x/a", parentDir: "/home/x" } };
-    expect(evaluatePermission(oc, []).outcome).toBe("deny");
+  it("keeps a request that names a path with the owner, e.g. OpenCode's external_directory (BOS-295 security review)", () => {
+    // The title is not a path here: a title that is a folder path is refused outright (BOS-495, below).
+    const oc = { title: "external_directory", kind: "other", rawInput: { filepath: "/home/x/a", parentDir: "/home/x" } };
+    expect(evaluatePermission(oc, []).outcome).toBe("owner");
+    expect(evaluatePermission({ ...oc, title: "/home/x" }, []).outcome).toBe("deny");
     expect(evaluatePermission({ title: "x", kind: null, rawInput: { file_path: "/etc/passwd" } }, []).outcome).toBe("owner");
   });
 
