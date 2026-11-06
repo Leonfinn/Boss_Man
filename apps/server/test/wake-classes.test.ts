@@ -177,7 +177,7 @@ describe("wake classes: watch wakes", () => {
     ctx = await setup();
     const t = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Watched" })).json();
     await ctx!.req("PUT" as never, `/api/tickets/${t.id}/watcher`, { agentId: ctx!.ceo.id, everyMinutes: 30 });
-    await ctx!.scheduler.tick();
+    await ctx!.scheduler.slow();
     const [w] = await ctx!.db.select().from(wakes).where(eq(wakes.reason, "ticket watch"));
     expect(w).toMatchObject({ ticketId: t.id });
     expect((await ctx!.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).not.toBe("in_progress");
