@@ -264,6 +264,17 @@ export class SessionManager {
     for (const run of this.runs.values()) killGroup(run.child, 2000);
   }
 
+  /** Tickets whose /tmp leftovers were already looked for, so a busy ticket's every run doesn't scan /tmp again. */
+  private readonly rescued = new Set<string>();
+
+  /** Moves this ticket's /tmp leftovers into its kept scratch (BOS-592); once per ticket per runner process. */
+  private rescueTmp(ticketId: string, dirs: string[]) {
+    if (this.rescued.has(ticketId) || !this.opts.workspaces) return;
+    this.rescued.add(ticketId);
+    const moved = dirs.flatMap((d) => (d ? this.opts.workspaces!.rescueTmp(ticketId, d) : []));
+    if (moved.length) this.opts.emit({ type: "runner.log", level: "info", message: `Moved ${moved.length} leftover file(s) of ticket ${ticketId} from /tmp into its kept scratch.` });
+  }
+
   private starting = new Set<string>();
   private cancelledEarly = new Set<string>();
 
@@ -447,6 +458,19 @@ export class SessionManager {
     // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
     if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask"));
     if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir));
+    // Kept scratch (BOS-592): proofs and check logs that /tmp loses on every restart. Made here so a command
+    // that only wants to write into it never has to, and reported as a warning when it can't be made.
+    // Its own session marker, so a check script can tell a run from a shell a person is using (BOS-592).
+    env.BOSSMAN_AGENT_SESSION = "1";
+    if (cmd.workspace && this.opts.workspaces) {
+      const dir = this.opts.workspaces.scratchDir(cmd.workspace.ticketId);
+      try {
+        mkdirSync(dir, { recursive: true });
+        env.BOSSMAN_SCRATCH = dir;
+      } catch (err) {
+        this.opts.log?.(`couldn't make the kept scratch for ticket ${cmd.workspace.ticketId}: ${String((err as Error)?.message ?? err)}`);
+      }
+    }
     return env;
   }
 
@@ -477,6 +501,9 @@ export class SessionManager {
       env.npm_config_store_dir = fence.pnpmStore;
       readWrite.push(fence.pnpmStore);
     }
+    // The ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the agent writes its proofs and logs there, and
+    // nothing else on the workspaces root is granted, so it reaches no other ticket's folder.
+    if (env.BOSSMAN_SCRATCH) readWrite.push(env.BOSSMAN_SCRATCH);
     const readOnlyExtra: string[] = [];
     if (this.opts.coordDir) {
       const grant = checkQueueGrant(this.opts.coordDir);
@@ -621,6 +648,9 @@ export class SessionManager {
         }
       }
     }
+    // A proof or log an older run of this ticket left in /tmp moves into its kept scratch, which the restart
+    // and the tmp sweep leave alone: /tmp is gone at the next restart, and so is the session's own temp folder.
+    if (cmd.workspace) this.rescueTmp(cmd.workspace.ticketId, [tmpdir(), ...(runTmp ? [runTmp] : [])]);
     const dropTmp = () => runTmp && rmSync(runTmp, { recursive: true, force: true });
     // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
     // Claude Code carries on headless with every permission denied (spike S4). Ending the run

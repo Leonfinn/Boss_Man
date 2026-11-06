@@ -20,6 +20,34 @@ fi
 # already passed on identical content is not run again. /var/tmp survives between runs; "off" switches the store off.
 STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
 
+# A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592, set by the runner): the full log of every run goes there too,
+# under its own name, so a failed check's whole output can be read back after the runner restarted. Best effort: a check
+# that can't write a log still checks. scripts/sweep-tmp.sh never touches it, unlike /tmp.
+SCRATCH=${BOSSMAN_SCRATCH:-}
+SCRATCH_LOG="$SCRATCH/check-all.log"
+# scratch_log <file> <exit code>: put this run's completed log in the ticket's kept scratch, so it can be read after a
+# restart wiped /tmp. Written as .next then moved into place, so a half-written log is never read, and the previous
+# run is kept as .previous. Best effort: a check that can't keep a log still checks. A fenced agent may not write the
+# scratch folder itself, so a copy is first made somewhere this run surely can (/tmp, under a name the tmp sweep clears
+# after 6 h), and the runner moves that into the scratch at the next start.
+scratch_log() {
+  local rc=$2 tmp="" out=""
+  [ -n "$SCRATCH" ] && [ -d "$SCRATCH" ] || return 0
+  # Written to a scratch file, then moved in: a half-written log is never read. A folder the run may not write (a
+  # fenced agent's) takes the log through /tmp under a kept name instead, and the runner moves that in at its next start.
+  if out="$( { : >"$SCRATCH_LOG.next"; } 2>/dev/null && echo "$SCRATCH_LOG.next")" && [ -n "$out" ]; then
+    { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } >"$out" 2>/dev/null || out=""
+  fi
+  if [ -z "$out" ]; then
+    [ -n "${BOSSMAN_TICKET:-}" ] && [ -d /tmp ] && [ -w /tmp ] || return 0
+    tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.log"; out=$tmp
+    { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } >"$tmp" 2>/dev/null || return 0
+  fi
+  if [ -z "$tmp" ]; then
+    [ ! -s "$SCRATCH_LOG" ] || mv -f "$SCRATCH_LOG" "$SCRATCH_LOG.previous" 2>/dev/null || true
+    mv -f "$out" "$SCRATCH_LOG" 2>/dev/null || true
+  fi
+}
 # The shared runner caps processes (pids.max 1024) and other agents use most of them, so a step can die
 # with "spawn EAGAIN" / "Cannot fork" through no fault of the code. Run the checks in a child and re-run
 # them, after a pause, only when the failure output shows that kind of error; any other failure is final.
@@ -53,6 +81,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     sleep 0.2  # let tee drain before the line is added
     echo "check-all: killed by signal $name" | tee -a "$log"
     record killed "$((128 + $2))"
+    scratch_log "$log" "$((128 + $2))"
     exit "$((128 + $2))"
   }
   trap 'on_signal TERM 15' TERM
@@ -81,7 +110,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     wait "$child" || rc=$?
     wait 2>/dev/null || true  # let tee finish writing the log
     # Exit 75: nothing ran (gave up waiting for a slot), so there is no result to keep.
-    if [ "$rc" -eq 0 ]; then record pass 0; exit 0; fi
+    if [ "$rc" -eq 0 ]; then record pass 0; scratch_log "$log" 0; exit 0; fi
     # Each retry re-runs everything, so only retry if another run of this length still fits the budget.
     # The budget counts from the slot-taken time (the first non-empty $began_file), not from before the queue wait:
     # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
@@ -93,6 +122,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
       sleep "$pause" & pause_pid=$!; wait "$pause_pid" 2>/dev/null || true
     else
       [ "$rc" -eq 75 ] || record fail "$rc"
+      scratch_log "$log" "$rc"
       exit "$rc"
     fi
   done
@@ -290,6 +320,21 @@ step in-memory-state node scripts/check-in-memory-state.mjs
 # at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),
 # and a capped heap for tsc only. Callers can override any of these.
 export BOSSMAN_TEST_MAX_WORKERS="${BOSSMAN_TEST_MAX_WORKERS:-2}"
+# /tmp fills with the tests' own scratch (BOS-568), and a check that starts on a full one fails oddly. Say so up front,
+# in the kept log, instead: 64 MB written and read back once per check. A probe that can't finish in 20 s is left as is.
+if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ] && [ -z "${BOSSMAN_SKIP_TMP_PROBE:-}" ]; then
+  probe="$TMPDIR/.bossman-probe.$$"
+  if mkdir -p "$probe" 2>/dev/null && dd if=/dev/zero of="$probe/blob" bs=1M count=64 conv=fsync 2>/dev/null; then
+    wrote=$(date +%s%N)
+    if timeout 20 dd if="$probe/blob" of=/dev/null bs=1M iflag=fullblock 2>/dev/null; then
+      elapsed=$(( ($(date +%s%N) - wrote) / 1000000 ))
+      [ "$elapsed" -lt 3000 ] || echo "check-all: note: $TMPDIR is slow (read 64 MB in ${elapsed} ms), so tests that scratch there are slow too"
+    fi
+  else
+    echo "check-all: note: $TMPDIR may be full (couldn't write 64 MB there), so a check that needs temp space may fail"
+  fi
+  rm -rf "$probe" 2>/dev/null || true
+fi
 NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}" step typecheck pnpm -r --workspace-concurrency=1 typecheck
 step test pnpm -r --workspace-concurrency=1 test
 step build pnpm build

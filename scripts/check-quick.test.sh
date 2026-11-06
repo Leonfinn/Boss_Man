@@ -124,4 +124,17 @@ g checkout -q main; echo main >"$repo/README"; g add -A; g commit -q -m m; g upd
 g checkout -q feature; echo feature >"$repo/README"; g add -A; g commit -q -m f
 run 1 "merge conflict" env
 grep -q "^FAIL  merge with origin/main" "$t/out" || fail "conflict not reported: $(cat "$t/out")"
+
+# A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the whole output of the run is kept there, marked with its exit,
+# and the previous run is kept as .previous.
+g checkout -q -B scratch origin/main; commit apps/web/src/q.ts
+scratch="$t/scratch.own"; mkdir -p "$scratch"
+run 0 "scratch: a passing run" env BOSSMAN_SCRATCH="$scratch"
+[ -s "$scratch/check-quick.log" ] || fail "scratch: no log in the scratch: $(cat "$t/out")"
+grep -q "PASS  typecheck @boss-man/web" "$scratch/check-quick.log" || fail "scratch: the log misses the run's output: $(cat "$scratch/check-quick.log")"
+grep -q "check-quick: finished .* (exit 0)" "$scratch/check-quick.log" || fail "scratch: the log is not marked finished"
+run 1 "scratch: a failing run" env BOSSMAN_SCRATCH="$scratch" FAIL_ON=typecheck
+grep -q "(exit 1)" "$scratch/check-quick.log" || fail "scratch: a failure's log is not marked with its exit: $(cat "$scratch/check-quick.log")"
+grep -q "PASS  typecheck @boss-man/web" "$scratch/check-quick.log.previous" || fail "scratch: the previous run's log is not kept: $(ls "$scratch")"
+
 echo "check-quick.test.sh: ok"

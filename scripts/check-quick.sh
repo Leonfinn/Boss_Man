@@ -9,8 +9,32 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 base="${BASE:-origin/main}"
 
-changed="$(git diff --name-only "$base"...HEAD)" || { echo "FAIL  diff against $base"; exit 1; }
-if [ -z "$changed" ]; then echo "PASS  nothing changed against $base"; exit 0; fi
+# A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592, set by the runner): keep the whole output of this run there too,
+# so a failed step can be read back after the runner restarted. Best effort, and for the outer run only: the heavy
+# phase (CHECK_QUICK_PHASE=heavy) runs inside check-all.sh, which keeps its own log. scripts/sweep-tmp.sh never
+# touches this folder, unlike /tmp.
+SCRATCH_LOG="" SCRATCH_NAME=""
+if [ -n "${BOSSMAN_SCRATCH:-}" ] && [ -d "${BOSSMAN_SCRATCH:-}" ] && [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
+  SCRATCH_LOG="$BOSSMAN_SCRATCH/check-quick.log"
+  # A fenced agent may not write the scratch folder: keep it under a name in /tmp the runner moves into the scratch.
+  if [ ! -w "$BOSSMAN_SCRATCH" ] && [ -n "${BOSSMAN_TICKET:-}" ] && [ -d /tmp ] && [ -w /tmp ]; then
+    SCRATCH_LOG="/tmp/bossman-scratch-$BOSSMAN_TICKET-quick.log"
+  fi
+fi
+finish() { # finish <exit code>: put this run's whole output into the kept log, marked with how it ended
+  local rc=$1 text
+  [ -n "$SCRATCH_LOG" ] || exit "$rc"
+  # The tee below is this run's only copy of its output: this finishes it (the one stream already drained, no second tee).
+  text="$(dirname "$SCRATCH_LOG")/bossman-scratch-$(basename "$SCRATCH_LOG").$$.done"
+  { printf 'check-quick: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$SCRATCH_NAME" 2>/dev/null; } >"$text" 2>/dev/null || exit "$rc"
+  [ ! -s "$SCRATCH_LOG" ] || mv -f "$SCRATCH_LOG" "$SCRATCH_LOG.previous" 2>/dev/null || true
+  mv -f "$text" "$SCRATCH_LOG" 2>/dev/null || rm -f "$text" 2>/dev/null
+  exit "$rc"
+}
+
+main() {
+changed="$(git diff --name-only "$base"...HEAD)" || { echo "FAIL  diff against $base"; return 1; }
+if [ -z "$changed" ]; then echo "PASS  nothing changed against $base"; return 0; fi
 
 failed=0
 step() { # step <label> <command...>
@@ -60,7 +84,7 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     # shellcheck disable=SC2086  # one argument per file; paths have no spaces
     step "tests related to $name changes" pnpm --filter "$name" exec vitest related --run $files
   done
-  exit "$failed"
+  finish "$failed"
 fi
 
 need_slot=0
@@ -81,4 +105,17 @@ if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
 if has '^apps/web/|^packages/shared/'; then step "build web" pnpm --filter @boss-man/web build; fi
 
 if [ "$failed" -eq 0 ]; then echo "check-quick: all steps passed (the merge gate still runs the full check)"; else echo "check-quick: FAILED"; fi
-exit "$failed"
+return "$failed"
+}
+
+# One tee for the whole outer run (which is what the kept log holds), or a plain run when there is nowhere to keep it.
+if [ -n "$SCRATCH_LOG" ] && command -v tee >/dev/null; then
+  SCRATCH_NAME="$(mktemp)"
+  echo "check-quick: the full output of this run is kept in $SCRATCH_LOG"
+  main 2>&1 | tee "$SCRATCH_NAME"
+  rc=${PIPESTATUS[0]}
+  finish "$rc"
+else
+  main
+  exit $?
+fi

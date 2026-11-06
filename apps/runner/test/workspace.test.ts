@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS } from "@boss-man/shared";
 import { branchFor, gitAuthEnv, safeGitEnv, Workspaces } from "../src/workspace.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
@@ -259,6 +260,97 @@ describe("workspace clean-up (R54)", () => {
     expect(later.usedBytes).toBe(later.tickets[0]!.bytes + later.repos[0]!.bytes);
     // The ticket's branch survives its worktree.
     expect(git(ws.repoDir(ids.project), "branch", "--list", branchFor(ids.b))).toContain(ids.b);
+  });
+});
+
+describe("kept scratch per ticket (BOS-592)", () => {
+  it("keeps a ticket's scratch on the workspaces disk, clears it once its work is released and old, and otherwise after a week", async () => {
+    const r = remote();
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root);
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    const scratch = ws.scratchDir(ids.a);
+    expect(scratch).toBe(path.join(root, "scratch", ids.a));
+    expect(scratch.startsWith(path.join(root, "scratch"))).toBe(true);
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(path.join(scratch, "proof.log"), "the whole check\n");
+
+    // A restart is a new process: scratch is on the disk, not in /tmp, so it is still there.
+    const again = new Workspaces(root);
+    expect(readFileSync(path.join(again.scratchDir(ids.a), "proof.log"), "utf8")).toBe("the whole check\n");
+
+    // While the ticket still has its worktree, only the week clears it (here: past the week).
+    const fresh = await again.housekeeping();
+    expect(fresh.scratch).toEqual([{ ticketId: ids.a, bytes: expect.any(Number) }]);
+    expect(existsSync(scratch)).toBe(true);
+    const week = await again.housekeeping(Date.now() + SCRATCH_KEEP_MS + 1000);
+    expect(week.removed).toContain(ids.a);
+    expect(existsSync(scratch)).toBe(false);
+
+    // The ticket's work goes: its scratch goes with it, but only once it is old enough that a run can't be writing.
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(path.join(scratch, "old-proof.log"), "x");
+    await again.release(spec);
+    expect(existsSync(scratch)).toBe(true);
+    const released = await again.housekeeping(Date.now() + RELEASED_SCRATCH_KEEP_MS + 1000);
+    expect(released.removed).toContain(ids.a);
+    expect(existsSync(scratch)).toBe(false);
+  });
+
+  it("only ever touches per-ticket folders of its own scratch, and counts them as used disk", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root);
+    const mine = ws.scratchDir(ids.a);
+    mkdirSync(mine, { recursive: true });
+    writeFileSync(path.join(mine, "big.bin"), Buffer.alloc(64 * 1024, 1));
+    // Anything else in the folder (a stray name, a file) is left exactly as it is.
+    mkdirSync(path.join(root, "scratch", "not-a-ticket"));
+    writeFileSync(path.join(root, "scratch", "not-a-ticket", "keep.txt"), "x");
+    writeFileSync(path.join(root, "scratch", "loose.txt"), "x");
+    const kept = await ws.housekeeping();
+    expect(kept.scratch).toEqual([{ ticketId: ids.a, bytes: expect.any(Number) }]);
+    expect(kept.usedBytes).toBeGreaterThanOrEqual(kept.scratch![0]!.bytes);
+    expect(kept.removed).toEqual([]);
+    const report = await ws.housekeeping(Date.now() + 8 * 24 * 3_600_000);
+    expect(existsSync(path.join(root, "scratch", "not-a-ticket", "keep.txt"))).toBe(true);
+    expect(existsSync(path.join(root, "scratch", "loose.txt"))).toBe(true);
+    expect(report.removed).toEqual([ids.a]);
+    expect(report.scratch).toEqual([]);
+    expect(existsSync(mine)).toBe(false);
+  });
+
+  it("moves a ticket's own /tmp leftovers into its scratch, once, without following links or overwriting a kept file", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root);
+    const tmp = mkdtempSync(path.join(tmpdir(), "bm-tmp-"));
+    const scratch = ws.scratchDir(ids.a);
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(path.join(scratch, "check-all.log"), "kept\n");
+    mkdirSync(path.join(tmp, ids.a));
+    writeFileSync(path.join(tmp, ids.a, "proof.txt"), "proof\n");
+    writeFileSync(path.join(tmp, `${ids.a}.log`), "log\n");
+    writeFileSync(path.join(tmp, "check-all.log"), "another ticket's log\n");
+    writeFileSync(path.join(tmp, "someone-else.log"), "not mine\n");
+    symlinkSync("/etc/hostname", path.join(tmp, `${ids.a}.link`));
+
+    expect(ws.rescueTmp(ids.a, tmp).sort()).toEqual([ids.a, `${ids.a}.log`].sort());
+    expect(readFileSync(path.join(scratch, ids.a, "proof.txt"), "utf8")).toBe("proof\n");
+    expect(readFileSync(path.join(scratch, `${ids.a}.log`), "utf8")).toBe("log\n");
+    expect(readFileSync(path.join(scratch, "check-all.log"), "utf8")).toBe("kept\n");
+    expect(existsSync(path.join(tmp, "someone-else.log"))).toBe(true);
+    expect(existsSync(path.join(tmp, `${ids.a}.link`))).toBe(true);
+    expect(ws.rescueTmp("../etc", tmp)).toEqual([]);
+  });
+
+  it("finds an image saved in the kept scratch as the ticket's own", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root);
+    expect(() => ws.readImage(ids.a, "shot.png")).toThrow();
+    const scratch = ws.scratchDir(ids.a);
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(path.join(scratch, "shot.png"), "png-bytes");
+    expect(ws.readImage(ids.a, "shot.png").base64).toBe(Buffer.from("png-bytes").toString("base64"));
   });
 });
 
