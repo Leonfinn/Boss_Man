@@ -383,6 +383,14 @@ describe("owner asks with steps", () => {
     expect(tried.open).toBe(false);
     expect(tried.textContent).toMatch(/no host access/);
   });
+
+  it("shows how the host steps were proven as a banner above them (R11, DR-024)", () => {
+    const card = (proof: NonNullable<NonNullable<Decision["context"]>["lint"]>["proof"]) =>
+      decision({ id: proof!.rehearsed ? "d1" : "d2", kind: "question", question: "Restart Tailscale?", options: ["Done"], recommendedOption: "Done", context: { type: "question", steps: ["Run docker compose up -d."], lint: { warn: [], proof } } });
+    const { container } = render(<Decisions decisions={[card({ rehearsed: true, script: "tailscale", commit: "0123abcd9" }), card({ rehearsed: false, part: "the login with your own Tailscale account" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(container.querySelector("[data-proof=rehearsed]")?.textContent).toBe("Tried on a test machine at 0123abc (tailscale).");
+    expect(container.querySelector("[data-proof=not-rehearsed]")?.textContent).toBe("First time on a real machine: the login with your own Tailscale account");
+  });
 });
 
 describe("references in steps and folded text", () => {
