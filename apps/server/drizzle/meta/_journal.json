@@ -666,6 +666,13 @@
       "when": 1793941639218,
       "tag": "0104_standing_rules",
       "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1794001195061,
+      "tag": "0105_ticket_progress_and_ceo_plan",
+      "breakpoints": true
     }
   ]
 }
