@@ -381,6 +381,7 @@ switch_back() {
   else
     # The old colour did not take over: put the new one back in charge and keep it running (the checkout stays on what runs).
     log "The switch-back to $BG_LIVE failed; keeping server-$BG_IDLE running."
+    flip_proxy "$BG_IDLE" >>"$LOG" 2>&1 || true
     compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || true
   fi
   ((ok))
