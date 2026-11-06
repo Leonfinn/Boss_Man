@@ -1,12 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { commandProblem, lintOwnerSteps, parseStep } from "../src/services/steps.js";
+import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
 import { companies, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -38,7 +38,16 @@ async function setup(opts: { deployer?: boolean } = {}) {
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   await req("POST", "/api/companies", { name: "App Co" });
-  const outbox = (name: string, body: unknown) => writeFile(path.join(dir, "outbox", name), JSON.stringify(body));
+  // The poller skips a pass when a file keeps its size and mtime (BOS-414), and a file system stamps mtime
+  // to a coarse tick: two same-sized writes within one tick looked untouched (BOS-560). Each write gets
+  // its own mtime, a second later than the last, so a rewrite is always a change, however fast the runner.
+  let stamp = Date.now() / 1000;
+  const outbox = async (name: string, body: unknown) => {
+    const file = path.join(dir, "outbox", name);
+    await writeFile(file, JSON.stringify(body));
+    stamp += 1;
+    await utimes(file, stamp, stamp);
+  };
   const available = (over: Record<string, unknown> = {}) =>
     outbox("available.json", { version: 1, checkedAt: "2026-10-20T12:00:00Z", deployed: A, tip: B, commits: [{ sha: B, subject: "Add rate limiting" }], paths: ["apps/server/src/x.ts"], infraPaths: [], runnerChanged: false, ...over });
   const status = (over: Record<string, unknown>) =>
@@ -244,6 +253,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(todo!.question).toContain("waiting for you to apply it by hand");
     // Every command is written in full, with the folders the host reported.
     expect(steps.join("\n")).toContain("cd /srv/bm/src && git checkout main");
+    // git runs in a umask 022 subshell (DR-028): under a root shell's 077 the checkout came out unreadable on 6 Nov.
+    expect(steps.join("\n")).toContain("\n(umask 022 && cd /srv/bm/src && git checkout main && git fetch origin && git merge --ff-only " + B + " && git rev-parse HEAD)\n");
     // This change touches neither the deployer nor the launcher.
     expect(steps.join("\n")).toContain("host-deployer.sh didn't change; no copy needed.");
     expect(steps.join("\n")).not.toContain("chown root:root");
@@ -251,7 +262,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     // The card still checks that the new server took charge, and how to recover it.
     expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-green");
     expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader") });
-    expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("cd /srv/bm/src && git checkout " + A) });
+    expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("\n(umask 022 && cd /srv/bm/src && git checkout " + A + " && scripts/rebuild-live.sh)\n") });
   });
 
   describe("hand-apply cards (BOS-269)", () => {
@@ -267,10 +278,11 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const c = (ctx = await setup());
       const x = await stepsOf(c, { ...LAYOUT, bluegreen: false });
       const text = [...x.handSteps!, x.rollback!].join("\n");
-      expect(text).toContain("cd /srv/bm/src && scripts/deploy.sh --commit " + B);
+      // deploy.sh's own git checkout/merge write the checkout, so both run in the umask subshell (DR-028).
+      expect(commands(x.handSteps!)).toContain("(umask 022 && cd /srv/bm/src && scripts/deploy.sh --commit " + B + ")");
       expect(text).not.toContain("rebuild-live.sh");
       expect(text).not.toContain("/mnt/NVME_Apps");
-      expect(x.rollback).toContain("scripts/deploy.sh --rollback");
+      expect(commands([x.rollback!])).toEqual(["(umask 022 && cd /srv/bm/src && scripts/deploy.sh --rollback)"]);
     });
 
     it("picks rebuild-live.sh on blue/green and uses the reported live colour", async () => {
@@ -343,6 +355,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
         { infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts", "apps/runner/Dockerfile"], runnerChanged: true },
       ];
       let cards = 0;
+      let gitCommands = 0;
       for (const layout of layouts)
         for (const change of changes) {
           await c.db.delete(decisions);
@@ -351,9 +364,20 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
           const where = JSON.stringify({ layout, change });
           expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse, where).toEqual([]);
           expect(all.join("\n"), where).not.toMatch(/docs\/0\d/);
+          // Every git the server writes runs in the umask subshell (DR-028), never after a bare umask; so does
+          // deploy.sh, which runs git checkout/merge itself (the lint can't see inside a script).
+          for (const k of commands(all).filter((k) => /\bgit\b|scripts\/deploy\.sh/.test(k))) {
+            expect(k, where).toMatch(/^\(umask 022 && cd \/srv\/bm\/src && (git|scripts\/deploy\.sh) [^()]*\)/);
+            gitCommands++;
+          }
           cards++;
         }
       expect(cards).toBe(40);
+      // The pin and the blue/green rollback are among them, so the loop above checked something.
+      expect(gitCommands).toBeGreaterThan(20);
+      // The 6 Nov card's own bare steps are refused by the lint (R14), so a generator that dropped the subshell fails here.
+      for (const bare of ["cd /srv/bm/src && git checkout main && git fetch origin && git merge --ff-only " + B + " && git rev-parse HEAD", "cd /srv/bm/src && git checkout " + A + " && scripts/rebuild-live.sh"])
+        expect(lintOwnerSteps([step("Run this:", sh(bare, { host: "nas01", as: "root" }))], [{ name: "nas01", ownership: [] }]).refuse.map((f) => f.rule)).toContain("R14");
       // The old fallback fails it, so this test would have caught it.
       expect(lintOwnerSteps(["Boss Man can't tell where it is installed, so no command is shown here. The folder is in docs/06-install-truenas.md; ask us on this ticket for the exact commands."]).refuse).not.toEqual([]);
     });

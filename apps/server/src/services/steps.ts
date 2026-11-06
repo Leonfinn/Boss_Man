@@ -58,7 +58,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R9" | "R13" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R9" | "R13" | "R14" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -165,6 +165,10 @@ function usesIn(code: string): string[] {
  * stopped or waiting for a login is refused, and one whose state is unknown is warned about; the add-on the
  * card itself sets up (`setsUp`) is exempt.
  *
+ * R14 (DR-028) runs on every card: a git command that writes the checkout must run inside a `(umask 022 && …)`
+ * subshell (`gitUmaskFindings`), and a `umask` outside a subshell is refused, since it stays set in the owner's terminal.
+ * A CEO override can't let it through.
+ *
  * `facts` is either the host facts array (R6 alone, the older call shape) or a `LintFacts` object carrying
  * `hosts`, `addons` and `setsUp`. Each rule runs only when its facts are there.
  */
@@ -213,6 +217,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
     const host = lintHost(blockPieces, step, given.hosts, staged, step === 1);
     refuse.push(...host.refuse);
     warn.push(...host.warn);
+    for (const c of code) refuse.push(...gitUmaskFindings(step, c));
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
     if (LINK.test(prose)) warn.push({ step, rule: "warn", problem: "links to a wiki page or ticket; fine as background, but the step itself must be complete" });
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
@@ -437,12 +442,12 @@ function readCommand(words: string[]): { asRoot: boolean; shellRoot: boolean; pr
 const READS = new Set(["ls", "cat", "cp", "rsync", "scp", "tar", "find", "du", "stat", "head", "tail", "less", "more", "grep", "rg", "diff", "sha256sum", "sha512sum", "wc", "file", "sed", "awk", "zgrep", "zcat", "gunzip", "base64", "cmp", "md5sum"]);
 /** Commands that put a copy somewhere (so R6 checks the destination, and remembers a copy staged for the login). */
 const STAGES = new Set(["install", "chown", "cp", "rsync", "mv"]);
-/** Commands whose mode option can open a folder to everyone. */
-const MODES = new Set(["chmod", "install", "umask"]);
+/** Commands whose mode option can open a folder to everyone. Not umask: its value means the opposite of a mode (umask 077 is private), and R14 checks it (DR-028). */
+const MODES = new Set(["chmod", "install"]);
 
 /** True when a command's mode opens it to everyone (an octal whose other bits are set, or o+rX / a+rX). */
 function modeOpensUp(p: Prog): boolean {
-  const mode = p.name === "umask" ? p.args[0] : p.mode ?? p.args.find((a) => /^[0-7]{3,4}$/.test(a) || /^[ugoa]*[+=][rwxX]+$/.test(a));
+  const mode = p.mode ?? p.args.find((a) => /^[0-7]{3,4}$/.test(a) || /^[ugoa]*[+=][rwxX]+$/.test(a));
   if (!mode) return false;
   if (/^[0-7]{3,4}$/.test(mode)) return (parseInt(mode, 8) & 0o007) !== 0;
   return /[ao][+=]?[rwxX]/.test(mode);
@@ -555,8 +560,98 @@ function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, s
   return { refuse, warn };
 }
 
+// ---------------------------------------------------------------------------------------------------
+// R14 (DR-028, the 6 Nov outage): git writes files with the terminal's umask. Under a root shell's 077 the
+// checkout came out root-only, the image built from it couldn't read its own code, and both colours went down.
+// So a git step that writes the checkout runs as (umask 022 && cd <src> && git …): the subshell keeps 022 from
+// staying set in the owner's root terminal, where it would make their later hand-made backups world-readable.
+// ---------------------------------------------------------------------------------------------------
+
+/** git subcommands that write files in the working tree. */
+const GIT_WRITES = new Set(["checkout", "switch", "merge", "pull", "reset", "restore", "rebase", "cherry-pick", "revert", "stash", "am", "apply", "clone", "worktree", "submodule"]);
+/** Their read-only forms (`git stash list`), which write nothing. */
+const GIT_READ_ONLY = new Set(["list", "show", "status", "summary"]);
+/** git's own options that take the next word as their value (`git -C <dir> checkout`). */
+const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+/** The subshell R14 accepts: it opens with umask 022 (or 0022), then && or ;. */
+const UMASK_SUBSHELL = /^\(\s*umask\s+0?022\s*(?:&&|;)/;
+
+/** The index of the ) closing the ( at `open`, skipping quoted text; -1 if it never closes. */
+function closingParen(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === "'") {
+      const end = text.indexOf("'", i + 1);
+      if (end === -1) return -1;
+      i = end;
+    } else if (c === "\"") {
+      for (i++; i < text.length && text[i] !== "\""; i++) if (text[i] === "\\") i++;
+    } else if (c === "\\") i++;
+    else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * A command with its subshells cut out: every one, or with `only` just those it matches (the accepted umask
+ * subshells), so what is left runs under the terminal's own umask. Any parenthesis not cut (a plain subshell,
+ * `$(…)`) becomes a command separator, so the git inside it is still seen.
+ */
+function outsideSubshells(command: string, only?: RegExp): string {
+  let out = "";
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!;
+    if (c === "'" || c === "\"") {
+      let j = i + 1;
+      while (j < command.length && command[j] !== c) j += c === "\"" && command[j] === "\\" ? 2 : 1;
+      out += command.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    if (c === "(") {
+      const end = closingParen(command, i);
+      if (end !== -1 && (!only || only.test(command.slice(i, end + 1)))) {
+        out += " ; ";
+        i = end;
+        continue;
+      }
+    }
+    out += c === "(" || c === ")" ? " ; " : c;
+  }
+  return out;
+}
+
+/**
+ * R14: refuse a git command that writes the checkout outside a `(umask 022 && …)` subshell, and a `umask` set
+ * at the top level, where it stays set in the owner's terminal. A umask inside any subshell ends with it, so
+ * `(umask 077; pg_dump … >backup)`, the private-backup form our own scripts use, passes. A word split, not a
+ * parser: git hidden in a quoted `sh -c` string is not seen.
+ */
+export function gitUmaskFindings(step: number, command: string): LintFinding[] {
+  const out: LintFinding[] = [];
+  for (const words of simpleCommands(outsideSubshells(command))) {
+    const prog = readCommand(words).prog;
+    if (prog?.name === "umask" && prog.args.length)
+      out.push({ step, rule: "R14", problem: `sets umask outside a subshell, so it stays set in the owner's terminal: ${command.slice(0, 120)}. Put it with the command it is for, in a subshell: (umask 022 && cd <folder> && git …)` });
+  }
+  for (const words of simpleCommands(outsideSubshells(command, UMASK_SUBSHELL))) {
+    const prog = readCommand(words).prog;
+    if (prog?.name !== "git") continue;
+    let j = words.findIndex((w) => w.split("/").pop() === "git") + 1;
+    while (j < words.length && words[j]!.startsWith("-")) j += GIT_VALUE_OPTS.has(words[j]!) ? 2 : 1;
+    const sub = words[j];
+    if (!sub || !GIT_WRITES.has(sub)) continue;
+    if (["stash", "worktree", "submodule"].includes(sub) && GIT_READ_ONLY.has(words[j + 1] ?? "")) continue;
+    out.push({ step, rule: "R14", problem: `runs git ${sub} outside a (umask 022 && …) subshell, so the files it writes take the terminal's umask (a root shell's 077 leaves the checkout unreadable by the server, as on 6 Nov): ${command.slice(0, 120)}. Write it as (umask 022 && cd <folder> && git ${sub} …)` });
+  }
+  return out;
+}
+
 /** Rules a CEO override can't let through: a command the owner can't paste as it is, or a value Boss Man doesn't have. */
-export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4"]);
+// R14 too (DR-028): its fix is always the same subshell, so there is never a reason to let a bare git step through.
+export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R14"]);
 
 /** One line per finding, for the agent's refusal or the CEO's list. */
 export const lintLines = (fs: LintFinding[]) => fs.map((f) => `- Step ${f.step}: ${f.problem}.`).join("\n");
