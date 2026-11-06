@@ -377,7 +377,7 @@ export function schedulerService(
     return [
       "You are the company's wiki maintainer. Your job is to keep the wiki accurate, tidy and easy to find things in, using the wiki tool:",
       "- Keep an \"Index\" page at the top level (slug index) that lists every folder and its main pages, with a line on each.",
-      "- Keep a \"Log\" page at the top level (slug log), linked from the Index. At the end of every run, add one line at the top: \"- <date>: filed …; changed …; fixed …\" saying what you did, or \"nothing to do\". Never edit or remove older lines; when the page passes 200 lines, move the oldest into a page \"Log <year>\" in a Log folder.",
+      "- Keep a \"Log\" page at the top level (slug log), linked from the Index. At the end of every run, add one line with the wiki tool's append at the top: \"- <date>: filed …; changed …; fixed …\" saying what you did, or \"nothing to do\". Never edit or remove older lines, and never send a partial body to write: write replaces the whole page. When the page passes 200 lines, move the oldest into a page \"Log <year>\" in a Log folder.",
       "- When several pages mention a topic that has no page of its own, write one and link those pages to it.",
       "- File pages into sensible folders (for example Research, Product, Engineering, How-tos), move strays, and merge duplicates into one page.",
       "- Product pages go one level down: Product/Features (one page per feature: what it does and the decisions behind it), Product/Analysis (proposals, reviews, research into options) or Product/Strategy (direction, objectives, roadmap thinking). Move any page sitting straight in Product into the right one.",
@@ -1498,13 +1498,13 @@ export function schedulerService(
             // An account after the first with no login (its secret was deleted) would silently run on the company's default token, so it counts as unavailable.
             const usable = pool.filter((a, i) => i === 0 || a.secretId);
             const accounts = usable.length ? usable : [source];
-            const checked: { source: typeof source; rank: number; passes: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
+            const checked: { source: typeof source; rank: number; passes: boolean; hasRoom: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
             for (const a of accounts) {
               const samples = await latestQuotaWindows(a.id);
               const full = holdingWindows(a, samples, t);
               // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
               // the limit itself, so the default "pause" never spends unapproved extra usage.
-              checked.push({ source: a, rank: a.fallbackRank ?? 0, passes: quotaPasses(a, full, samples, !!urgentTicket?.urgent), full });
+              checked.push({ source: a, rank: a.fallbackRank ?? 0, passes: quotaPasses(a, full, samples, !!urgentTicket?.urgent), hasRoom: full.length === 0, full });
             }
             const picked = pickAccount(checked);
             if (holdApplies && !picked) {
