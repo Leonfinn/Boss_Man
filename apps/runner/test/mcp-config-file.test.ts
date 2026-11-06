@@ -65,7 +65,7 @@ describe("Claude MCP config file", () => {
   it("sweeps token folders a crashed runner left in tmp at startup", () => {
     const stale = mkdtempSync(path.join(tmpdir(), "bossman-mcp-"));
     writeFileSync(path.join(stale, "mcp.json"), "{}");
-    new SessionManager({ mcpUrl: "x", emit: () => {} }).recoverInterrupted();
+    new SessionManager({ mcpUrl: "x", emit: () => {}, resolveEnv: async () => ({}) }).recoverInterrupted();
     expect(existsSync(stale)).toBe(false);
   });
 
