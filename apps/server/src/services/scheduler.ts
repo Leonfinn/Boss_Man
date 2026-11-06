@@ -1645,6 +1645,11 @@ export function schedulerService(
       if (deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) return false;
       if (!cur.assigneeAgentId) {
         if (!deps.length) return false;
+        // A blocked ticket has always gone to ready here, assignee or not; keep that.
+        if (cur.systemState === "blocked") {
+          await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, ticketId), eq(tickets.systemState, "blocked")));
+          return true;
+        }
         const rows = await db
           .insert(decisions)
           .values({
