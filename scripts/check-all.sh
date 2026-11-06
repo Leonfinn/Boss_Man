@@ -137,7 +137,7 @@ if command -v flock >/dev/null; then
   if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then prio=0; STUCK=${CHECK_ALL_STUCK_AFTER:-3600}; fi
   AGEREF="$LOCK.age.$$"  # an empty file dated 2 h ago, to tell stale queue entries by their modification time
   # Fair line (BOS-558): a hand-run entry that has waited CHECK_ALL_AGE_AFTER seconds (default 1200, one full check) is served
-  # before newer merge checks; a new entry from the same folder replaces the older one (marker file REPLACED, read by the older
+  # before merge checks that queued after it (never before older ones); a new entry from the same folder replaces the older one (marker file REPLACED, read by the older
   # waiter); every slot hold is logged to SLOTLOG (start and end), so a gap in the line can be named later.
   AGE_AFTER=${CHECK_ALL_AGE_AFTER:-1200}; [[ $AGE_AFTER =~ ^[0-9]{1,9}$ ]] || AGE_AFTER=1200
   FOLDER=${CHECK_ALL_FOLDER:-$(pwd -P)}; FOLDER=${FOLDER//[$'\n\r']/ }
@@ -149,7 +149,8 @@ if command -v flock >/dev/null; then
   # sit at the head waiting on an order the newer copies don't follow. Entries from an older runner boot are dropped.
   # A waiter that sees a free slot and no change in the line for CHECK_ALL_STALL_AFTER seconds (default 120) tries for the
   # slot whatever its place; the flock itself keeps two from running in one slot. Old copies (no version lines) still queue.
-  RULES=${CHECK_ALL_QUEUE_RULES:-2}; [[ $RULES =~ ^[0-9]{1,6}$ ]] || RULES=2; RULES=$((10#$RULES))
+  # v3 (BOS-613): one list in queue-time order for merge checks and aged hand-run entries; hand-run checks hold at most SLOTS-1 slots while a merge check waits.
+  RULES=${CHECK_ALL_QUEUE_RULES:-3}; [[ $RULES =~ ^[0-9]{1,6}$ ]] || RULES=3; RULES=$((10#$RULES))
   STALL_AFTER=${CHECK_ALL_STALL_AFTER:-120}; [[ $STALL_AFTER =~ ^[0-9]{1,9}$ ]] || STALL_AFTER=120
   boot_id() {  # kernel boot id plus when pid 1 started: the second part changes when the runner container restarts too
     local b="" s=""; read -r b </proc/sys/kernel/random/boot_id 2>/dev/null || true
@@ -190,7 +191,7 @@ if command -v flock >/dev/null; then
       { exec 9>"$LOCK.slot.$k"; } 2>/dev/null || lock_unusable "cannot open $LOCK.slot.$k"
       # Note who holds the slot in a file of its own (every waiter's open truncates the slot file): a waiter
       # sees the queue move when this line changes. Best effort; a holder from an older script leaves none.
-      if flock -n 9; then SLOT_K=$k; echo "$$ $(date +%s)" >"$LOCK.holder.$k" 2>/dev/null || true; return 0; fi
+      if flock -n 9; then SLOT_K=$k; echo "$$ $(date +%s) $([ "$prio" = 1 ] && echo hand || echo merge)" >"$LOCK.holder.$k" 2>/dev/null || true; return 0; fi
     done
     exec 9>&-
     return 1
@@ -200,8 +201,12 @@ if command -v flock >/dev/null; then
   # took 13.6 s a pass with them), and only the first CHECK_ALL_QUEUE_SCAN entries in serving order count.
   # A waiter further back sees a place past the scan and keeps waiting.
   queue_place() {
-    # Serving order: aged hand-run entries, then merge checks, then the other hand-run entries (each group oldest first).
-    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now stale=0 nA=0 nM=0 nH=0 myclass="" myidx=0 newer=0 sig="" el2 el3; now=$(date +%s)
+    # Serving order (BOS-613): merge checks and aged hand-run entries in one list, oldest queue time first (an aged hand-run
+    # entry beats only merge checks that queued after it), then the other hand-run entries oldest first. While a merge check
+    # waits and the hand-run checks already running fill all but one slot (more than one slot), no hand-run entry goes ahead
+    # of a merge check: aged ones drop to the back with the rest. $1 is the number of hand-run checks running now.
+    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now stale=0 nM=0 nA=0 nH=0 myclass="" newer=0 sig="" el2 el3
+    local key mykey="" capped=0 mk=() ak=() hk=() ns qns e; now=$(date +%s)
     # A live waiter touches its entry every report, so age is read from the file's modification time (a bash test,
     # no subprocess per entry), not from the name: a check that has waited more than 2 h in a long queue keeps its place.
     touch -d "@$((now - 7200))" "$AGEREF" 2>/dev/null && stale=1
@@ -213,7 +218,7 @@ if command -v flock >/dev/null; then
       # "Gone" is read from /proc, not kill -0: a fenced agent may not signal other sessions (BOS-321).
       base=${f##*/}
       if ! [[ $base =~ ^[01]-([0-9]{1,19})-([0-9]{1,9})$ ]]; then rm -f "$f"; continue; fi
-      qts=$((10#${BASH_REMATCH[1]} / 1000000000)); qpid=$((10#${BASH_REMATCH[2]}))
+      qns=${BASH_REMATCH[1]}; qts=$((10#$qns / 1000000000)); qpid=$((10#${BASH_REMATCH[2]}))
       if [ ! -d "/proc/$qpid" ] || [ $((qts - now)) -gt 60 ] || { [ "$stale" = 1 ] && [ "$f" -ot "$AGEREF" ]; }; then rm -f "$f"; continue; fi
       # Version lines (BOS-591): an entry from an older runner boot is dropped; one with newer rules than mine is noted.
       el2=""; el3=""; { read -r _; read -r el2; read -r el3; } <"$f" 2>/dev/null || true
@@ -221,20 +226,47 @@ if command -v flock >/dev/null; then
       if [[ $el2 =~ ^rules=([0-9]{1,6})$ ]] && [ $((10#${BASH_REMATCH[1]})) -gt "$RULES" ] && [ "$f" != "$qfile" ]; then newer=$((10#${BASH_REMATCH[1]})); fi
       sig="$sig $base"
       total=$((total + 1))
-      if [ "${base:0:1}" = 0 ]; then nM=$((nM + 1)); [ "$f" != "$qfile" ] || { myclass=M; myidx=$nM; }
-      elif [ $((now - qts)) -ge "$AGE_AFTER" ]; then nA=$((nA + 1)); [ "$f" != "$qfile" ] || { myclass=A; myidx=$nA; }
-      else nH=$((nH + 1)); [ "$f" != "$qfile" ] || { myclass=H; myidx=$nH; }
+      # Sort key: the queue time in nanoseconds, zero-padded to 19 digits so a string compare is a number compare (no overflow),
+      # then the name to break a tie. Digits only: the name matched the pattern above.
+      ns="0000000000000000000$qns"; key="${ns: -19}-$base"
+      if [ "${base:0:1}" = 0 ]; then nM=$((nM + 1)); mk+=("$key"); [ "$f" != "$qfile" ] || { myclass=M; mykey=$key; }
+      elif [ $((now - qts)) -ge "$AGE_AFTER" ]; then nA=$((nA + 1)); ak+=("$key"); [ "$f" != "$qfile" ] || { myclass=A; mykey=$key; }
+      else nH=$((nH + 1)); hk+=("$key"); [ "$f" != "$qfile" ] || { myclass=H; mykey=$key; }
       fi
       if [ "$total" -ge "$scan" ]; then break; fi
     done
+    # Cap: with a merge check waiting and more than one slot, hand-run checks may hold at most SLOTS-1 slots.
+    if [ "$nM" -gt 0 ] && [ "$SLOTS" -gt 1 ] && [ "${1:-0}" -ge $((SLOTS - 1)) ]; then capped=1; fi
+    # Groups, served in this order: 0 = merge checks (+ aged hand-run entries unless capped), 1 = aged hand-run entries when
+    # capped, 2 = the other hand-run entries. Inside a group, oldest queue time first. Place = entries in earlier groups +
+    # older entries in my group + 1.
+    older() { local n=0 x; for x in "$@"; do if [[ $x < $mykey ]]; then n=$((n + 1)); fi; done; cnt=$n; }
+    local cnt=0
     case $myclass in
-      A) mine=$myidx ;;
-      M) mine=$((nA + myidx)) ;;
-      H) mine=$((nA + nM + myidx)) ;;
+      M) if [ "$capped" = 0 ]; then older ${mk[@]+"${mk[@]}"} ${ak[@]+"${ak[@]}"}; else older ${mk[@]+"${mk[@]}"}; fi
+         mine=$((cnt + 1)) ;;
+      A) if [ "$capped" = 0 ]; then older ${mk[@]+"${mk[@]}"} ${ak[@]+"${ak[@]}"}; mine=$((cnt + 1))
+         else older ${ak[@]+"${ak[@]}"}; mine=$((nM + cnt + 1)); fi ;;
+      H) older ${hk[@]+"${hk[@]}"}; mine=$((nM + nA + cnt + 1)) ;;
     esac
-    # An aged entry is a group of its own but sits among the hand-run names, so one past the scan may still hold earlier ones: count it behind the scan.
+    # Own entry not seen (past the scan, or dropped): count it behind the scan.
     [ "$mine" -gt 0 ] || mine=$((scan + 1))
-    echo "$mine $total $newer ${sig// /,}"
+    echo "$mine $total $newer $capped ${sig// /,}"
+  }
+  # Prints how many hand-run checks hold a slot right now (BOS-613): a slot is held when its lock can't be taken, and its
+  # holder file (written by take_slot: "<pid> <time> <hand|merge>") names the kind. A holder from an older copy has no
+  # kind and counts as a merge check. Not atomic with take_slot: two hand-run checks may take the last two allowed slots
+  # in the same second; the next pass corrects the line, nothing is left stuck.
+  hand_running() {
+    local k n=0 line="" kind
+    for ((k = 1; k <= SLOTS; k++)); do
+      { exec 8>"$LOCK.slot.$k"; } 2>/dev/null || continue
+      if flock -n 8; then exec 8>&-; continue; fi
+      exec 8>&-
+      line=""; read -r line <"$LOCK.holder.$k" 2>/dev/null || true
+      kind=${line##* }; if [ "$kind" = hand ]; then n=$((n + 1)); fi
+    done
+    echo "$n"
   }
   # True when some slot is free right now (probed on fd 8 and let go at once, so nothing is held).
   slot_free() {
@@ -264,15 +296,16 @@ if command -v flock >/dev/null; then
     if [ -e "$REPLACED" ]; then
       echo "check-all: replaced by a newer check of this folder ($FOLDER); leaving the line" >&2; exit 75
     fi
-    read -r place total newer linesig < <(queue_place)
+    read -r place total newer capped linesig < <(queue_place "$(hand_running)")
     if [ "${newer:-0}" -gt 0 ]; then
       echo "check-all: this copy of check-all.sh uses queue rules v$RULES but the line is on v$newer: merge origin/main to get the current script; leaving the line" >&2; exit 75
     fi
     if [ "$place" -le 1 ] && take_slot; then got=yes; break; fi
     # A line that stands still with a free slot (an old copy at the head, waiting on an order the rest don't follow) must not
     # jam: after STALL_AFTER seconds of a free slot and no change in the line, try for the slot whatever my place.
+    # A hand-run check held back by the hand-run cap (BOS-613) does not take part: the free slot is the merge check's.
     if slot_free && [ "$linesig" = "${stall_sig:-}" ]; then
-      if [ $((SECONDS - stall_since)) -ge "$STALL_AFTER" ] && take_slot; then
+      if [ $((SECONDS - stall_since)) -ge "$STALL_AFTER" ] && { [ "$prio" = 0 ] || [ "$capped" != 1 ]; } && take_slot; then
         echo "check-all: the line stood still for $((SECONDS - stall_since)) s with a free slot (place $place of $total); taking it"; got=yes; break
       fi
     else stall_sig=$linesig; stall_since=$SECONDS; fi
