@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, RISK_TIERS, riskOf, ruleFor, slotRef, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, readVerdicts, renderTemplate, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
@@ -105,11 +105,13 @@ export const NOTHING_CHANGED = "Nothing in the repository changed. Make the chan
 
 /** The plain-words outcome of landing, for a non-developer. */
 export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
-  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; problems?: string[]; url?: string | null; note?: string; carried?: Array<{ title: string }>; unchecked?: string };
+  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; problems?: string[]; url?: string | null; note?: string; carried?: Array<{ title: string }>; unchecked?: string; afterMerge?: string[] };
   const back = `It's gone back to ${ctx.assignee ?? "the assignee"}`;
   switch (r.outcome) {
     case "merged":
-      return `Merged into ${ctx.branch}.`;
+      return `Merged into ${ctx.branch}.` + (d.afterMerge?.length
+          ? ` The ticket stays open until ${d.afterMerge.length === 1 ? "this check is" : "these checks are"} shown to work live: ${d.afterMerge.map((c) => `"${c}"`).join(", ")}. ${back} to report ${d.afterMerge.length === 1 ? "it" : "them"}.`
+          : "");
     case "done":
       return `Approved; the ticket is done.${d.note ? ` ${d.note}` : ""}`;
     case "pull_request":
@@ -438,10 +440,45 @@ export function reviewService(
     return { outcome: "carried" as const, delivered, detail };
   }
 
+  /**
+   * The work landed: done, unless a criterion can only be checked now that it is live (DR-024 #5). Then
+   * the ticket goes back to its assignee to show those before it can close.
+   */
   async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null) {
     await db.update(tickets).set({ mergeCommit: commit, pullRequestNote: null }).where(eq(tickets.id, t.id));
-    await deps.work.updateTicket(t.id, { state: "done", outcome: "completed", overLimit: true });
-    return { outcome: "merged" as const, delivered: null, detail: { commit } };
+    const left = afterMergeLeft(t);
+    // With a live check still to show, the ticket isn't finished: go straight to the assignee without a
+    // brief done state in between, so done hooks (worktree release, notifications) never fire for it.
+    if (!left) await deps.work.updateTicket(t.id, { state: "done", outcome: "completed", overLimit: true });
+    return { outcome: "merged" as const, delivered: null, detail: { commit, ...(left ? { afterMerge: left } : {}) } };
+  }
+
+  /** Checks the merged ticket now has to show: its after-merge criteria still without a pass or fail. */
+  function afterMergeLeft(t: typeof tickets.$inferSelect): string[] | null {
+    const left = unreportedAfterMerge(t.acceptanceCriteria, t.stateNote);
+    return left.length ? left : null;
+  }
+
+  /** After a real merge: close the ticket, or send it back to show the checks only a live host can settle. */
+  async function closeAfterMerge(t: typeof tickets.$inferSelect, commit: string | null, causedByRunId?: string | null) {
+    const r = await finishMerged(t, commit);
+    if (!r.detail.afterMerge) return { outcome: "merged" as const, delivered: null, detail: r.detail };
+    const merged = commit ? `Merged as ${commit.slice(0, 12)}. ` : "Merged. ";
+    // The branch is merged, so its working copy would be released (and checking on it would need a fresh
+    // clone): it's kept for this pass so the agent can show the live result where it was.
+    const [repoUrl] = await db
+      .select({ repoUrl: projects.repoUrl })
+      .from(tickets)
+      .innerJoin(projects, eq(projects.id, tickets.projectId))
+      .where(eq(tickets.id, t.id));
+    if (repoUrl?.repoUrl) await deps.work.updateTicket(t.id, { state: "in_progress", overLimit: true, internal: true, noCode: true });
+    const delivered = await tellAgent(
+      { ...t, systemState: "in_progress" },
+      `${merged}The work is live, so these checks can only be made now: ${r.detail.afterMerge!.map((c) => `"${c}"`).join(", ")}. Report pass or fail for each and move the ticket to done. If only the owner can check one, put a card in front of them (raise_decision with blocksTicketId): answering it records their answer as that check's pass or fail, so you can close the ticket once they have.`,
+      "after merge",
+      causedByRunId,
+    ).catch(() => null);
+    return { outcome: "merged" as const, delivered, detail: { ...r.detail, commit } };
   }
 
   /** The ticket stays in review with the host's reason; the owner hears once per new reason. */
@@ -1053,6 +1090,8 @@ export function reviewService(
           const delivered = await sendBack(`The review was approved, but the ticket can't be closed: ${NOTHING_CHANGED} Then move the ticket back to review.`, "nothing changed");
           return { outcome: "empty", delivered };
         }
+        // Nothing to merge, but a live check still can't be made before the change is live (DR-024 #5): keep it to show.
+        if (afterMergeLeft(t)) return closeAfterMerge(t, null, causedByRunId);
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
         return { outcome: "done", delivered: null, detail: { note: "Nothing in the repository changed, so there was nothing to check or merge." } };
       }
@@ -1227,12 +1266,13 @@ export function reviewService(
         for (const command of checks) await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: checkedSha, kind: kindOf(command), passed: true, detail: null });
       }
       await db.update(tickets).set({ mergeCommit: m.commit, ...(checkedSha ? { checkedCommit: checkedSha } : {}) }).where(eq(tickets.id, ticketId));
-      await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
+      // Its own after-merge checks keep this ticket open (DR-024 #5), but not the ones riding along.
+      const mine = await closeAfterMerge(t, m.commit, causedByRunId);
       for (const c of together) {
         await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, c.ticketId));
         await deps.work.updateTicket(c.ticketId, { state: "done", outcome: "completed", overLimit: true });
       }
-      return { outcome: "merged", delivered: null, detail: m };
+      return { ...mine, delivered: mine.delivered, detail: mine.detail };
     },
 
     /**
@@ -1240,7 +1280,7 @@ export function reviewService(
      * status checks still needed, or someone else must merge), the ticket waits in review with
      * the host's reason; the sync tries again, and finishes the ticket if it's merged on the host.
      */
-    async mergePullRequest(ticketId: string): Promise<{ outcome: "merged" | "pull_request"; delivered: null; detail?: unknown }> {
+    async mergePullRequest(ticketId: string): Promise<{ outcome: "merged" | "pull_request"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       if (!t.pullRequestNumber) throw new ReviewError(409, "This ticket has no pull request.");
       if (t.systemState === "done") return { outcome: "merged", delivered: null };
@@ -1250,7 +1290,7 @@ export function reviewService(
       try {
         const now = await deps.gitHosts!.get(cfg, token, t.pullRequestNumber);
         // Already merged on the host (someone did it by hand): the ticket is finished, whatever the branch had.
-        if (now.merged) return finishMerged(t, now.mergeCommit);
+        if (now.merged) return closeAfterMerge(t, now.mergeCommit);
         const others = (await otherOpenBranches(t)).filter((o): o is typeof o & { branch: string } => !!o.branch);
         const ids = await carriedOnHost(t, gitHost, gitApiBase, others);
         const carried = others.filter((o) => ids.includes(o.ticketId));
@@ -1261,7 +1301,7 @@ export function reviewService(
         if (now.closed) return wait(t, "The pull request was closed on the host without merging. Reopen it there, or approve the ticket again to open a new one.");
         // Only the reviewed commit is merged: anything pushed to the branch since needs a new review.
         const tried = await deps.gitHosts!.merge(cfg, token, t.pullRequestNumber, { headSha: t.pullRequestHead, title: `Merge "${t.title}" into ${defaultBranch}`, message: `Boss Man ticket ${t.id}.` });
-        return tried.merged ? finishMerged(t, tried.commit) : wait(t, tried.note);
+        return tried.merged ? closeAfterMerge(t, tried.commit) : wait(t, tried.note);
       } catch (err) {
         if (err instanceof GitHostError) return wait(t, err.message);
         throw err;
