@@ -71,6 +71,15 @@ describe("compose memory limits", () => {
     expect(launcherEnv.BOSSMAN_RUNNER_CPUS).toContain("BOSSMAN_RUNNER_CPUS");
   });
 
+  // BOS-602: compose passes only the variables it lists, so the profiler's off switch must be listed for every server.
+  it("the stall profiler's off switch reaches the single server and both blue/green colours", () => {
+    const main = services("docker-compose.yml") as Record<string, Service & { environment?: Record<string, string> }>;
+    const bg = services("deploy/truenas-bluegreen.yml") as typeof main;
+    for (const [n, s] of [["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]]] as const) {
+      expect(s!.environment?.BOSSMAN_STALL_PROFILE, n).toBe("${BOSSMAN_STALL_PROFILE:-}");
+    }
+  });
+
   it("tool servers are the first to be killed", () => {
     for (const [name, s] of Object.entries(services("deploy/tool-servers.yml"))) expect(s.oom_score_adj, name).toBeGreaterThan(0);
   });
