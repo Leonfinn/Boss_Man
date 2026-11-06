@@ -396,8 +396,9 @@ describe("stalled runs (R32)", () => {
     await ctx.scheduler.tick();
     ctx.advance(6 * 60_000);
     expect(await ctx.sweep()).toMatchObject({ stalledRuns: { raised: 0 }, neverStartedRuns: 0 });
-    const status = (await ctx.serverStatus.status(ctx.company.id)) as { runner: { swapping: boolean } | null };
-    expect(status.runner?.swapping).toBe(true);
+    const status = (await ctx.serverStatus.status(ctx.company.id)) as { runner: { swapping: boolean; settling: boolean } | null };
+    // Connected again: it is settling (starting queued runs), not mid-swap, so the swapping flag is clear (BOS-382).
+    expect(status.runner).toMatchObject({ swapping: false, settling: true });
   });
 
   describe("runs that never start (BOS-480)", () => {
