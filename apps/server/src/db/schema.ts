@@ -64,6 +64,11 @@ export const companies = pgTable("companies", {
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
+  /** Company-wide rules every agent reads at the start of every run (BOS-353); set by the owner or the CEO, capped in code. */
+  standingRules: text("standing_rules"),
+  /** Who last changed the standing rules ("owner" or the CEO's name), and when. */
+  standingRulesBy: text("standing_rules_by"),
+  standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */

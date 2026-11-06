@@ -168,6 +168,36 @@ refresh_available() {
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
+# Host facts (BOS-427): the machine's own name and, for the folders it knows, their owner, group and mode,
+# read with `stat` only (never their contents). The server's owner-card lint (R6) uses this to refuse a step
+# that would run as the owner's login and hit a folder that login can't read. Every folder is optional: one
+# that isn't there is skipped, and a stat that fails is skipped too, so a host on another layout still gets a
+# record. The file is written mode 644 (no secrets in it) and only replaced when it changed.
+write_host_facts() {
+  local f="$OUTBOX/host.json"
+  ((DRY)) && { log "[dry-run] would write $f"; return 0; }
+  local name; name="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost)"
+  name="${name%%[[:space:]]*}"
+  [[ $name =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || name="localhost"
+  local rows="" sep="" p o g m
+  # The install folder (the deployer's parent), the deployer folder, backups, data and the checkout's secrets.
+  local -a folders=("$D/.." "$D" "${BOSSMAN_BACKUP_DIR:-$D/..}" "${BOSSMAN_DATA:-/srv/boss-man/data}" "$REPO/secrets")
+  for p in "${folders[@]}"; do
+    [[ -n $p && -d $p ]] || continue
+    p="$(cd "$p" 2>/dev/null && pwd)" || continue
+    [[ -n $p ]] || continue
+    o="$(stat -c %U "$p" 2>/dev/null || stat -c %u "$p" 2>/dev/null)" || continue
+    g="$(stat -c %G "$p" 2>/dev/null || stat -c %g "$p" 2>/dev/null)" || continue
+    m="$(stat -c %a "$p" 2>/dev/null)" || continue
+    [[ $m =~ ^[0-7]{3,4}$ ]] || continue
+    # Avoid listing the same folder twice (install and backups can be the same folder).
+    [[ $rows == *"\"path\": $(jstr "$p")"* ]] && continue
+    rows+="$sep{\"path\": $(jstr "$p"), \"owner\": $(jstr "$o"), \"group\": $(jstr "$g"), \"mode\": \"$m\"}"; sep=", "
+  done
+  printf '{"version": 1, "name": %s, "writtenAt": %s, "ownership": [%s]}\n' "$(jstr "$name")" "$(jstr "$(now)")" "$rows" >"$f.tmp"
+  chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
+}
+
 # One function per action, so a later phase can change what "deploy the server" means in one place.
 do_deploy_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
 # No --now: update-runner.sh builds and checks the image, then asks Boss Man to drain (inbox/drain.json) and returns,
@@ -480,6 +510,9 @@ deploy_status_field() { jfield "$1" <"${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_
 
 main() {
   local req="$INBOX/request.json"
+  # What this host says about itself (BOS-427), refreshed every tick, so an owner card's steps can be
+  # checked against the real folders before they reach the owner.
+  write_host_facts || true  # never let a stat failure stop a deploy
   if ((ROLLBACK)); then
     bluegreen_enabled || { echo "ERROR: this install does not use blue/green; use scripts/deploy.sh --rollback." >&2; exit 1; }
     local rrc=0
