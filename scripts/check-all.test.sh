@@ -267,7 +267,7 @@ if command -v flock >/dev/null; then
   fence="$here/../apps/runner/src/fence/landlock.pl"
   if command -v perl >/dev/null && [ "$(perl "$fence" --probe | sed -n 's/.*"abi":\([0-9]*\).*/\1/p')" -ge 6 ]; then
     rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
-    sleep 10 & waiter=$!
+    sleep 3600 & waiter=$!
     : >"$t/lock.queue/0-$(date +%s%N)-$waiter"
     hold 1 3; h1=$!; sleep 0.3
     rc=0
