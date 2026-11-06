@@ -227,11 +227,24 @@ function recordedFolder(path: string, facts: HostFacts): (Ownership & { folder: 
   return best;
 }
 
-/** Read and search bits the login gets: the owner's if it is the owner, the group's if it is in the group, else everyone's. */
+/**
+ * Read and search bits the login gets: the owner's if it is the owner, the group's if it is in the group, else
+ * everyone's. When the host hasn't recorded which account the login is (an older deployer), a folder owned by an
+ * ordinary account could well be the login's own, so only the "everyone" bits are trusted: a 700 folder owned by
+ * uid 1000 is not refused as unreadable, since it may be the login's home. The check is then a safe under-refusal,
+ * not a wrong one.
+ */
 function canRead(login: string | undefined, o: Ownership): boolean {
   const mode = parseInt(o.mode, 8);
   if (Number.isNaN(mode)) return false;
-  const [read, search] = login && login === o.owner ? [0o400, 0o100] : login && login === o.group ? [0o040, 0o010] : [0o004, 0o001];
+  if (!login) {
+    // No login recorded: a root-owned folder is never the login's own, so only the "everyone" bits can help it
+    // (the root-only backups case is refused); a folder an ordinary account owns is let through, since it may be
+    // the login's own and refusing would be wrong.
+    if (o.owner === "root" || o.owner === "0") return (mode & 0o004) !== 0 && (mode & 0o001) !== 0;
+    return true;
+  }
+  const [read, search] = login === o.owner ? [0o400, 0o100] : login === o.group ? [0o040, 0o010] : [0o004, 0o001];
   return (mode & read) !== 0 && (mode & search) !== 0;
 }
 
@@ -394,6 +407,19 @@ function modeOpensUp(p: Prog): boolean {
 function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, step: number, hosts: HostFacts[] | undefined, staged: Map<string, Set<string>>, first: boolean): { refuse: LintFinding[]; warn: LintFinding[] } {
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
+  const stagedForLogin = (host: string, folder: string) => {
+    const set = staged.get(host) ?? new Set<string>();
+    set.add(folder);
+    staged.set(host, set);
+  };
+  /** Refuse a login-run read of a recorded folder the login can't read, unless an earlier block made a copy it can. */
+  const refusesLoginRead = (host: string, login: string | undefined, target: string, rec: Ownership & { folder: string }): boolean => {
+    const can = canRead(login, rec);
+    const made = staged.get(host)?.has(rec.folder) ?? false;
+    if (can || made) return false;
+    refuse.push({ step, rule: "R6", problem: `runs as the login on ${host} and reads ${target}, which the login can't read (${rec.path} is mode ${rec.mode}, owned by ${rec.owner}). Run this block as root, or make a copy for the login in an earlier step (sudo install -o <login> -m 700 -D <source> <folder>)` });
+    return true;
+  };
   for (const piece of blockPieces) {
     const where = piece.where;
     if (!where) {
@@ -416,17 +442,31 @@ function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, s
       const abs = p.args.map((a) => pathArg(a)).filter((a): a is string => a !== null);
       if (!abs.length) continue;
       if (STAGES.has(p.name)) {
-        // A copy writes at its last operand; that is the path R6 warns about and remembers.
-        const dest = abs[abs.length - 1]!;
+        // A copy reads its source operands (all but the last) and writes at the last one. Run by the login, it
+        // has to be able to read every source, or the copy fails (and must not stage anything). Split on the raw
+        // operands by position first, so a relative destination is never mistaken for a source.
+        const operands = p.args.map((a) => pathArg(a));
+        const sources = operands.slice(0, -1).filter((a): a is string => a !== null);
+        let sourceReadable = true;
+        for (const source of sources) {
+          const rec = recordedFolder(source, known);
+          if (rec && !asRoot && refusesLoginRead(where.host, known.login, source, rec)) sourceReadable = false;
+        }
+        // Only an absolute destination names the folder a copy can stage; a relative one (`.`, `~/x`) is a
+        // path the shell works out, so R6 neither warns about it nor treats it as a folder made readable.
+        const dest = operands.at(-1) ?? null;
+        if (!dest) continue;
         const rec = recordedFolder(dest, known);
         if (!rec) {
           warn.push({ step, rule: "warn", problem: `${p.name} puts a copy at ${dest}, which has no recorded ownership on ${known.name}; R6 can't tell whether the owner's login can use it` });
           continue;
         }
         // Remember the folder a copy made for the login, so a later login block can read it. `install -o` names
-        // the login; a copy the login runs itself is readable by it; a copy by root that keeps the mode closed is not.
-        const owner = p.owner;
-        if (owner || !asRoot) stagedForLogin(where.host, rec.folder);
+        // the account it hands the copy to: that stages it only when the owner isn't root (a copy by root that
+        // stays root's is not readable by the login). A copy the login runs itself is readable by it, but only
+        // if it could read the source.
+        const namesLogin = p.owner !== undefined && p.owner !== "root";
+        if (sourceReadable && (namesLogin || (!asRoot && p.owner === undefined))) stagedForLogin(where.host, rec.folder);
         // An install or chown that opens a backup folder's mode to everyone is refused, like chmod below.
         if (MODES.has(p.name) && modeOpensUp(p) && PRIVATE_FOLDER.test(rec.folder))
           refuse.push({ step, rule: "R6", problem: `opens ${dest} to everyone with ${p.name}. Backups and secrets stay readable only by their owner` });
@@ -444,15 +484,7 @@ function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, s
       const target = abs[0]!;
       const rec = recordedFolder(target, known);
       if (!rec) continue;
-      const can = canRead(known.login, rec);
-      const made = staged.get(where.host)?.has(rec.folder) ?? false;
-      if (!can && !made)
-        refuse.push({ step, rule: "R6", problem: `runs as the login on ${where.host} and reads ${target}, which the login can't read (${rec.path} is mode ${rec.mode}, owned by ${rec.owner}). Run this block as root, or make a copy for the login in an earlier step (sudo install -o <login> -m 700 -D <source> <folder>)` });
-    }
-    function stagedForLogin(host: string, folder: string) {
-      const set = staged.get(host) ?? new Set<string>();
-      set.add(folder);
-      staged.set(host, set);
+      refusesLoginRead(where.host, known.login, target, rec);
     }
   }
   return { refuse, warn };

@@ -116,6 +116,33 @@ describe("R6: where a command runs and as whom (BOS-427)", () => {
     expect(refuse(elsewhere)).toHaveLength(1);
   });
 
+  it("refuses a login-run copy whose source the login can't read, and doesn't let it unlock a later read", () => {
+    const L = { host: "nas01", as: "login" as const };
+    // cp/rsync read their source: a login copy out of the root-only backups folder is refused, whether the
+    // destination is relative (which the path reader can't place) or an absolute unrecorded path.
+    expect(refuse([step("Copy it home:", sh("cp /mnt/backups/bossman.sql.gz ./mine.sql.gz", L))])).toHaveLength(1);
+    expect(refuse([step("Copy it home:", sh("cp /mnt/backups/bossman.sql.gz ~/x", L))])).toHaveLength(1);
+    expect(refuse([step("Copy it out:", sh("cp -a /mnt/backups/bossman.sql.gz /tmp/x", L))])).toHaveLength(1);
+    // The failed copy must not mark the backups folder readable: a later login listing is still refused.
+    const failed = [step("Copy it home:", sh("cp /mnt/backups/bossman.sql.gz ./mine.sql.gz", L)), step("Look again:", sh("ls -l /mnt/backups", L))];
+    expect(refuse(failed)).toHaveLength(2);
+    // A login copy from a folder it can read is allowed, and stages a copy in the destination folder.
+    const good = [step("Copy it:", sh("cp /mnt/bm/data/x /mnt/bm/mine.sql.gz", L)), step("Read it:", sh("cat /mnt/bm/mine.sql.gz", L))];
+    expect(refuse(good)).toEqual([]);
+    // A copy that stays root's (`install -o root`) stages nothing, so a later login read of the root-only folder is still refused.
+    const rootCopy = [step("Copy it:", sh("sudo install -o root -m 700 -D /mnt/backups/x /mnt/backups/y", { host: "nas01", as: "root" })), step("Read it:", sh("cat /mnt/backups/y", L))];
+    expect(refuse(rootCopy)).toHaveLength(1);
+  });
+
+  it("does not refuse a folder an ordinary account owns when the host hasn't recorded the login", () => {
+    // The deployer doesn't write the login yet, so when it's unknown a 700 folder owned by uid 1000 could be the
+    // login's own home: R6 lets it through rather than guess wrong. A root-owned 700 folder is still refused.
+    const NO_LOGIN = [{ name: "nas01", ownership: [{ path: "/home/leon", owner: "1000", group: "1000", mode: "700" }, { path: "/mnt/backups", owner: "root", group: "root", mode: "700" }] }];
+    const f = (steps: string[]) => lintOwnerSteps(steps, NO_LOGIN).refuse.filter((x) => x.rule === "R6");
+    expect(f([step("Look:", sh("ls /home/leon", { host: "nas01", as: "login" }))])).toEqual([]);
+    expect(f([step("Look:", sh("ls /mnt/backups", { host: "nas01", as: "login" }))])).toHaveLength(1);
+  });
+
   it("never makes backups world-readable", () => {
     expect(refuse([step("Make it readable:", sh("chmod 755 /mnt/backups", { host: "nas01", as: "root" }))])).toHaveLength(1);
     expect(refuse([step("Copy it in readable:", sh("install -m 644 /mnt/bm/x /mnt/backups/x", { host: "nas01", as: "root" }))])).toHaveLength(1);
