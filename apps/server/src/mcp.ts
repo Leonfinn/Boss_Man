@@ -55,7 +55,7 @@ export const TREE_ROOT_LINE = /^Tree of ticket ([0-9a-f-]{36})$/gm;
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
-export async function issueRunToken(db: Db, scope: Scope, ttlHours = 6): Promise<string> {
+export async function issueRunToken(db: Db, scope: Scope, ttlHours = 12): Promise<string> {
   const token = `bm_run_${randomBytes(32).toString("base64url")}`;
   await db.insert(runTokens).values({ tokenHash: hashToken(token), runId: scope.runId, companyId: scope.companyId, agentId: scope.agentId, expiresAt: new Date(Date.now() + ttlHours * 3_600_000) });
   return token;
@@ -2715,8 +2715,8 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       ? await db
           .select({ companyId: runTokens.companyId, agentId: runTokens.agentId, runId: runTokens.runId })
           .from(runTokens)
-          // A token works only while its own run is live (BOS-513): a copy left in a file stops working when the run ends. A token with no run row was never sent to an agent (the launch rolled back), so it is no leak.
-          .leftJoin(runsTable, eq(runsTable.id, runTokens.runId))
+          // A token works only while its own run is live (BOS-513): a copy left in a file stops working when the run ends. A token whose run row is missing is refused too (inner join).
+          .innerJoin(runsTable, eq(runsTable.id, runTokens.runId))
           .where(and(eq(runTokens.tokenHash, hashToken(token)), gt(runTokens.expiresAt, new Date()), isNull(runsTable.endedAt)))
       : [];
     if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });

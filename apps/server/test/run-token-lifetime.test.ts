@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runs } from "../src/db/schema.js";
+import { runs, runTokens } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 // BOS-513: a run token works only while its own run is live, so a copy left in a shared file stops working.
@@ -64,6 +64,22 @@ describe("run token lifetime (BOS-513)", () => {
     await c.db.update(runs).set({ endedAt: new Date() }).where(eq(runs.id, a.runId));
     expect((await c.call(a.token)).statusCode).toBe(401);
     expect((await c.call(b.token)).statusCode).not.toBe(401);
+  });
+
+  it("refuses a token whose run row is missing", async () => {
+    const c = (ctx = await setup());
+    const { runId, token } = await c.startRun(c.worker.id);
+    await c.db.delete(runs).where(eq(runs.id, runId));
+    expect((await c.call(token)).statusCode).toBe(401);
+  });
+
+  it("ending a run through the runners service deletes its token row", async () => {
+    const c = (ctx = await setup());
+    const { runId, token } = await c.startRun(c.worker.id);
+    expect(await c.db.select().from(runTokens).where(eq(runTokens.runId, runId))).toHaveLength(1);
+    expect(await c.runners.endRun(runId, "done")).toBe(true);
+    expect(await c.db.select().from(runTokens).where(eq(runTokens.runId, runId))).toHaveLength(0);
+    expect((await c.call(token)).statusCode).toBe(401);
   });
 
   it("refuses unknown, empty and expired tokens", async () => {
