@@ -14,7 +14,7 @@ const TOKEN = `bmr_${"t".repeat(43)}`;
 /** A stand-in Docker that keeps containers in memory and records each call. */
 function fakeDocker() {
   const containers = new Map<string, { id: string; labels: Record<string, string>; spec: unknown; state: string; imageId: string; startedAt: number; health?: string; exitCode?: number }>();
-  const fail = { guard: false, nft: false, bad: false, hang: false, slow: false };
+  const fail = { guard: false, nft: false, bad: false, hang: false, slow: false, pause: false, guardImage: false };
   let clock = 0;
   const image = { current: "img1" };
   const calls: string[] = [];
@@ -32,8 +32,22 @@ function fakeDocker() {
       const c = containers.get(name);
       return c ? ({ Id: c.id, Name: `/${name}`, Config: { Labels: c.labels }, State: { Status: c.state, StartedAt: new Date(c.startedAt).toISOString(), ExitCode: c.exitCode, ...(c.health ? { Health: { Status: c.health } } : {}) } } as ContainerInfo) : null;
     },
-    async imageId() {
+    async imageId(ref) {
+      if (fail.guardImage && ref.includes("netguard")) return null;
       return image.current;
+    },
+    async pause(id) {
+      calls.push(`pause ${id}`);
+      if (fail.pause) throw new DockerError(500, "Pausing the runner failed: cgroups: freezer not supported");
+      for (const c of containers.values()) if (c.id === id) c.state = "paused";
+    },
+    async unpause(id) {
+      calls.push(`unpause ${id}`);
+      for (const c of containers.values()) if (c.id === id) c.state = "running";
+    },
+    async stop(id) {
+      calls.push(`stop ${id}`);
+      for (const c of containers.values()) if (c.id === id) c.state = "exited";
     },
     async create(name, spec) {
       calls.push(`create ${name}`);
@@ -157,10 +171,10 @@ describe("the runner launcher (R55)", () => {
     expect(readFileSync(file, "utf8")).toBe(TOKEN);
     expect(statSync(file).mode & 0o777).toBe(0o600);
     for (const sub of ["workspaces", "runner-data", "claude", "opencode"]) expect(existsSync(path.join(s.cfg.dataRoot, "companies/app-co", sub))).toBe(true);
-    expect(s.calls).toEqual(["inspect boss-man-runner-app-co", "create boss-man-runner-app-co", "start id1", "inspect boss-man-netguard-app-co", "create boss-man-netguard-app-co", "start id2", "inspect boss-man-netguard-app-co"]);
+    expect(s.calls).toEqual(["inspect boss-man-runner-app-co", "create boss-man-runner-app-co", "start id1", "inspect boss-man-netguard-app-co", "create boss-man-netguard-app-co", "start id2", "inspect boss-man-netguard-app-co", "inspect boss-man-runner-app-co"]);
 
     await s.call("PUT", "/runners/app-co", { token: TOKEN });
-    expect(s.calls.slice(7)).toEqual(["inspect boss-man-runner-app-co", "remove id1", "create boss-man-runner-app-co", "start id3", "inspect boss-man-netguard-app-co", "remove id2", "create boss-man-netguard-app-co", "start id4", "inspect boss-man-netguard-app-co"]);
+    expect(s.calls.slice(8)).toEqual(["inspect boss-man-runner-app-co", "remove id1", "create boss-man-runner-app-co", "start id3", "inspect boss-man-netguard-app-co", "remove id2", "create boss-man-netguard-app-co", "start id4", "inspect boss-man-netguard-app-co", "inspect boss-man-runner-app-co"]);
     expect(await (await s.call("GET", "/runners")).json()).toEqual([{ slug: "app-co", state: "running", status: "running", image: "boss-man-runner:current", current: true, guard: "on" }]);
 
     // Every call is logged, never the token.
@@ -325,20 +339,83 @@ describe("the runner launcher (R55)", () => {
     expect(fake.containers.has("boss-man-runner-app-co")).toBe(false);
   });
 
-  it("removes the runner when its guard fails after a restart or in reconcile", async () => {
+  it("DR-007: a guard failing after a restart or in reconcile freezes the runner, never removes it", async () => {
     const fake = fakeDocker();
     const api = launcher(config(), fake.docker);
     await api.put("app-co", TOKEN);
     fake.fail.guard = true;
     await expect(api.restart("app-co")).rejects.toThrow();
-    expect(fake.containers.has("boss-man-runner-app-co")).toBe(false);
+    expect(fake.containers.get("boss-man-runner-app-co")?.state).toBe("paused");
+    expect(fake.calls.some((c) => c.startsWith("remove") && c.includes(fake.containers.get("boss-man-runner-app-co")!.id))).toBe(false);
 
     fake.fail.guard = false;
     await api.put("app-co", TOKEN);
     await fake.docker.restart(fake.containers.get("boss-man-runner-app-co")!.id);
     fake.fail.guard = true;
     await expect(api.reconcileGuards()).rejects.toThrow();
-    expect(fake.containers.has("boss-man-runner-app-co")).toBe(false);
+    expect(fake.containers.get("boss-man-runner-app-co")?.state).toBe("paused");
+  });
+
+  it("DR-007 row 1: guard gone but the runner didn't restart: the guard is retried, the runner keeps working", async () => {
+    const fake = fakeDocker();
+    const api = launcher(config(), fake.docker);
+    await api.put("app-co", TOKEN);
+    const runner = fake.containers.get("boss-man-runner-app-co")!;
+    fake.containers.delete("boss-man-netguard-app-co");
+    fake.fail.guard = true;
+    fake.calls.length = 0;
+    await expect(api.reconcileGuards()).rejects.toThrow();
+    expect(runner.state).toBe("running");
+    expect(fake.calls.filter((c) => /^(pause|stop|remove) /.test(c))).toEqual([]);
+    expect((await api.list())[0]).toMatchObject({ guard: "retrying", guardReason: expect.any(String) });
+  });
+
+  it("DR-007 row 2: a restarted runner is paused, reported frozen after the wait, and unpaused when its guard is back", async () => {
+    let t = 1_000_000;
+    const fake = fakeDocker();
+    const api = launcher({ ...config(), now: () => t, guardFreezeAfterMs: 120_000 }, fake.docker);
+    await api.put("app-co", TOKEN);
+    const runner = fake.containers.get("boss-man-runner-app-co")!;
+    await fake.docker.restart(runner.id);
+    fake.fail.guard = true;
+    await expect(api.reconcileGuards()).rejects.toThrow();
+    expect(runner.state).toBe("paused");
+    expect((await api.list())[0]!.guard).toBe("retrying");
+    t += 121_000;
+    await expect(api.reconcileGuards()).rejects.toThrow();
+    expect((await api.list())[0]!.guard).toBe("frozen");
+    expect(runner.state).toBe("paused");
+    fake.fail.guard = false;
+    t += 61_000;
+    expect(await api.reconcileGuards()).toEqual(["app-co"]);
+    expect(runner.state).toBe("running");
+    expect((await api.list())[0]!.guard).toBe("on");
+  });
+
+  it("DR-007: a host that refuses to pause gets the runner stopped (kept, not removed) and reported frozen", async () => {
+    const fake = fakeDocker();
+    const api = launcher(config(), fake.docker);
+    await api.put("app-co", TOKEN);
+    const runner = fake.containers.get("boss-man-runner-app-co")!;
+    await fake.docker.restart(runner.id);
+    fake.fail.guard = true;
+    fake.fail.pause = true;
+    await expect(api.reconcileGuards()).rejects.toThrow("refused to pause");
+    expect(fake.containers.has("boss-man-runner-app-co")).toBe(true);
+    expect(runner.state).toBe("exited");
+    expect((await api.list())[0]!.guard).toBe("frozen");
+  });
+
+  it("DR-007 row 3: with the guard image missing, the old guard isn't removed", async () => {
+    const fake = fakeDocker();
+    const api = launcher(config(), fake.docker);
+    await api.put("app-co", TOKEN);
+    const oldGuard = fake.containers.get("boss-man-netguard-app-co")!;
+    oldGuard.state = "exited";
+    fake.fail.guardImage = true;
+    await expect(api.reconcileGuards()).rejects.toThrow("image");
+    expect(fake.containers.get("boss-man-netguard-app-co")?.id).toBe(oldGuard.id);
+    expect(fake.containers.get("boss-man-runner-app-co")?.state).toBe("running");
   });
 
   it("a host that can't load nftables: auto keeps the runner and says 'unavailable', enforce refuses it, off skips the guard", async () => {

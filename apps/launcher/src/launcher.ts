@@ -1,11 +1,11 @@
 // The launcher's API (R55): five calls, each about one company's runner, and nothing else.
 // The server holds the key; Docker is reached only from here, with a spec the launcher builds.
 import { timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
-import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
+import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_IMAGE, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
 const MAX_BODY = 4096;
@@ -20,9 +20,16 @@ export class LauncherError extends Error {
 }
 
 /** `current` is true when the container runs the image `boss-man-runner:current` points at now. */
-export type RunnerStatus = { slug: string; state: string; status: string; image: string; current: boolean; guard: GuardStatus };
-/** "on": the guard is loaded; "off": turned off by BOSSMAN_NETGUARD=off; "unavailable": this host can't load the rules (BOSSMAN_NETGUARD=auto lets the runner go without). */
-export type GuardStatus = "on" | "off" | "unavailable";
+export type RunnerStatus = { slug: string; state: string; status: string; image: string; current: boolean; guard: GuardStatus; guardReason?: string; guardSince?: string };
+/**
+ * "on": the guard is loaded; "off": turned off by BOSSMAN_NETGUARD=off; "unavailable": this host can't load the rules
+ * (BOSSMAN_NETGUARD=auto lets the runner go without). DR-007: "retrying": the guard is being started again (the runner
+ * keeps working when its rules are still in force, or is paused while they aren't); "frozen": it didn't come back
+ * in time, so the runner stays paused (or stopped) with its work kept, until the guard works or the owner acts.
+ */
+export type GuardStatus = "on" | "off" | "unavailable" | "retrying" | "frozen";
+/** The file beside the allow list that records which runner start (StartedAt) the guard's rules were last loaded for. */
+export const GUARDED_FOR = "guarded-for";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -99,11 +106,19 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     unavailable.delete(slug);
     if (mode === "off") return;
     try {
+      // DR-007 row 3: check the guard can be made at all before taking the old one away. Without the
+      // image the old guard stays, and so do the rules it loaded.
+      if (!(await docker.imageId(NETGUARD_IMAGE))) throw new GuardUnavailable(false, `The network guard image ${NETGUARD_IMAGE} is missing on this host; run the runner update to build it.`);
       const old = await guardOf(slug);
       if (old) await removeSettled(docker, old.Id);
       mkdirSync(netguardDir(cfg, slug), { recursive: true, mode: 0o755 });
       await docker.start(await docker.create(netguardName(slug), netguardSpec(cfg, slug, runnerId)));
       await guardReady(slug);
+      // Which runner start these rules belong to: a later check can then tell "guard gone, rules still in force"
+      // (same start) from "runner restarted, new namespace with no rules" (a different start).
+      const r = await ours(slug);
+      if (r?.Id === runnerId && r.State.StartedAt) writeMarker(slug, r.State.StartedAt);
+      trouble.delete(slug);
     } catch (err) {
       if (err instanceof GuardUnavailable && err.hostCannot && mode === "auto") {
         unavailable.add(slug);
@@ -114,6 +129,27 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       throw err;
     }
   }
+
+  function readMarker(slug: string): string | null {
+    try {
+      return readFileSync(path.join(netguardDir(cfg, slug), GUARDED_FOR), "utf8").trim() || null;
+    } catch {
+      return null;
+    }
+  }
+  function writeMarker(slug: string, startedAt: string) {
+    const dir = netguardDir(cfg, slug);
+    mkdirSync(dir, { recursive: true, mode: 0o755 });
+    const tmp = path.join(dir, `${GUARDED_FOR}.tmp`);
+    writeFileSync(tmp, `${startedAt}\n`, { mode: 0o644 });
+    renameSync(tmp, path.join(dir, GUARDED_FOR));
+  }
+
+  /** DR-007: a guard that is being started again (retrying) or that didn't come back in time (frozen), per company. */
+  const trouble = new Map<string, { state: "retrying" | "frozen"; reason: string; since: number; tries: number; next: number }>();
+  const freezeAfterMs = cfg.guardFreezeAfterMs ?? 120_000;
+  const backoff = (tries: number) => Math.min(60_000, 5_000 * 2 ** Math.max(0, tries - 1));
+  const now = () => (cfg.now ? cfg.now() : Date.now());
 
   /** Writes the tool-server allow list the guard reads (host:port lines); the guard picks it up within 15 s. */
   function writeAllow(slug: string, hosts: string[]) {
@@ -170,8 +206,11 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       try {
         await guard(slug, c.Id);
       } catch (err) {
-        // No guard, no runner (same as create).
-        await docker.remove(c.Id).catch(() => undefined);
+        // DR-007 row 4: the restart gave it a new namespace with no rules. Freeze it (stop if this host can't
+        // pause) rather than remove it: its workspaces and sessions stay, and the guard check keeps retrying.
+        const frozen = await docker.pause(c.Id).then(() => false, async () => (await docker.stop(c.Id).catch(() => undefined), true));
+        const reason = String((err as Error)?.message ?? err);
+        trouble.set(slug, { state: frozen ? "frozen" : "retrying", reason, since: now(), tries: 1, next: now() + backoff(1) });
         throw err;
       }
       return { slug, id: c.Id };
@@ -184,6 +223,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       if (g) await docker.remove(g.Id);
       if (c) await removeSettled(docker, c.Id);
       unavailable.delete(slug);
+      trouble.delete(slug);
       rmSync(tokenFile(cfg, slug), { force: true });
       return { slug, removed: !!c };
     }),
@@ -193,7 +233,12 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       const current = await docker.imageId(IMAGE);
       return all
         .filter((c) => SLUG.test(c.Labels[COMPANY_LABEL] ?? "") && c.Names.includes(`/${containerName(c.Labels[COMPANY_LABEL]!)}`))
-        .map((c) => ({ slug: c.Labels[COMPANY_LABEL]!, state: c.State, status: c.Status, image: c.Image, current: !!current && c.ImageID === current, guard: (mode === "off" ? "off" : unavailable.has(c.Labels[COMPANY_LABEL]!) ? "unavailable" : "on") as GuardStatus }));
+        .map((c) => {
+          const slug = c.Labels[COMPANY_LABEL]!;
+          const t = trouble.get(slug);
+          const guard: GuardStatus = mode === "off" ? "off" : unavailable.has(slug) ? "unavailable" : t ? t.state : "on";
+          return { slug, state: c.State, status: c.Status, image: c.Image, current: !!current && c.ImageID === current, guard, ...(t ? { guardReason: t.reason, guardSince: new Date(t.since).toISOString() } : {}) };
+        });
     },
 
     /**
@@ -205,21 +250,58 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       const fixed: string[] = [];
       const errors: string[] = [];
       for (const r of await this.list()) {
-        if (r.state !== "running" || r.guard !== "on") continue;
+        if ((r.state !== "running" && r.state !== "paused") || r.guard === "off" || r.guard === "unavailable") continue;
         await locked(r.slug, async () => {
           // Looked at again inside the lock: a create or restart may have just made a guard.
           const c = await ours(r.slug);
-          if (!c || c.State.Status !== "running") return;
+          const status = c?.State.Status;
+          if (!c || (status !== "running" && status !== "paused")) return;
+          const startedAt = c.State.StartedAt ?? "";
+          const paused = status === "paused";
           const g = await guardOf(r.slug);
-          const fresh = g && g.State.Status === "running" && new Date(g.State.StartedAt ?? 0).getTime() >= new Date(c.State.StartedAt ?? 0).getTime();
-          if (fresh) return;
+          const fresh = !paused && g && g.State.Status === "running" && new Date(g.State.StartedAt ?? 0).getTime() >= new Date(startedAt || 0).getTime();
+          if (fresh) {
+            // An install from before the marker: the running guard started after this runner, so its rules are this runner's.
+            if (startedAt && readMarker(r.slug) !== startedAt) writeMarker(r.slug, startedAt);
+            trouble.delete(r.slug);
+            return;
+          }
+          // DR-007: no automatic path removes a runner that may hold work. Same start as the last good guard:
+          // the namespace and its rules are still there (row 1). A different start: a new namespace with no
+          // rules, so freeze it until the guard is back (rows 2 and 11).
+          const sameStart = !!startedAt && readMarker(r.slug) === startedAt;
+          const t = trouble.get(r.slug);
+          if ((sameStart || paused) && t && now() < t.next) return; // backing off
+          const failed = (err: unknown, frozen: boolean) => {
+            const since = t?.since ?? now();
+            const tries = (t?.tries ?? 0) + 1;
+            const reason = String((err as Error)?.message ?? err);
+            const state = frozen || (!sameStart && now() - since >= freezeAfterMs) ? "frozen" : "retrying";
+            trouble.set(r.slug, { state, reason, since, tries, next: now() + backoff(tries) });
+            console.error(JSON.stringify({ at: new Date(now()).toISOString(), msg: `network guard ${state}`, slug: r.slug, reason, runnerKept: true }));
+          };
+          if (!sameStart && !paused) {
+            try {
+              await docker.pause(c.Id);
+            } catch (pauseErr) {
+              // This host can't freeze containers (some rootless or LXC set-ups): stop it instead, which keeps its
+              // data and workspaces but cuts its runs, and say so. It never runs with no rules.
+              await docker.stop(c.Id);
+              const err = new Error(`The runner's network rules were gone after it restarted, and this host refused to pause it (${String((pauseErr as Error)?.message ?? pauseErr)}), so it was stopped with its work kept. Start it again once the guard works.`);
+              failed(err, true);
+              throw err;
+            }
+          }
           try {
             await guard(r.slug, c.Id);
           } catch (err) {
-            // No guard, no runner: don't leave it running in a namespace with no rules.
-            await docker.remove(c.Id).catch(() => undefined);
+            failed(err, false);
             throw err;
           }
+          if (!sameStart || paused) await docker.unpause(c.Id).catch((err: unknown) => {
+            // Already running (it was never paused, or someone unpaused it): nothing to undo.
+            if ((err as DockerError)?.status !== 409) throw err;
+          });
           fixed.push(r.slug);
         }).catch((err: unknown) => errors.push(`${r.slug}: ${String((err as Error)?.message ?? err)}`));
       }

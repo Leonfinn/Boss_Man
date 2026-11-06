@@ -44,6 +44,10 @@ export type LauncherConfig = {
   checkSlots?: number;
   /** How long to wait for a new guard to load its rules (default 20 s). */
   guardReadyMs?: number;
+  /** DR-007: how long a paused runner waits for its guard before it's reported frozen (default 2 min). For tests. */
+  guardFreezeAfterMs?: number;
+  /** The clock, for tests. */
+  now?: () => number;
 };
 
 export type GuardMode = "auto" | "enforce" | "off";
