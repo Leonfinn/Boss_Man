@@ -88,14 +88,16 @@ run && fail "ran without knowing the live colour"
 grep -q "can't find which colour is live" "$T/out" || fail "didn't explain the missing include"
 # The failure message ends with the last lines of that colour's log, so the cause is not hidden.
 LEADER_AFTER=999 REBUILD_WAIT_SECONDS=1 run green && fail "a standby server reported success"
-grep -q "Last 20 lines of the server-green log" "$T/out" && grep -q "EACCES: permission denied" "$T/out" || fail "didn't show the container log"
+grep -q "Last 20 lines of the server-green log" "$T/out" || fail "no log header"
+grep -q "EACCES: permission denied" "$T/out" || fail "didn't show the container log"
 logged "compose logs --no-color --tail 20 server-green" || fail "didn't ask for 20 log lines"
 
 # BOS-562: tracked files or folders the server (user node) can't read stop the rebuild before the backup, changing nothing.
 (cd "$T/repo" && echo a >tracked.txt && mkdir -p dir && echo b >dir/x && git add tracked.txt dir && git -c user.email=t@t -c user.name=t commit -q -m files && chmod 600 tracked.txt && chmod 700 dir)
 ls "$T/backups" >"$T/before"
 run green && fail "rebuilt with unreadable files"
-grep -q "^  tracked.txt$" "$T/out" && grep -q "^  dir$" "$T/out" || fail "didn't list the unreadable paths"
+grep -q "^  tracked.txt$" "$T/out" || fail "tracked.txt not listed"
+grep -q "^  dir$" "$T/out" || fail "didn't list the unreadable paths"
 grep -q "chmod go+r" "$T/out" || fail "didn't print the fix"
 [[ ! -s $FAKE_LOG ]] || fail "touched docker despite unreadable files"
 [[ "$(ls "$T/backups")" == "$(cat "$T/before")" ]] || fail "made a backup despite unreadable files"

@@ -210,7 +210,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       handSteps.push(
         src && shaOk
           ? host
-            ? step(`On the machine that runs Boss Man, pin the approved commit ${commit} with this command. The last line it prints must be exactly that commit; if it prints anything else, stop and tell us.`, cmd(`cd ${src} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD`))
+            ? step(`On the machine that runs Boss Man, pin the approved commit ${commit} with this command. The last line it prints must be exactly that commit; if it prints anything else, stop and tell us.`, cmd(`(umask 022 && cd ${src} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD)`))
             : noHost
           : noSrc,
       );
@@ -264,7 +264,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         ? host
           ? step(
               bg ? "To go back, run this on the machine that runs Boss Man:" : "To go back, run this on the machine that runs Boss Man (code only, never the database):",
-              cmd(bg ? `cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh` : `cd ${src} && scripts/deploy.sh --rollback`),
+              cmd(bg ? `(umask 022 && cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh)` : `cd ${src} && scripts/deploy.sh --rollback`),
               rollbackNote,
             )
           : `To go back, ${noHost} ${rollbackNote}`

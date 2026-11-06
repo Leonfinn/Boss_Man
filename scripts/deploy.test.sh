@@ -68,7 +68,8 @@ git reset -q --hard "$one"; : >"$FAKE_LOG"; rm -f "$t"/backups/bossman-*.sql.gz
 # A tracked file others can't read: stop before the backup and build, change nothing, name the file and the fix.
 git reset -q --hard "$one"; : >"$FAKE_LOG"; rm -f "$t"/backups/bossman-*.sql.gz; chmod 600 f; chmod 700 scripts
 if PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/unread.out" 2>&1; then echo "FAIL: deployed with unreadable files"; exit 1; fi
-grep -q "^  f$" "$t/unread.out" && grep -q "^  scripts$" "$t/unread.out" || { echo "FAIL: unreadable files not listed"; cat "$t/unread.out"; exit 1; }
+grep -q "^  f$" "$t/unread.out" || { echo "FAIL: f not listed"; exit 1; }
+grep -q "^  scripts$" "$t/unread.out" || { echo "FAIL: unreadable files not listed"; cat "$t/unread.out"; exit 1; }
 grep -q "chmod go+r" "$t/unread.out" || { echo "FAIL: no fix printed"; exit 1; }
 [[ ! -s $FAKE_LOG ]] || { echo "FAIL: ran docker despite unreadable files"; exit 1; }
 [[ $(git rev-parse HEAD) == "$one" ]] || { echo "FAIL: moved the checkout despite unreadable files"; exit 1; }

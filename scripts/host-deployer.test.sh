@@ -352,7 +352,6 @@ conf 0; : >"$D/inbox/check"; bg
 # 14b. BOS-562: a checkout with files the server (user node) can't read is refused before the backup and build; nothing changes.
 reset_world blue "$cur"
 (cd "$T/src" && chmod 600 "$(git ls-files | head -1)")
-before_calls="$(calls)"
 bgreq "$b1"; bg --dry-run; has "$T/out" "the real run would stop"; rm -f "$D/inbox/request.json"
 bgreq "$b1"; bg
 has "$D/outbox/status.json" '"result": "failed"'
