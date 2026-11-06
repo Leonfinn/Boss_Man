@@ -239,7 +239,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
           src && host
             ? step(
                 "This update changes a compose file. The steps above never restart the database, so changed database settings (memory, limits) are not applied by them. Only if the database settings changed: take a backup, then restart just the database (the server is unreachable for a few seconds). Run the backup first:",
-                cmd(`(umask 077 && cd ${src} && docker compose exec -T db pg_dump -U bossman bossman | gzip > db-backup-before-restart.sql.gz) && gzip -t ${src}/db-backup-before-restart.sql.gz && ls -l ${src}/db-backup-before-restart.sql.gz`),
+                cmd(`(set -o pipefail && umask 077 && cd ${src} && docker compose exec -T db pg_dump -U bossman bossman | gzip > db-backup-before-restart.sql.gz) && gzip -t "${src}/db-backup-before-restart.sql.gz" && ls -l "${src}/db-backup-before-restart.sql.gz"`),
                 "Then restart only the database:",
                 cmd(`cd ${src} && docker compose up -d --no-deps db`),
               )
