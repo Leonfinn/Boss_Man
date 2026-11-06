@@ -134,7 +134,8 @@ type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "comp
 /** The plan-first instruction, by harness: only Claude Code is in plan mode and has ExitPlanMode; OpenCode runs in build mode and has no plan tool (BOS-531). */
 export function planFirstText(agentKind: string): string {
   if (agentKind === "claude") return "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.";
-  return "This ticket is plan-first, and you have no plan mode or ExitPlanMode here. Investigate without changing anything, then write your plan in a ticket_reply and call raise_decision (with the plan and your recommended answer) so the plan approver gets a card to answer. Do not change code until the plan is approved; stop and wait for the answer.";
+  // Any harness but Claude Code (today OpenCode) has no plan mode, so it submits its plan through the bossman submit_plan tool.
+  return "This ticket is plan-first, and you have no plan mode or ExitPlanMode here. Investigate without changing anything, then call submit_plan (with this ticket's id and your plan) so the plan approver gets a card to answer. Do not change code until the plan is approved; stop and wait for the answer.";
 }
 
 export function schedulerService(

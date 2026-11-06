@@ -9,6 +9,6 @@ describe("plan-first wake text by harness (BOS-531)", () => {
     const t = planFirstText("opencode");
     expect(t).toContain("no plan mode or ExitPlanMode");
     expect(t).not.toContain("present your plan with ExitPlanMode");
-    expect(t).toContain("raise_decision");
+    expect(t).toContain("submit_plan");
   });
 });

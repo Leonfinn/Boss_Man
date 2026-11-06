@@ -16,7 +16,7 @@ import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { AnswerError, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
+import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
@@ -526,6 +526,38 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       const links = await missingPageNote(db, scope.companyId, `${question}\n${options.join("\n")}\n${steps?.join("\n") ?? ""}`);
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${links ? `\n\n${links}` : ""}`);
+    },
+  );
+
+  server.registerTool(
+    "submit_plan",
+    {
+      description: "For a plan-first ticket when you have no plan mode or ExitPlanMode (OpenCode and other non-Claude agents): save your plan on the ticket and raise the plan card for the approver. Approving it releases the ticket (the same as approving a plan from ExitPlanMode); \"Keep planning\" sends you feedback to revise, and you call submit_plan again. Stop and wait after calling it; don't change code until you are woken with the approval.",
+      inputSchema: { ticketId: z.string().uuid(), plan: z.string().min(1).max(40000) },
+    },
+    async ({ ticketId, plan }) => {
+      const [t] = await db.select({ id: tickets.id, title: tickets.title, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!t) return fail("No ticket with that ID in your company.");
+      if (!t.planFirst) return fail("This ticket is not plan-first, so it needs no plan card.");
+      if (t.planApprovedAt) return fail("This ticket's plan is already approved; go ahead with it.");
+      const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
+      if (reviewWrite) return fail(reviewWrite);
+      let d: { id: string };
+      try {
+        d = await decisions.raise({
+          companyId: scope.companyId,
+          agentId: scope.agentId,
+          question: `Plan for "${t.title}": approve it?\n\n${plan}`.slice(0, 4000),
+          options: [APPROVE_PLAN, KEEP_PLANNING],
+          recommended: APPROVE_PLAN,
+          blocksTicketId: ticketId,
+          plan,
+        });
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+      return text(`Plan card ${d.id} is with the plan approver. You'll be woken with the answer; stop now and don't change code until the plan is approved.`);
     },
   );
 
