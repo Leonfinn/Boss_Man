@@ -22,7 +22,9 @@ export type ClearWhen =
    * A revoked key or an empty credit balance leaves the quota windows untouched, so "room again" is true
    * at once (BOS-469, security review): only a clean run proves the credential is fixed.
    */
-  | { kind: "accountRanOk"; fundingSourceId: string };
+  | { kind: "accountRanOk"; fundingSourceId: string }
+  /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
+  | { kind: "companyRanOk"; companyId: string };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
@@ -149,6 +151,12 @@ export const ALERT_KINDS = {
   quota_held: {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
+  },
+  // no-progress.ts (BOS-593, N4): a company with work waiting and no clean run for an hour, or one error
+  // hitting several agents. One card per company. It may reach the owner: a stopped company usually can't
+  // run its own CEO either (HolidayHours went two days unseen that way). Closes on the company's next clean run.
+  no_progress: {
+    topRung: "owner",
   },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
