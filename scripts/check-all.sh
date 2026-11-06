@@ -154,7 +154,7 @@ if command -v flock >/dev/null; then
   if [ "$prio" = 1 ]; then
     mine_base=${qfile##*/}; seen_n=0
     for f in "$QDIR"/1-*; do
-      [ -e "$f" ] && [ "$f" != "$qfile" ] || continue
+      [ -e "$f" ] || continue; [ "$f" != "$qfile" ] || continue
       seen_n=$((seen_n + 1)); [ "$seen_n" -le "${CHECK_ALL_QUEUE_SCAN:-200}" ] || break
       base=${f##*/}; [[ $base < $mine_base ]] || continue
       [[ $base =~ ^1-[0-9]{1,19}-([0-9]{1,9})$ ]] || continue
