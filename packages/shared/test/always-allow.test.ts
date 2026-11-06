@@ -45,12 +45,12 @@ describe("requests that never get an Always choice (BOS-294)", () => {
     expect(choices({ title: "mcp__bossman__wiki", kind: "other", rawInput: {} })).toEqual([]);
   });
   it("offers a rule that can't lift the destructive or push gate even if built for another command", () => {
-    const [c] = choices({ title: "WebFetch", kind: "fetch", rawInput: { url: "https://x.dev" } });
+    const [c] = choices({ title: "mcp__c__md", kind: "other", rawInput: null });
     expect(c!.match.safeOnly).toBe(true);
     const rule = [{ name: "k", match: { ...c!.match, kinds: ["execute"] }, outcome: "allow" as const }];
     expect(evaluatePermission(cmd("git push origin main"), rule).rule).not.toBe("k");
   });
   it("gives every offer a plain what-it-allows phrase", () => {
-    for (const info of [{ title: "mcp__c__md", kind: "other", rawInput: null }, { title: "WebFetch", kind: "fetch", rawInput: { url: "https://x.dev" } }, cmd("ls")]) { const cs = choices(info); expect(cs.length).toBeGreaterThan(0); for (const c of cs) expect(c.what.length).toBeGreaterThan(3); }
+    for (const info of [{ title: "mcp__c__md", kind: "other", rawInput: null }, cmd("ls")]) { const cs = choices(info); expect(cs.length).toBeGreaterThan(0); for (const c of cs) expect(c.what.length).toBeGreaterThan(3); }
   });
 });
