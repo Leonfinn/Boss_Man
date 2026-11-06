@@ -7,9 +7,21 @@ export function createBackground(loops: Loop[], onError: (err: unknown, name: st
   let timers: NodeJS.Timeout[] = [];
   // shortcut: passes in flight in this process; lost on restart, harmless because stopBackground() waits for them.
   const inFlight = new Set<Promise<void>>();
+  // shortcut: the loops with a pass running now; lost on restart, harmless because a fresh process starts with none.
+  // A pass slower than its interval skips the ticks it misses rather than piling up (BOS-414): one loop never
+  // runs two passes at once, and each timer keeps its own promise, so a slow loop only skips its own ticks.
+  const running = new Set<Loop>();
 
   const pass = (l: Loop) => {
-    const p: Promise<void> = l.run().then(() => undefined, (err) => onError(err, l.name)).finally(() => inFlight.delete(p));
+    if (running.has(l)) return;
+    running.add(l);
+    const p: Promise<void> = l
+      .run()
+      .then(() => undefined, (err) => onError(err, l.name))
+      .finally(() => {
+        running.delete(l);
+        inFlight.delete(p);
+      });
     inFlight.add(p);
   };
 

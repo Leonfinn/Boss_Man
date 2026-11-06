@@ -741,7 +741,10 @@ export class Workspaces {
     const started = Date.now();
     // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
     let env: NodeJS.ProcessEnv = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) };
-    let launch = { bin: "sh", args: ["-c", command] };
+    // The check starts with default HUP/INT/TERM handling: a server started with those ignored would pass that on, and a shell can't undo it
+    // (so check-all's own signal trap and its tests never fire). env --default-signal needs GNU coreutils; without it the command runs as before.
+    // Inside the fence this wrapper runs as the fenced command, so both paths get it.
+    let launch = { bin: "sh", args: ["-c", 'if env --default-signal=HUP,INT,TERM true 2>/dev/null; then exec env --default-signal=HUP,INT,TERM sh -c "$0"; fi; exec sh -c "$0"', command] };
     let tmp: string | null = null;
     if (fence && this.checkFence) {
       const set = this.fenceCheck(fenceProject ?? "", dir, env, launch);

@@ -121,9 +121,10 @@ describe("a review that ends without a verdict twice", () => {
     const b = await ctx.hire("Reviewer B", { template: SENIOR_DEV_TEMPLATE });
     const id = await ctx.ticket("Needs review", { systemState: "review" });
     const [req] = await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: a.id, round: 1, createdAt: new Date(Date.now() - 3 * 60 * MIN) }).returning();
+    // Each run was woken after the review was asked and started after this round began (BOS-433).
     for (const ago of [150, 60]) {
-      const [run] = await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: a.id, startedAt: new Date(Date.now() - ago * MIN), endedAt: new Date(Date.now() - (ago - 10) * MIN) }).returning();
-      await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, reason: REVIEW_REASON, status: "launched", runId: run!.id, note: `- ${id} "Needs review": x` });
+      const [run] = await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: a.id, startedAt: new Date(Date.now() - ago * MIN + 60_000), endedAt: new Date(Date.now() - (ago - 10) * MIN), outcome: "end_turn" }).returning();
+      await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, reason: REVIEW_REASON, status: "launched", runId: run!.id, note: `- ${id} "Needs review": x`, createdAt: new Date(Date.now() - ago * MIN + 120_000) });
     }
     expect(await ctx.sweeps.run()).toMatchObject({ progress: { reviewsMoved: 1 } });
     const [after] = await ctx.db.select().from(reviewRequests).where(eq(reviewRequests.id, req!.id));
@@ -137,7 +138,7 @@ describe("a review that ends without a verdict twice", () => {
     await ctx.hire("Reviewer B", { template: SENIOR_DEV_TEMPLATE });
     const id = await ctx.ticket("Needs review", { systemState: "review" });
     const [req] = await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: a.id, round: 1, createdAt: new Date(Date.now() - 3 * 60 * MIN) }).returning();
-    const [run] = await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: a.id, startedAt: new Date(Date.now() - 60 * MIN), endedAt: new Date(Date.now() - 50 * MIN) }).returning();
+    const [run] = await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: a.id, startedAt: new Date(Date.now() - 60 * MIN), endedAt: new Date(Date.now() - 50 * MIN), outcome: "end_turn" }).returning();
     await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, reason: REVIEW_REASON, status: "launched", runId: run!.id, note: `- ${id} "Needs review": x` });
     await ctx.sweeps.run();
     const [after] = await ctx.db.select().from(reviewRequests).where(eq(reviewRequests.id, req!.id));
@@ -146,18 +147,15 @@ describe("a review that ends without a verdict twice", () => {
 });
 
 describe("a run that fails to start", () => {
-  it("raises a card on the first failure, naming the reason", async () => {
+  it("raises no card when the runner is offline: the wake waits for it, and the runner watch is the one alert (BOS-480)", async () => {
     ctx = await setup();
     const id = await ctx.ticket("Start me");
     await ctx.scheduler.wake({ agentId: ctx.worker.id, ticketId: id, reason: "assigned" });
     await ctx.scheduler.tick();
-    const mine = async () => (await ctx.cards("start-fail:")).filter((d) => d.question.includes("Engineer"));
-    const [c] = await mine();
-    expect(c!.question).toContain("Engineer");
-    expect(c!.question).toContain("runner offline");
-    // Ticks that fail the same way again do not add cards.
     await ctx.scheduler.tick();
-    expect(await mine()).toHaveLength(1);
+    expect(await ctx.cards("start-fail:")).toEqual([]);
+    const [w] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, id));
+    expect(w).toMatchObject({ status: "queued", statusReason: "runner offline" });
   });
 });
 
