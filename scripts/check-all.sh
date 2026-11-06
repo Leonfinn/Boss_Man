@@ -125,7 +125,7 @@ if command -v flock >/dev/null; then
   SLOTS=1
   # A proof file holding just a whole number sets the slot count (the runner writes it from BOSSMAN_CHECK_SLOTS, so sessions
   # cannot); any other content (a pair-measurement note) keeps the old meaning: CHECK_ALL_SLOTS, default 2.
-  if [ -s "$PROOF" ] && [[ "$(tr -d '[:space:]' <"$PROOF" 2>/dev/null)" =~ ^[0-9]{1,2}$ ]] && [ "$((10#${BASH_REMATCH[0]}))" -ge 1 ]; then SLOTS=$((10#${BASH_REMATCH[0]}))
+  if [ -s "$PROOF" ] && [[ "$(tr -d '[:space:]' <"$PROOF" 2>/dev/null)" =~ ^[0-9]{1,2}$ ]]; then SLOTS=$((10#${BASH_REMATCH[0]})); [ "$SLOTS" -ge 1 ] || SLOTS=1; [ "$SLOTS" -le 16 ] || SLOTS=16
   elif [ -s "$PROOF" ] || [ -n "${CHECK_ALL_PAIR_TRIAL:-}" ]; then SLOTS=${CHECK_ALL_SLOTS:-2}
   elif [ "${CHECK_ALL_SLOTS:-1}" -gt 1 ]; then echo "check-all: CHECK_ALL_SLOTS=$CHECK_ALL_SLOTS ignored, no passed side-by-side pair recorded in $PROOF; running one at a time"
   fi

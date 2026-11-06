@@ -1,6 +1,6 @@
 // Runner daemon: one per company. Dials out to the Boss Man server, runs agents over ACP
 // on its commands, and journals every event until the server has it (R31).
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
 import { applyCheckSlots, runnerFence, sandboxSelfTest } from "./fence.js";
@@ -32,6 +32,16 @@ const coordDir = path.join(workspacesRoot, ".bossman-coord");
 mkdirSync(coordDir, { recursive: true });
 const checkSlots = applyCheckSlots(coordDir, env.BOSSMAN_CHECK_SLOTS);
 if (checkSlots > 1) console.log(`[runner] full checks: ${checkSlots} at a time (BOSSMAN_CHECK_SLOTS)`);
+if (checkSlots > 1) {
+  // Each extra full check peaks near 3 GB; warn when the container limit (cgroup v2 or v1) is lower than that.
+  for (const f of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
+    if (!existsSync(f)) continue;
+    const limit = Number(readFileSync(f, "utf8").trim());
+    if (Number.isFinite(limit) && limit < checkSlots * 3 * 1024 ** 3 + 2 * 1024 ** 3 && limit < 2 ** 50)
+      console.warn(`[runner] warning: memory limit is ${Math.round(limit / 1024 ** 3)} GB but ${checkSlots} full checks at once need about ${checkSlots * 3 + 2} GB; raise BOSSMAN_RUNNER_MEMORY or checks may be OOM-killed`);
+    break;
+  }
+}
 const workspaces = new Workspaces(workspacesRoot, process.env, coordDir);
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.

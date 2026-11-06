@@ -114,6 +114,11 @@ if command -v flock >/dev/null; then
   rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1 CHECK_ALL_SLOTS=2) || rc=$?
   [ "$rc" = 75 ] || fail "proof 1: expected exit 75 (one slot), got $rc: $out"
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  # A proof of 0 means one slot, not the old default of two.
+  echo 0 >"$t/proof"; hold 1 4; holder=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1 CHECK_ALL_SLOTS=2) || rc=$?
+  [ "$rc" = 75 ] || fail "proof 0: expected exit 75 (one slot), got $rc: $out"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
   echo 3 >"$t/proof"; hold 1 5; h1=$!; hold 2 5; h2=$!; sleep 0.3
   out=$(lock env) || fail "proof 3: expected a third slot, got: $out"
   grep -q "lock held" <<<"$out" || fail "proof 3: third slot not acquired"
