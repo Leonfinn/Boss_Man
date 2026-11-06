@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
+import { runners, runs as runsTable, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -34,13 +34,22 @@ async function setup() {
   let seq = 0;
   const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: new Date().toISOString(), event });
   const starts = () => sent.filter((c): c is Extract<RunnerCommand, { type: "run.start" }> => c.type === "run.start");
+  // A run.ended is handled in the background, so wait until it is really marked ended.
+  const ended = async (runId: string) => {
+    for (let i = 0; i < 100; i++) {
+      const [r] = await db.select({ at: runsTable.endedAt }).from(runsTable).where(eq(runsTable.id, runId));
+      if (r?.at) return;
+      await new Promise((res) => setTimeout(res, 10));
+    }
+    throw new Error("the run never ended");
+  };
   const mcp = async (runId: string) => {
     const token = await issueRunToken(db, { companyId: company.id, agentId: worker.id, runId });
     const c = new Client({ name: "t", version: "0" });
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
   };
-  return { ...built, db, close, req, company, ceo, worker, project, sent, emit, starts, mcp };
+  return { ...built, db, close, req, company, ceo, worker, project, sent, emit, starts, ended, mcp };
 }
 
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
@@ -72,6 +81,9 @@ describe("ticket conversation (R65)", () => {
     expect((await c.req("GET", `/api/tickets/${t.id}/runs`)).json()).toEqual([expect.objectContaining({ id: first!.runId, agent: "Engineer", endedAt: null })]);
     await c.emit({ type: "run.update", runId: first!.runId, update: { kind: "agent_message", text: "Done, footer is brand blue now." } });
     await c.emit({ type: "run.ended", runId: first!.runId, stopReason: "end_turn", error: null });
+    // The end is handled in the background; wait for it before the next message, which is the one
+    // that must become a new run rather than go into the old one.
+    await c.ended(first!.runId);
     await c.db.delete(wakes);
 
     expect((await c.req("POST", `/api/tickets/${t.id}/messages`, { text: "Make the links bold too" })).json()).toMatchObject({ delivery: "woken" });
