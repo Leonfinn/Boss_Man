@@ -96,6 +96,20 @@ describe("check queue", () => {
     await s.close();
   });
 
+  it("a later quick request never drops a queued full check, and concurrent requests for one tree queue one job", async () => {
+    const s = await setup();
+    const ticketId = await s.ticket();
+    const full = (await s.req({ ticketId, tree: "a", kind: "pre_review", scope: "full" })).job;
+    const quick = (await s.req({ ticketId, tree: "b", kind: "pre_review", scope: "quick" })).job;
+    const status = await s.q.status(s.companyId);
+    expect(status.queued.map((j) => j.id).sort()).toEqual([full.id, quick.id].sort());
+    const t2 = await s.ticket();
+    await Promise.all([s.req({ ticketId: t2, tree: "same", kind: "pre_review" }), s.req({ ticketId: t2, tree: "same", kind: "merge" })]);
+    const rows = await s.db.select().from(checkJobs);
+    expect(rows.filter((j) => j.tree === "same").length).toBe(1);
+    await s.close();
+  });
+
   it("a newer commit drops the ticket's older queued job with a reason", async () => {
     const s = await setup();
     const ticketId = await s.ticket();

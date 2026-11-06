@@ -55,6 +55,15 @@ export function checkQueue(db: Db) {
 
   /** Queue a check, or hand back the job that already answers the request. */
   async function enqueue(input: EnqueueInput): Promise<EnqueueResult> {
+    // One enqueue at a time (the lock is held to the end of the transaction), so a pre-review and a merge request for the same
+    // tree cannot both see "nothing queued" and both insert.
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"check_jobs_enqueue"}))`);
+      return enqueueIn(tx as unknown as Db, input);
+    });
+  }
+
+  async function enqueueIn(db: Db, input: EnqueueInput): Promise<EnqueueResult> {
     const scope = input.scope ?? "full";
     // A pass on the same tree with an equal or wider scope answers the request, whatever kind asked for it.
     const sameTree = await db
@@ -76,11 +85,17 @@ export function checkQueue(db: Db) {
       }
       return { job: live, reused: "live" };
     }
-    // A newer commit of the same ticket replaces its queued job (never a running one: that one is the runner's to finish or fail).
-    await db
-      .update(checkJobs)
-      .set({ state: "cancelled", reason: "A newer commit of this ticket was queued for checking, so this older request was dropped.", endedAt: new Date() })
-      .where(and(eq(checkJobs.ticketId, input.ticketId), eq(checkJobs.kind, input.kind), eq(checkJobs.state, "queued")));
+    // A newer commit of the same ticket replaces its queued job of the same command whose scope is no wider than the new one
+    // (never a running one: that one is the runner's to finish or fail). A queued full check is never dropped by a later quick
+    // request, so nobody is left waiting for a result that was cancelled without anyone asking.
+    const stale = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, input.ticketId), eq(checkJobs.kind, input.kind), eq(checkJobs.state, "queued")))).filter(
+      (j) => (SCOPE_RANK[j.scope] ?? 0) <= SCOPE_RANK[scope]! && (j.command ?? null) === (input.command ?? null),
+    );
+    if (stale.length)
+      await db
+        .update(checkJobs)
+        .set({ state: "cancelled", reason: "A newer commit of this ticket was queued for checking, so this older request was dropped.", endedAt: new Date() })
+        .where(inArray(checkJobs.id, stale.map((j) => j.id)));
     const [job] = await db
       .insert(checkJobs)
       .values({
