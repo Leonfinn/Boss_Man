@@ -1,6 +1,6 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { and, asc, eq, gt, inArray, isNotNull, isNull, like, max, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, like, lt, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
@@ -12,6 +12,9 @@ import type { fundingService } from "./funding.js";
 /** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
 const RESTART_PULL_MAX = 20;
 const RESTART_PULL_COOLDOWN_MS = 10 * 60_000;
+
+/** A run started this recently may not be on the runner's list yet; and the wait before the list is acted on lets the runner replay what it finished while offline (BOS-583). */
+export const LIVE_RUNS_GRACE_MS = 60_000;
 
 type Runner = typeof runners.$inferSelect;
 /** The transaction handle drizzle passes to `db.transaction`, so apply steps share the ingest transaction. */
@@ -40,6 +43,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   // Runs before listeners and is awaited, for cheap bookkeeping a reader must see straight after the event (BOS-217).
   const syncHooks: Array<(runner: Runner, event: RunnerEvent) => Promise<unknown>> = [];
   const connectListeners: Array<(runnerId: string) => unknown> = [];
+  const lostListeners: Array<(runId: string) => unknown> = [];
+  let liveRunsDelayMs = LIVE_RUNS_GRACE_MS;
   const resumeListeners: Array<(runner: Runner, pending: Array<{ runId: string; requestId: string }>) => unknown> = [];
   // shortcut: pending requests and live sockets belong to this process; lost on restart, harmless because runners reconnect and callers time out.
   /** Requests waiting for a runner's reply, by request id. */
@@ -286,6 +291,49 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     /** Keeps the runner's latest fence self-test (BOS-321). */
     async recordSandbox(runnerId: string, report: SandboxReport, at: Date) {
       await db.update(runners).set({ sandbox: report, sandboxCheckedAt: at }).where(eq(runners.id, runnerId));
+    },
+
+    /** Called after the server closes a run the runner doesn't have, so it can be resumed (BOS-583). */
+    onLost(listener: (runId: string) => unknown) {
+      lostListeners.push(listener);
+    },
+
+    /** Test hook: how long after hello the runner's run list is acted on. */
+    setLiveRunsDelay(ms: number) {
+      liveRunsDelayMs = ms;
+    },
+
+    /**
+     * Closes this runner's open runs that its hello list leaves out, as "lost: runner doesn't have it",
+     * and hands each to the lost listeners to resume (BOS-583). Runs started within the grace period
+     * are left alone, measured back from the hello (helloAt), not from when this check runs: a run
+     * started just before the hello may not have reached the runner yet. Returns the ids closed.
+     * A runner that sent no list never gets here.
+     */
+    async reconcileLive(runner: Runner, liveRunIds: string[], at: Date = new Date(), helloAt: Date = at): Promise<string[]> {
+      const open = await db
+        .select({ id: runs.id })
+        .from(runs)
+        .where(and(eq(runs.companyId, runner.companyId), isNull(runs.endedAt), lt(runs.startedAt, new Date(helloAt.getTime() - LIVE_RUNS_GRACE_MS))));
+      const live = new Set(liveRunIds);
+      const closed: string[] = [];
+      for (const { id: runId } of open) {
+        if (live.has(runId)) continue;
+        if (!(await this.endRun(runId, "lost: runner doesn't have it", at))) continue;
+        closed.push(runId);
+        for (const l of lostListeners) await Promise.resolve(l(runId)).catch(() => {});
+      }
+      return closed;
+    },
+
+    /** Waits for the runner to replay anything it finished offline, then reconciles, if it is still connected. */
+    reconcileLater(runner: Runner, liveRunIds: string[]) {
+      const helloAt = new Date();
+      const timer = setTimeout(() => {
+        if (!connected.has(runner.id)) return;
+        void this.reconcileLive(runner, liveRunIds, new Date(), helloAt).catch(() => {});
+      }, liveRunsDelayMs);
+      timer.unref();
     },
 
     async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>) {
