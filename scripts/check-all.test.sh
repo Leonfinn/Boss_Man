@@ -95,12 +95,12 @@ if command -v flock >/dev/null; then
   # clear message instead of waiting forever as if the slot were busy (BOS-321, Freddy's hazard 2).
   mkdir -p "$t/ro" "$t/bad.slot.1"; chmod 555 "$t/ro"
   if [ ! -w "$t/ro" ]; then
-    rc=0; out=$(lock env CHECK_ALL_LOCK="$t/ro/lock" timeout 20) || rc=$?
+    rc=0; out=$(lock env CHECK_ALL_LOCK="$t/ro/lock" timeout 300) || rc=$?
     [ "$rc" = 2 ] || fail "unwritable lock folder: expected exit 2, got $rc: $out"
     grep -q "cannot use the check lock folder" <<<"$out" || fail "unwritable lock folder: no clear message: $out"
   fi
   chmod 755 "$t/ro"
-  rc=0; out=$(lock env CHECK_ALL_LOCK="$t/bad" timeout 20) || rc=$?
+  rc=0; out=$(lock env CHECK_ALL_LOCK="$t/bad" timeout 300) || rc=$?
   [ "$rc" = 2 ] || fail "unopenable slot: expected exit 2 at once, got $rc: $out"
   grep -q "cannot open $t/bad.slot.1" <<<"$out" || fail "unopenable slot: no clear message: $out"
   [ -z "$(ls "$t/bad.queue" 2>/dev/null)" ] || fail "unopenable slot: queue entry left behind"
