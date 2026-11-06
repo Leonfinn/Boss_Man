@@ -79,6 +79,8 @@ export const WATCH_REASON = "ticket watch";
 export const MISSED_REASON = "missed work";
 /** An urgent ticket in progress that nobody is working on, found by the sweep (BOS-346). */
 export const URGENT_IDLE_REASON = "urgent idle";
+/** A free run slot given to an in-progress ticket nobody is working on (BOS-574, DR-029). */
+export const IDLE_SLOT_REASON = "idle slot";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 /** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
@@ -97,7 +99,7 @@ const LOOP_EXCHANGES = 4;
 
 /** How long after a run that made progress Boss Man wakes the agent to carry on, when it set no check itself. */
 export const CARRY_ON_MS = 15 * 60_000;
-const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
+export const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
 
 /** Wakes held for a full subscription window: re-checked every pass, so adding or reordering an account releases them (BOS-449). */
 const QUOTA_HOLD_LIKE = "subscription % nearly used up%";
@@ -947,6 +949,28 @@ export function schedulerService(
   const self = {
     limits,
     hasRoom,
+
+    /**
+     * How many more work runs the company could start now (BOS-574): the instance and company limits
+     * (the owner's Settings first), less the slot kept for cards, the work runs going and the wakes
+     * already waiting. 0 while everything is paused, an update hold is on, or in the owner's quiet
+     * hours, when a routine wake would only wait. The idle-slot sweep fills no more than this.
+     */
+    async freeSlots(companyId: string): Promise<number> {
+      if (await globallyPaused()) return 0;
+      if (await getHold(db)) return 0;
+      if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
+      const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
+      const stored = lrow?.value as { instance?: number; company?: number } | undefined;
+      const maxTotal = stored?.instance ?? limits.instance;
+      const maxCompany = stored?.company ?? limits.company;
+      const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
+      const live = await db.select({ companyId: runs.companyId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`));
+      const waiting = await db.select({ companyId: wakes.companyId }).from(wakes).where(and(inArray(wakes.status, ["queued", "deferred"]), ne(wakes.reason, CHAT_REASON)));
+      const total = live.length + waiting.length;
+      const mine = live.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
+      return Math.max(0, Math.min(maxTotal - reserved - total, maxCompany - reserved - mine));
+    },
 
     /**
      * Whether the CEO could run right now (DR-015 A, BOS-469 point 1 and 7): an account with room and no
