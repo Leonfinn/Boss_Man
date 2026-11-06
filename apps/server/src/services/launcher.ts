@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { eq, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, mcpServers, settings } from "../db/schema.js";
+import { expectRestart } from "./runner-restarts.js";
 import type { runnersService } from "./runners.js";
 
 export type LauncherOptions = { url: string; keyFile: string };
@@ -113,6 +114,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       const slug = await slugFor(companyId);
       // The launcher must answer before the token changes, or a working runner would be cut off for nothing.
       await call("GET", "/runners");
+      await expectRestart(db, companyId, "owner restart");
       const { token } = await deps.runners.register(companyId);
       await call("PUT", `/runners/${slug}`, { token, allow: await allowFor(companyId) });
       return { slug };
@@ -120,6 +122,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
 
     async restart(companyId: string) {
       const slug = await slugFor(companyId);
+      await expectRestart(db, companyId, "owner restart");
       await call("POST", `/runners/${slug}/restart`);
       return { slug };
     },

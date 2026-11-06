@@ -10,10 +10,18 @@ import type { Db } from "../db/client.js";
 import { companies, decisions, runs, settings } from "../db/schema.js";
 import { CANCEL_UPDATE, KEEP_WAITING_MORE, STOP_AND_UPDATE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
+import { expectRestart } from "./runner-restarts.js";
 
 export const MAINTENANCE_KEY = "maintenance";
 /** Said to every running agent when a runner update starts waiting, and after each ticket move while it waits. */
 export const WRAP_UP = "A runner update is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the update is done.";
+/** The same, for a runner restart that applies new runner settings (BOS-594). */
+export const WRAP_UP_SETTINGS = "A runner restart for a setting change is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the runner is back.";
+/** What a drain is for. "update": swap each runner not on the current image. "settings": recreate every runner once,
+ * whatever its image, so new launcher settings (memory, check slots, CPU) reach it without cutting runs off (BOS-594). */
+export type HoldKind = "update" | "settings";
+/** The reason drain.json carries for a setting change (scripts/update-runner.sh --settings). */
+export const SETTINGS_REASON = "setting change";
 /** How the last runner update ended, for Settings (BOS-465). `swapped` says which companies it swapped, so a later Settings visit knows which history belongs to which runner. */
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string; swapped?: Record<string, string> };
 export const MAINTENANCE_LAST_KEY = "maintenance:last";
@@ -22,6 +30,8 @@ export const HOLD_REASON = "update pending";
 
 export type Hold = {
   reason: string;
+  /** Absent on a hold saved before BOS-594: an update. */
+  kind?: HoldKind;
   since: string;
   deadline: string;
   /** How long one wait is: the first deadline, and each "Keep waiting". */
@@ -82,6 +92,20 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'maintenance'`));
   }
 
+  /** Whether this runner still needs recreating in this drain. */
+  function needsSwap(h: Hold, r: FleetRunner, swapped: Record<string, string>) {
+    return h.kind === "settings" ? !swapped[r.slug] : !r.current;
+  }
+
+  /** What drain.json asks for: a setting change when it says so, else an image update. Unreadable or odd contents count as an update, as before. */
+  function kindOf(text: string): HoldKind {
+    try {
+      return (JSON.parse(text) as { reason?: unknown })?.reason === SETTINGS_REASON ? "settings" : "update";
+    } catch {
+      return "update";
+    }
+  }
+
   async function end(title: string, level: NotifyInput["level"], body: string) {
     const h = await getHold(db);
     const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
@@ -116,15 +140,31 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
   const self = {
     /** Turns the hold on. Idempotent: a second call returns the hold that is already on. // leader-only */
-    async start(opts: { reason?: string; minutes?: number } = {}): Promise<Hold> {
+    async start(opts: { reason?: string; minutes?: number; kind?: HoldKind } = {}): Promise<Hold> {
+      const kind = opts.kind ?? "update";
       const have = await getHold(db);
-      if (have) return have;
+      if (have) {
+        // A setting change asked for during an image update: recreate every runner from now on, including any
+        // already swapped, since they were made with the old settings. The recreate also puts them on the new image.
+        if (kind === "settings" && have.kind !== "settings") {
+          const up: Hold = { ...have, kind, reason: SETTINGS_REASON, swapped: {} };
+          await save(up);
+          return up;
+        }
+        return have;
+      }
       const minutes = opts.minutes ?? deps.drainMinutes ?? 30;
       const t = now();
-      const h: Hold = { reason: opts.reason ?? "runner update", since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
+      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
       await save(h);
-      await deps.tellRunning?.(WRAP_UP).catch((err) => deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`));
-      await deps.notify({ companyId: null, level: "note", title: "Update pending: waiting for runs to finish", body: `Nothing new starts in any company. Each runner is swapped as its company goes idle. If runs are still going after ${minutes} minutes, you will be asked.`, link: "#/settings" });
+      await deps.tellRunning?.(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP).catch((err) => deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`));
+      await deps.notify({
+        companyId: null,
+        level: "note",
+        title: kind === "settings" ? "Setting change pending: waiting for runs to finish" : "Update pending: waiting for runs to finish",
+        body: `Nothing new starts in any company. Each runner is ${kind === "settings" ? "recreated with the new settings" : "swapped"} as its company goes idle. If runs are still going after ${minutes} minutes, you will be asked.`,
+        link: "#/settings",
+      });
       return h;
     },
 
@@ -171,14 +211,14 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
      * asks at the deadline, and lifts the hold once every runner is on the new image.
      */
     async step() {
-      let asked = false;
+      let asked: HoldKind | null = null;
       if (trigger && (await stat(trigger).then(() => true, () => false))) {
-        await readFile(trigger, "utf8").catch(() => ""); // contents are not used: the file's existence is the request
+        // The file's existence is the request; its "reason" says whether it is a setting change (BOS-594).
+        asked = kindOf(await readFile(trigger, "utf8").catch(() => ""));
         await rm(trigger, { force: true });
-        asked = true;
       }
       let h = await getHold(db);
-      if (!h && asked) h = await self.start({ reason: "runner update" });
+      if (asked && (!h || (asked === "settings" && h.kind !== "settings"))) h = await self.start({ kind: asked });
       if (!h) return;
 
       let fleet: FleetRunner[];
@@ -200,7 +240,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const failed = { ...h.failed };
       const swapped = { ...h.swapped };
       for (const r of fleet) {
-        if (r.current || failed[r.slug]) continue;
+        if (!needsSwap(h, r, swapped) || failed[r.slug]) continue;
         if (swapped[r.slug] && t.getTime() - new Date(swapped[r.slug]!).getTime() < 60_000) continue;
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
@@ -208,6 +248,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         active = await activeByCompany();
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         try {
+          // Said before the call, so the runner's next hello is recorded as this, not as a crash (BOS-594).
+          if (r.companyId) await expectRestart(db, r.companyId, h.kind === "settings" ? "setting change" : "update", now());
           await deps.recreate(r.slug); // leader-only
           swapped[r.slug] = now().toISOString();
         } catch (err) {
@@ -218,10 +260,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       h = { ...h, swapped, failed };
       await save(h);
 
-      if (fleet.some((r) => !r.current && !failed[r.slug] && !swapped[r.slug])) return; // still waiting for an idle company
+      if (fleet.some((r) => needsSwap(h!, r, swapped) && !failed[r.slug] && !swapped[r.slug])) return; // still waiting for an idle company
       // Everything is swapped or failed. Re-read what runs the new image before judging.
       const after = await deps.fleet().catch(() => fleet);
-      if (after.some((r) => !r.current && !failed[r.slug])) return;
+      if (h.kind !== "settings" && after.some((r) => !r.current && !failed[r.slug])) return;
       const slow: string[] = [];
       for (const r of after) {
         const at = swapped[r.slug];
@@ -233,7 +275,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       for (const r of after) if (failed[r.slug] && r.current && r.companyId && (await deps.connected(r.companyId))) delete failed[r.slug];
       const bad = [...Object.entries(failed).map(([s, m]) => `${s}: ${m}`), ...slow.map((s) => `${s}: has not reconnected`)];
       // The hold lifts either way: keeping every company stopped for one runner would cost more than it protects.
-      if (bad.length) await end("Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
+      const settingsDone = h.kind === "settings";
+      if (bad.length) await end(settingsDone ? "Runner restart for a setting change finished with problems" : "Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
+      else if (settingsDone) await end("Runners restarted with the new settings", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " was" : "s were"}` : "No runners were"} recreated after their runs finished. New runs have started again.`);
       else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.`);
     },
   };

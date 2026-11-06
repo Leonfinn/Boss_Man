@@ -19,6 +19,8 @@ export type ConnectionOptions = {
   log?: (msg: string) => void;
   /** Permission requests still waiting for a verdict, re-asked on every (re)connect. */
   pendingPermissions?: () => Array<{ runId: string; requestId: string }>;
+  /** Why this process started, told to the server in every hello so it can record the restart's reason (BOS-594). */
+  restart?: { previousExit?: "stopped" | "crashed" | null; hostBootAt?: string | null };
 };
 
 export class RunnerConnection {
@@ -81,7 +83,7 @@ export class RunnerConnection {
     ws.on("open", () => {
       this.attempt = 0;
       const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(pending.length ? { pending } : {}) });
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(pending.length ? { pending } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");

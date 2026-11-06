@@ -8,7 +8,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, notifications, runners, settings, tickets, wakes } from "../src/db/schema.js";
-import { getHold, HOLD_REASON, WRAP_UP } from "../src/services/maintenance.js";
+import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { MISSED_REASON } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -326,5 +326,81 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     const [row] = await c.db.select().from(settings).where(eq(settings.key, "maintenance"));
     expect(row!.value).toMatchObject({ reason: "runner update", minutes: 45 });
     expect((await c.maintenance.start()).minutes).toBe(45); // idempotent
+  });
+});
+
+describe("setting change drain and restart reasons (BOS-594)", () => {
+  const runnerOf = async (c: { db: Awaited<ReturnType<typeof setup>>["db"] }, companyId: string) => (await c.db.select().from(runners).where(eq(runners.companyId, companyId)))[0]!;
+
+  it("recreates every runner once, even on the current image, after its runs end, then wakes and says so", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Home Lab", "home-lab");
+    // Both already run the current image: an image update would have nothing to do.
+    for (const r of c.fake.runnersBySlug.values()) r.current = true;
+    await c.wake(a);
+    await c.scheduler.tick();
+
+    // scripts/update-runner.sh --settings drops this.
+    await writeFile(path.join(c.dir, "inbox", "drain.json"), JSON.stringify({ requestedAt: new Date().toISOString(), by: "update-runner.sh", reason: "setting change" }));
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "settings", reason: "setting change" });
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP_SETTINGS}`]);
+    expect(await c.titles()).toContain("note: Setting change pending: waiting for runs to finish");
+    // Idle B is recreated at once; busy A waits for its run. B's restart is expected as a setting change.
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/home-lab/recreate"]);
+    const [intent] = await c.db.select().from(settings).where(eq(settings.key, `runner-restart-intent:${b.id}`));
+    expect(intent!.value).toMatchObject({ reason: "setting change" });
+    // Further passes don't recreate B again.
+    c.advance(2 * MIN);
+    await c.maintenance.step();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/home-lab/recreate"]);
+
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/home-lab/recreate", "POST /runners/app-co/recreate"]);
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("note: Runners restarted with the new settings");
+  });
+
+  it("a setting change asked for during an image update recreates every runner, including ones already swapped", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.company("Home Lab", "home-lab");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.maintenance.step(); // home-lab swapped onto the new image with the old settings
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/home-lab/recreate"]);
+    await writeFile(path.join(c.dir, "inbox", "drain.json"), JSON.stringify({ reason: "setting change" }));
+    c.advance(2 * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "settings" });
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/home-lab/recreate", "POST /runners/home-lab/recreate"]);
+  });
+
+  it("an image update's drain.json (no reason) is an update, as before", async () => {
+    const c = (ctx = await setup());
+    await c.company("Home Lab", "home-lab");
+    await writeFile(path.join(c.dir, "inbox", "drain.json"), JSON.stringify({ by: "update-runner.sh" }));
+    await c.maintenance.step();
+    expect(await c.titles()).toContain("note: Runners updated");
+  });
+
+  it("the runner's next hello records the reason in the owner's feed and server_status", async () => {
+    const c = (ctx = await setup());
+    const b = await c.company("Home Lab", "home-lab");
+    const runner = await runnerOf(c, b.id);
+    await c.runners.bootSeen(runner, "boot-1", {}); // first known boot: a baseline, no notice
+    await c.maintenance.start({ kind: "settings" });
+    await c.maintenance.step();
+    await c.runners.bootSeen(await runnerOf(c, b.id), "boot-2", { previousExit: "stopped", hostBootAt: "2026-11-05T16:28:00.000Z" });
+    // A crash afterwards, which Boss Man didn't ask for, is a flag the owner can act on.
+    await c.runners.bootSeen(await runnerOf(c, b.id), "boot-3", { previousExit: "crashed", hostBootAt: "2026-11-05T16:28:00.000Z" });
+    await new Promise((r) => setTimeout(r, 20)); // the notice is sent without blocking the hello
+    const restarts = (await c.titles()).filter((t) => t.includes("Runner restarted"));
+    expect(restarts).toEqual(["note: Runner restarted: setting change", "flag: Runner restarted: crash or out of memory"]);
+    const status = (await c.serverStatus.status(b.id)) as { runner: { lastRestart: { reason: string; bootId: string } } };
+    expect(status.runner.lastRestart).toMatchObject({ reason: "crash or out of memory", bootId: "boot-3" });
   });
 });

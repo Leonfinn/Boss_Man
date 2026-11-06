@@ -58,7 +58,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R9" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R9" | "R13" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -107,6 +107,16 @@ const DOC_POINTERS: Array<[RegExp, string]> = [
   [/\bwith (?:the |your |some )?changes\b/i, "asks the owner to adapt instructions (\"with changes\")"],
   [/\b(?:same as|as) (?:before|last time|usual)\b/i, "relies on what the owner did before"],
   [/\b(?:previous|earlier|other|last|old) card\b/i, "sends the owner to another card"],
+];
+/**
+ * R13 (BOS-594): a command that recreates or restarts the runners at once cuts off every run in progress, with no
+ * drain and no wake afterwards (6 Nov 16:00: a setting change applied with recreate-all). Setting changes go through
+ * `scripts/update-runner.sh --settings`, new images through Build and update runners; both drain first.
+ */
+const RUNNER_RECREATE: Array<[RegExp, string]> = [
+  [/\brecreate-all\b/, "recreates every runner at once"],
+  [/\bupdate-runner\.sh\b[^\n|;&]*\s--now\b/, "recreates every runner at once (--now)"],
+  [/\bdocker\s+(?:restart|stop|rm(?:\s+-f)?)\s+[^\n|;&]*\bboss-man-runner-/, "restarts or removes a runner container directly"],
 ];
 const HEDGES = /\b(?:probably|should be|if it'?s still|i think|maybe|hopefully|might need)\b/i;
 const LINK = /\[\[|#\/(?:wiki|tickets)\/|\b[A-Z]{2,6}-\d+\b/;
@@ -193,6 +203,12 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
       if (p) refuse.push({ step, rule: "R3", problem: `has a command that ${p}: ${b.slice(0, 120)}` });
     }
     for (const c of inline) if (PLACEHOLDER.test(c)) refuse.push({ step, rule: "R3", problem: `has a placeholder the owner would have to edit: ${c.slice(0, 120)}` });
+    for (const c of code)
+      for (const [re, what] of RUNNER_RECREATE)
+        if (re.test(c)) {
+          refuse.push({ step, rule: "R13", problem: `${what}, which cuts off every agent run in progress with no drain and no wake afterwards. For a runner setting change use \`scripts/update-runner.sh --settings\` (it waits for runs to finish, then wakes the agents); for a new runner image use Settings → Server and runner → Updates → Build and update runners. In a real emergency only the CEO can raise it, with lintOverride saying why` });
+          break;
+        }
     for (const m of text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) refuse.push({ step, rule: "R4", problem: `has {{${m[1]}}}, which Boss Man has no value for. Write the value itself` });
     const host = lintHost(blockPieces, step, given.hosts, staged, step === 1);
     refuse.push(...host.refuse);
