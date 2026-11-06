@@ -385,6 +385,7 @@ export async function buildApp(opts: AppOptions) {
   });
   const serverStatus = serverStatusService(db, {
     memory,
+    runLimits: (id) => scheduler.runLimits(id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
