@@ -9,7 +9,7 @@ import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max
 import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
@@ -82,7 +82,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   const now = opts.now ?? (() => new Date());
 
   async function withdraw(ids: string[]) {
-    if (ids.length) await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(inArray(decisions.id, ids));
+    if (!ids.length) return;
+    await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(inArray(decisions.id, ids));
+    // Withdrawn without an answer: their notifications are read now (BOS-413).
+    await db.update(notifications).set({ readAt: now() }).where(and(inArray(notifications.decisionId, ids), isNull(notifications.readAt)));
   }
 
   async function openOfKind(kind: "stale_blocker" | "stalled_run") {

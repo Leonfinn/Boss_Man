@@ -52,6 +52,8 @@ const bg = createBackground(
     { name: "notification sync", everyMs: Number(env.BOSSMAN_NOTIFY_MS ?? 5000), run: () => notes.syncDecisions() },
     // Stale-blocker, stalled-run and missed-work sweeps.
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
+    // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
+    { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: () => notes.markAnsweredRead() },
     // The Scrum Master watchdog's rule checks (BOS-58): no model; wakes the Scrum Master only when a rule trips. Off per company until the owner switches it on.
     { name: "watchdog", everyMs: Number(env.BOSSMAN_WATCHDOG_MS ?? 5 * 60_000), run: () => watchdog.run() },
     // Workflow retros (docs/19): wakes the retro agent every 20 finished tickets or 7 days, whichever comes first. No model here.
