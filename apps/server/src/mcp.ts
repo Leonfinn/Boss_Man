@@ -1336,11 +1336,13 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       // One page covers the whole thing, description through conversation, so a long owner message is
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
+      const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
       const head = [
         `# ${t.title}`,
         `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
         ...(note ? [note] : []),
         ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
+        ...(ciLine ? [ciLine] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
         t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
         "",

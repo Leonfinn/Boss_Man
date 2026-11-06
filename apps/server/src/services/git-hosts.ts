@@ -8,7 +8,7 @@ import { apiBaseFor, parseRepoUrl, type GitHostKind } from "@boss-man/shared";
 export type GitHostConfig = { kind: GitHostKind; apiBase: string; owner: string; repo: string };
 export type PullRequest = { number: number; url: string; merged: boolean; closed: boolean; mergeCommit: string | null };
 /** What a commit's checks say (R86). GitHub's older commit statuses (not Actions check runs) aren't read. */
-export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; failing: string[] };
+export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total?: number };
 export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
 /** A pull request and the commits that made it: the host lists them in order, oldest first. */
 export type PullRequestCommits = { pull: PullRequest; commits: string[] };
@@ -132,7 +132,7 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
         .filter((r) => (gh ? ["failure", "timed_out", "cancelled", "startup_failure"].includes(String(r.conclusion)) : ["failure", "error"].includes(String(r.status))))
         .map((r) => String(gh ? r.name : r.context));
       const waiting = rows.some((r) => (gh ? r.status !== "completed" : r.status === "pending"));
-      return { state: failing.length ? "failed" : !rows.length ? "none" : waiting ? "pending" : "passed", failing };
+      return { state: failing.length ? "failed" : !rows.length ? "none" : waiting ? "pending" : "passed", failing, total: rows.length };
     },
 
     /** The commit a branch points at: GitHub calls it commit.sha, Gitea commit.id. */
