@@ -4,7 +4,7 @@ import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
-type Match = { kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; workingCopyOnly?: boolean };
+type Match = { kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; destructive?: boolean; pushing?: boolean };
 type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number };
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }>; shadowedIds?: string[] };
 
@@ -26,7 +26,10 @@ function describeMatch(m: Match) {
   if (m.commandPattern) parts.push(`command matches /${m.commandPattern}/`);
   if (m.titlePattern) parts.push(`title matches /${m.titlePattern}/`);
   if (m.scratchOnly) parts.push("everything it changes or deletes is in /tmp");
+  if (m.destructive) parts.push("the command deletes or destroys data (Boss Man reads what each part runs, however it's written)");
+  if (m.tempCleanupOnly) parts.push("its only deletes are of entries directly in /tmp");
   if (m.workingCopyOnly) parts.push("its deletes are plain paths in the agent's own working copy (or /tmp)");
+  if (m.pushing) parts.push("the command pushes or publishes");
   return parts.join(" and ");
 }
 

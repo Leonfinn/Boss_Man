@@ -51,7 +51,7 @@ import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
-import { commandProblem, parseStep } from "./steps.js";
+import { commandProblem, parseStep, strayFence } from "./steps.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -171,6 +171,8 @@ export type DecisionContext =
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   /** A display-name change for an agent (BOS-265); only the name moves, never the id. */
   | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string }
+  /** A change to the company's standing rules (BOS-353), applied when the owner approves. */
+  | { type: "standing_rules"; text: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A model-setup change for an existing agent (BOS-128): the owner approves, edits or rejects it. */
   | { type: "model_change"; agentId: string; before: AgentModelConfig; proposed: AgentModelConfig; byAgentId: string; runningRunId?: string | null; applied?: { at: string; afterRunId: string | null; config?: AgentModelConfig } }
@@ -276,6 +278,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "hire",
   "instructions",
   "rename",
+  "standing_rules",
   "model_change",
   "team_plan",
   "risk_review",
@@ -536,7 +539,10 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
 export function ownerSetupProblem(steps: string[]): string | null {
   const text = steps.join("\n");
   if (!text.trim()) return "it has no steps";
-  for (const piece of parseStep(text)) {
+  const pieces = parseStep(text);
+  const stray = strayFence(pieces);
+  if (stray !== null) return `a \`\`\` isn't a complete command block, so it would show as raw text: ${stray}`;
+  for (const piece of pieces) {
     if (piece.type !== "command") continue;
     const problem = commandProblem(piece.text);
     if (problem) return `a command is not copy-safe (${problem}): ${piece.text}`;
@@ -728,7 +734,7 @@ export type RetroHook = {
   checked(changeId: string, answer: string): Promise<unknown>;
   lessonAnswered(decisionId: string, answer: string, note?: string): Promise<unknown>;
 };
-type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" | "rename" }>, companyId: string, approved: boolean) => Promise<unknown>;
+type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" | "rename" | "standing_rules" }>, companyId: string, approved: boolean) => Promise<unknown>;
 type ModelChangeHook = (ctx: Extract<DecisionContext, { type: "model_change" }>, companyId: string, config: AgentModelConfig) => Promise<{ afterRunId: string | null }>;
 
 /**
@@ -2519,7 +2525,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           await db.update(decisions).set({ status: "open", answer: null, answeredAt: null, context: d.context as object }).where(eq(decisions.id, id));
           throw err;
         }
-      } else if (ctx.type === "hire" || ctx.type === "instructions" || ctx.type === "rename") {
+      } else if (ctx.type === "hire" || ctx.type === "instructions" || ctx.type === "rename" || ctx.type === "standing_rules") {
         try {
           await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
         } catch (err) {

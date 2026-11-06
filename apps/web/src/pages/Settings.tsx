@@ -1396,6 +1396,114 @@ function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: ()
   );
 }
 
+/** Standing rules (BOS-353): what every agent reads at the start of every run. The owner can edit, clear or undo them here; agents cannot. */
+function StandingRules({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  type Rules = { text: string; by: string | null; at: string | null; max: number };
+  const [rules, setRules] = useState<Rules | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [draft, setDraft] = useState<string | null>(null);
+  const act = useAction();
+  useEffect(() => {
+    let live = true;
+    void api<Rules>(`/api/companies/${company.id}/standing-rules`)
+      .then((r) => live && setRules(r))
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [company.id]);
+  const url = `/api/companies/${company.id}/standing-rules`;
+  return (
+    <Section id="standing-rules-h" title="Standing rules">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The rules every agent reads at the start of every run. Your CEO can set them, and so can you; no other agent can change them. They are capped at {rules?.max ?? 2000} characters.
+      </p>
+      {failed ? (
+        <p className="muted">Couldn't load the standing rules.</p>
+      ) : !rules ? (
+        <p className="muted">Loading…</p>
+      ) : draft !== null ? (
+        <>
+          <textarea aria-label="Standing rules" value={draft} onChange={(e) => setDraft(e.target.value)} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={act.busy}
+              onClick={() =>
+                void act.run(async () => {
+                  const saved = await api<Rules>(url, { method: "PUT", body: { text: draft } });
+                  setRules(saved);
+                  setDraft(null);
+                  onChanged();
+                  return "Saved.";
+                })
+              }
+            >
+              Save
+            </button>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(null)}>
+              Cancel
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          {rules.text ? (
+            <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit", fontSize: 14, padding: 12, background: "var(--panel, #f6f6f6)", borderRadius: 6 }}>{rules.text}</pre>
+          ) : (
+            <p className="muted">No standing rules are set yet.</p>
+          )}
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            {rules.text ? "Last changed by " : "Last cleared by "}
+            {rules.by === "undo" ? "an undo" : (rules.by ?? "no one")}
+            {rules.at ? ` on ${when(rules.at)}` : ""}.
+          </p>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(rules.text)}>
+              Edit
+            </button>
+            {rules.text ? (
+              <button
+                type="button"
+                className="btn"
+                disabled={act.busy}
+                onClick={() => {
+                  if (!confirm("Clear the standing rules? Agents will stop reading them from the next run.")) return;
+                  void act.run(async () => {
+                    const saved = await api<Rules>(url, { method: "PUT", body: { text: "" } });
+                    setRules(saved);
+                    onChanged();
+                    return "Cleared.";
+                  });
+                }}
+              >
+                Clear
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="btn"
+              disabled={act.busy || !rules.at}
+              onClick={() =>
+                void act.run(async () => {
+                  const saved = await api<Rules>(`${url}/undo`, { method: "POST" });
+                  setRules(saved);
+                  onChanged();
+                  return "Undone.";
+                })
+              }
+            >
+              Undo last change
+            </button>
+          </div>
+        </>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
 /** How the rules judge advises on permission cards (BOS-337). It only picks the suggested button; it never answers a card. */
 function PermissionJudgeSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const act = useAction();
@@ -2230,6 +2338,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <NudgeCap company={company} onChanged={onChanged} />
             <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
+            <StandingRules company={company} onChanged={onChanged} />
             <PermissionJudgeSetting company={company} onChanged={onChanged} />
             <SecondOpinionSetting company={company} />
             <Watchdog company={company} />

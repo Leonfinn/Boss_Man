@@ -376,9 +376,13 @@ export function reviewService(
       if (!row?.branch) continue;
       // No pull request yet: the branch's own head at the host is what is waiting to land.
       const head = row.head ?? (await viaHost.branchHead(cfg, token, row.branch).catch((err) => {
+        // A branch the host has never seen carries nothing onto the target, so it can't be
+        // carried by this one either (BOS-577). Any other failure still refuses: the gate can't
+        // answer for a branch that does exist.
+        if (err instanceof GitHostError && err.status === 404) return null;
         throw new ReviewError(409, `Couldn't read the branch of "${o.title}" on the host, so it wasn't merged: ${(err as Error).message}`);
       }));
-      theirs.push({ ticketId: o.ticketId, head });
+      if (head) theirs.push({ ticketId: o.ticketId, head });
     }
     if (!theirs.length) return [];
     let mine: string[];
@@ -998,6 +1002,11 @@ export function reviewService(
             // The runner restarted or went away under the merge (DR-014): the work is fine. Try again by itself, keeping the place in line.
             const { t } = await ticketWithRepo(ticketId);
             const message = (r.detail as { message: string }).message;
+            // A copy that is no longer in charge stops quietly (DR-026): the server now in charge starts this merge again, so no retries and no card here.
+            if (deps.isLeader && !deps.isLeader()) {
+              await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: "The merge was cut off by the hand-over; the server now in charge starts it again. Nothing to do." });
+              return { outcome: "check_stuck", delivered: null, detail: { note: "Cut off by the hand-over; the server now in charge restarts it." } };
+            }
             goneTries++;
             if (goneTries > INFRA_RETRY_ATTEMPTS) {
               await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The runner kept going away under the merge (${message}); it's in your Decisions.` });
@@ -1016,6 +1025,7 @@ export function reviewService(
             }
             const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
             if (now?.state !== "review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge waited, so it was not retried." } };
+            if (deps.isLeader && !deps.isLeader()) return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited; the server now in charge restarts it." } };
             attempt--;
             continue;
           }
