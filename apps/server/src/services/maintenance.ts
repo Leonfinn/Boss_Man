@@ -135,7 +135,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const h = await getHold(db);
       const [l] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MAINTENANCE_LAST_KEY));
       const last = (l?.value ?? null) as { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
-      if (!h) return { on: false as const, last };
+      // A past failure is history once every runner is connected on the new image: say so, not the old problem.
+      let healthy = false;
+      if (!h && last && !last.ok) {
+        try {
+          const fleet = await deps.fleet();
+          healthy = fleet.length > 0 && (await Promise.all(fleet.map(async (r) => r.current === true && !!r.companyId && (await deps.connected(r.companyId))))).every(Boolean);
+        } catch {
+          healthy = false;
+        }
+      }
+      if (!h) return last && !last.ok ? { on: false as const, last, healthy } : { on: false as const, last };
       const active = await activeByCompany();
       return { on: true as const, reason: h.reason, since: h.since, deadline: h.deadline, runs: [...active.values()].reduce((a, b) => a + b, 0), companies: active.size, last };
     },
@@ -235,6 +245,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         if (now().getTime() - new Date(at).getTime() < reconnectMs) return; // give it time to dial in
         slow.push(r.slug);
       }
+      // A runner that failed to swap but came back by itself on the new image needs nothing from the owner.
+      for (const r of after) if (failed[r.slug] && r.current && r.companyId && (await deps.connected(r.companyId))) delete failed[r.slug];
       const bad = [...Object.entries(failed).map(([s, m]) => `${s}: ${m}`), ...slow.map((s) => `${s}: has not reconnected`)];
       // The hold lifts either way: keeping every company stopped for one runner would cost more than it protects.
       if (bad.length) await end("Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
