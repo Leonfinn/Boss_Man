@@ -237,6 +237,9 @@ else
   echo "check-all: flock not found, running without the heavy-phase lock"
 fi
 [ -z "${CHECK_ALL_STARTED_FILE:-}" ] || date +%s >"$CHECK_ALL_STARTED_FILE"
+# Nested check-all runs (the script tests inside the full check) inherit this variable and would overwrite the start time, so the
+# recorded duration came out as seconds: only the run that owns the file may write it (BOS-545).
+unset CHECK_ALL_STARTED_FILE
 # Test hook: scripts/check-all.test.sh stops here once the lock is held.
 [ -z "${CHECK_ALL_STOP_AFTER_LOCK:-}" ] || { echo "check-all: lock held"; exit 0; }
 if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
