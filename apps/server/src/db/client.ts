@@ -29,12 +29,16 @@ export async function openPostgres(url: string, opts: { migrate?: boolean } = {}
 // Lost on restart, harmless because it's rebuilt from the migrations on the next call.
 let migratedTemplate: Promise<Blob> | undefined;
 
-/** Tests and quick local runs: an in-process Postgres (PGlite), migrated with the same SQL. */
-export async function openPglite(dataDir?: string): Promise<{ db: Db; close: () => Promise<void> }> {
+/**
+ * Tests and quick local runs: an in-process Postgres (PGlite), migrated with the same SQL.
+ * `logQuery` (tests only) sees every statement, so a test can prove a pass made none.
+ */
+export async function openPglite(dataDir?: string, opts: { logQuery?: (sql: string) => void } = {}): Promise<{ db: Db; close: () => Promise<void> }> {
   const { PGlite } = await import("@electric-sql/pglite");
   const { drizzle } = await import("drizzle-orm/pglite");
   const { migrate } = await import("drizzle-orm/pglite/migrator");
   const { vector } = await import("@electric-sql/pglite-pgvector");
+  const logger = opts.logQuery ? { logQuery: opts.logQuery } : undefined;
   if (dataDir === undefined) {
     migratedTemplate ??= (async () => {
       // The test run's global setup saves one migrated copy for every test file to share.
@@ -49,10 +53,10 @@ export async function openPglite(dataDir?: string): Promise<{ db: Db; close: () 
     const client = new PGlite({ extensions: { vector }, loadDataDir: await migratedTemplate });
     // A copy's first query loads PGlite's array types; a close during that never returns, so do it now.
     await client.query("select 1");
-    return { db: drizzle(client, { schema }) as unknown as Db, close: () => client.close() };
+    return { db: drizzle(client, { schema, logger }) as unknown as Db, close: () => client.close() };
   }
   const client = new PGlite({ dataDir, extensions: { vector } });
-  const db = drizzle(client, { schema });
+  const db = drizzle(client, { schema, logger });
   await migrate(db, { migrationsFolder });
   return { db: db as unknown as Db, close: () => client.close() };
 }

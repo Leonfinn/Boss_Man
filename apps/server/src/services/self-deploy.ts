@@ -55,6 +55,8 @@ const folder = (p: string | undefined) => (p && /^\/[\w.+@/-]+$/.test(p) && !p.s
 const isSha = (s: string) => /^[0-9a-f]{7,64}$/.test(s);
 /** The ladder: success is a note, a refusal a flag, anything half-done or broken a page. */
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
+/** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
+const FORCED_SYNC_MS = 60_000;
 
 export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; log?: (msg: string) => void }) {
   const dir = deps.dir;
@@ -69,6 +71,39 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   const available = () => (dir ? readJson(path.join(dir, "outbox", "available.json"), Available) : Promise.resolve(null));
   const status = () => (dir ? readJson(path.join(dir, "outbox", "status.json"), Status) : Promise.resolve(null));
   const pending = async () => !!inboxFile && (await stat(inboxFile).then(() => true, () => false));
+  const availableFile = dir && path.join(dir, "outbox", "available.json");
+  const statusFile = dir && path.join(dir, "outbox", "status.json");
+
+  /**
+   * When the host last rewritten a file, and how big it was (BOS-414). The host replaces each file by
+   * rename, so both change with its content; a missing or unreadable file gets a token that never
+   * matches a stored one, so the next pass runs.
+   */
+  const fingerprint = (file: string | undefined) =>
+    file
+      ? stat(file).then(
+          (st) => `${st.mtimeMs}:${st.size}`,
+          () => "missing",
+        )
+      : Promise.resolve("off");
+  let seen: { print: string; at: number } | null = null;
+
+  /**
+   * Nothing a pass reads outside its database can change until the host writes a file, or a request
+   * is put in its inbox, so when all three have the same mtime and size as last time there is nothing
+   * to do (BOS-414). A pass still runs at least once a minute, which covers a missed rename and
+   * anything else a file token can't see. The minute is measured from the last pass that *ran*, not
+   * the last call: a skipped call keeps the old time, or the poller skipping every 30 s would push the
+   * forced pass back for ever (BOS-414 review). Tests set the time with fake timers, never a timer.
+   */
+  const unchanged = async () => {
+    const nowMs = Date.now();
+    const print = (await Promise.all([fingerprint(availableFile), fingerprint(statusFile), fingerprint(inboxFile)])).join("|");
+    const skip = seen !== null && seen.print === print && nowMs - seen.at < FORCED_SYNC_MS;
+    // On a skip only the print is refreshed: the clock for the forced pass stays on the last real pass.
+    seen = skip ? { print, at: seen!.at } : { print, at: nowMs };
+    return skip;
+  };
 
   /** Boss Man itself belongs to no company, but a decision needs one: the oldest. */
   async function homeCompany() {
@@ -412,9 +447,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       return cleared;
     },
 
-    /** One pass of the poller. // leader-only: phase 3 runs this on the leader alone. */
+    /** One pass of the poller. Skips the pass when the host's files haven't changed (BOS-414). // leader-only: phase 3 runs this on the leader alone. */
     async sync() {
       if (!dir) return;
+      if (await unchanged()) return;
       const s = await status();
       const a = await available();
       if (s && s.result !== "running") await finished(s, a);
