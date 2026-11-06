@@ -51,6 +51,11 @@ describe("wake classes: the table", () => {
     "the owner wrote on this ticket",
     "snoozed twice in a row and still tripping",
     "runner update",
+    // Why a runner restarted (BOS-594), and the setting-change drain's label: not wakes.
+    "setting change",
+    "host",
+    "crash or out of memory",
+    "unknown",
     "it is no longer at its link",
     "it has no pinned version to check",
     "the file at the link has changed since the review",
