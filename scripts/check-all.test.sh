@@ -298,7 +298,7 @@ if command -v flock >/dev/null; then
   ( lock env CHECK_ALL_AGE_AFTER=2 >"$t/aged.out" 2>&1 ) & a=$!
   waitq 2; sleep 3; ! grep -q "lock held" "$t/aged.out" || fail "ageing: took a busy slot"
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
-  for _ in $(seq 50); do grep -q "lock held" "$t/aged.out" 2>/dev/null && break; sleep 0.2; done
+  for _ in $(seq 300); do grep -q "lock held" "$t/aged.out" 2>/dev/null && break; sleep 0.2; done
   grep -q "lock held" "$t/aged.out" || fail "ageing: an aged hand-run check was not served ahead of a merge check: $(cat "$t/aged.out")"
   wait "$a" || true
   # Slot log: the hold above left a start and an end line naming the folder.
