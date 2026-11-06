@@ -13,7 +13,8 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { APPROVE_MERGE, CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard } from "./signoff.js";
 import { checkGate, checkPriority } from "./check-gate.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
@@ -166,37 +167,11 @@ export function isSignoffPending(err: unknown): boolean {
 export type GitTemplates = { commit: string; pr: string };
 type NotifyHook = (agentId: string, input: { reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
 
-type SignedOff = { head: string; risk: string | null; at: string };
-
 /** "4 Nov 07:35 UTC", for a sign-off named on a card or event. */
 const when = (iso: string) => {
   const d = new Date(iso);
   return `${d.getUTCDate()} ${d.toLocaleString("en-GB", { month: "short", timeZone: "UTC" })} ${iso.slice(11, 16)} UTC`;
 };
-
-/**
- * The owner's last sign-off on this ticket, and whether it covers `head` (DR-013). It is reused only when the newest
- * answered sign-off card is an "Approve and merge" for the same commit, nobody sent the ticket back since (the card's
- * "Send it back" makes a newer answered card; the review page and reviewers leave a changes-requested ticket_reviews
- * row), and the risk is no higher than what the owner saw. `earlier` names the last signed-off commit for a new card.
- */
-async function priorSignoff(db: Db, t: { id: string; risk: RiskTier | null }, head: string | null): Promise<{ reuse: SignedOff | null; earlier: SignedOff | null }> {
-  const cards = await db
-    .select({ answer: decisions.answer, context: decisions.context })
-    .from(decisions)
-    .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${t.id}`))
-    .orderBy(desc(decisions.answeredAt));
-  const signed = cards.find((c) => c.answer === APPROVE_MERGE && (c.context as { signedOff?: SignedOff }).signedOff);
-  const earlier = signed ? (signed.context as { signedOff: SignedOff }).signedOff : null;
-  if (!earlier || !head || cards[0] !== signed || earlier.head !== head) return { reuse: null, earlier };
-  if (!earlier.risk || RISK_TIERS.indexOf(riskOf(t.risk)) > RISK_TIERS.indexOf(earlier.risk as RiskTier)) return { reuse: null, earlier };
-  const [sentBack] = await db
-    .select({ id: ticketReviews.id })
-    .from(ticketReviews)
-    .where(and(eq(ticketReviews.ticketId, t.id), eq(ticketReviews.verdict, "changes_requested"), gt(ticketReviews.createdAt, new Date(earlier.at))))
-    .limit(1);
-  return { reuse: sentBack ? null : earlier, earlier };
-}
 
 /** The owner decides what to do with a check that couldn't finish; the ticket stays in review and the loop detector never hears of it. */
 async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title: string }, command: string, reason: string, output: string) {
@@ -344,8 +319,11 @@ export function reviewService(
    * land it too. Anything less (still in review rounds, sent back, awaiting the owner) stays a refusal.
    */
   async function approvedAndWaiting(ticketId: string): Promise<boolean> {
-    const [c] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+    const [c] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
     if (!c || c.systemState !== "review") return false;
+    // Owed the owner's sign-off, card or not: not approved yet (BOS-503, DR-021). A missing card never means "not needed".
+    const so = (await derivedSignoff(db, c)).state;
+    if (so !== "not_needed" && so !== "signed_off") return false;
     const rows = await latestRows(db, ticketId);
     if (!rows.length || evaluate(rows) !== "passed") return false;
     const [signoff] = await db
@@ -521,12 +499,7 @@ export function reviewService(
 
   /** True while the owner's "Merge it, or send it back?" sign-off card for this ticket is open (BOS-471). */
   async function ownerSignoffOpen(ticketId: string): Promise<boolean> {
-    const [signoff] = await db
-      .select({ id: decisions.id })
-      .from(decisions)
-      .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`))
-      .limit(1);
-    return !!signoff;
+    return !!(await openSignoffCard(db, ticketId));
   }
 
   return {
@@ -669,7 +642,7 @@ export function reviewService(
           .from(ticketDependencies)
           .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
           .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
-        if (signoff) throw new ReviewError(409, "Every review is in; the ticket is waiting on the owner's decision before it merges.");
+        if (signoff || (await derivedSignoff(db, t)).state === "waiting") throw new ReviewError(409, "Every review is in; the ticket is waiting on the owner's decision before it merges.");
         if (landings.get(ticketId)?.state === "running" && !(await landingStale(ticketId))) throw new ReviewError(409, "Every review is in and the merge is running now.");
         await record(db, { companyId: t.companyId, agentId: input.reviewerAgentId ?? null, ticketId, kind: "merge_restarted", summary: `All reviews were in but the merge had not run; ${input.reviewer} confirmed the approval, so Boss Man started it.` });
         return this.approve(t, { reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId, background: input.background, causedByRunId: input.causedByRunId });
@@ -717,7 +690,6 @@ export function reviewService(
       // Where the review policy says the owner signs off, an agent's approval asks them (R48).
       if (o.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
         // One open sign-off card per ticket: this round replaces any older one (BOS-446).
-        await supersedeSignoffs(db, ticketId, { by: "system", note: "Replaced by a newer sign-off card after a new review round.", at: new Date().toISOString() });
         // The owner signs off a commit, not a ticket (DR-013). A runner that can't say the head never reuses a sign-off.
         const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
         const prior = await priorSignoff(db, t, head);
@@ -726,23 +698,8 @@ export function reviewService(
           if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
           return { verdict: "approved" as const, ...(await this.landVisible(ticketId, o.reviewer, o.causedByRunId)) };
         }
-        const earlier = prior.earlier ? `\n\nYou approved an earlier version (${prior.earlier.head.slice(0, 8)}) on ${when(prior.earlier.at)}; the code has changed since.` : "";
-        const [d] = await db
-          .insert(decisions)
-          .values({
-            companyId: t.companyId,
-            kind: "approval",
-            question: `${o.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?${earlier}`,
-            options: ["Approve and merge", "Send it back"],
-            recommendedOption: "Approve and merge",
-            raisedByAgentId: o.reviewerAgentId,
-            tier: "owner",
-            dedupeKey: `risk-review:${ticketId}:${Date.now()}`,
-            context: { type: "risk_review", ticketId, reviewer: o.reviewer, ...(head ? { head, risk: riskOf(t.risk) } : {}) },
-          })
-          .returning({ id: decisions.id });
-        await addTicketDependency(db, { companyId: t.companyId, blockedTicketId: ticketId, blockerDecisionId: d!.id, actor: { type: "system" } });
-        return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${d!.id}` };
+        const id = await raiseSignoffCard(db, t, { reviewer: o.reviewer, reviewerAgentId: o.reviewerAgentId, head, earlier: prior.earlier });
+        return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${id}` };
       }
       if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
       return { verdict: "approved" as const, ...(await this.landVisible(ticketId, o.reviewer, o.causedByRunId)) };
@@ -1070,6 +1027,34 @@ export function reviewService(
       }
     },
 
+    /**
+     * Refuses a merge the owner hasn't signed off when the policy needs it (BOS-503, DR-021). `head` null: any
+     * recorded sign-off for this round will do (the early check); a string: the sign-off must cover that commit,
+     * and "" (the runner couldn't say) passes only an owner's own approval, which covers what is there now.
+     */
+    async requireSignoff(t: typeof tickets.$inferSelect, head: string | null) {
+      const d = await derivedSignoff(db, t, head || null);
+      if (d.state === "not_needed") return;
+      if (d.state === "signed_off" && (head === null || d.head === null || d.head === head)) {
+        if (head === "" && d.head !== null) throw new ReviewError(409, "The owner's sign-off couldn't be matched to the commit: the runner didn't say which commit would merge, so nothing was merged. Try again once the runner answers.");
+        return;
+      }
+      if (d.state === "waiting" && head) {
+        // Signed off for another commit, with no new review since: the code changed under the sign-off, and nobody
+        // reviewed what would merge now. Refuse in plain sight (the merge card that follows lets the owner send it back).
+        const was = await derivedSignoff(db, t, null);
+        if (was.state === "signed_off" && was.head && was.head !== head) throw new ReviewError(409, `The owner signed off commit ${was.head.slice(0, 8)}, but the branch is now at ${head.slice(0, 8)}, so nothing was merged. Send it back for a new review and sign-off.`);
+      }
+      if (d.state === "waiting") {
+        // Raise its card if it went missing; either way the owner's answer is what starts the merge.
+        await restoreSignoffCard(db, t, "a merge was about to start without it", head || null);
+        throw new SignoffPendingError();
+      }
+      if (d.state === "reviews_pending") throw new ReviewError(409, "This ticket needs the owner's sign-off and its reviews aren't all in, so it wasn't merged.");
+      // Signed off, but for another commit: the code changed after the owner approved it.
+      throw new ReviewError(409, `The owner signed off commit ${d.head!.slice(0, 8)}, but ${head!.slice(0, 8)} would merge, so nothing was merged. It needs a new review and sign-off.`);
+    },
+
     async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       // An answer to an older "merge stuck" ask can arrive after the ticket merged: nothing to do again.
@@ -1077,6 +1062,10 @@ export function reviewService(
       // A retry must not merge past the owner's sign-off (BOS-149): if a "Merge it, or send it back?"
       // card is still open, this ticket waits for the owner, whatever answered the merge card.
       if (await ownerSignoffOpen(ticketId)) throw new SignoffPendingError();
+      // Nor past a sign-off that isn't recorded (BOS-503, DR-021): a lost card used to let the unmerged-approvals
+      // retry and carried-work landing merge a high-risk ticket the owner never saw. Every path into a merge comes
+      // through here, so this one check fails them all closed. A card that went missing is raised again.
+      await this.requireSignoff(t, null);
       // A merge under way is activity: the unmerged-approvals sweep waits for it rather than asking again.
       const touch = () => beatNow(ticketId);
       await touch();
@@ -1126,6 +1115,9 @@ export function reviewService(
       // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
       // merge, and running the check anyway could send the ticket back for a failure it can't fix.
       const changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+      // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
+      // A ticket with no branch has nothing to merge, so only the early check above applies to it.
+      await this.requireSignoff(t, changed ? changed.head : t.branch ? "" : null);
       if ((changed && !changed.commits.length && !changed.files.length) || (!changed && !t.branch)) {
         // Only a ticket marked "no code" closes on an empty diff; any other is sent back, not closed.
         if (!t.noCode) {
