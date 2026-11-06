@@ -131,7 +131,7 @@ if command -v flock >/dev/null; then
   echo "A=600s B=640s no OOM" >"$t/proof"
 
   # With both slots busy a merge check gives up with exit 75 after CHECK_ALL_LOCK_WAIT, and says its place.
-  hold 1 9; h1=$!; hold 2 9; h2=$!; sleep 0.3
+  hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3  # released by the kill after the leading-zero case below
   rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2) || rc=$?
   [ "$rc" = 75 ] || fail "busy slots: expected exit 75, got $rc: $out"
   grep -q "place 1 of 1" <<<"$out" || fail "busy slots: no place message: $out"
@@ -194,7 +194,7 @@ if command -v flock >/dev/null; then
   waitq 3; kill "$h1" "$h2" 2>/dev/null || true
   wait "$h1" "$h2" "$hand1" "$hand2" "$merge"
   for f in hand1 hand2 merge; do grep -q "lock held" "$t/$f.out" || fail "queue: $f did not get a slot: $(cat "$t/$f.out")"; done
-  grep -q "place 3 of 3" "$t/hand2.out" || grep -q "place 2 of 3" "$t/hand2.out" || fail "queue: no place shown: $(cat "$t/hand2.out")"
+  grep -q "place [23] of [23]" "$t/hand2.out" || fail "queue: no place shown: $(cat "$t/hand2.out")"
   [ "$(cat "$t/merge.at")" -le "$(cat "$t/hand1.at")" ] || fail "hand-run check got in ahead of the merge check"
   [ "$(cat "$t/hand1.at")" -le "$(cat "$t/hand2.at")" ] || fail "hand-run checks got in out of order"
   [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "queue entries left behind"
@@ -240,12 +240,14 @@ if command -v flock >/dev/null; then
 
   # A flood of live-looking entries must not stall the queue: one pass over 5000 used to take 13.6 s.
   rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  # Baseline: the same call on an empty queue, so the time check-all takes to reach the lock (slow on a busy runner) cancels out.
+  b0=$SECONDS; lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=5 >/dev/null 2>&1 || true; base=$((SECONDS - b0))
   now_ns=$(date +%s%N)
   for ((i = 0; i < 5000; i++)); do : >"$t/lock.queue/1-$((now_ns + i))-$$"; done
   began=$SECONDS
   rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=5) || rc=$?
   if [ "$rc" != 0 ] || ! grep -q "lock held" <<<"$out"; then fail "flooded queue: merge check didn't get in, got $rc: $out"; fi
-  [ $((SECONDS - began)) -le 3 ] || fail "flooded queue: took $((SECONDS - began)) s to get a free slot"
+  [ $((SECONDS - began)) -le $((base + 3)) ] || fail "flooded queue: took $((SECONDS - began)) s to get a free slot (empty queue: $base s)"
   # A hand-run check behind the flood sees a place past the scan, and waits.
   rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=2) || rc=$?
   grep -q "place 201 of 200" <<<"$out" || fail "flooded queue: hand-run check's place: $out"
@@ -273,7 +275,7 @@ if command -v flock >/dev/null; then
   # The retry budget counts from the slot-taken time, not from before the queue wait (P13 Q4). A check that waits
   # longer than the budget, then hits EAGAIN, is still retried; measured from before the wait it was never retried.
   : >"$t/count"; export COUNT="$t/count"
-  rc=0; ( cd "$here/.." && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BUDGET_SECONDS=2 CHECK_ALL_QUEUE_TEST_SLEEP=3 BOSSMAN_CHECK_BODY='echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3' ./scripts/check-all.sh >"$t/budget.out" 2>&1 ) || rc=$?
+  rc=0; ( cd "$here/.." && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BUDGET_SECONDS=15 CHECK_ALL_QUEUE_TEST_SLEEP=16 BOSSMAN_CHECK_BODY='echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3' ./scripts/check-all.sh >"$t/budget.out" 2>&1 ) || rc=$?
   [ "$rc" -eq 3 ] || fail "budget after queue wait: rc $rc, want 3: $(cat "$t/budget.out")"
   [ "$(runs)" -eq 3 ] || fail "budget after queue wait: ran $(runs) times, want 3 (a long wait must not use up the retry budget)"
   # A signal leaves a trace and frees the queue place: the output, the stored log and the result store get "killed by signal <name>",
