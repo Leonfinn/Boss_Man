@@ -41,8 +41,10 @@ export function recoveryService(db: Db) {
       // An interrupted owner chat run is simply asked again; it only ever touched the board.
       if (run.purpose === "chat") return wake({ agentId: run.agentId, reason: CHAT_REASON, note: "", priority: 4, causedByRunId: runId });
       const steps = await finishedSteps(runId);
+      // A run the server closed because its runner went offline and never reported it (BOS-574).
+      const lost = run.outcome?.startsWith("lost:");
       const note = [
-        "Your previous run was interrupted when the runner restarted, and this run picks it up.",
+        lost ? "Your previous run was cut off when the runner went offline, and this run picks it up." : "Your previous run was interrupted when the runner restarted, and this run picks it up.",
         steps.length
           ? `Boss Man saw you finish these steps before the interruption:\n${steps.slice(-30).map((s, i) => `${i + 1}. ${s}`).join("\n")}`
           : "Boss Man saw no finished steps before the interruption.",
