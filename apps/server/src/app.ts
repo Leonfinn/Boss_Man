@@ -351,6 +351,8 @@ export async function buildApp(opts: AppOptions) {
         if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
       }
     },
+    // `sweeps` is built further down; this only runs when a hold lifts.
+    afterHold: (since) => sweeps.resumeAfterUpdate(since),
     dir: opts.deployerDir,
     drainMinutes: opts.drainMinutes,
     reconnectMs: opts.drainReconnectMs,
@@ -554,7 +556,9 @@ export async function buildApp(opts: AppOptions) {
     wake: (input) => scheduler.notify(input.agentId, input),
     isConnected: (runnerId) => runners.isConnected(runnerId),
     runnerSettling: (runnerId) => runners.isSettling(runnerId, (opts.now ?? (() => new Date()))()),
-    endRun: (runId, outcome, at) => runners.endRun(runId, outcome, at),
+    endRun: (runId, outcome, at, how) => runners.endRun(runId, outcome, at, how),
+    // Free run slots go to idle in-progress work (BOS-574, DR-029).
+    freeSlots: (companyId) => scheduler.freeSlots(companyId),
     // A never-started run's retry (BOS-480) is a wake of its own, not merged into a waiting one, so it keeps its resume and retry count.
     requeue: (input) => scheduler.wake(input),
     cancelOnRunner: (runnerId, runId) => runners.send(runnerId, { type: "run.cancel", runId }),
