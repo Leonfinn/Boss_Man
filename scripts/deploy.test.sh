@@ -36,7 +36,8 @@ mkdir "$t/bin"; cat >"$t/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 echo "docker $*" >>"$FAKE_LOG"
 case "$*" in
-  *pg_dump*) echo dump ;; *"config --services"*) echo server ;; *"ps -q"*) echo cid ;; *inspect*) echo healthy ;;
+  *pg_dump*) echo dump ;; *"config --services"*) echo server ;; *"ps -q"*) echo cid ;; *inspect*) echo "${FAKE_HEALTH:-healthy}" ;;
+  *"logs --no-color"*) echo "Error: EACCES: permission denied, open '/app/x.ts'" ;;
 esac
 FAKE
 chmod +x "$t/bin/docker"
@@ -77,6 +78,18 @@ ls "$t"/backups/bossman-*.sql.gz >/dev/null 2>&1 && { echo "FAIL: made a backup 
 # The printed fix works, and the deploy then goes through.
 eval "$(sed -n 's/^  cd /cd /p' "$t/unread.out")"
 PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null || { echo "FAIL: deploy after the fix"; exit 1; }
+# Untracked private files (.env at 600, secrets/ at 700) are not checked: the deploy goes through and leaves them private.
+git reset -q --hard "$one"; : >"$FAKE_LOG"
+echo SECRET=x >.env; chmod 600 .env; mkdir -p secrets; echo k >secrets/key; chmod 600 secrets/key; chmod 700 secrets
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/private.out" 2>&1 || { echo "FAIL: a private .env or secrets/ stopped the deploy"; cat "$t/private.out"; exit 1; }
+grep -q "compose build" "$FAKE_LOG" || { echo "FAIL: did not build with a private .env"; exit 1; }
+[[ $(stat -c %a .env) == 600 && $(stat -c %a secrets) == 700 && $(stat -c %a secrets/key) == 600 ]] || { echo "FAIL: deploy changed the modes of .env or secrets/"; exit 1; }
+# A server that never gets healthy: the rollback help shows the last lines of the server log.
+git reset -q --hard "$one"; : >"$FAKE_LOG"
+if FAKE_HEALTH=unhealthy BOSSMAN_HEALTH_TIMEOUT=1 PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/unhealthy.out" 2>&1; then echo "FAIL: an unhealthy server reported success"; exit 1; fi
+grep -q "Last 20 lines of the server log" "$t/unhealthy.out" || { echo "FAIL: no log header in the rollback help"; exit 1; }
+grep -q "EACCES: permission denied" "$t/unhealthy.out" || { echo "FAIL: rollback help didn't show the server log"; exit 1; }
+grep -q "compose logs --no-color --tail 20 server" "$FAKE_LOG" || { echo "FAIL: didn't ask for 20 log lines"; exit 1; }
 # The readable-check is one text in the three scripts.
 for s in rebuild-live host-deployer; do
   [[ "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/$s.sh")" == "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/deploy.sh")" ]] || { echo "FAIL: readable-check in $s.sh differs from deploy.sh"; exit 1; }

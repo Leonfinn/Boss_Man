@@ -106,8 +106,15 @@ grep -q "chmod go+r" "$T/out" || fail "didn't print the fix"
 run green && fail "rebuilt with many unreadable files"
 [[ $(grep -c "^  many/f" "$T/out") == 10 ]] || fail "expected 10 listed paths, got $(grep -c "^  many/f" "$T/out")"
 grep -q "STOPPED: 17 file(s)" "$T/out" || fail "didn't count all of them"
+# Untracked private files: .env at 600 and secrets/ at 700 are not counted, and the printed fix leaves them private.
+(cd "$T/repo" && echo SECRET=x >.env && chmod 600 .env && mkdir -p secrets && echo k >secrets/key && chmod 600 secrets/key && chmod 700 secrets)
+run green && fail "rebuilt with many unreadable files"
+grep -q "STOPPED: 17 file(s)" "$T/out" || fail "counted untracked private files"
+grep -Eq "^  (\.env|secrets)" "$T/out" && fail "listed an untracked private file"
 # The printed fix works.
 eval "$(sed -n 's/^  cd /cd /p' "$T/out")"
+[[ $(stat -c %a "$T/repo/.env") == 600 && $(stat -c %a "$T/repo/secrets") == 700 && $(stat -c %a "$T/repo/secrets/key") == 600 ]] || fail "the printed fix opened up .env or secrets/"
 git -C "$T/repo" rev-parse HEAD >"$T/commit" # the repo has new commits now
-run green || fail "the printed fix did not make the rebuild go through"
+run green || fail "the printed fix did not make the rebuild go through with a private .env and secrets/"
+logged "compose build server-green" || fail "didn't build with a private .env and secrets/"
 echo "rebuild-live.sh: all checks passed"

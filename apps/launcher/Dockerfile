@@ -25,6 +25,6 @@ COPY apps/launcher/package.json ./
 RUN mkdir -p /run/launcher && chown 1000:1000 /run/launcher
 USER 1000:1000
 # BOS-562: fail the build if the launcher could not read a file it was given.
-RUN bad="$(find /app ! -readable 2>/dev/null | head -10)"; [ -z "$bad" ] || { echo "Files uid 1000 cannot read (fix the checkout: chmod go+r on tracked files):"; echo "$bad"; exit 1; }
+RUN bad="$(find /app \( ! -type l ! -readable \) -o \( -type d ! -executable \) 2>/dev/null | head -10)"; [ -z "$bad" ] || { echo "Files uid 1000 cannot read (fix the checkout: chmod go+r on tracked files):"; echo "$bad"; exit 1; }
 ENV NODE_ENV=production
 CMD ["node", "dist/main.js"]
