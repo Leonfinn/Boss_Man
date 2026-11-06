@@ -206,7 +206,7 @@ if command -v flock >/dev/null; then
     # waits and the hand-run checks already running fill all but one slot (more than one slot), no hand-run entry goes ahead
     # of a merge check: aged ones drop to the back with the rest. $1 is the number of hand-run checks running now.
     local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now stale=0 nM=0 nA=0 nH=0 myclass="" newer=0 sig="" el2 el3
-    local key mykey="" capped=0 mk=() ak=() hk=() ns qns e; now=$(date +%s)
+    local key mykey="" capped=0 mk=() ak=() hk=() ns qns; now=$(date +%s)
     # A live waiter touches its entry every report, so age is read from the file's modification time (a bash test,
     # no subprocess per entry), not from the name: a check that has waited more than 2 h in a long queue keeps its place.
     touch -d "@$((now - 7200))" "$AGEREF" 2>/dev/null && stale=1
