@@ -6,7 +6,7 @@ import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerComman
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { costEvents, decisions, engagements, notifications, runnerEvents, runners, runs, settings, tickets } from "../db/schema.js";
+import { costEvents, decisions, engagements, notifications, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
 /** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
@@ -76,6 +76,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     if (ended?.fundingSourceId && outcome && /weekly limit/i.test(outcome)) {
       await funding.recordQuota(ended.fundingSourceId, [{ provider: "anthropic", window: "seven_day", utilization: 1, resetsAt: new Date(at.getTime() + 60 * 60_000), status: "rejected", overageInUse: false }], at);
     }
+    // The run is over, so its token goes with it (BOS-513).
+    await db.delete(runTokens).where(eq(runTokens.runId, runId));
     // A finished run's own questions are moot: its permission requests leave the queue, and its
     // stall alert is closed by the one closer on `runActive`, which says why it went (DR-016, BOS-470).
     await db
@@ -218,16 +220,19 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     /**
      * Ends a run from this side when the runner can't (offline, lost, or didn't confirm a
      * cancel): the same marking and listeners as the runner's own run.ended. No-op if already ended.
+     * `interrupted` says the run was cut off, not stopped by anyone (a runner that went offline and
+     * never reported it): listeners treat it as the runner's own interrupted end and resume it (BOS-574).
      */
-    async endRun(runId: string, outcome: string, at: Date = new Date()): Promise<boolean> {
+    async endRun(runId: string, outcome: string, at: Date = new Date(), how: { interrupted?: boolean } = {}): Promise<boolean> {
       const [run] = await db.select().from(runs).where(and(eq(runs.id, runId), isNull(runs.endedAt)));
       if (!run) return false;
       await markEnded(runId, at, outcome);
       const [runner] = await db.select().from(runners).where(eq(runners.companyId, run.companyId));
       const ended = runner ?? ({ companyId: run.companyId } as Runner);
+      const event = { type: "run.ended" as const, runId, stopReason: null, error: null, ...(how.interrupted ? { interrupted: true } : {}) };
       // The sync hooks close what the end settles (BOS-217); listeners only read the event and the company.
-      for (const h of syncHooks) await h(ended, { type: "run.ended", runId, stopReason: null, error: null });
-      for (const l of listeners) l(ended, { type: "run.ended", runId, stopReason: null, error: null });
+      for (const h of syncHooks) await h(ended, event);
+      for (const l of listeners) l(ended, event);
       return true;
     },
 

@@ -203,6 +203,68 @@ describe("R6: where a command runs and as whom (BOS-427)", () => {
   });
 });
 
+describe("R14: git that writes the checkout runs in a (umask 022 && …) subshell (DR-028, the 6 Nov outage)", () => {
+  const r14 = (command: string, where: { host: string; as: "root" | "login" } = H) => lintOwnerSteps([step("Run this:", sh(command, where))]).refuse.filter((f) => f.rule === "R14");
+
+  it("refuses the 6 Nov card's bare pin and rollback, and passes them in the subshell", () => {
+    expect(r14("cd /srv/bm/src && git checkout main && git fetch origin && git merge --ff-only abc1234 && git rev-parse HEAD").map((f) => f.problem.split(" ")[2])).toEqual(["checkout", "merge"]);
+    expect(r14("cd /srv/bm/src && git checkout abc1234 && scripts/rebuild-live.sh")).toHaveLength(1);
+    expect(r14("(umask 022 && cd /srv/bm/src && git checkout main && git fetch origin && git merge --ff-only abc1234 && git rev-parse HEAD)")).toEqual([]);
+    expect(r14("(umask 022 && cd /srv/bm/src && git checkout abc1234) && cd /srv/bm/src && scripts/rebuild-live.sh")).toEqual([]);
+    expect(r14("(umask 0022; git -C /srv/bm/src pull)")).toEqual([]);
+  });
+
+  it("refuses every writing git, however it is spelled, outside the subshell", () => {
+    for (const c of [
+      "git -C /srv/bm/src checkout main",
+      "git -c core.x=y merge --ff-only abc1234",
+      "sudo git reset --hard abc1234",
+      "env GIT_DIR=/x git pull",
+      "/usr/bin/git switch main",
+      "git stash pop",
+      "git clone https://example.com/bm.git /srv/bm/src",
+      "cd /srv/bm/src; git restore apps",
+      "(cd /srv/bm/src && git checkout main)", // a subshell without the umask
+      "(umask 077 && cd /srv/bm/src && git checkout main)", // the outage's own umask
+      "(umask 002 && git checkout main)",
+      "echo $(git checkout main)",
+      "(umask 022 && cd /srv/bm/src) && git checkout main", // the git is after the subshell closed
+    ])
+      expect(r14(c).length, c).toBeGreaterThan(0);
+    // The login's blocks too: the rule is about the files git writes, not who runs it.
+    expect(r14("git checkout main", { host: "nas01", as: "login" })).toHaveLength(1);
+    // Inline code in a sentence is pasted too.
+    expect(lintOwnerSteps(["Run `git checkout main` in the install folder."]).refuse.map((f) => f.rule)).toContain("R14");
+  });
+
+  it("refuses a bare umask, which would stay set in the owner's terminal", () => {
+    expect(r14("umask 022")[0]!.problem).toMatch(/sets umask outside a subshell/);
+    expect(r14("umask 022 && cd /srv/bm/src && git checkout main")).toHaveLength(2);
+    // umask alone only prints the current one.
+    expect(r14("umask")).toEqual([]);
+  });
+
+  it("passes a umask inside any subshell, such as the private backup our scripts make, but still refuses its git", () => {
+    // The form deploy.sh, rebuild-live.sh and host-deployer.sh use for backups: the 077 ends with the subshell.
+    expect(r14("(umask 077; cd /srv/bm/src && docker compose exec -T db pg_dump -U bossman bossman | gzip >/srv/bm/backups/b.sql.gz)")).toEqual([]);
+    expect(lintOwnerSteps([step("Back up:", sh("(umask 077 && tar czf /srv/bm/backups/src.tgz -C /srv/bm src)", H))]).refuse).toEqual([]);
+    // A git that writes, inside a subshell whose umask isn't 022, is refused once: for the git, not the umask.
+    expect(r14("(umask 077 && cd /srv/bm/src && git checkout main)").map((f) => f.problem.split(" ")[2])).toEqual(["checkout"]);
+    // Only the top-level umask of a mixed command is refused.
+    expect(r14("umask 022; (umask 077; tar czf /srv/bm/backups/src.tgz -C /srv/bm src)")).toHaveLength(1);
+  });
+
+  it("passes git that writes nothing, and parentheses inside quotes", () => {
+    for (const c of ["cd /srv/bm/src && git fetch origin && git rev-parse HEAD", "git -C /srv/bm/src status", "git log --oneline -5", "git stash list", "git worktree list", "git diff abc1234 def5678"]) expect(r14(c), c).toEqual([]);
+    expect(r14(`(umask 022 && cd /srv/bm/src && git merge --ff-only abc1234 && echo "done (ok)") && docker compose exec -T server-blue node -e "fetch('x').then(r=>console.log(r))"`)).toEqual([]);
+  });
+
+  it("can't be overridden by the CEO: the fix is always the same subshell", () => {
+    const r = checkAsk({ triedFirst: TRIED, steps: [step("Pin it:", sh("cd /srv/bm/src && git checkout main", H))], lintOverride: "The owner's umask is 022 on this host.", byCeo: true });
+    expect(r.error).toMatch(/runs git checkout outside a \(umask 022 && …\) subshell/);
+  });
+});
+
 describe("checkAsk with the lint", () => {
   const bad = ["Follow docs/06 for the folder."];
   it("returns the refusal with the step and the reason", () => {

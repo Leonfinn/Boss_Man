@@ -2715,7 +2715,9 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       ? await db
           .select({ companyId: runTokens.companyId, agentId: runTokens.agentId, runId: runTokens.runId })
           .from(runTokens)
-          .where(and(eq(runTokens.tokenHash, hashToken(token)), gt(runTokens.expiresAt, new Date())))
+          // A token works only while its own run is live (BOS-513): a copy left in a file stops working when the run ends. A token whose run row is missing is refused too (inner join).
+          .innerJoin(runsTable, eq(runsTable.id, runTokens.runId))
+          .where(and(eq(runTokens.tokenHash, hashToken(token)), gt(runTokens.expiresAt, new Date()), isNull(runsTable.endedAt)))
       : [];
     if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });
 

@@ -352,6 +352,8 @@ export async function buildApp(opts: AppOptions) {
         if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
       }
     },
+    // `sweeps` is built further down; this only runs when a hold lifts.
+    afterHold: (since) => sweeps.resumeAfterUpdate(since),
     dir: opts.deployerDir,
     drainMinutes: opts.drainMinutes,
     reconnectMs: opts.drainReconnectMs,
@@ -563,7 +565,9 @@ export async function buildApp(opts: AppOptions) {
     wake: (input) => scheduler.notify(input.agentId, input),
     isConnected: (runnerId) => runners.isConnected(runnerId),
     runnerSettling: (runnerId) => runners.isSettling(runnerId, (opts.now ?? (() => new Date()))()),
-    endRun: (runId, outcome, at) => runners.endRun(runId, outcome, at),
+    endRun: (runId, outcome, at, how) => runners.endRun(runId, outcome, at, how),
+    // Free run slots go to idle in-progress work (BOS-574, DR-029).
+    freeSlots: (companyId) => scheduler.freeSlots(companyId),
     // A never-started run's retry (BOS-480) is a wake of its own, not merged into a waiting one, so it keeps its resume and retry count.
     requeue: (input) => scheduler.wake(input),
     cancelOnRunner: (runnerId, runId) => runners.send(runnerId, { type: "run.cancel", runId }),
@@ -1444,6 +1448,8 @@ export async function buildApp(opts: AppOptions) {
         .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
         .where(eq(projects.id, id))
         .returning();
+      // A new repo address (or archiving) changes which git host the company's runner may reach.
+      if (p && (fields.repoUrl !== undefined || archived !== undefined)) void launch.syncAllow(p.companyId);
       return p ?? reply.code(404).send({ error: "not_found" });
     });
 
@@ -2688,5 +2694,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, memory, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
+  return { app, launcher: launch, memory, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
 }

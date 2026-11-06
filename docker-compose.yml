@@ -47,6 +47,8 @@ x-runner: &runner
   environment: &runner-env
     BOSSMAN_URL: ws://server:3100/api/runner/connect
     BOSSMAN_RUNNER_TOKEN_FILE: /run/secrets/runner_token
+    # Full checks at once (BOS-542): the compose runner never received this, only the launcher passed it on.
+    BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
   # Agents run code: keep the container unprivileged and bounded. Never mount docker.sock;
   # use a deploy target with a socket proxy instead (R14).
   cap_drop: [ALL]
@@ -115,6 +117,8 @@ services:
       # JS heap cap in MiB (BOS-410). The live heap measured 89-100 MiB; 1536 leaves ~15x headroom. Raise it in .env if
       # the memory log ("memory" lines, heapUsed) ever nears it. Keep it below BOSSMAN_SERVER_MEMORY when that is set.
       NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
+      # The stall profiler (BOS-602): 0 turns it off. Empty = on (the server checks only for "0").
+      BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
     secrets:
       - master_key
     # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.
