@@ -258,7 +258,7 @@ describe("runner restart wakes parked agents (BOS-352)", () => {
     second.conn.start();
     const t = await waitFor(() => monitorAtOf(id!), (x) => !!x.monitorAt && x.monitorAt.getTime() < Date.now() + 5000);
     expect(t.monitorRestartAt).not.toBeNull();
-    await ctx.built.scheduler.tick();
+    await ctx.built.scheduler.slow();
     const w = (await ctx.db.select().from(wakes).where(and(eq(wakes.ticketId, id!), eq(wakes.reason, "check due"))))[0]!;
     expect(w.note).toMatch(/The runner restarted at .*any background check you started is gone\. Check its log and rerun only what you need\./);
     second.conn.stop();
@@ -271,7 +271,7 @@ describe("runner restart wakes parked agents (BOS-352)", () => {
     first.conn.breakConnection();
     await new Promise((r) => setTimeout(r, 1500));
     await waitFor(async () => first.conn.isLive, Boolean);
-    await ctx.built.scheduler.tick();
+    await ctx.built.scheduler.slow();
     expect((await monitorAtOf(id!)).monitorAt!.getTime()).toBe(before);
     first.conn.stop();
   });

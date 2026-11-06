@@ -8,6 +8,7 @@ import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { linkPieces, type LinkContext } from "../links";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
@@ -115,6 +116,22 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
       (err: Error) => setError(err.message),
     );
   };
+  // Too long for a message: send it as a .txt file, which the agent opens whole.
+  const sendAsFile = async (long: string) => {
+    if (!company || !current) return;
+    try {
+      const markdown = await img.uploadText(long, "message.txt");
+      await api(`/api/companies/${company.id}/chat`, { method: "POST", body: { text: withAttachments("I've sent the text as a file (below); please read it before answering.", [markdown]).trim(), agentId: current.id } });
+      setText("");
+      img.clear();
+      setError(null);
+      setBusy(true);
+      threads.reload();
+      chat.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
   // A phone keyboard has no Shift, so there Return adds a line and Send sends.
   const coarse = useCoarsePointer();
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -198,38 +215,33 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
                 <div ref={end} />
               </div>
               <form onSubmit={send} className="chat-form">
-                <label htmlFor="chat-text" className="sr-only">
-                  Message to {current.name}
-                </label>
-                <textarea
+                <OwnerMessageBox
                   id="chat-text"
+                  label={`Message to ${current.name}`}
+                  className="chat-text"
                   rows={2}
-                  maxLength={4000}
                   enterKeyHint={NEWLINE_KEY_HINT}
                   placeholder={coarse ? `Message ${current.name}` : `Message ${current.name}. Enter sends, Shift+Enter adds a line.`}
                   value={text}
-                  onChange={(e) => setText(e.target.value)}
+                  onChange={setText}
                   onKeyDown={onKey}
                   onPaste={img.onPaste}
-                />
+                  onSendAsFile={sendAsFile}
+                  attaching={img.busy}
+                  error={img.error}
+                >
+                  {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+                </OwnerMessageBox>
                 {img.button}
                 {current.duty === "assistant" && ceo && (
                   <button className="btn" type="button" disabled={!text.trim()} onClick={() => send(undefined, ceo)}>
                     Ask the CEO
                   </button>
                 )}
-                <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy}>
+                <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)}>
                   Send
                 </button>
               </form>
-              <div style={{ padding: "0 20px" }}>
-                <ImagePreviews attached={img.attached} onRemove={img.remove} />
-              </div>
-              {img.error && (
-                <p className="error" role="alert" style={{ padding: "0 20px 14px" }}>
-                  {img.error}
-                </p>
-              )}
               {error && (
                 <p className="error" role="alert" style={{ padding: "0 20px 14px" }}>
                   {error}

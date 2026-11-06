@@ -99,6 +99,9 @@ const LOOP_EXCHANGES = 4;
 export const CARRY_ON_MS = 15 * 60_000;
 const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
 
+/** Wakes held for a full subscription window: re-checked every pass, so adding or reordering an account releases them (BOS-449). */
+const QUOTA_HOLD_LIKE = "subscription % nearly used up%";
+
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
@@ -374,7 +377,7 @@ export function schedulerService(
     return [
       "You are the company's wiki maintainer. Your job is to keep the wiki accurate, tidy and easy to find things in, using the wiki tool:",
       "- Keep an \"Index\" page at the top level (slug index) that lists every folder and its main pages, with a line on each.",
-      "- Keep a \"Log\" page at the top level (slug log), linked from the Index. At the end of every run, add one line at the top: \"- <date>: filed …; changed …; fixed …\" saying what you did, or \"nothing to do\". Never edit or remove older lines; when the page passes 200 lines, move the oldest into a page \"Log <year>\" in a Log folder.",
+      "- Keep a \"Log\" page at the top level (slug log), linked from the Index. At the end of every run, add one line with the wiki tool's append at the top: \"- <date>: filed …; changed …; fixed …\" saying what you did, or \"nothing to do\". Never edit or remove older lines, and never send a partial body to write: write replaces the whole page. When the page passes 200 lines, move the oldest into a page \"Log <year>\" in a Log folder.",
       "- When several pages mention a topic that has no page of its own, write one and link those pages to it.",
       "- File pages into sensible folders (for example Research, Product, Engineering, How-tos), move strays, and merge duplicates into one page.",
       "- Product pages go one level down: Product/Features (one page per feature: what it does and the decisions behind it), Product/Analysis (proposals, reviews, research into options) or Product/Strategy (direction, objectives, roadmap thinking). Move any page sitting straight in Product into the right one.",
@@ -512,10 +515,14 @@ export function schedulerService(
     return { items, fp: createHash("sha256").update(items.map((i) => i.key).join("\n")).digest("hex") };
   }
 
-  /** Wakes each watcher once per distinct stopped state of its tree (watchdog); a moving tree forgets the last one. */
-  async function watchTrees(watched: (typeof tickets.$inferSelect)[]) {
+  /**
+   * Wakes each watcher once per distinct stopped state of its tree (watchdog); a moving tree forgets the
+   * last one. `reported` are the tickets whose reports this pass queued: like `stoppedTree` treating a
+   * waiting wake as movement, a tree that already has a report coming is not "stopped" (BOS-414).
+   */
+  async function watchTrees(watched: (typeof tickets.$inferSelect)[], reported: Set<string> = new Set()) {
     for (const x of watched) {
-      if (x.systemState === "done") continue;
+      if (x.systemState === "done" || reported.has(x.id)) continue;
       const s = await stoppedTree(x);
       if (!s) {
         if (x.watchStoppedFp) await db.update(tickets).set({ watchStoppedFp: null }).where(eq(tickets.id, x.id));
@@ -557,6 +564,9 @@ export function schedulerService(
     }
     const byWatcher = new Map<string, string[]>();
     for (const x of due) byWatcher.set(x.watcherAgentId!, [...(byWatcher.get(x.watcherAgentId!) ?? []), x.id]);
+    // This pass can run between the queue pass queuing a watcher's report and launching it (BOS-414). join()
+    // adds the ticket to that waiting wake instead of queueing a second one, so a busy watcher gets one run.
+    const reported = new Set(due.map((x) => x.id));
     for (const [agentId, ids] of byWatcher) {
       const add = ids.map((id) => `Watch ticket ${id}`).join("\n");
       // A report on one ticket carries that ticket (so the queue, the Runs list and the ticket caps see it);
@@ -564,7 +574,7 @@ export function schedulerService(
       await self.notify(agentId, { reason: WATCH_REASON, note: add, priority: 1, ticketId: ids.length === 1 ? ids[0] : null });
     }
     // After the reports, so a watcher that is both due and stopped reports first.
-    await watchTrees(watched);
+    await watchTrees(watched, reported);
   }
 
   /**
@@ -1287,11 +1297,23 @@ export function schedulerService(
      * (the timer, a run ending, the API) can't both pass the same concurrency check.
      */
     tick() {
-      // Monitors fire after the pass, so a check's wake is launched by the next one.
+      const pass = lane.then(() => this.tickOnce());
+      lane = pass.catch(() => undefined);
+      return pass;
+    },
+
+    /**
+     * The slower checks (BOS-414): watchers due for a report, scheduled checks that are due and
+     * the quota notices. Watch intervals are in minutes and schedule_check's minimum is 5 minutes,
+     * so they run every 30 s and share the tick lane: neither type can overtake the other, and a
+     * slow pass is never half-done when a queue pass starts.
+     */
+    slow() {
       const pass = lane.then(async () => {
-        const r = await this.tickOnce();
-        if (!r.paused) await monitorDue();
-        return r;
+        if (await globallyPaused()) return;
+        await watchDue();
+        await monitorDue();
+        await quotaNotices(now()).catch((err) => deps.log?.(`quota notices failed: ${(err as Error).message}`));
       });
       lane = pass.catch(() => undefined);
       return pass;
@@ -1303,14 +1325,11 @@ export function schedulerService(
     async tickOnce() {
       const result = { launched: 0, deferred: 0, waiting: 0, paused: false };
       if (await globallyPaused()) return { ...result, paused: true };
-      await watchDue();
-
       const t = now();
-      await quotaNotices(t).catch((err) => deps.log?.(`quota notices failed: ${(err as Error).message}`));
       const queue = await db
         .select()
         .from(wakes)
-        .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)))))
+        .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t), like(wakes.statusReason, QUOTA_HOLD_LIKE)))))
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
       if (queue.length === 0) return result;
       // Priority order, but a wake Boss Man scheduled gains 1 for every 15 minutes it has waited, so a
@@ -1369,6 +1388,11 @@ export function schedulerService(
 
       for (const w of queue) {
         const defer = async (reason: string, notBefore: Date | null) => {
+          // A quota-held wake is looked at again every pass (BOS-449); only write when something changed.
+          if (w.status === "deferred" && w.statusReason === reason && (w.notBefore?.getTime() ?? null) === (notBefore?.getTime() ?? null)) {
+            result.deferred++;
+            return;
+          }
           await db.update(wakes).set({ status: "deferred", statusReason: reason, notBefore }).where(eq(wakes.id, w.id));
           result.deferred++;
         };
@@ -1504,7 +1528,11 @@ export function schedulerService(
               const resets = checked.map((c) => c.full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null));
               const until = resets.reduce<Date | null>((m, r) => (r && (!m || r < m) ? r : m), null);
               const first = checked[0]!;
-              await defer(`subscription ${first.full.map((s) => s.window).join(", ")} window nearly used up`, until);
+              const skipped = pool.filter((a) => !usable.includes(a));
+              // An agent's own account with no order cannot switch to the ranked ones (BOS-449): say so.
+              const [otherRanked] = source.fallbackRank == null && source.provider === "anthropic" ? await db.select({ id: fundingSources.id }).from(fundingSources).where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "anthropic"), isNotNull(fundingSources.fallbackRank))).limit(1) : [];
+              const unranked = otherRanked ? ` (${source.name} has no order, so it cannot switch accounts: set its order on the Funding page)` : "";
+              await defer(`subscription ${first.full.map((s) => s.window).join(", ")} window nearly used up${unranked}${skipped.length ? ` (${skipped.map((a) => a.name).join(", ")} skipped: no login)` : ""}`, until);
               continue;
             }
             if (pool.length) {
@@ -1555,11 +1583,13 @@ export function schedulerService(
     /** Frees a finished ticket's worktree on its company's runner, keeping its branch (R38). */
     async releaseWorkspace(ticketId: string) {
       const [t] = await db
-        .select({ companyId: tickets.companyId, projectId: tickets.projectId, repoUrl: projects.repoUrl })
+        .select({ companyId: tickets.companyId, projectId: tickets.projectId, repoUrl: projects.repoUrl, state: tickets.systemState })
         .from(tickets)
         .innerJoin(projects, eq(projects.id, tickets.projectId))
         .where(eq(tickets.id, ticketId));
       if (!t?.repoUrl) return false;
+      // Merged work that still has live checks to show keeps its working copy until it is really done.
+      if (t.state !== "done") return false;
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
       return runner ? deps.runners.send(runner.id, { type: "workspace.release", projectId: t.projectId, ticketId }) : false;
     },

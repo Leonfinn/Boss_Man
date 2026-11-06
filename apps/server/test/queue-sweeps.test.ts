@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq, getTableName, sql } from "drizzle-orm";
+import { and, eq, getTableName, inArray, ne, sql } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite, type Db } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
-import { activity, agents, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
+import { effectiveDueDate, rankDecision, ticketRef, type BlockedTicket } from "@boss-man/shared";
+import { activity, agents, companies, decisions, keyResults, milestones, notifications, objectives, runs, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -648,6 +649,32 @@ describe("stalled runs (R32)", () => {
     expect(row!.question).toContain("It is still inside pnpm check-all, so it may just be a long command.");
   });
 
+  it("doesn't alert at 15 or 60 minutes while a check script waits for the check slot, but does after 2 hours (BOS-518)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run quick check", rawInput: { command: "cd /work && scripts/check-quick.sh" }, status: "in_progress" } } as unknown as RunnerEvent);
+    for (const minutes of [16, 44, 30]) {
+      ctx.advance(minutes * 60_000);
+      await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+      expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    }
+    expect(await ctx.alerts()).toEqual([]);
+    ctx.advance(29 * 60_000);
+    await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    expect(await ctx.alerts()).toEqual([]);
+    ctx.advance(2 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+  });
+
+  it("still alerts after 15 minutes for a silent command that is not a check script (BOS-518)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run other", rawInput: { command: "sleep 9999 # scripts/check-quick.sh.bak" }, status: "in_progress" } } as unknown as RunnerEvent);
+    ctx.advance(16 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+  });
+
   it("doesn't raise the 5-minute alert while a connected runner is still answering pings mid-command (BOS-217)", async () => {
     ctx = await setup();
     const { runId } = await launch();
@@ -778,5 +805,188 @@ describe("the server ends runs it can't reach", () => {
     await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "wiki upkeep", startedAt: new Date(ctx.clock().getTime() - 5 * 60_000) });
     await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: null, purpose: "chat", origin: "owner_chat", startedAt: new Date(ctx.clock().getTime() - 30 * 60_000) });
     expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
+  });
+});
+
+/**
+ * The queue as it was before BOS-413, kept in the test as the reference the new one must match: every
+ * open ticket with four joins, then every dependency row, and a chain walk that filters by done tickets.
+ * Only what the fixture needs; anything else (permission runs, deploys) reads nothing here.
+ */
+async function legacyQueue(db: Db, now: () => Date) {
+  const t = now();
+  const open = await db.select({ d: decisions, companyName: companies.name, agentName: agents.name }).from(decisions).innerJoin(companies, eq(companies.id, decisions.companyId)).leftJoin(agents, eq(agents.id, decisions.raisedByAgentId)).where(and(eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`, sql`coalesce(${decisions.context}->>'type', '') not in ('lesson', 'lesson_replace')`));
+  if (!open.length) return [];
+  const work = await db
+    .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix, dueDate: tickets.dueDate, milestoneTarget: milestones.targetDate, krPriority: objectives.priority, milestoneObjectiveId: milestones.objectiveId })
+    .from(tickets)
+    .innerJoin(companies, eq(companies.id, tickets.companyId))
+    .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
+    .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+    .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
+    .where(ne(tickets.systemState, "done"));
+  const msObjectives = [...new Set(work.map((w) => w.milestoneObjectiveId).filter((x): x is string => !!x))];
+  const msPriority = new Map((msObjectives.length ? await db.select({ id: objectives.id, p: objectives.priority }).from(objectives).where(inArray(objectives.id, msObjectives)) : []).map((o) => [o.id, o.p]));
+  const info = new Map(
+    work.map((w) => {
+      const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
+      return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null }];
+    }),
+  );
+  // The old walk: every dependency row, by blocked ticket. Rows are read in id order both times,
+  // so the order a ticket's dependents come back in (and the chain order) is the same.
+  const allDeps = await db.select().from(ticketDependencies);
+  const directIds = new Map(open.map(({ d }) => [d.id, allDeps.filter((x) => x.blockerDecisionId === d.id).map((x) => x.blockedTicketId)]));
+  const byTicket = new Map<string, string[]>();
+  for (const x of allDeps) if (x.blockerTicketId && info.has(x.blockedTicketId)) byTicket.set(x.blockerTicketId, [...(byTicket.get(x.blockerTicketId) ?? []), x.blockedTicketId]);
+  const rows = open.map(({ d, companyName, agentName }) => {
+    const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
+    const seen = new Set<string>();
+    // Same stable order as the shipped queue: nearest first, then by ticket id at each depth.
+    const order = (x: string, y: string) => x.localeCompare(y);
+    let frontier = (directIds.get(d.id) ?? []).filter((id) => info.has(id)).sort(order);
+    for (let depth = 1; frontier.length && depth <= 10; depth++) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const i = info.get(id)!;
+        chain.push({ ticketId: id, title: i.title, ref: i.ref, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
+        next.push(...(byTicket.get(id) ?? []));
+      }
+      frontier = next.sort(order);
+    }
+    const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
+    return { ...d, companyName, agentName, forAgentName: null, blocks: chain, about: [], refs: {}, ...rank };
+  });
+  // Newest first, as the shipped queue does.
+  return rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+}
+
+// BOS-413: the queue reads only what its open cards reach, and a feed read never writes.
+describe("queue reads only what the open cards reach (BOS-413)", () => {
+  /** What the queue read, by table, for one GET /api/decisions. */
+  async function measureQueue() {
+    ctx.reads.queries = 0;
+    ctx.reads.rows = 0;
+    ctx.reads.byTable = {};
+    ctx.reads.on = true;
+    const q = (await ctx.req("GET", "/api/decisions")).json() as Row[];
+    ctx.reads.on = false;
+    return { q, queries: ctx.reads.queries, byTable: ctx.reads.byTable };
+  }
+
+  it("does not read dependency rows, or tickets below a finished ticket, that no card reaches", async () => {
+    ctx = await setup();
+    const chain = async () => {
+      const a = await ctx.ticket({ title: "A" });
+      const b = await ctx.ticket({ title: "B", state: "blocked" });
+      const c = await ctx.ticket({ title: "C", state: "blocked" });
+      await ctx.req("POST", `/api/tickets/${b.id}/dependencies`, { ticketId: a.id });
+      await ctx.req("POST", `/api/tickets/${c.id}/dependencies`, { ticketId: b.id });
+      return { a, b, c };
+    };
+    const live = await chain();
+    const held = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: live.a.id });
+    // A chain below a finished ticket, and loose live work no card points at.
+    const done = await chain();
+    await ctx.req("PATCH", `/api/tickets/${done.a.id}`, { state: "done" });
+    const loose = await chain();
+    ctx.advance(HOUR);
+    await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+
+    const { q, byTable } = await measureQueue();
+    // Same output as before, still down the chain from what the card holds.
+    expect(q.find((r) => r.id === held.id)!.blocks).toEqual([
+      expect.objectContaining({ ticketId: live.a.id, depth: 1 }),
+      expect.objectContaining({ ticketId: live.b.id, depth: 2 }),
+      expect.objectContaining({ ticketId: live.c.id, depth: 3 }),
+    ]);
+    // Only the rows that name an open card, then the chain's own edges: the done chain below `done.a`
+    // and the loose chain are never read.
+    const deps = await ctx.db.select().from(ticketDependencies);
+    expect(byTable["ticket_dependencies"] ?? 0).toBeLessThan(deps.length);
+    expect(q.every((r) => r.blocks.every((b) => b.ticketId !== done.b.id && b.ticketId !== done.c.id))).toBe(true);
+    expect(q.some((r) => r.blocks.some((b) => b.ticketId === loose.a.id || b.ticketId === loose.b.id || b.ticketId === loose.c.id))).toBe(false);
+  });
+
+  it("marks a card's notification read when it is answered, without the feed read writing", async () => {
+    ctx = await setup();
+    const d = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship the beta?", options: ["Yes", "No"], recommended: "Yes" });
+    const other = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Rename the app?", options: ["Yes", "No"], recommended: "No" });
+    await ctx.notes.syncDecisions();
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(2);
+
+    // Answering marks that card read at once: the feed is right before any sweep runs.
+    expect((await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Yes" })).statusCode).toBe(200);
+    const [note] = await ctx.db.select().from(notifications).where(eq(notifications.decisionId, d.id));
+    expect(note!.readAt).not.toBeNull();
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(1);
+
+    // A close made elsewhere still shows once it settles, but a read never writes: it takes the sweep.
+    await ctx.db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, other.id));
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(1);
+    await ctx.notes.markAnsweredRead();
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(0);
+  });
+
+  it("leaves a done ticket out of the chain even when the card holds it directly and it still has live dependents", async () => {
+    ctx = await setup();
+    // A ticket with a live dependent, held directly by a card that is then answered out of band: the
+    // ticket is finished while the card is still open, so it is done and still holds live work.
+    const finished = await ctx.ticket({ title: "Finished" });
+    const live = await ctx.ticket({ title: "Still waiting", state: "blocked" });
+    await ctx.req("POST", `/api/tickets/${live.id}/dependencies`, { ticketId: finished.id });
+    const card = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: finished.id });
+    // Finished behind the card's back, as another path (a merge, another ticket) would.
+    await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, finished.id));
+
+    const mine = (await ctx.queue()) as unknown as Array<Record<string, unknown> & { id: string; createdAt: string }>;
+    const row = mine.find((r) => r.id === card.id)!;
+    // The done ticket is not the start of a chain, so neither it nor its dependents appear.
+    expect(row.blocks).toEqual([]);
+
+    // The done ticket is still named as what the card is about, as before; only the chain leaves it out.
+    expect(row.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished" })]);
+    // Same chain as the old whole-table walk.
+    const legacyRaw = await legacyQueue(ctx.db, () => new Date());
+    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, createdAt: r.createdAt.toISOString() }));
+    expect(mine).toEqual(old);
+  });
+
+  it("returns the same queue as the old whole-table walk on a fixture with chained dependencies", async () => {
+    ctx = await setup();
+    const chain = async (prefix: string, length: number) => {
+      const out: Array<{ id: string }> = [];
+      for (let i = 0; i < length; i++) out.push(await ctx.ticket({ title: `${prefix} ${i}`, ...(i ? { state: "blocked" } : {}) }));
+      for (let i = 1; i < length; i++) await ctx.req("POST", `/api/tickets/${out[i]!.id}/dependencies`, { ticketId: out[i - 1]!.id });
+      return out;
+    };
+    const root = await chain("Root", 4);
+    const branch = await chain("Branch", 2);
+    await ctx.req("POST", `/api/tickets/${branch[1]!.id}/dependencies`, { ticketId: root[2]!.id });
+    // A finished ticket mid-chain: both walks stop there.
+    const doneMid = await chain("Finished", 2);
+    await ctx.req("PATCH", `/api/tickets/${doneMid[0]!.id}`, { state: "done" });
+    await chain("Loose", 3);
+    const heldCards = [
+      await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship the chain?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: root[0]!.id }),
+      await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Start the branch?", options: ["Yes", "No"], recommended: "No", blocksTicketId: branch[0]!.id }),
+      await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Unrelated?", options: ["A", "B"], recommended: "A" }),
+    ];
+    // The shipped queue and the old body (every open ticket, then every dependency row) must agree
+    // field for field, right down to the score and its reasons. What it adds beyond the old body is
+    // the tickets a card is about and the card's references; those are filled in here for comparison.
+    const mine = (await ctx.queue()) as unknown as Array<Record<string, unknown> & { id: string; createdAt: string }>;
+    const legacyRaw = await legacyQueue(ctx.db, () => new Date());
+    const about = (id: string) => [{ ticketId: id, title: id === root[0]!.id ? "Root 0" : "Branch 0", ref: id === root[0]!.id ? "APP-1" : "APP-5" }];
+    const old = legacyRaw.map((r) => ({
+      ...r,
+      about: r.id === heldCards[0]!.id ? about(root[0]!.id) : r.id === heldCards[1]!.id ? about(branch[0]!.id) : [],
+      // A Date in the old body, an ISO string over HTTP.
+      createdAt: r.createdAt.toISOString(),
+    }));
+    expect(mine).toEqual(old);
+    expect(mine.map((r) => r.id)).toEqual(expect.arrayContaining(heldCards.map((c) => c.id)));
   });
 });

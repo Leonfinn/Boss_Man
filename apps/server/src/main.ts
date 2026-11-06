@@ -48,10 +48,21 @@ const bg = createBackground(
   [
     // Scheduling passes; run ends and new wakes also prompt one.
     { name: "scheduler tick", everyMs: Number(env.BOSSMAN_TICK_MS ?? 5000), run: () => scheduler.tick() },
+    // Watchers' reports, scheduled checks that are due and quota notices (BOS-414). Watch intervals are in
+    // minutes and schedule_check's minimum is 5 minutes, so 30 s is plenty.
+    { name: "watch and monitor", everyMs: Number(env.BOSSMAN_SLOW_MS ?? 30_000), run: () => scheduler.slow() },
     // New decisions reach the owner's notifications (R44).
     { name: "notification sync", everyMs: Number(env.BOSSMAN_NOTIFY_MS ?? 5000), run: () => notes.syncDecisions() },
+    // After a server takes charge: restart approved, unmerged merges (DR-026). Gives up after 30 minutes; the 66-minute merge sweep is the net after that. // leader-only
+    { name: "resume merges", everyMs: Number(env.BOSSMAN_RESUME_MERGES_MS ?? 10_000), run: async () => {
+      if (!resumeMergesSince) return;
+      const r = await sweeps.resumeMergesOnPromotion(resumeMergesSince);
+      if (!r.waiting || Date.now() - resumeMergesSince.getTime() > 30 * 60_000) resumeMergesSince = null;
+    } },
     // Stale-blocker, stalled-run and missed-work sweeps.
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
+    // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
+    { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: () => notes.markAnsweredRead() },
     // The Scrum Master watchdog's rule checks (BOS-58): no model; wakes the Scrum Master only when a rule trips. Off per company until the owner switches it on.
     { name: "watchdog", everyMs: Number(env.BOSSMAN_WATCHDOG_MS ?? 5 * 60_000), run: () => watchdog.run() },
     // Workflow retros (docs/19): wakes the retro agent every 20 finished tickets or 7 days, whichever comes first. No model here.
@@ -63,7 +74,8 @@ const bg = createBackground(
     // Project briefs whose branch moved on the git host, merges made outside Boss Man included.
     { name: "brief upkeep", everyMs: Number(env.BOSSMAN_BRIEF_UPKEEP_MS ?? 30 * 60_000), run: briefUpkeep },
     // What the host deployer reports: raises "Deploy?" when main moves and tells the owner how a deploy went. // leader-only
-    { name: "self-deploy sync", everyMs: Number(env.BOSSMAN_SELF_DEPLOY_MS ?? 5000), run: () => selfDeploy.sync() },
+    // The sync itself skips the pass when the deployer's files haven't changed (BOS-414), so polling this often costs a stat.
+    { name: "self-deploy sync", everyMs: Number(env.BOSSMAN_SELF_DEPLOY_MS ?? 30_000), run: () => selfDeploy.sync() },
     // The runner update drain: starts when update-runner.sh asks, swaps each runner as its company goes idle, lifts the hold at the end. // leader-only
     // What each runner's add-ons say about their health (docs/12).
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
@@ -74,7 +86,12 @@ const bg = createBackground(
   (err, name) => app.log.error({ err }, `${name} failed`),
 );
 // Background work follows leadership; runner sockets are closed by buildApp on demotion.
-leader.onPromote(() => bg.startBackground());
+// A server that takes charge holds no merges: it restarts every approved, unmerged one (DR-026). The loop below keeps asking until the update hold is off and the runners are connected.
+let resumeMergesSince: Date | null = null;
+leader.onPromote(() => {
+  resumeMergesSince = new Date();
+  bg.startBackground();
+});
 leader.onDemote(() => bg.stopBackground());
 // Host signals only (no HTTP endpoint changes the role): SIGUSR1 = hand over, SIGUSR2 = take over.
 process.on("SIGUSR1", () => void leader.demote());

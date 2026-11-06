@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { HARNESSES, harnessLabel, modelFitProblem, providerLabel } from "@boss-man/shared";
+import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, type StepPiece, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -9,6 +9,22 @@ import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
 import { SkillProposal } from "../components/SkillProposal";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
+
+/** The answer sent when it is too long for the box: the text is in the .txt file the line links. */
+export const ANSWER_IN_FILE = "My answer is too long to type here, so it's in this file (open it to read it whole):";
+
+/** Attaches an owner's text as a .txt file, for an answer too long for the box; returns its Markdown. */
+async function uploadText(companyId: string, ticketId: string | undefined, text: string) {
+  const data = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(new Error("Couldn't read the text."));
+    r.readAsDataURL(new Blob([text], { type: "text/plain" }));
+  });
+  const r = await api<{ markdown: string }>(`/api/companies/${companyId}/images`, { method: "POST", body: { data, name: "answer.txt", ...(ticketId ? { ticketId } : {}) } });
+  return r.markdown;
+}
 
 const KIND: Record<string, { label: string; tone: string }> = {
   permission: { label: "Permission", tone: "" },
@@ -171,9 +187,8 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
   );
 }
 
-/** Text with ticket references the server resolved (BOS-70) turned into links; anything else stays plain text. */
 /** One command to paste, in its own block with a Copy button that copies exactly this text (BOS-269). */
-function CommandBlock({ command }: { command: string }) {
+function CommandBlock({ command, where }: { command: string; where?: Where }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const pre = useRef<HTMLPreElement>(null);
   const copy = async () => {
@@ -184,31 +199,33 @@ function CommandBlock({ command }: { command: string }) {
   };
   const label = state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy, select the text instead" : "Copy";
   return (
-    <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start", margin: "6px 0" }}>
-      <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
-        <code>{command}</code>
-      </pre>
-      <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
+    <div style={{ margin: "6px 0" }}>
+      {where && (
+        <div style={{ fontSize: 13, color: "var(--muted, #888)", margin: "0 0 2px 2px" }}>
+          On <strong>{where.host}</strong>, as {where.as === "root" ? <strong>root</strong> : "the logged-in account"}.
+        </div>
+      )}
+      <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
+          <code>{command}</code>
+        </pre>
+        <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
+      </div>
     </div>
   );
 }
 
-/** A step's text: sentences as before, and each fenced ```sh block as its own command with a Copy button. */
+/**
+ * A step's text: sentences as before, and each fenced block as its own command with a Copy button (BOS-269, BOS-427).
+ * The fences are read by the same parser as the server's card lint (BOS-550), so a step the lint accepts renders
+ * its commands as blocks, labelled fence lines and indented list items included.
+ */
 function StepText({ text, refs }: { text: string; refs?: Decision["refs"] }) {
-  const parts: Array<{ command: boolean; text: string }> = [];
-  const re = /```[a-z]*\n([\s\S]*?)\n```/g;
-  let last = 0;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    const before = text.slice(last, m.index).trim();
-    if (before) parts.push({ command: false, text: before });
-    parts.push({ command: true, text: m[1]! });
-    last = m.index + m[0].length;
-  }
-  const rest = text.slice(last).trim();
-  if (rest || parts.length === 0) parts.push({ command: false, text: parts.length === 0 ? text : rest });
+  const parsed = parseStep(text);
+  const parts: StepPiece[] = parsed.length ? parsed : [{ type: "text", text }];
   return (
     <>
-      {parts.map((p, i) => (p.command ? <CommandBlock key={i} command={p.text} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
+      {parts.map((p, i) => (p.type === "command" ? <CommandBlock key={i} command={p.text} where={p.where} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
     </>
   );
 }
@@ -416,6 +433,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // A merge started from the ticket page (or a sweep) while its approval card is still open.
   const [landings, setLandings] = useState<Record<string, TicketLanding | null>>({});
   const [notices, setNotices] = useState<Record<string, string>>({});
+  // The answer being sent as a .txt file, for one too long to send as a message.
+  const [attaching, setAttaching] = useState<string | null>(null);
   const inFlight = useRef(new Set<string>());
   const landingIds = [...new Set(decisions.filter((d) => !answered[d.id] && d.context?.type === "risk_review" && d.context.ticketId).map((d) => d.context!.ticketId!))];
   const landingKey = landingIds.sort().join(",");
@@ -469,6 +488,29 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
+  // Too long for an answer: the text goes in a .txt file, and the agent is told where to read it whole.
+  const answerAsFile = async (d: Decision, long: string) => {
+    if (inFlight.current.has(d.id)) return;
+    inFlight.current.add(d.id);
+    setBusy(d.id);
+    setAttaching(d.id);
+    try {
+      // Attach it to the ticket the card is about, so it sits with the work; else the company, which agents still open.
+      const ticketId = d.context?.type === "risk_review" ? d.context.ticketId ?? undefined : d.context?.blockerTicketId ?? undefined;
+      const markdown = await uploadText(d.companyId, ticketId || undefined, long);
+      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: `${ANSWER_IN_FILE}\n\n${markdown}`, custom: true } });
+      setAnswered((a) => ({ ...a, [d.id]: ANSWER_IN_FILE }));
+      setOwnWords(({ [d.id]: _, ...rest }) => rest);
+      setErrors(({ [d.id]: _, ...rest }) => rest);
+      setNotices(({ [d.id]: _, ...rest }) => rest);
+      onAnswered();
+    } catch (err) {
+      setErrors((e) => ({ ...e, [d.id]: (err as Error).message }));
+    } finally {
+      setBusy(null);
+      setAttaching(null);
+    }
+  };
   const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
     // A second click can land before React re-renders the disabled button: refuse it here too.
     if (inFlight.current.has(d.id)) return;
@@ -655,6 +697,17 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\nNew instructions:")[0]!} refs={d.refs} /></h2>
                         <MoreText label="New instructions" text={d.context.instructions} />
                       </>
+                    ) : d.context?.type === "standing_rules" ? (
+                      <>
+                        {/* The decision holds the exact text that will be saved, already stripped and capped; show all of it. */}
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question} refs={d.refs} /></h2>
+                        {d.context.text ? <MoreText label="New rules" text={d.context.text} /> : <p>This clears the standing rules.</p>}
+                      </>
+                    ) : d.context?.type === "owner_setup" ? (
+                      // The server's question repeats the steps as plain numbered text (raiseOwnerSetup), so any
+                      // command block in them showed as raw ``` lines (BOS-550). The steps show once, as blocks, under
+                      // "What to do"; the heading is only the first line.
+                      <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
@@ -985,22 +1038,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           >
                             <div className="field">
                               <label htmlFor={`own-${d.id}`}>Your answer, in your own words. It goes to {d.agentName ?? "the agent"} exactly as you write it.</label>
-                              <textarea
+                              <OwnerMessageBox
                                 id={`own-${d.id}`}
+                                label="Your answer, in your own words"
                                 className="own-answer"
                                 rows={5}
-                                maxLength={4000}
                                 autoFocus
                                 placeholder={d.recommendedOption ?? undefined}
-                                value={ownWords[d.id]}
-                                onChange={(e) => setOwnWords((w) => ({ ...w, [d.id]: e.target.value }))}
+                                value={ownWords[d.id] ?? ""}
+                                onChange={(text) => setOwnWords((w) => ({ ...w, [d.id]: text }))}
                                 onKeyDown={(e) => {
                                   if (e.key === "Tab" && !e.shiftKey && d.recommendedOption && !ownWords[d.id]) {
                                     e.preventDefault();
                                     setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }));
                                   }
                                 }}
-                                style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
+                                textareaStyle={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
+                                onSendAsFile={(long) => answerAsFile(d, long)}
+                                attaching={attaching === d.id}
                               />
                               {d.recommendedOption && !ownWords[d.id] && (
                                 <button type="button" className="use-suggestion" onClick={() => setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }))}>
@@ -1009,7 +1064,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               )}
                             </div>
                             <div className="actions">
-                              <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim()}>
+                              <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim() || tooLongToSend(ownWords[d.id] ?? "")}>
                                 Send my answer
                               </button>
                               <button type="button" className="btn" onClick={() => setOwnWords(({ [d.id]: _, ...rest }) => rest)}>

@@ -2,6 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
+import { commandRisks, type Risk } from "./destructive.js";
 import { cleanupScope, explainCommand, readPush, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
@@ -27,6 +28,10 @@ export type PolicyMatch = {
   tempCleanupOnly?: boolean;
   /** Only matches a shell command written as one string whose deletes include plain relative paths in the working copy, the rest as tempCleanupOnly (BOS-120, cleanupScope in explain.ts). */
   workingCopyOnly?: boolean;
+  /** Only matches a shell command that deletes or destroys data, judged by what each part runs (BOS-116, destructive.ts). */
+  destructive?: boolean;
+  /** Only matches a shell command that pushes or publishes, judged the same way. */
+  pushing?: boolean;
   /** Only matches a call to one of Boss Man's own tools that isn't a command (isBossmanCall). Built-in rule only. */
   bossmanCall?: boolean;
 };
@@ -36,6 +41,7 @@ export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: Policy
 /** The owner's opt-in standing rule for scratch work (Rules page switch). */
 export const SCRATCH_RULE: PolicyRuleSpec = { name: "Always allow commands that only work in /tmp", match: { kinds: ["execute"], scratchOnly: true }, outcome: "allow" };
 
+// The old text patterns, kept as a second net under commandRisks (BOS-116): anything they caught is still caught.
 // rm's -r/-f may come after other flags or the paths (GNU rm reads `rm x -rf`), or be spelled long; find deletes with -delete or -exec.
 export const DESTRUCTIVE = String.raw`\brm\s+(?:[^\s;&|]+\s+)*?(?:-[a-zA-Z]*[rf][a-zA-Z]*|--(?:recursive|force))\b|\bfind\b[^;&|\n]*\s-(?:delete|exec(?:dir)?\s+(?:rm|rmdir|unlink|shred|truncate))\b|\bmkfs\b|\bdd\s+if=|\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm)\b|\bgit\s+push\s+.*--force\b|\bzfs\s+destroy\b|\bshred\b`;
 
@@ -104,11 +110,11 @@ export function isUnrecognisedTool(info: PermissionInfo): boolean {
 /** Table row 3: the built-in guards. Checked before any company allow, so a broad allow cannot lift them (BOS-307, DR-001). */
 export const BUILTIN_GUARDS: PolicyRuleSpec[] = [
   // Before the owner rule: cleaning up /tmp is the CEO's call, and reaches the owner only if the CEO escalates it (BOS-111).
-  { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, tempCleanupOnly: true }, outcome: "ceo" },
+  { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], destructive: true, tempCleanupOnly: true }, outcome: "ceo" },
   // The same for plain relative paths in the agent's checkout; the server sends it to the owner when the run has no checkout (BOS-120).
-  { name: WORKING_COPY_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, workingCopyOnly: true }, outcome: "ceo" },
-  { name: "Destructive commands go to the owner", match: { commandPattern: DESTRUCTIVE }, outcome: "owner" },
-  { name: "Pushing and publishing go to the owner", match: { commandPattern: PUSHING }, outcome: "owner" },
+  { name: WORKING_COPY_RULE, match: { kinds: ["execute"], destructive: true, workingCopyOnly: true }, outcome: "ceo" },
+  { name: "Destructive commands go to the owner", match: { destructive: true }, outcome: "owner" },
+  { name: "Pushing and publishing go to the owner", match: { pushing: true }, outcome: "owner" },
 ];
 
 /** Table row 6: the built-in allows. Never reached by a request a guard caught, and company routing rules never apply to them. */
@@ -144,7 +150,7 @@ export const TOOL_KINDS = ["read", "edit", "delete", "move", "search", "execute"
 /** What's wrong with a rule's match, if anything: it needs a condition, and its patterns must compile. */
 export function ruleProblems(match: PolicyMatch): string[] {
   const problems: string[] = [];
-  if (!match.kinds?.length && !match.commandPattern && !match.titlePattern && !match.scratchOnly) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
+  if (!match.kinds?.length && !match.commandPattern && !match.titlePattern && !match.scratchOnly && !match.destructive && !match.pushing) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
   for (const k of match.kinds ?? []) if (!(TOOL_KINDS as readonly string[]).includes(k)) problems.push(`"${k}" isn't a tool kind. Use: ${TOOL_KINDS.join(", ")}.`);
   for (const [label, p] of [["command pattern", match.commandPattern], ["title pattern", match.titlePattern]] as const) {
     if (p == null) continue;
@@ -161,6 +167,63 @@ export function commandOf(rawInput: unknown): string | null {
   if (Array.isArray(c) && c.every((x) => typeof x === "string")) return c.join(" ");
   return null;
 }
+
+/** Programs that only ever use their quoted arguments as text (a message, a pattern), never run them. `printf -v` stores its text in a variable that can be run, so it's not one of them. */
+const DATA_ONLY = /^(?:echo|printf(?!\s+(?:--\s+)?-v)|grep|egrep|fgrep|git\s+(?:commit|tag)|(?:gh|glab)\s+(?:pr|issue|release|mr))(?=\s|$)/;
+
+/**
+ * The command for the text patterns, with quoted text blanked only where it can't run: the
+ * arguments of a DATA_ONLY program written alone (`git commit -m 'stop rm -rf'`). Anywhere else
+ * quoted text may be run by a program the reader doesn't know (tmux new 'rm -rf x', at, docker
+ * exec, sed '1e …'), so it stays (BOS-116 review). Only a lone command is exempt: chained after
+ * anything, the text can reach a runner (git's COMMIT_EDITMSG, `git log > a.sh`, an earlier
+ * `exec >file`), so with ; & && || | or a newline nothing is blanked. Nor with heredocs,
+ * substitutions, definitions, a comment or $'…' quoting, which this scan would misread. A
+ * redirect into a file keeps the text too (`echo 'rm -rf x' >> ~/.bashrc`).
+ */
+function dataText(cmd: string): string {
+  if (/<<|[<>]\(|`|\$\(|\$['"]|\(\s*\)|\bfunction\s|\balias\b|\bPATH=|\bhash\s/.test(cmd)) return cmd;
+  const segs: Array<{ start: number; quotes: Array<[number, number]>; writes?: boolean }> = [{ start: 0, quotes: [] }];
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (c === "\\") i++;
+    else if (c === "#") return cmd;
+    else if (c === ">" && !/^>>?\|?\s*(?:\/dev\/null|&\d)(?=[\s;&|)]|$)/.test(cmd.slice(i))) segs.at(-1)!.writes = true;
+    // &> and >& are redirects, not a background &: the segment (and its writes) goes on.
+    else if (c === "&" && (cmd[i + 1] === ">" || cmd[i - 1] === ">")) continue;
+    else if (c === "'" || c === '"') {
+      let e = i + 1;
+      for (; e < cmd.length && cmd[e] !== c; e++) if (c === '"' && cmd[e] === "\\") e++;
+      if (e >= cmd.length) return cmd;
+      segs.at(-1)!.quotes.push([i, e + 1]);
+      i = e;
+    } else if (c === "|" && cmd[i + 1] !== "|" && cmd[i - 1] !== "|") return cmd;
+    else if (/[;&|\n]/.test(c)) segs.push({ start: i + 1, quotes: [] });
+  }
+  // A trailing ; or & leaves an empty segment, which chains nothing.
+  const used = segs.filter((s, i) => i === 0 || cmd.slice(s.start, segs[i + 1]?.start ?? cmd.length).replace(/[;&|\n]/g, "").trim());
+  const s = segs[0]!;
+  if (used.length > 1 || s.writes || !DATA_ONLY.test(cmd.trimStart())) return cmd;
+  let out = cmd;
+  for (const [a, b] of s.quotes.reverse()) out = out.slice(0, a) + "''" + out.slice(b);
+  return out;
+}
+
+/** What a request's shell command destroys or pushes. An argv array is read as its words, so ["bash", "-lc", "…"] keeps its script whole. */
+function risksOf(info: PermissionInfo): Risk[] {
+  const raw = info.rawInput && typeof info.rawInput === "object" ? (info.rawInput as Record<string, unknown>) : {};
+  const argv = raw["command"] ?? raw["cmd"];
+  if (Array.isArray(argv) && argv.every((x) => typeof x === "string")) return commandRisks(argv);
+  const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null);
+  return cmd ? commandRisks(cmd) : [];
+}
+
+const hits = (info: PermissionInfo, kind: Risk["kind"], legacy: string) => {
+  const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null) ?? "";
+  return risksOf(info).some((r) => r.kind === kind) || new RegExp(legacy, "i").test(dataText(cmd));
+};
+export const isDestructive = (info: PermissionInfo) => hits(info, "destroys", DESTRUCTIVE);
+export const isPushing = (info: PermissionInfo) => hits(info, "pushes", PUSHING);
 
 function safeRegex(pattern: string): RegExp | null {
   try {
@@ -179,10 +242,9 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     const re = safeRegex(rule.commandPattern);
     if (!cmd || !re || !re.test(cmd)) return false;
   }
-  if (rule.safeOnly) {
-    const cmd = commandOf(info.rawInput) ?? "";
-    if (new RegExp(`${DESTRUCTIVE}|${PUSHING}`, "i").test(cmd)) return false;
-  }
+  if (rule.safeOnly && (isDestructive(info) || isPushing(info))) return false;
+  if (rule.destructive && !isDestructive(info)) return false;
+  if (rule.pushing && !isPushing(info)) return false;
   if (rule.scratchOnly) {
     // Paths are checked as written, so the note (scratchOnly in explain.ts) vouches only for
     // programs that can't follow a symlink at their target: rm/rmdir/unlink/mkdir of one plain
@@ -190,18 +252,16 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     const scratch = explainCommand(commandOf(info.rawInput) ?? "").scratch;
     if (!scratch || scratch.unchecked.length) return false;
   }
-  if (rule.tempCleanupOnly && !tempCleanup(commandOf(info.rawInput) ?? "")) return false;
-  if (rule.workingCopyOnly) {
-    // A string only: an argv array runs without a shell, so cleanupScope's reading of ; and && wouldn't hold.
-    const cmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
-    if (typeof cmd !== "string" || !cleanupScope(cmd)?.workingCopy.length) return false;
-  }
+  // A string only: an argv array runs without a shell, so tempCleanup's and cleanupScope's reading of ; and && wouldn't hold.
+  const shellCmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
+  if (rule.tempCleanupOnly && !(typeof shellCmd === "string" && tempCleanup(shellCmd))) return false;
+  if (rule.workingCopyOnly && !(typeof shellCmd === "string" && cleanupScope(shellCmd)?.workingCopy.length)) return false;
   if (rule.titlePattern) {
     const re = safeRegex(rule.titlePattern);
     if (!info.title || !re || !re.test(info.title)) return false;
   }
   if (rule.bossmanCall && !isBossmanCall(info)) return false;
-  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.bossmanCall);
+  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.destructive || rule.pushing || rule.bossmanCall);
 }
 
 /** Addresses a fetch must not reach: the home network and the machine itself (SSRF). */
@@ -299,6 +359,8 @@ const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:node_m
 /** find -delete rooted at one plain /tmp entry: kept Allow as BOS-111 pinned it. Root must be one level, quoted patterns kept simple. */
 const FIND_TMP_DELETE = /^find\s+\/tmp\/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+(?:\s+-(?:name|iname|type|path|mindepth|maxdepth|mtime|mmin|newer|empty|print)(?:\s+(?:'[^']*'|[\w.*?-]+))?)*\s+-delete$/;
 
+const vouched = (s: string) => WORKSPACE_DELETE.test(s) || TEMP_DELETE.test(s) || FIND_TMP_DELETE.test(s);
+
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
  * files isn't a reason to refuse on its own: temp-file cleanup and deletes of build output in the
@@ -308,30 +370,38 @@ const FIND_TMP_DELETE = /^find\s+\/tmp\/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+(?:\s+-(
  */
 export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const cmd = commandOf(info.rawInput) ?? info.title ?? "";
-  // Temp cleanup is Allow whatever else is in it: cleanupScope already refuses shred, pushes and other destructive words, and a later cd can't move a /tmp/NAME delete.
-  if (tempCleanup(cmd)) return "allow";
+  const found = risksOf(info).filter((r) => r.kind === "destroys");
+  // Temp cleanup is Allow whatever else is in it: cleanupScope already refuses shred, pushes and other destructive words,
+  // and a later cd can't move a /tmp/NAME delete. The reader must agree that nothing but deletes destroys (BOS-116).
+  if (tempCleanup(cmd) && found.every((r) => /^(rm|find)\b/i.test(r.text))) return "allow";
   // A push is judged by where it goes (BOS-208): a plain ticket-branch push is Allow; main, force,
   // deletes, every-branch and anything the parser can't read are Deny.
   const push = readPush(cmd);
   if (push) return push.dangerous ? "deny" : "allow";
-  // Quoted text is data (a sed script, a commit message) unless a shell runs it.
-  const run = /\b(sh|bash|zsh)\s+-c\b|\beval\b/.test(cmd) ? cmd : cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
+  const run = dataText(cmd);
   const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];
   // Destructive commands that aren't file deletes are Deny even in /tmp (shred /tmp/a); find -delete counts as a delete.
-  if (hits.some((h) => !/^(rm|find)\b/i.test(h))) return "deny";
+  if ([...hits, ...found.map((r) => r.text)].some((h) => !/^(rm|find)\b/i.test(h))) return "deny";
   // A command that only works in /tmp, with nothing in it Boss Man can't check, is safe too.
   const scratch = explainCommand(cmd).scratch;
   if (scratch && !scratch.unchecked.length) return "allow";
-  if (!hits.length) return "allow";
+  if (!hits.length && !found.length) return "allow";
   // A shell still runs $( ), backticks and <( ) inside double quotes, which `run` blanked out, so the pieces below can't be judged without seeing them (security round 2).
   if (/\$\(|`|[<>]\(/.test(cmd)) return "deny";
-  if (hits.some((h) => !/^(?:rm|find)\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");
   const pieces = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
+  // Of the reader's findings, only a plainly written delete of build output or of one-level /tmp entries can be vouched for (BOS-116, BOS-165).
+  // A find whose pattern is quoted (-name '*.log') isn't "plain", so it is vouched for only when the command itself has a top-level piece
+  // FIND_TMP_DELETE accepts: a find inside bash -c, a wrapper or a subshell doesn't make one.
+  const vouchedRisk = (r: Risk) => (r.plain ? vouched(r.text) : /^find\s/.test(r.text) && FIND_TMP_DELETE.test(r.text) && pieces.some((p) => FIND_TMP_DELETE.test(p)));
+  if (!found.every(vouchedRisk)) return "deny";
+  if (hits.some((h) => !/^(?:rm|find)\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   // A plain delete of one-level /tmp entries never makes the suggestion Deny, whatever else the
   // command does (BOS-165, from BOS-153 finding 2). TEMP_DELETE accepts no trailing slash, deeper
   // path, glob or redirect to a file, so /tmp/a/, /tmp/a/b and rm > /home/x stay Deny. A piece with
   // no vouched delete is accepted only when it can't reach beyond /tmp either (writesBeyondTmp),
   // so cp -t /home and a redirect into the home folder still pay Deny.
-  return pieces.every((s) => (destructive.test(s) ? WORKSPACE_DELETE.test(s) || TEMP_DELETE.test(s) || FIND_TMP_DELETE.test(s) : !writesBeyondTmp(s))) ? "allow" : "deny";
+  // A piece counts as a delete when the reader finds one in it too (rm --rec dist), so the vouched check, not writesBeyondTmp, judges it.
+  const deletes = (s: string) => destructive.test(s) || commandRisks(s).some((r) => r.kind === "destroys");
+  return pieces.every((s) => (deletes(s) ? vouched(s) : !writesBeyondTmp(s))) ? "allow" : "deny";
 }
