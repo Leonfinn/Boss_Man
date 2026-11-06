@@ -569,6 +569,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     });
 
     it("skips nothing once a deploy has finished, and runs again the moment its result lands", async () => {
+      // Only the clock: pinned so a slow machine can't push these syncs past the forced minute and turn a skip into a pass.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-20T12:05:00Z"));
       const c = (ctx = await setup());
       await c.available();
       await c.selfDeploy.sync();
