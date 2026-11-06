@@ -70,6 +70,15 @@ fi
 
 # The slots and queue (need flock). pnpm/node are stubbed and CHECK_ALL_STOP_AFTER_LOCK stops the child once a slot is held.
 if command -v flock >/dev/null; then
+  # BOS-545: the recorded duration is the whole run from slot taken, even if something inside the run (a nested
+  # check-all, as in the script tests) writes to the start-time file. Old code recorded the nested write: 0 s.
+  if command -v git >/dev/null; then
+    git -C "$repo" checkout -q -- . ; git -C "$repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m clean; rm -f "$store"/*.json
+    ( cd "$repo" && env CHECK_ALL_LOCK="$t/dlock" CHECK_ALL_PAIR_PROOF="$t/dproof" BOSSMAN_CHECK_STORE="$store" BOSSMAN_CHECK_FORCE=1 \
+        CHECK_ALL_SLOT_COMMAND='sleep 2; [ -z "${CHECK_ALL_STARTED_FILE:-}" ] || date +%s >"$CHECK_ALL_STARTED_FILE"' ./scripts/check-all.sh >"$t/out" 2>&1 ) || fail "duration run failed: $(cat "$t/out")"
+    d=$(sed -n 's/.*"duration_seconds":\([0-9]*\).*/\1/p' "$store"/*.json | head -1)
+    [ "${d:-0}" -ge 2 ] || fail "duration_seconds is ${d:-missing}, want the whole run (>= 2): $(cat "$t/out")"
+  fi
   mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
   lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" "$@" ./scripts/check-all.sh 2>&1); }
   hold() { ( exec 8>"$t/lock.slot.$1"; flock 8; sleep "$2" ) & }
