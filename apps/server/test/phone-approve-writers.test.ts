@@ -54,6 +54,7 @@ describe("rule 1: every writer of a decision card is classified", () => {
       ["steps", { approveSummary: "Do it", steps: ["Click"] }, false],
       ["ownerMustDo", { approveSummary: "Do it", ownerMustDo: true, steps: ["Click"] }, false],
       ["stillNeeded", { approveSummary: "Do it", stillNeeded: "The price changed." }, false],
+      ["sets up an add-on (BOS-522, closes itself)", { approveSummary: "Do it", setsUp: "ntfy" }, false],
       ["no agent (Boss Man's own notices in app.ts)", { approveSummary: "Do it", agentId: null }, false],
     ];
     for (const [name, extra, eligible] of cases) {
@@ -109,7 +110,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/app.ts": { counts: { raise: 9 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425) and decisionsSvc.raise with agentId null (merge failed, import checklist)" },
   "src/mcp.ts": { counts: { raise: 1 }, why: "raise_decision: the one eligible path, when plain and with an approveSummary" },
   "src/services/watchdog.ts": { counts: { raise: 1 }, why: "the Scrum Master's raise_decision always blocks its ticket (ticketId, blocker)" },
-  "src/services/agents.ts": { counts: { insert: 5 }, why: "kind approval: hire, model_change, instructions, team_plan, rename" },
+  "src/services/agents.ts": { counts: { insert: 6 }, why: "kind approval: hire, model_change, instructions, team_plan, rename, standing_rules (CEO rules change)" },
   "src/services/alert-ladder.ts": { counts: { insert: 1 }, why: "tier ceo with a ladder key" },
   "src/services/decisions.ts": {
     counts: { insert: 12, question: 8, todo: 2 },

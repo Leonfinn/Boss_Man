@@ -24,8 +24,11 @@ export const IP_LIMIT = { taps: 10, ms: 10 * 60_000 };
 export const COMPANY_LIMIT = { taps: 60, ms: 3_600_000 };
 export const SUMMARY_MAX = 120;
 
-/** Context keys whose mere presence makes a card ineligible (rule 1). */
-export const RULE1_KEYS = ["steps", "ownerMustDo", "ticketId", "stillNeeded", "advice", "ladder"] as const;
+/**
+ * Context keys whose mere presence makes a card ineligible (rule 1). setsUp/clearWhen (BOS-522) mark
+ * an add-on setup card: an owner to-do that closes itself, never a plain choice to approve blind.
+ */
+export const RULE1_KEYS = ["steps", "ownerMustDo", "ticketId", "stillNeeded", "advice", "ladder", "setsUp", "clearWhen"] as const;
 
 /**
  * Text as the phone shows it (rules 2 and N4): the stored text with control and format characters
