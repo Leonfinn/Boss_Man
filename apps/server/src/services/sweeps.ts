@@ -959,13 +959,15 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
 
   // A whole company with work waiting and nothing finishing (BOS-593). Its cause test asks whether a live run waits in the check line.
   const noProgress = noProgressSweep(db, { alert: opts.alert, isConnected: opts.isConnected, inCheckLine: async (runId) => !!(await busyInCommand(runId))?.checkScript });
+  // `run` is a property so a test can stand in for one sweep step and watch the pass around it (BOS-611).
+  type Pass = { goalChecks: { raised: number }; closedCards: number | undefined; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number } };
 
   return {
     limits,
     resumeMergesOnPromotion,
     resumeAfterUpdate,
     /** One pass of every sweep. Safe to call often. */
-    async run() {
+    run: async (_noProgressRun: (t: Date) => Promise<{ raised: number }> = (t) => noProgress.run(t)): Promise<Pass> => {
       const t = now();
       const goalChecks = await raiseDueGoalChecks(db, t);
       await opts.expireSkills?.();
@@ -985,10 +987,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // After missed work, so its wakes already count against the free slots (BOS-574).
       const idleSlotsResult = held ? { woken: 0 } : await idleSlots(t);
       // Silent runs, reviews that end without a verdict, and causes left unproven (BOS-314): these run whether or not the watchdog is on.
-      // A failing query here must not take the whole sweep down every minute (BOS-611), as with the owner replies below.
-      const progress = held
-        ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 }
-        : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert, inCheckQueue: async (runId, silentMs) => silentMs < limits.checkQueueAfterMs && !!(await busyInCommand(runId))?.checkScript }).catch(() => ({ steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 }));
+      const progress = held ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 } : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert, inCheckQueue: async (runId, silentMs) => silentMs < limits.checkQueueAfterMs && !!(await busyInCommand(runId))?.checkScript });
       const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);
       const unmerged = held ? 0 : await unmergedApprovals(t);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
@@ -997,8 +996,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // steps wait, like the other sweeps: an ask to the CEO would start a run too.
       const unanswered = held ? { rewoken: 0, standIns: 0 } : opts.ownerReplies ? await opts.ownerReplies(t).catch(() => ({ rewoken: 0, standIns: 0 })) : { rewoken: 0, standIns: 0 };
       // After the closer, so a company that has just moved again isn't raised. An update hold stops every
-      // company on purpose, so it isn't a stall.
-      const noProgressResult = held ? { raised: 0 } : await noProgress.run(t);
+      // company on purpose, so it isn't a stall. A failing query here must not take the whole sweep down
+      // every minute (BOS-611), as with the owner replies above.
+      const noProgressResult = held ? { raised: 0 } : await _noProgressRun(t).catch(() => ({ raised: 0 }));
       return { noProgress: noProgressResult, goalChecks, closedCards, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress };
     },
   };
