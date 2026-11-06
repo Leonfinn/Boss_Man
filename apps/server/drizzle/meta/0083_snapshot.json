@@ -5492,18 +5492,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "sandbox": {
-          "name": "sandbox",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "sandbox_checked_at": {
-          "name": "sandbox_checked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -9688,8 +9676,8 @@
   "policies": {},
   "views": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   }
 }

@@ -22,3 +22,29 @@ it("runs loops on their interval and stop waits for a pass in flight", async () 
   await new Promise((r) => setTimeout(r, 20));
   expect(started).toBe(seen); // nothing fires after stop
 });
+
+it("skips a loop's ticks while its last pass is still running, and only that loop's (BOS-414)", async () => {
+  let slowStarted = 0;
+  let slowFinished = 0;
+  let fast = 0;
+  const bg = createBackground([
+    {
+      name: "slow",
+      everyMs: 5,
+      run: async () => {
+        slowStarted++;
+        await new Promise((r) => setTimeout(r, 60));
+        slowFinished++;
+      },
+    },
+    { name: "fast", everyMs: 5, run: async () => void fast++ },
+  ]);
+  bg.startBackground();
+  await new Promise((r) => setTimeout(r, 40));
+  await bg.stopBackground();
+  // Twelve ticks fit in 60 ms; the slow pass that was still running skipped all of them.
+  expect(slowStarted).toBe(1);
+  expect(slowFinished).toBe(1);
+  // The other loop kept its own pace.
+  expect(fast).toBeGreaterThan(3);
+});

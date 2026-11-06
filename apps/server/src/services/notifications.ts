@@ -124,7 +124,12 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     return row;
   }
 
-  /** A notification about a decision is read once the decision is settled, whoever answered it and however. */
+  /**
+   * A notification about a decision is read once the decision is settled, whoever answered it and however.
+   * Cards answered or withdrawn through the decisions service mark their own notification read at that
+   * moment (BOS-413). This sweep is the safety net for a close made anywhere else, and runs once a minute
+   * rather than on every feed poll, so a read never writes.
+   */
   const readAnswered = () =>
     db
       .update(notifications)
@@ -174,8 +179,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     },
 
     async list(opts: { before?: Date; limit?: number; status?: "unread" | "read"; level?: NotifyLevel; company?: string } = {}) {
-      await readAnswered();
-      // `company: "none"` means notices that belong to no company.
+      // The read path only reads (BOS-413): a settled card's notification was marked read when it settled.
       const where = and(
         opts.before ? lt(notifications.createdAt, opts.before) : undefined,
         opts.status === "unread" ? isNull(notifications.readAt) : opts.status === "read" ? isNotNull(notifications.readAt) : undefined,
@@ -193,10 +197,13 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     },
 
     async unread() {
-      await readAnswered();
+      // The read path only reads (BOS-413): a settled card's notification was marked read when it settled.
       const [row] = await db.select({ n: count() }).from(notifications).where(isNull(notifications.readAt));
       return Number(row?.n ?? 0);
     },
+
+    /** A read never writes (BOS-413). This is the once-a-minute sweep that catches cards closed outside the decisions service. */
+    markAnsweredRead: readAnswered,
 
     async markRead(ids: string[] | "all") {
       await db
