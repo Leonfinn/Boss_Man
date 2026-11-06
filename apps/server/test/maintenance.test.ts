@@ -257,6 +257,34 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(page!.body).toContain("silent-co: has not reconnected");
   });
 
+  it("a failed swap lifts the hold; once the runner is back on the new image the panel shows the current state, not the failure", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.broken.add("app-co");
+    await c.maintenance.start();
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.maint()).toMatchObject({ on: false, last: { ok: false }, healthy: false });
+    c.fake.runnersBySlug.get("app-co")!.current = true; // it came back by itself (compose recreated it)
+    expect(await c.maint()).toMatchObject({ on: false, last: { ok: false }, healthy: true });
+  });
+
+  it("a runner that failed to swap but came back on the new image by itself is not reported", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.broken.add("app-co");
+    const recreate = c.fake.fetch;
+    c.fake.runnersBySlug.get("app-co")!.current = false;
+    await c.maintenance.start();
+    // The recreate call fails, yet the container is on the new image by the time the pass re-reads the fleet.
+    const orig = c.fake.runnersBySlug.get("app-co")!;
+    Object.defineProperty(orig, "current", { get: (() => { let n = 0; return () => ++n > 1; })(), set: () => undefined });
+    void recreate;
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect((await c.db.select().from(notifications)).map((n) => n.title)).toContain("Runners updated");
+  });
+
   it("needs the launcher, and stops cleanly with an older one", async () => {
     const none = (ctx = await setup({ launcher: false }));
     expect((await none.req("POST", "/api/maintenance/start", {})).statusCode).toBe(409);

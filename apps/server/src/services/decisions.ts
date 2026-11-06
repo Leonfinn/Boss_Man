@@ -46,7 +46,7 @@ import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from 
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 import { commandProblem, parseStep } from "./steps.js";
 
@@ -307,7 +307,10 @@ export async function clearMergeCards(db: Db, ticketId: string, withdrawal: With
       .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(r.context as object), withdrawn: withdrawal } })
       .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
       .returning({ id: decisions.id });
-    if (done) cleared++;
+    if (done) {
+      cleared++;
+      await markDecisionNotificationRead(db, r.id, new Date(withdrawal.at));
+    }
   }
   // An answered or withdrawn card keeps its key (the column is unique), which would swallow a fresh insert silently (BOS-362).
   await db.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, `merge-stuck:${ticketId}`), ne(decisions.status, "open")));
@@ -332,6 +335,7 @@ export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Wi
       .returning({ id: decisions.id });
     if (done) {
       cleared++;
+      await markDecisionNotificationRead(db, r.id, new Date(withdrawal.at));
       await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, r.id));
     }
   }
@@ -394,6 +398,15 @@ export async function raiseOwnerTodo(
     .onConflictDoNothing()
     .returning({ id: decisions.id });
   return row ?? null;
+}
+
+/**
+ * Marks a settled card's notification read at the moment it is answered or withdrawn (BOS-413), so the
+ * owner's feed is right without the GET path having to sweep every notification on every poll. A
+ * background sweep is kept as a safety net for cards closed outside these helpers.
+ */
+export async function markDecisionNotificationRead(db: Db, decisionId: string, at: Date = new Date()) {
+  await db.update(notifications).set({ readAt: at }).where(and(eq(notifications.decisionId, decisionId), isNull(notifications.readAt)));
 }
 
 /** The dedupe key for a ticket's owner setup card (DR-011): one per ticket, ever. */
@@ -461,6 +474,7 @@ export async function clearOwnerTodo(db: Db, key: string, summary: string) {
     .where(and(eq(decisions.dedupeKey, key), eq(decisions.status, "open")))
     .returning({ id: decisions.id, companyId: decisions.companyId });
   if (row) await record(db, { companyId: row.companyId, kind: "decision_answered", summary, at: new Date() });
+  if (row) await markDecisionNotificationRead(db, row.id);
   return row ?? null;
 }
 
@@ -1630,7 +1644,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     /** Takes a skill decision off the owner's queue when the proposal ended some other way. */
     async withdrawSkill(id: string) {
-      await db.update(decisions).set({ status: "withdrawn", dedupeKey: null, answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      const [done] = await db.update(decisions).set({ status: "withdrawn", dedupeKey: null, answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
+      if (done) await markDecisionNotificationRead(db, id, now());
     },
 
     setLoopHooks(hooks: LoopHooks) {
@@ -1715,40 +1730,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const forIds = [...new Set(open.map((o) => o.d.forAgentId).filter((x): x is string => !!x))];
       const forNames = new Map(forIds.length ? (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, forIds))).map((a) => [a.id, a.name]) : []);
 
-      // Open work, with the most important objective it serves and its effective due date.
-      const work = await db
-        .select({
-          id: tickets.id,
-          title: tickets.title,
-          number: tickets.number,
-          prefix: companies.ticketPrefix,
-          dueDate: tickets.dueDate,
-          milestoneTarget: milestones.targetDate,
-          krPriority: objectives.priority,
-          milestoneObjectiveId: milestones.objectiveId,
-        })
-        .from(tickets)
-        .innerJoin(companies, eq(companies.id, tickets.companyId))
-        .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
-        .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
-        .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
-        .where(ne(tickets.systemState, "done"));
-      const msObjectives = [...new Set(work.map((w) => w.milestoneObjectiveId).filter((x): x is string => !!x))];
-      const msPriority = new Map(
-        msObjectives.length ? (await db.select({ id: objectives.id, p: objectives.priority }).from(objectives).where(inArray(objectives.id, msObjectives))).map((o) => [o.id, o.p]) : [],
-      );
-      const info = new Map(
-        work.map((w) => {
-          const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
-          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null }];
-        }),
-      );
-      const deps = await db.select().from(ticketDependencies);
-      const dependents = new Map<string, string[]>();
-      for (const dep of deps) {
-        if (!dep.blockerTicketId) continue;
-        dependents.set(dep.blockerTicketId, [...(dependents.get(dep.blockerTicketId) ?? []), dep.blockedTicketId]);
-      }
+      // (BOS-413) Read only what the open cards point at, never every open ticket in every company with
+      // its objective joins, and never every dependency row: the rows that name an open card, then the
+      // chain below the tickets those reach.
+      const openIds = open.map(({ d }) => d.id);
+      const directDeps = await db.select().from(ticketDependencies).where(inArray(ticketDependencies.blockerDecisionId, openIds));
 
       // Tickets a decision holds up directly, by kind.
       const runIds = open.flatMap(({ d }) => {
@@ -1760,6 +1746,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const deployTickets = new Map(
         deployIds.length ? (await db.select({ id: deploys.id, ticketId: deploys.ticketId }).from(deploys).where(inArray(deploys.id, deployIds))).map((r) => [r.id, r.ticketId]) : [],
       );
+      const engagementTicketIds = [...new Set(open.flatMap(({ d }) => {
+        const c = d.context as DecisionContext;
+        return c.type === "engagement" ? [c.engagementId] : [];
+      }))];
+      const engagementDeps = engagementTicketIds.length
+        ? await db.select({ engagementId: ticketDependencies.blockerEngagementId, blockedTicketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(inArray(ticketDependencies.blockerEngagementId, engagementTicketIds))
+        : [];
       const direct = (d: typeof decisions.$inferSelect): string[] => {
         const c = d.context as DecisionContext;
         switch (c.type) {
@@ -1778,9 +1771,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             return id ? [id] : [];
           }
           case "engagement":
-            return deps.filter((x) => x.blockerEngagementId === c.engagementId).map((x) => x.blockedTicketId);
+            return engagementDeps.filter((x) => x.engagementId === c.engagementId).map((x) => x.blockedTicketId);
           default:
-            return deps.filter((x) => x.blockerDecisionId === d.id).map((x) => x.blockedTicketId);
+            return directDeps.filter((x) => x.blockerDecisionId === d.id).map((x) => x.blockedTicketId);
         }
       };
 
@@ -1798,37 +1791,108 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return explain?.push?.ticketId ? [explain.push.ticketId] : [];
       });
       const wantedAbout = [...new Set([...open.flatMap(({ d }) => aboutIds(d)), ...pushTicketIds])];
-      const aboutRows = wantedAbout.length
+      // (BOS-413) The dependents chain below the tickets the cards hold up, in one round trip: a
+      // recursive walk down from those tickets only, capped at the same depth of 10, reading only
+      // rows that name a ticket already in the chain. Nothing outside the chain is read.
+      const dependents = new Map<string, string[]>();
+      {
+        const seed = [...new Set(open.flatMap(({ d }) => direct(d)))];
+        if (seed.length) {
+          // node-postgres and PGlite both answer db.execute with the rows, but one wraps them.
+          const result = (await db.execute(sql`
+            with recursive chain(dep, blocker, blocked, depth) as (
+              select d.id, d.blocker_ticket_id, d.blocked_ticket_id, 1
+                from ticket_dependencies d
+                join tickets k on k.id = d.blocker_ticket_id
+                join tickets b on b.id = d.blocked_ticket_id
+               where d.blocker_ticket_id in (${sql.join(seed.map((id) => sql`${id}`), sql`, `)})
+                 and k.system_state <> 'done' and b.system_state <> 'done'
+              union
+              select d.id, d.blocker_ticket_id, d.blocked_ticket_id, c.depth + 1
+                from ticket_dependencies d
+                join chain c on d.blocker_ticket_id = c.blocked
+                join tickets k on k.id = d.blocker_ticket_id
+                join tickets b on b.id = d.blocked_ticket_id
+               where c.depth < 10 and k.system_state <> 'done' and b.system_state <> 'done'
+            )
+            -- One row per edge, carrying the smallest dependency row that made it, so the consumer's
+            -- order is the same on every run and every database.
+            select min(dep::text) as dep, blocker, blocked from chain group by blocker, blocked`)) as unknown as { rows?: Array<{ dep: string; blocker: string; blocked: string }> } | Array<{ dep: string; blocker: string; blocked: string }>;
+          const found = Array.isArray(result) ? result : (result.rows ?? []);
+          // Under each blocker, its dependents in the order of the dependency rows that made them: the
+          // same order the old walk over every dependency row produced (Postgres returns rows in no
+          // promised order, so the sort is done here rather than in SQL).
+          for (const r of [...found].sort((x, y) => x.dep.localeCompare(y.dep))) {
+            dependents.set(r.blocker, [...(dependents.get(r.blocker) ?? []), r.blocked]);
+          }
+        }
+      }
+
+      // The chains' tickets, and only those, with the most important objective each serves and its
+      // effective due date; plus the tickets a card is about, which may be done or hold nothing up.
+      const chainIds = [...new Set([...dependents.keys(), ...[...dependents.values()].flat()])];
+      const wantedTickets = [...new Set([...chainIds, ...wantedAbout])];
+      const work = wantedTickets.length
         ? await db
-            .select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix })
+            .select({
+              id: tickets.id,
+              title: tickets.title,
+              number: tickets.number,
+              systemState: tickets.systemState,
+              companyId: tickets.companyId,
+              prefix: companies.ticketPrefix,
+              dueDate: tickets.dueDate,
+              milestoneTarget: milestones.targetDate,
+              krPriority: objectives.priority,
+              milestoneObjectiveId: milestones.objectiveId,
+            })
             .from(tickets)
             .innerJoin(companies, eq(companies.id, tickets.companyId))
-            .where(inArray(tickets.id, wantedAbout))
+            .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
+            .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+            .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
+            // A chain member that is done is skipped, as before; a card's "about" ticket may be done.
+            .where(inArray(tickets.id, wantedTickets))
         : [];
-      const aboutInfo = new Map(aboutRows.map((r) => [r.id, r]));
+      const msObjectives = [...new Set(work.map((w) => w.milestoneObjectiveId).filter((x): x is string => !!x))];
+      const msPriority = new Map(
+        msObjectives.length ? (await db.select({ id: objectives.id, p: objectives.priority }).from(objectives).where(inArray(objectives.id, msObjectives))).map((o) => [o.id, o.p]) : [],
+      );
+      const info = new Map(
+        work.map((w) => {
+          const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
+          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), companyId: w.companyId, prefix: w.prefix, number: w.number, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null } as const];
+        }),
+      );
+      // Only live tickets are in a chain; a done one (or a deleted one) is left out of the walk, and so
+      // is everything below it: a done ticket never starts a chain, nor is it a hop through one.
+      const liveOnly = new Set(work.filter((w) => w.systemState !== "done").map((w) => w.id));
 
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
         const seen = new Set<string>();
-        let frontier = direct(d).filter((id) => info.has(id));
+        // Nearest first, and at each depth by ticket id: an order that is the same on every run,
+        // which a read of every dependency row (the old walk) never promised anyway.
+        const byTicket = (a: string, b: string) => a.localeCompare(b);
+        let frontier = direct(d).filter((id) => liveOnly.has(id)).sort(byTicket);
         for (let depth = 1; frontier.length && depth <= 10; depth++) {
           const next: string[] = [];
           for (const id of frontier) {
             if (seen.has(id)) continue;
             seen.add(id);
             const i = info.get(id);
-            if (!i) continue;
+            if (!i || !liveOnly.has(id)) continue;
             chain.push({ ticketId: id, title: i.title, ref: i.ref, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
             next.push(...(dependents.get(id) ?? []));
           }
-          frontier = next;
+          frontier = next.sort(byTicket);
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
-        const about = aboutIds(d).flatMap((id) => { const r = aboutInfo.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
+        const about = aboutIds(d).flatMap((id) => { const r = info.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
         const c = d.context as DecisionContext;
         const push = c.type === "permission" ? c.explain?.push : undefined;
-        const pushTicket = push?.ticketId ? aboutInfo.get(push.ticketId) : undefined;
+        const pushTicket = push?.ticketId ? info.get(push.ticketId) : undefined;
         const context = pushTicket && c.type === "permission" && c.explain
           ? { ...c, explain: { ...c.explain, push: { ...push!, ref: ticketRef(pushTicket.prefix, pushTicket.number) ?? undefined } } }
           : d.context;
@@ -1976,6 +2040,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           return true;
         });
         if (!made) return null;
+        // The card was withdrawn in the transaction above; its notification is read now (BOS-413).
+        await markDecisionNotificationRead(db, d.id, now());
         const [held] = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, newId));
         await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held?.ticketId, kind: "decision_reissued", summary: `CEO reissued "${d.question}" with more detail${via}`, at: now() });
         return { outcome: "reissue" as const, id: newId, inPlace: false };
@@ -2074,6 +2140,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id });
       if (!closed) return null;
+      await markDecisionNotificationRead(db, d.id, now());
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
       // A withdrawn card must never be left holding a ticket (BOS-149): move its hold to an identical
       // open card when there is one, so the owner's surviving question still holds it, and drop it
@@ -2258,6 +2325,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.update(decisions).set({ context: { ...ctx, repeats: repeatsNow } as DecisionContext }).where(eq(decisions.id, id));
       }
       if (!closed) return null;
+      // The card is settled, so its notification is read now rather than on the next feed poll (BOS-413).
+      await markDecisionNotificationRead(db, id, now());
 
       // Whatever else we told the owner about these tickets may now be out of date (BOS-123).
       // A permission click allowed a command; it isn't the owner doing the thing the note asked about.
@@ -2530,6 +2599,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (d.kind !== "question" || type !== "question") throw new AnswerError("Only a question card you raised with raise_decision can be withdrawn; this card belongs to another flow and has to be answered.");
       const [closed] = await db.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
       if (!closed) return null;
+      await markDecisionNotificationRead(db, id, now());
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
       await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
       for (const f of freed) await releaseIfFree(f.ticketId, false);
