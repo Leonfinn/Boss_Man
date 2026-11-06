@@ -10,6 +10,8 @@ unset BOSSMAN_CHECK_CHILD BOSSMAN_CHECK_ATTEMPTS BOSSMAN_CHECK_BUDGET_SECONDS BO
 export BOSSMAN_CHECK_RETRY_SECONDS=0 BOSSMAN_CHECK_STORE=off
 # Also drop the merge gate's and user's settings, which would change what the cases below mean. check-all.sh sets CHILD for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
 unset BOSSMAN_CHECK_CHILD BOSSMAN_MERGE_CHECK BOSSMAN_CHECK_FORCE CHECK_ALL_SLOTS CHECK_ALL_LOCK_WAIT CLAUDECODE BOSSMAN_AGENT_SESSION CHECK_ALL_FORCE
+# check-all.sh sweeps /tmp before it takes a slot; on a busy runner that outruns the timed holds below (BOS-557). Sweep an empty folder of ours instead.
+mkdir -p "$t/sweep"; export SWEEP_TMP_DIR="$t/sweep"
 runs() { grep -c . "$t/count" 2>/dev/null || true; }
 
 # run <expected rc> <expected runs> <label> <stub body> [dir] [command]
@@ -126,7 +128,7 @@ if command -v flock >/dev/null; then
   echo "A=600s B=640s no OOM" >"$t/proof"
 
   # With both slots busy a merge check gives up with exit 75 after CHECK_ALL_LOCK_WAIT, and says its place.
-  hold 1 5; h1=$!; hold 2 5; h2=$!; sleep 0.3
+  hold 1 9; h1=$!; hold 2 9; h2=$!; sleep 0.3
   rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2) || rc=$?
   [ "$rc" = 75 ] || fail "busy slots: expected exit 75, got $rc: $out"
   grep -q "place 1 of 1" <<<"$out" || fail "busy slots: no place message: $out"
