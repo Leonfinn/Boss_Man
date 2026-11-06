@@ -643,13 +643,31 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     const result = { released: 0 };
     if (!opts.releaseUnblocked) return result;
     const rows = await db
-      .select({ id: tickets.id })
+      .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
       .where(and(inArray(tickets.systemState, ["backlog", "blocked"]), eq(companies.paused, false), sql`exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`, sql`not exists (select 1 from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id} and b.system_state <> 'done')`));
-    for (const { id } of rows) {
+    const byCompany = new Map<string, string[]>();
+    for (const { id, title, companyId } of rows) {
       if (await isBlocked(id)) continue;
-      if (await opts.releaseUnblocked(id)) result.released++;
+      if (!(await opts.releaseUnblocked(id))) continue;
+      result.released++;
+      byCompany.set(companyId, [...(byCompany.get(companyId) ?? []), title]);
+    }
+    // One summary for the CEO the first time the catch-up releases anything, so a ticket held on purpose can be put back.
+    for (const [companyId, titles] of byCompany) {
+      await db
+        .insert(decisions)
+        .values({
+          companyId,
+          kind: "question",
+          question: `Tickets that were waiting on finished work have been started: ${titles.map((x) => `"${x}"`).join(", ")}. If any was held on purpose, move it back to backlog.`,
+          options: ["Got it"],
+          recommendedOption: "Got it",
+          dedupeKey: `unblocked-catchup:${companyId}`,
+          context: { type: "question" },
+        })
+        .onConflictDoNothing();
     }
     return result;
   }

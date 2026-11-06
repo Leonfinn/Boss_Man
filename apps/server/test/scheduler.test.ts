@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
+import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -485,6 +485,25 @@ describe("scheduler", () => {
       expect(await unblockedWakes(stuck.id)).toHaveLength(1);
       expect(((await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number } }).releasedUnblocked.released).toBe(0);
       expect(await unblockedWakes(stuck.id)).toHaveLength(1);
+      const summaries = (await ctx.db.select().from(decisions)).filter((d) => d.dedupeKey === `unblocked-catchup:${ctx.company.id}`);
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]!.question).toContain("Stuck");
+    });
+
+    it("leaves a plain backlog ticket and one waiting on an open decision alone", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const plain = await mk("Plain", { assigneeAgentId: worker.id });
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      const [card] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.company.id, kind: "question", question: "Which way?", options: ["A", "B"], recommendedOption: "A", context: { type: "question" } })
+        .returning();
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: held.id, blockerDecisionId: card!.id });
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(plain.id)).toBe("backlog");
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(0);
     });
   });
 
