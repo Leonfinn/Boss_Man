@@ -919,7 +919,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * and missed work, so a ready ticket never pulls an agent off what it was doing. Same order and the same
    * per-ticket limits as tier 1; plan-first tickets whose plan waits for approval, and blocked ones, are skipped.
    */
-  async function readySlots(t: Date, busy: Set<string>, roomIn: (companyId: string) => Promise<number>, take: (companyId: string) => void) {
+  async function readySlots(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>, take: (companyId: string) => void) {
     const msObjective = alias(objectives, "ms_objective");
     const rows = await db
       .select({ ticket: tickets, krPriority: objectives.priority, msPriority: msObjective.priority })
@@ -984,7 +984,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * company per `idleAskEveryMs`, and none while the same agents and tickets were already listed within
    * `missedEveryMs`, so an agent the CEO leaves idle on purpose doesn't start a CEO run every half hour.
    */
-  async function askCeoForWork(t: Date, busy: Set<string>, roomIn: (companyId: string) => Promise<number>) {
+  async function askCeoForWork(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>) {
     const idle = await db
       .select({ id: agents.id, companyId: agents.companyId, name: agents.name, title: agents.title, role: agents.role })
       .from(agents)
