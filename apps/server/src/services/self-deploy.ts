@@ -11,7 +11,7 @@ import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { sh, step } from "./steps.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
@@ -281,9 +281,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (row && target === "server") {
       // An older, still-open question about an earlier commit can no longer be answered: the host only deploys the tip.
       // Free each one's dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped (Freddy).
-      for (const d of await openFor("server")) if (d.id !== row.id) await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, d.id));
+      for (const d of await openFor("server")) if (d.id !== row.id) await withdrawOpen(d.id);
     }
     return row ?? null;
+  }
+
+  /** A card closed by the product, not answered: its notification is marked read here (BOS-413). */
+  async function withdrawOpen(id: string) {
+    await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, id));
+    await markDecisionNotificationRead(db, id);
   }
 
   async function saveSeen(key: string) {
@@ -365,7 +371,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (s.result === "rolled_back" || s.result === "failed") {
         await putSetting(RUNNER_DUE, null);
         // Free the dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped.
-        for (const o of await openFor("runner")) await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, o.id));
+        for (const o of await openFor("runner")) await withdrawOpen(o.id);
       }
     }
     if (d && ctx?.type === "self_deploy") {
@@ -421,7 +427,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return woken;
       if (a.tip === a.deployed) {
         // Free the dedupe key, as every other withdraw does, so a later offer for that commit is not silently dropped (Freddy).
-        for (const d of await openFor("server")) await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, d.id));
+        for (const d of await openFor("server")) await withdrawOpen(d.id);
         return woken;
       }
       await raise("server", a.tip, a.deployed, a);
