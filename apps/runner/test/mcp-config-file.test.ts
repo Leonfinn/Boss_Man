@@ -1,5 +1,5 @@
 // BOS-553: a Claude run's Boss Man token goes to Claude Code in a 0600 file, never in the command line the adapter passes on.
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,18 @@ describe("Claude MCP config file", () => {
   it("keeps the board-tools-only setting beside the file", async () => {
     const d = await run({ boardToolsOnly: true });
     expect(d.params._meta?.claudeCode.options).toMatchObject({ tools: [], extraArgs: { "mcp-config": d.file } });
+  });
+
+  it("deletes the file as soon as the session is open, not at run end (production runs share /tmp and one user)", async () => {
+    const d = (await run()) as { fileDuringRun?: boolean };
+    expect(d.fileDuringRun).toBe(false);
+  });
+
+  it("sweeps token folders a crashed runner left in tmp at startup", () => {
+    const stale = mkdtempSync(path.join(tmpdir(), "bossman-mcp-"));
+    writeFileSync(path.join(stale, "mcp.json"), "{}");
+    new SessionManager({ mcpUrl: "x", emit: () => {} }).recoverInterrupted();
+    expect(existsSync(stale)).toBe(false);
   });
 
   it("gives two runs different files", async () => {
