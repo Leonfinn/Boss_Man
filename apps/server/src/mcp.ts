@@ -27,9 +27,9 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, describeRoles, missingVerdicts, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
-import { findSection, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
+import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import type { SkillFinding } from "./db/schema.js";
@@ -358,7 +358,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
-      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.`);
+      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${criteriaWarning(acceptanceCriteria)}`);
     },
   );
 
@@ -1117,7 +1117,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "review",
     {
       description:
-        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one, and when you request changes, name the criterion that fails. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off). You can't review a ticket assigned to you.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off). You can't review a ticket assigned to you.",
       inputSchema: {
         action: z.enum(["diff", "submit", "sequence", "overrule"]),
         ticketId: z.string().uuid(),
@@ -1158,9 +1158,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           // Keep the agent's context in check: the file list always, the patch up to 60 KB.
           const files = d.files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join("\n");
           const patch = d.diff.length > 60_000 ? `${d.diff.slice(0, 60_000)}\n[diff truncated]` : d.diff;
-          const checklist = rt.acceptanceCriteria.length
-            ? `Acceptance criteria:\n${readVerdicts(rt.acceptanceCriteria, rt.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`).join("\n")}\nIf one fails, request changes and name it.\n\n`
-            : "";
+          const checklist = criteriaChecklist(rt.acceptanceCriteria, rt.stateNote);
           // The owner's setup steps are judged like code (DR-011 point 2): seen next to the criteria, and
           // sent back if they are wrong, missing, or not in plain words by button path.
           const setup = rt.ownerSetup?.trim()
@@ -1224,6 +1222,25 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
 }
 
 
+/** One line per criterion with the author's verdict, the after-merge ones marked so they read as skippable (DR-024 #5). */
+function criterionLines(criteria: readonly Criterion[], note: string | null): string[] {
+  return readVerdicts(criteria, note).map((r, i) => `- [${r.verdict ?? "not reported"}] ${r.criterion}${isAfterMerge(criteria[i]!) ? " (checked after merge; don't fail the review on it)" : ""}`);
+}
+
+/** The reviewer's checklist, split so only the before-merge criteria can hold the review up (DR-024 #5). */
+function criteriaChecklist(criteria: readonly Criterion[], note: string | null): string {
+  if (!criteria.length) return "";
+  const lines = criterionLines(criteria, note);
+  const after = criteria.some(isAfterMerge);
+  return `Acceptance criteria:\n${lines.join("\n")}\nIf a before-merge one fails, request changes and name it.${after ? " The after-merge ones are checked once the work is live; review can approve with those still unreported, and an answer on the ticket's owner card closes them." : ""}\n\n`;
+}
+
+/** The plain-words warning for a live-looking criterion that isn't marked after merge; a trailing blank line for the reply. */
+const criteriaWarning = (criteria: readonly Criterion[] | undefined) => {
+  const w = criteria?.length ? afterMergeLint(criteria) : "";
+  return w ? `\n\nHeads-up: ${w}` : "";
+};
+
 /** What a verdict (or an overrule) did, in a sentence for the reviewer. */
 function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?: string }): string {
   const outcome = r.outcome ?? "done";
@@ -1246,17 +1263,20 @@ function registerViewImage(server: McpServer, images: Services["images"], scope:
   server.registerTool(
     "open_attachment",
     {
-      description: "Open something the owner attached. In a task, a message or the chat, a picture appears as ![name](/api/ticket-images/<id>) and a file as [📎 name](/api/ticket-images/<id>); open each one with this tool (pass the id) before you act on it. Pictures come back as images, text files as text, PDFs as a document.",
-      inputSchema: { id: z.string().uuid() },
+      description: "Open something the owner attached. In a task, a message or the chat, a picture appears as ![name](/api/ticket-images/<id>) and a file as [📎 name](/api/ticket-images/<id>); open each one with this tool (pass the id) before you act on it. Pictures come back as images, text files as text, PDFs as a document. Long text comes in parts; pass offset to read the rest.",
+      inputSchema: { id: z.string().uuid(), offset: z.number().int().min(0).optional() },
     },
-    async ({ id }) => {
+    async ({ id, offset }) => {
       const a = await images.forCompany(id, scope.companyId);
       if (!a) return fail("No attachment with that id in your company.");
       const bytes = Buffer.from(a.bytes);
       const label = a.caption ? `${a.name}: ${a.caption}` : a.name;
       if (a.type.startsWith("image/")) return { content: [{ type: "image" as const, data: bytes.toString("base64"), mimeType: a.type }, { type: "text" as const, text: label }] };
-      // shortcut: long text is cut at 200,000 characters; page through it if owners attach bigger files.
-      if (a.type === "text/plain") return text(`${label}\n\n${bytes.toString("utf8").slice(0, 200_000)}`);
+      // Text comes in parts so a long log reaches the agent whole, never silently cut.
+      if (a.type === "text/plain") {
+        const body = bytes.toString("utf8");
+        return text(`${label}\n\n${cut(body, CAP, (m) => `continue with open_attachment id=${id} offset=${m}`, offset)}`);
+      }
       if (a.type === "application/pdf") return { content: [{ type: "resource" as const, resource: { uri: `bossman:attachment/${id}`, mimeType: a.type, blob: bytes.toString("base64") } }, { type: "text" as const, text: `${label} (PDF)` }] };
       return text(`${label} is a ${a.type} file of ${bytes.length} bytes that can't be shown as text or a picture. Ask the owner what's in it, or for a PDF or text copy.`);
     },
@@ -1313,36 +1333,34 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const pics = await db.select({ id: ticketImages.id, name: ticketImages.name, caption: ticketImages.caption }).from(ticketImages).where(and(eq(ticketImages.ticketId, ticketId), eq(ticketImages.companyId, scope.companyId), sql`${ticketImages.type} like 'image/%'`)).orderBy(asc(ticketImages.createdAt));
       const t = row.t;
       const note = stateNoteLine(t, new Date());
+      // One page covers the whole thing, description through conversation, so a long owner message is
+      // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
-      return text(
-        [
-          `# ${t.title}`,
-          `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
-          ...(note ? [note] : []),
-          ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
-          ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
-          t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
-          "",
-          "## Description",
-          t.body ? cut(t.body, CAP, (m) => `continue with tickets read ticketId=${t.id} offset=${m}`, offset) : "(none)",
-          ...(t.acceptanceCriteria?.length
-            ? [
-                "",
-                "## Acceptance criteria",
-                ...readVerdicts(t.acceptanceCriteria, t.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`),
-              ]
-            : []),
-          ...(t.ownerSetup?.trim() ? ["", "## After it goes live, the owner will need to", ...t.ownerSetup.trim().split(/\r?\n/).map((l) => `- ${l.trim()}`)] : []),
-          ...(t.plan && t.planApprovedAt ? ["", "## Approved plan", cut(t.plan, CAP, () => "the rest isn't shown here")] : []), // shortcut: plans over 40000 chars aren't paged; add an offset if one ever is
-          "",
-          "## What it produced",
-          ...(made.length ? made.map((m) => (m.kind === "wiki_page" ? `- wiki page ${m.slug} (read it with wiki read)` : m.kind === "url" ? `- link ${m.url}` : `- repo file ${m.path}${m.ref ? ` at ${m.ref}` : ""} (read it with tickets file)`)) : ["(nothing attached)"]),
-          "",
-          ...(pics.length ? ["## Images (put one in a wiki page with the Markdown shown)", ...pics.map((i) => `- ${imageMarkdown((i.caption || i.name).replace(/[\][()\n\r]/g, ""), i.id)}`), ""] : []),
-          "## Recent conversation",
-          ...(talk.length ? talk : ["(none)"]),
-        ].join("\n"),
-      );
+      const head = [
+        `# ${t.title}`,
+        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
+        ...(note ? [note] : []),
+        ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
+        ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
+        t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
+        "",
+        "## Description",
+        t.body || "(none)",
+        ...(t.acceptanceCriteria?.length
+          ? ["", "## Acceptance criteria", ...criterionLines(t.acceptanceCriteria, t.stateNote)]
+          : []),
+        ...(t.ownerSetup?.trim() ? ["", "## After it goes live, the owner will need to", ...t.ownerSetup.trim().split(/\r?\n/).map((l) => `- ${l.trim()}`)] : []),
+        ...(t.plan && t.planApprovedAt ? ["", "## Approved plan", t.plan] : []),
+        "",
+        "## What it produced",
+        ...(made.length ? made.map((m) => (m.kind === "wiki_page" ? `- wiki page ${m.slug} (read it with wiki read)` : m.kind === "url" ? `- link ${m.url}` : `- repo file ${m.path}${m.ref ? ` at ${m.ref}` : ""} (read it with tickets file)`)) : ["(nothing attached)"]),
+        "",
+        ...(pics.length ? ["## Images (put one in a wiki page with the Markdown shown)", ...pics.map((i) => `- ${imageMarkdown((i.caption || i.name).replace(/[\][()\n\r]/g, ""), i.id)}`), ""] : []),
+        "## Recent conversation",
+        ...(talk.length ? talk : ["(none)"]),
+      ];
+      const full = head.join("\n");
+      return text(cut(full, CAP, (m) => `continue with tickets read ticketId=${t.id} offset=${m}`, offset));
     },
   );
 
@@ -1671,7 +1689,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "set_agent_picture",
     {
       description:
-        "Set an agent's picture (CEO only), in chat and in your ticket runs, from an image already attached to one of your company's tickets (such as one the Graphics Designer made and attached with attach_image; any ticket read lists its image ids). Pass imageId, or clear to go back to the built-in portrait, and say why. PNG, JPEG or WebP only, 256 KB or smaller; another company's image or a document is refused. It shows on the Agents page, the board and the runs list, is logged, and the owner gets a feed note and can undo it on the Agents page.",
+        "Set an agent's picture (CEO only), in chat and in your ticket runs, from an image already attached to one of your company's tickets (such as one the Graphics Designer made and attached with attach_image; any ticket read lists its image ids). Pass imageId, or clear to go back to the built-in portrait, and say why. PNG, JPEG or WebP only; a picture over 256 KB is shrunk to fit on the server, and another company's image or a document is refused. It shows on the Agents page, the board and the runs list, is logged, and the owner gets a feed note and can undo it on the Agents page.",
       inputSchema: { agent: z.string().trim().min(1).max(80), imageId: z.string().uuid().optional(), clear: z.boolean().optional(), reason: z.string().trim().max(2000).optional() },
     },
     async ({ agent, imageId, clear, reason }) => {
@@ -1682,7 +1700,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
       try {
         const r = await team.setPicture(scope.companyId, ceo, who.id, { imageId: imageId ?? null, clear: !!clear }, reason);
-        return text(clear ? `${who.name}'s picture is back to the default.` : `${who.name} now has that picture. It shows on the Agents page, the board and the runs list.`);
+        return text(clear ? `${who.name}'s picture is back to the default.` : `${who.name} now has that picture${r.shrunk ? " (it was shrunk to fit)" : ""}. It shows on the Agents page, the board and the runs list.`);
       } catch (err) {
         if (err instanceof AgentError) return fail(err.message);
         throw err;
@@ -1694,9 +1712,9 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "wiki",
     {
       description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output), append (slug, entry, optional heading and position), history (slug: every version of a page, newest first, with its size and who saved it; pass offset to page further back when a page has a long history) and restore (slug and version id: put an old version back as a new version), and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). write always sets the whole page: it takes no section or offset (those are for read). A write to an existing page that would remove more than about a quarter of its text, or any of its headings, is refused unless you pass replace: true; only the CEO or the owner may replace a page another agent created. For a running log (a release log, a cock-ups log, a status page) never re-send the whole body to write: add one entry with append, which inserts it under a heading (newest first by default, or position \"oldest\" at the end of that section) or at the top or the end of the page, and never shortens the page (one entry is a line or two, at most 20,000 characters). An append needs a real heading: \"intro\" (the text above the first heading) is refused, and an entry whose code fence (```) never closes is refused so it can't swallow the page after it. If a page was wiped, history shows the full version and restore puts it back; the CEO and the page's last writer may restore. Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
       inputSchema: {
-        action: z.enum(["list", "read", "write", "attach"]),
+        action: z.enum(["list", "read", "write", "append", "history", "restore", "attach"]),
         q: z.string().max(200).optional(),
         slug: z.string().max(500).optional(),
         folder: z.string().max(400).optional(),
@@ -1708,6 +1726,12 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         url: z.string().max(2000).optional(),
         section: z.string().max(300).optional(),
         offset: z.number().int().min(0).optional(),
+        replace: z.boolean().optional(),
+        entry: z.string().max(20_000).optional(),
+        position: z.enum(["top", "bottom", "oldest"]).optional(),
+        revisionId: z.string().uuid().optional(),
+        heading: z.string().max(300).optional(),
+        limit: z.number().int().min(1).max(HISTORY_PAGE_MAX).optional(),
       },
     },
     async (input) => {
@@ -1752,13 +1776,50 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           }
           case "write": {
             if (!input.title || input.body === undefined) return fail("Give a title and a body.");
+            // section and offset are for read: write always sets the whole page, so ignore them at your peril (BOS-430).
+            if (input.section !== undefined) return fail("write has no section argument: it replaces the whole page. To add an entry under a heading, use append; to read one section, use read with section.");
+            if (input.offset !== undefined) return fail("write has no offset argument: it replaces the whole page. To read the page in parts, use read with offset.");
             if (input.ticketId) {
               const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, input.ticketId, scope.agentId);
               if (reviewWrite) return fail(reviewWrite);
             }
-            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, ...by });
+            const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, replace: input.replace, isCeo: me?.role === "ceo", ...by });
             const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
             return text(`${r.created ? "Created" : "Updated"} ${link}${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
+          }
+          case "append": {
+            if (!input.slug) return fail("Give the page's slug.");
+            if (input.entry === undefined) return fail("Give the entry to add.");
+            if (input.section !== undefined) return fail("append has no section argument: give the heading to add under as heading.");
+            if (input.replace !== undefined) return fail("append adds an entry and never replaces the page; to replace it, use write with the whole body.");
+            const r = await wiki.append(scope.companyId, { slug: input.slug, entry: input.entry, heading: input.heading, position: input.position, title: input.title, ticketId: input.ticketId ?? null, agentId: scope.agentId, runId: scope.runId });
+            const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
+            return text(`Added the entry${r.where} of ${link} (${r.size.toLocaleString("en-GB")} characters now)${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
+          }
+          case "history": {
+            // Every saved version, newest first; offset pages further back (BOS-496), so a page with a
+            // long history still shows the version from before a wipe.
+            if (!input.slug) return fail("Give the page's slug.");
+            const p = await wiki.get(scope.companyId, input.slug);
+            const offset = input.offset ?? 0;
+            const rows = await wiki.versions(scope.companyId, p.slug, { offset, limit: input.limit });
+            if (!rows.length)
+              return text(`${p.slug} has ${p.revisionCount} saved ${p.revisionCount === 1 ? "version" : "versions"}${offset ? `; there is none at offset ${offset}` : ""}.`);
+            const more = offset + rows.length < p.revisionCount ? `\n\nMore: wiki history slug="${p.slug}" offset=${offset + rows.length}` : "";
+            return text(
+              `# ${p.title} (${p.slug}): ${p.body.length.toLocaleString("en-GB")} characters now, ${p.revisionCount} version${p.revisionCount === 1 ? "" : "s"}, newest first. Showing versions ${offset + 1} to ${offset + rows.length}:\n` +
+                rows.map((r) => `- ${r.id} · ${r.createdAt.toISOString()} · ${r.agent ?? "the owner"} · ${r.size.toLocaleString("en-GB")} chars${r.runId ? ` · run #/runs/${r.runId}` : ""}`).join("\n") +
+                `\n\nPut one back with restore (slug and version id). A restore is itself a new version, so it can be undone.${more}`,
+            );
+          }
+          case "restore": {
+            if (!input.slug) return fail("Give the page's slug.");
+            if (!input.revisionId) return fail("Give the version id (from history).");
+            const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+            const r = await wiki.restore(scope.companyId, { slug: input.slug, revisionId: input.revisionId, agentId: scope.agentId, runId: scope.runId, isCeo: me?.role === "ceo" });
+            const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
+            return text(`Restored ${link} to that version (${r.size.toLocaleString("en-GB")} characters), kept as a new version so it can be undone. Pass link "${link}" to notify_owner when you tell the owner about it.`);
           }
           case "attach": {
             if (!input.ticketId) return fail("Give the ticketId it belongs to.");
@@ -1865,7 +1926,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished (a no-code ticket assigned to you can be closed by you); ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies.",
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished (a no-code ticket assigned to you can be closed by you); ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria to check before merge, the summary must say pass or fail for each; a criterion marked checked after merge is reported once the work is live, and the ticket cannot be marked done until it is. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies.",
       inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional(), blocked_until: z.string().datetime({ offset: true }).optional(), blocked_reason: z.string().max(BLOCKED_UNTIL_REASON_MAX).optional(), ownerSetup: z.string().max(4000).optional().describe("The owner's steps, for a ticket whose change needs them to do something once it is live (a setting, a secret, a button): plain words by button path, one step per line, e.g. Settings → Funding → Add account. Boss Man raises their card with these steps when the change goes live, not at merge. Pass an empty string to clear it. Only the ticket's own assignee, CEO or a manager may set it.") },
     },
     async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason, ownerSetup }) => {
@@ -1929,10 +1990,19 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       if (!withCriteria) return fail("No ticket with that ID in your company.");
       // Same state again (DR-010): only the note changes. No enter-state hooks, no new review round.
       const sameState = withCriteria.prev === state;
-      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, summary ?? withCriteria.current) : [];
+      const note = summary ?? withCriteria.current;
+      // The done gate also reads the state note already on the ticket: the owner's answer on a linked card
+      // records its pass or fail there (DR-024 #5), so a short closing summary mustn't hide it.
+      const reported = state === "done" ? `${withCriteria.current ?? ""}\n${note ?? ""}` : note;
+      // A review only needs the before-merge criteria reported: an after-merge one can only be settled
+      // once the work is live, so it must not bounce rounds of review (DR-024 #5). Once the work has
+      // merged, the ticket can't be done until those after-merge criteria are reported pass or fail.
+      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, note, "before") : state === "done" ? unreportedAfterMerge(withCriteria.criteria, reported) : [];
       if (missing.length)
         return fail(
-          `This ticket has acceptance criteria, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".`,
+          state === "done"
+            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket): their answer records the check's pass or fail, so you can close it once they have.`
+            : `This ticket has acceptance criteria to report before it merges, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".${withCriteria.criteria.some(isAfterMerge) ? " The after-merge criteria don't need a verdict at review." : ""}`,
         );
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
       // tickets are marked "no code" and are not held to this.
@@ -2525,7 +2595,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
       try {
         const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);
-        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.`);
+        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${criteriaWarning(input.acceptanceCriteria)}`);
       } catch (err) {
         return workFail(err);
       }

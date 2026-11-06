@@ -27,6 +27,7 @@ fi
 echo "node $*" >>"$LOG"
 S
 chmod +x "$t/bin/pnpm" "$t/bin/node"
+unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED CHECK_QUICK_BROAD_FILES CHECK_ALL_FORCE
 export PATH="$t/bin:$PATH" LOG="$t/log" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_PAIR_PROOF="$t/proof" CHECK_ALL_QUEUE_REPORT=1
 
 g() { git -C "$repo" -c user.name=t -c user.email=t@t "$@"; }

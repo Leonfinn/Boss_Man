@@ -6,9 +6,9 @@
 import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { readWatchdogSettings, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, companies, decisions, engagements, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
+import { activity, agents, companies, decisions, engagements, notifications, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
-import { checkAsk } from "./decisions.js";
+import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
 import type { CardLint } from "./steps.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
@@ -1144,6 +1144,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
           const [d] = await db.select().from(decisions).where(eq(decisions.id, after.decisionId!));
           if (!d || d.status !== "open") throw new WatchdogError(409, "The owner has already answered it (or it was withdrawn), so it can't be taken back.");
           await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(eq(decisions.id, d.id));
+          await markDecisionNotificationRead(db, d.id);
           await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
           // Back to where it was, if nothing else holds it now.
           const [t] = await db.select().from(tickets).where(eq(tickets.id, a.ticketId!));

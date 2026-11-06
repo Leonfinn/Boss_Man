@@ -18,6 +18,22 @@ const day = (d: Date) => d.toISOString().slice(0, 10);
 
 export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
   const now = deps.now ?? (() => new Date());
+  /**
+   * Each agent's latest run, and why it started (BOS-407). The latest run is picked first, on the
+   * runs table alone, and the origin subqueries run only on those rows: doing it the other way
+   * round computed a nudge lookup for every run the company ever had, then threw them all away.
+   */
+  const latestRunPerAgent = (agentIds: string[]) => {
+    const latest = db.selectDistinctOn([runs.agentId])
+      .from(runs)
+      .where(inArray(runs.agentId, agentIds))
+      .orderBy(runs.agentId, desc(runs.startedAt))
+      .as("latest");
+    return db
+      .select({ agentId: latest.agentId, id: latest.id, ticketId: latest.ticketId, ticket: tickets.title, purpose: latest.purpose, startedAt: latest.startedAt, endedAt: latest.endedAt, outcome: latest.outcome, ...runOriginQuery("latest") })
+      .from(latest)
+      .leftJoin(tickets, eq(tickets.id, latest.ticketId));
+  };
   return {
     async get(companyId: string) {
       const t = now();
@@ -30,14 +46,7 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
         .leftJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId))
         .where(eq(agents.companyId, companyId));
       // Each agent's latest run: the one going now, or the last one that ended.
-      const latest = team.length
-        ? await db
-            .selectDistinctOn([runs.agentId], { agentId: runs.agentId, id: runs.id, ticketId: runs.ticketId, ticket: tickets.title, purpose: runs.purpose, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome, ...runOriginQuery("runs") })
-            .from(runs)
-            .leftJoin(tickets, eq(tickets.id, runs.ticketId))
-            .where(inArray(runs.agentId, team.map((a) => a.id)))
-            .orderBy(runs.agentId, desc(runs.startedAt))
-        : [];
+      const latest = team.length ? await latestRunPerAgent(team.map((a) => a.id)) : [];
       const byAgent = new Map(latest.map((r) => [r.agentId, r]));
       const rank = { ceo: 0, manager: 1, worker: 2 } as const;
       const agentCards = team
