@@ -157,6 +157,52 @@ export function lintNumberClash(files, journal) {
   return problems;
 }
 
+const NO_PARENT = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * drizzle-kit's snapshot chain (BOS-519). `drizzle-kit generate` diffs schema.ts against the
+ * snapshot file that sorts last, refuses to run when two snapshots share a prevId, and names the
+ * new migration after the last journal entry's idx + 1, so every entry needs its own
+ * `meta/NNNN_snapshot.json` chained to the entry before it, and the last idx must be at least the
+ * highest migration number. `snapshots` maps file name ("0101_snapshot.json") to parsed JSON.
+ * Whether the last snapshot matches schema.ts is apps/server/test/migrations.test.ts's job.
+ */
+export function lintSnapshots(journal, snapshots) {
+  const problems = [];
+  const entries = journal.entries ?? [];
+  const fix = "To fix: merge origin/main, delete your migration's .sql, snapshot and journal entry, and run pnpm db:generate again.";
+  const byPrev = new Map();
+  for (const [file, s] of snapshots) {
+    if (!byPrev.has(s.prevId)) byPrev.set(s.prevId, []);
+    byPrev.get(s.prevId).push(file);
+  }
+  for (const [prevId, files] of byPrev) if (files.length > 1) problems.push(`${files.sort().join(", ")}: share prevId ${prevId}, so drizzle-kit generate refuses to run. ${fix}`);
+  const listed = new Set();
+  let prev = null;
+  for (const e of entries) {
+    const file = `${String(e.tag).split("_")[0]}_snapshot.json`;
+    listed.add(file);
+    const s = snapshots.get(file);
+    if (prev && !(e.idx > prev.idx)) problems.push(`_journal.json: entry "${e.tag}" has idx ${e.idx}, not greater than "${prev.tag}" (${prev.idx}).`);
+    if (!s) problems.push(`_journal.json: entry "${e.tag}" has no meta/${file}. ${fix}`);
+    else {
+      const want = prev ? prev.id : NO_PARENT;
+      if (want !== undefined && s.prevId !== want) problems.push(`${file}: prevId is ${s.prevId}, but the entry before it ("${prev?.tag ?? "none"}") has snapshot id ${want}. ${fix}`);
+    }
+    prev = { tag: e.tag, idx: e.idx, id: s?.id };
+  }
+  for (const file of snapshots.keys()) if (!listed.has(file)) problems.push(`meta/${file}: no journal entry uses it.`);
+  const highest = Math.max(-1, ...entries.map((e) => Number(String(e.tag).slice(0, 4))).filter(Number.isFinite));
+  if (prev && prev.idx < highest) problems.push(`_journal.json: the last entry "${prev.tag}" has idx ${prev.idx}, below the highest migration number ${highest}, so drizzle-kit generate would name the next migration ${String(prev.idx + 1).padStart(4, "0")}. Set the last entry's idx to its own number.`);
+  return problems;
+}
+
+/** Every `meta/NNNN_snapshot.json` in a drizzle folder, by file name. */
+export function readSnapshots(dir) {
+  const meta = join(dir, "meta");
+  return new Map(readdirSync(meta).filter((f) => f.endsWith("_snapshot.json")).map((f) => [f, JSON.parse(readFileSync(join(meta, f), "utf8"))]));
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const dir = process.argv[2] ?? "apps/server/drizzle";
   const files = newMigrations(dir);
@@ -164,6 +210,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const problems = files.flatMap((f) => lintSql(f, readFileSync(join(dir, f), "utf8")));
   problems.push(...lintJournal(journal));
   problems.push(...lintNumberClash(files, journal));
+  problems.push(...lintSnapshots(journal, readSnapshots(dir)));
   if (problems.length) {
     console.error(`Migration lint failed:\n${problems.join("\n")}\nSee docs/10-migrations.md.`);
     process.exit(1);
