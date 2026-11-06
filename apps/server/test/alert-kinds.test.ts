@@ -35,6 +35,7 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/scheduler.ts", kind: "could_not_start", why: "a run that couldn't start" },
   { file: "services/scheduler.ts", kind: "alert", why: "the add-on notice" },
   { file: "services/watchdog.ts", kind: "quota_held", why: "work held by the usage limit" },
+  { file: "services/no-progress.ts", kind: "no_progress", why: "a company with work waiting and nothing finishing (BOS-593)" },
 ];
 
 describe("the alert kinds table (DR-017 A, BOS-469)", () => {
@@ -81,6 +82,8 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
     }
     expect(kindCeiling("account_limit", undefined)).toBe("owner");
     expect(kindCeiling("owner", undefined)).toBe("owner");
+    // A stopped company usually can't run its own CEO either, so this card may reach the owner (BOS-593).
+    expect(kindCeiling("no_progress", "ceo")).toBe("owner");
   });
 
   it("an account limit card is per account and clears when the account has room", () => {

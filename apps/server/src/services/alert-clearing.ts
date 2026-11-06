@@ -32,7 +32,9 @@ export type ClearWhen =
    * the next push fails, so a card raised to fix one that has just broken would close at once on the old
    * reading (the BOS-469 lesson). A request through the edge or a push that went through since then proves it.
    */
-  | { kind: "addonRunning"; addon: Addon };
+  | { kind: "addonRunning"; addon: Addon }
+  /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
+  | { kind: "companyRanOk"; companyId: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -65,6 +67,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "accountRanOk":
         if (typeof c.fundingSourceId === "string") out.push({ kind: "accountRanOk", fundingSourceId: c.fundingSourceId });
+        break;
+      case "companyRanOk":
+        if (typeof c.companyId === "string") out.push({ kind: "companyRanOk", companyId: c.companyId });
         break;
       case "addonRunning":
         if ((ADDONS as readonly unknown[]).includes(c.addon)) out.push({ kind: "addonRunning", addon: c.addon as Addon });
@@ -148,6 +153,18 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
           .orderBy(runs.endedAt)
           .limit(1);
         return clean?.endedAt ? `a run on the account succeeded at ${hhmm(clean.endedAt)}` : null;
+      }
+      case "companyRanOk": {
+        // Ended after the card, not started after it: a long run that was going all along and then finishes
+        // cleanly is the company moving again. Chat runs, stopped or cancelled runs, and the CEO run that
+        // only read the card (origin "decision") are not progress: the last would close the card at once.
+        const [clean] = await db
+          .select({ endedAt: runs.endedAt })
+          .from(runs)
+          .where(and(eq(runs.companyId, c.companyId), gt(runs.endedAt, card.createdAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.origin} is distinct from 'decision'`, sql`coalesce(${runs.outcome}, '') not like 'error:%'`, sql`coalesce(${runs.outcome}, '') not like 'lost:%'`, sql`coalesce(${runs.outcome}, '') not in ('interrupted', 'cancelled')`, sql`coalesce(${runs.outcome}, '') not like 'stopped%'`))
+          .orderBy(runs.endedAt)
+          .limit(1);
+        return clean?.endedAt ? `a run there finished cleanly at ${hhmm(clean.endedAt)}` : null;
       }
       case "addonRunning": {
         const f = (await addonFacts())?.[c.addon];
