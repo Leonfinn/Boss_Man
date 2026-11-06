@@ -520,6 +520,8 @@ export async function buildApp(opts: AppOptions) {
   const clearing = alertClearing(db, {
     isConnected: (runnerId) => runners.isConnected(runnerId),
     hasRoom: (fundingSourceId) => scheduler.hasRoom(fundingSourceId),
+    addons: addonFacts,
+    release: (ticketId) => decisionsSvc.release(ticketId),
     now: opts.now,
   });
   // A runner coming back clears "could not start … runner offline" cards at once, on any tier
