@@ -41,6 +41,7 @@ const RECORD_WORDS: Record<string, string> = {
   record_auto_escalate: "escalations to the CEO",
   record_urgent_page: "pages to you about a decision",
   record_alert_skip: "Boss Man alerts passed up the ladder",
+  record_quota_held_alert: "CEO alerts about work held by the usage limit",
 };
 
 /** Null on a day nothing happened: no new problems, no actions, nothing cleared. Record-only runs always report. */
