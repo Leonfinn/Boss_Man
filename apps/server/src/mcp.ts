@@ -18,6 +18,7 @@ import { imageMarkdown, TicketImageError, type ticketImagesService } from "./ser
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { AnswerError, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
+import type { hostFactsService } from "./services/host-facts.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
@@ -133,6 +134,8 @@ type Services = {
   alerts: ReturnType<typeof alertLadder>;
   retro: ReturnType<typeof retroService>;
   serverStatus: ReturnType<typeof serverStatusService>;
+  /** What each host recorded about itself (BOS-427), for the owner-card lint's R6. */
+  hostFacts: ReturnType<typeof hostFactsService>;
   /** Add-on facts for server_status and the card lint's R9 (addons.ts, DR-023). Absent: R9 is not checked. */
   addons?: () => Promise<AddonFacts>;
 };
@@ -180,7 +183,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
  * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, addons }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, addons }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -496,7 +499,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       const [me] = lintOverride !== undefined && scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
-      const ask = checkAsk({ triedFirst, ownerMustDo, steps, lintOverride, byCeo: me?.role === "ceo", addons: steps?.length ? await addons?.() : undefined, setsUp });
+      const ask = checkAsk({ triedFirst, ownerMustDo, steps, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), addons: steps?.length ? await addons?.() : undefined, setsUp });
       if (ask.error) return fail(ask.error);
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
@@ -1061,7 +1064,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           let r;
           if (input.outcome === "reissue") {
             if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
-            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, lintOverride: input.lintOverride, byCeo: true, addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp });
+            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp });
             if (ask.error) return fail(ask.error);
             r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: input.steps?.length ? input.steps : undefined, lint: ask.lint });
           } else if (input.outcome === "advice") {
