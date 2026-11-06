@@ -10,6 +10,11 @@
 // live server's 4 GB heap, which would itself be a freeze). Starting the next profile before ending the current
 // one keeps profiling on at all times, so only the first start pays that walk (at server start, small heap) and
 // each cut costs ~0.2 ms.
+//
+// Cost, measured on the runner (Node 22, 176 MB heap, a 50 ms timer standing in for the idle server; 6 Nov, under
+// load 11-20 on 12 cores): the 10 ms sampler adds ~0.36% of a core when idle (process CPU over 120 s: 0.54% off,
+// 0.90% on); first start 155 ms (the heap walk, paid once at boot); a cut after 1 s of samples 0.25 ms median,
+// 0.46 ms max (20 runs); a cut of a full 120 s rotation window (the most a profile holds) 2.65 ms; a rotate 0.01 ms.
 // inspector's own console (V8's), not the global one, which test runners and loggers may replace.
 import { console as v8Console, Session, type Profiler } from "node:inspector";
 import { performance } from "node:perf_hooks";

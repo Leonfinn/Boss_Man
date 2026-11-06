@@ -2,7 +2,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { Session } from "node:inspector";
+import { describe, expect, it, vi } from "vitest";
 import { createStallMonitor } from "../src/services/stall-monitor.js";
 import { summariseProfile } from "../src/services/stall-profile.js";
 
@@ -107,6 +108,28 @@ describe("stall monitor", () => {
       { fn: "sweep apps/server/src/services/sweeps.ts:10", ms: 60 },
       { fn: "tidy apps/server/src/services/sweeps.ts:42", ms: 20 },
     ]);
+  });
+
+  // BOS-602: on the live server the profiler is on by default; BOSSMAN_STALL_PROFILE=0 starts no inspector session at all.
+  it("BOSSMAN_STALL_PROFILE=0 starts no profiler session on the live server; without it one starts", () => {
+    const connect = vi.spyOn(Session.prototype, "connect");
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      vi.stubEnv("BOSSMAN_STALL_PROFILE", "0");
+      const off = createStallMonitor({ thresholdMs: 1000, probeMs: 50 });
+      off.start();
+      off.stop();
+      expect(connect).not.toHaveBeenCalled();
+      // Control: the same set-up without the switch does start one, so the spy sees it.
+      vi.stubEnv("BOSSMAN_STALL_PROFILE", "");
+      const on = createStallMonitor({ thresholdMs: 1000, probeMs: 50 });
+      on.start();
+      on.stop();
+      expect(connect).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
+      connect.mockRestore();
+    }
   });
 
   it("short blips under the threshold are not stalls", async () => {
