@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { brotliCompressSync, brotliDecompressSync, gzipSync, gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
@@ -67,6 +68,44 @@ describe("the web UI (R45)", () => {
     for (const name of ["Website", "Customer app"]) await app.inject({ method: "POST", url: `/api/companies/${company.id}/projects`, headers: { cookie }, payload: { name } });
     const list = (await app.inject({ method: "GET", url: `/api/companies/${company.id}/projects`, headers: { cookie } })).json();
     expect(list.map((p: { name: string }) => p.name)).toEqual(["Customer app", "Website"]);
+  });
+
+  it("serves the build's brotli and gzip copies when the browser accepts them, and never a sidecar as a file (BOS-411)", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "bm-web-"));
+    mkdirSync(path.join(dir, "assets"));
+    const text = `console.log("${"a bundle big enough to compress ".repeat(80)}");`;
+    const asset = path.join(dir, "assets", "index-abc123.js");
+    writeFileSync(asset, text);
+    writeFileSync(`${asset}.br`, brotliCompressSync(text));
+    writeFileSync(`${asset}.gz`, gzipSync(text));
+    writeFileSync(path.join(dir, "index.html"), "<!doctype html><title>Boss Man</title>");
+    const { app } = await setup({ webDir: dir });
+
+    const br = await app.inject({ method: "GET", url: "/assets/index-abc123.js", headers: { "accept-encoding": "br" } });
+    expect(br.statusCode).toBe(200);
+    expect(br.headers["content-encoding"]).toBe("br");
+    expect(br.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+    expect(br.headers["vary"]).toContain("accept-encoding");
+    expect(brotliDecompressSync(br.rawPayload).toString()).toBe(text);
+
+    const gz = await app.inject({ method: "GET", url: "/assets/index-abc123.js", headers: { "accept-encoding": "gzip" } });
+    expect(gz.headers["content-encoding"]).toBe("gzip");
+    expect(gz.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+    expect(gunzipSync(gz.rawPayload).toString()).toBe(text);
+
+    // A browser that asks for neither still gets the original.
+    const plain = await app.inject({ method: "GET", url: "/assets/index-abc123.js", headers: { "accept-encoding": "identity" } });
+    expect(plain.statusCode).toBe(200);
+    expect(plain.headers["content-encoding"]).toBeUndefined();
+    expect(plain.body).toBe(text);
+
+    // The sidecar is not a file anyone can fetch directly.
+    for (const suffix of [".br", ".gz", ".zst"]) expect(`${suffix} ${(await app.inject({ method: "GET", url: `/assets/index-abc123.js${suffix}` })).statusCode}`).toBe(`${suffix} 404`);
+
+    // The page itself is never compressed at build time and is never cached.
+    const page = await app.inject({ method: "GET", url: "/", headers: { "accept-encoding": "br, gzip" } });
+    expect(page.headers["content-encoding"]).toBeUndefined();
+    expect(page.headers["cache-control"]).toBe("no-cache");
   });
 
   it("says whether a company's runner is registered and connected", async () => {

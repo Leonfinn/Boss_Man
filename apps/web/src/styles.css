@@ -877,3 +877,15 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 /* The controls sit on their own strip above the picture, so they never float over the diagram. */
 .lightbox-bar { padding: 2px 0 4px; }
 .lightbox-panel { background: rgb(0 0 0 / 0.35); border-radius: 12px; }
+
+/* ---------- The owner's message boxes (BOS-502) ---------- */
+/* A long paste makes the box grow to OWNER_MESSAGE_MAX height's cap and then scroll (the cap is set
+   in OwnerMessageBox); the count and the over-limit offer sit under it, in the same column. */
+.owner-message-count { margin: 0; font-size: 12px; color: var(--muted); text-align: right; }
+.owner-message-count.over { color: var(--red-ink); }
+.owner-message-over { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--amber-ink); border-radius: 8px; background: var(--amber-soft); color: var(--amber-ink); font-size: 13px; }
+.owner-message-over p { margin: 0; flex: 1 1 220px; }
+/* The chat form keeps the box in its own column beside the buttons, as before (BOS-502 raised the limit, not the layout). */
+.messenger .chat-form .owner-message-count, .messenger .chat-form .owner-message-over { flex-basis: 100%; }
+.chat-form .owner-message-count { width: 100%; }
+.activity-compose textarea { field-sizing: content; }

@@ -6,6 +6,7 @@ import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
 import { activity, agents, decisions, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
 import { runOriginQuery } from "./runs.js";
+import { getStandingRules, standingRulesSection } from "./standing-rules.js";
 
 const MORE = (n: number) => `- +${n} more: use whats_new or tickets`;
 const one = (s: string, n = 160) => {
@@ -143,6 +144,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     ];
   }
   const head = `Company brief as of ${now.toISOString().slice(0, 16).replace("T", " ")} UTC. This supersedes any earlier brief in this conversation.`;
-  const text = (body.join("\n") || "Nothing open and nothing changed.").trim();
+  const rules = standingRulesSection(await getStandingRules(db, companyId));
+  const text = [...rules, ...(body.length ? body : ["", "Nothing open and nothing changed."])].join("\n").trim();
   return `${head}\n\n${plain ? text : untrusted("brief: notes written by agents and the owner", text)}`;
 }

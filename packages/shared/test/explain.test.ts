@@ -121,6 +121,27 @@ describe("explainCommand", () => {
 });
 
 describe("explainPermission", () => {
+  it("names the file in OpenCode's edit requests (BOS-318)", () => {
+    // OpenCode sends its permission metadata as rawInput: { filepath, diff } for an edit, { files: [...] } for a patch.
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { filepath: "/work/src/a.ts", diff: "@@" } }, "A").summary).toBe("Change the file /work/src/a.ts.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { files: [{ filePath: "/work/a.ts", relativePath: "a.ts" }] } }, "A").summary).toBe("Change the file a.ts.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { files: [{ filePath: "/w/a.ts" }, { filePath: "/w/b.ts" }] } }, "A").summary).toBe("Change 2 files: /w/a.ts, /w/b.ts.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: {} }, "A").summary).toBe("Change (no name given).");
+  });
+
+  it("keeps the tool name when an mcp tool is given a parentDir argument (BOS-318)", () => {
+    const e = explainPermission({ title: "mcp__github__delete_repository", kind: "other", rawInput: { owner: "o", repo: "r", parentDir: "/tmp/screens" } }, "A");
+    expect(e.summary).toContain("mcp__github__delete_repository");
+    expect(e.summary).not.toContain("folder outside");
+    expect(explainPermission({ title: "/etc", kind: "other", rawInput: { parentDir: "/tmp/x" } }, "A").summary).not.toContain("folder outside");
+  });
+
+  it("shows OpenCode's external_directory request as a folder outside the checkout (BOS-318)", () => {
+    expect(explainPermission({ title: "/tmp/opencode/shots", kind: "other", rawInput: { filepath: "/tmp/opencode/shots/a.png", parentDir: "/tmp/opencode/shots" } }, "A").summary).toBe("Access folder outside checkout: /tmp/opencode/shots.");
+    expect(explainPermission({ title: "/tmp/opencode/shots", kind: "other", rawInput: {} }, "A").summary).toBe("Access folder outside checkout: /tmp/opencode/shots.");
+    expect(explainPermission({ title: "/tmp/x", kind: "other", rawInput: {} }, "A").effect).toBe("unknown");
+  });
+
   it("titles commands and keeps only a short single-line reason", () => {
     const r = explainPermission({ title: "x", kind: "execute", rawInput: { command: "ls", description: `Look\naround ${"a".repeat(300)}` } }, "Wiki Maintainer");
     expect(r.title).toBe("Wiki Maintainer wants to run a command");
