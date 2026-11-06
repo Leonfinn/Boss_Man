@@ -20,7 +20,7 @@ import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
 import { modelProbeService } from "./services/model-probe.js";
-import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
+import { assetPathOf, PRECOMPRESSED_SUFFIX_LIST, parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
@@ -171,8 +171,14 @@ async function serveWeb(app: FastifyInstance, root: string) {
     wildcard: false,
     cacheControl: false,
     index: ["index.html"],
+    // The build writes a .br/.gz sibling next to each asset (BOS-411), so a request that accepts one is
+    // answered from disk with no CPU per request. A sidecar is never a route of its own: only the
+    // negotiation below may pick it, so nobody downloads one as a file. @fastify/static hands setHeaders
+    // the sibling's path, so the immutable rule is applied to the original name.
+    preCompressed: true,
+    globIgnore: PRECOMPRESSED_SUFFIX_LIST.map((suffix) => `**/*${suffix}`),
     setHeaders(res, file) {
-      res.header("cache-control", file.includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
+      res.header("cache-control", assetPathOf(file).includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
     },
   });
   app.addHook("onSend", async (req, reply) => {

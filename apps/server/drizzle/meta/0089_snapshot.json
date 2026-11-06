@@ -1,6 +1,6 @@
 {
   "id": "641425d6-d130-41be-a945-856f0086c468",
-  "prevId": "7d1f2c4e-5b6a-4c8d-9e0f-1a2b3c4d5e6f",
+  "prevId": "b7b30b78-8edf-4bd8-9e17-56afc610ec93",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1242,12 +1242,19 @@
           "notNull": true,
           "default": 120
         },
+        "permission_judge": {
+          "name": "permission_judge",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'watch'"
+        },
         "watchdog": {
           "name": "watchdog",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6}'::jsonb"
+          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -3067,6 +3074,12 @@
         "secret_id": {
           "name": "secret_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fallback_rank": {
+          "name": "fallback_rank",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false
         },
@@ -5480,6 +5493,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "boot_id": {
+          "name": "boot_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "boot_pulled_at": {
+          "name": "boot_pulled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "disk_used_bytes": {
           "name": "disk_used_bytes",
           "type": "bigint",
@@ -5558,6 +5583,12 @@
           "primaryKey": true,
           "notNull": true,
           "default": "gen_random_uuid()"
+        },
+        "funding_source_id": {
+          "name": "funding_source_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         },
         "company_id": {
           "name": "company_id",
@@ -5701,6 +5732,19 @@
       },
       "indexes": {},
       "foreignKeys": {
+        "runs_funding_source_id_funding_sources_id_fk": {
+          "name": "runs_funding_source_id_funding_sources_id_fk",
+          "tableFrom": "runs",
+          "tableTo": "funding_sources",
+          "columnsFrom": [
+            "funding_source_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
         "runs_company_id_companies_id_fk": {
           "name": "runs_company_id_companies_id_fk",
           "tableFrom": "runs",
@@ -7529,6 +7573,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "checked_commit": {
+          "name": "checked_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "pull_request_url": {
           "name": "pull_request_url",
           "type": "text",
@@ -7671,6 +7721,12 @@
           "notNull": true,
           "default": 5
         },
+        "monitor_restart_at": {
+          "name": "monitor_restart_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "custom_fields": {
           "name": "custom_fields",
           "type": "jsonb",
@@ -7768,12 +7824,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "checked_commit": {
-          "name": "checked_commit",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -9718,8 +9768,8 @@
   "policies": {},
   "views": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   }
 }
