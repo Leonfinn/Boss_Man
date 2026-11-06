@@ -47,6 +47,8 @@ x-runner: &runner
   environment: &runner-env
     BOSSMAN_URL: ws://server:3100/api/runner/connect
     BOSSMAN_RUNNER_TOKEN_FILE: /run/secrets/runner_token
+    # Full checks at once (BOS-542): the compose runner never received this, only the launcher passed it on.
+    BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
   # Agents run code: keep the container unprivileged and bounded. Never mount docker.sock;
   # use a deploy target with a socket proxy instead (R14).
   cap_drop: [ALL]
