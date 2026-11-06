@@ -199,7 +199,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // read its own code (the 6 Nov outage, DR-028). A subshell, never a bare umask: 022 left set in the owner's root
     // terminal would make their later hand-made backups world-readable. So the pin and the blue/green rollback below
     // each run as one (umask 022 && cd <src> && git …) subshell, and the card lint's R14 refuses any other form.
-    // (The same two lines as BOS-562's, byte for byte, so the two branches merge in either order.)
+    // The single-server apply and rollback run deploy.sh, whose own git checkout/merge write the checkout too: they get
+    // the same subshell. (BOS-562 makes deploy.sh run its own git under 022 too; the subshell still covers an older
+    // deploy.sh on the host, which is the copy that runs the apply.)
     // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
     const noSrc = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
     const noHost = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
@@ -225,7 +227,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
             ? host
               ? bg
                 ? step("Apply it with this command, on the same machine:", cmd(`cd ${src} && scripts/rebuild-live.sh`))
-                : step(`Apply it with this command, on the same machine (it deploys exactly ${short(commit)}):`, cmd(`cd ${src} && scripts/deploy.sh --commit ${commit}`))
+                : step(`Apply it with this command, on the same machine (it deploys exactly ${short(commit)}):`, cmd(`(umask 022 && cd ${src} && scripts/deploy.sh --commit ${commit})`))
               : noHost
             : noSrc,
         );
@@ -269,7 +271,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         ? host
           ? step(
               bg ? "To go back, run this on the machine that runs Boss Man:" : "To go back, run this on the machine that runs Boss Man (code only, never the database):",
-              cmd(bg ? `(umask 022 && cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh)` : `cd ${src} && scripts/deploy.sh --rollback`),
+              cmd(bg ? `(umask 022 && cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh)` : `(umask 022 && cd ${src} && scripts/deploy.sh --rollback)`),
               rollbackNote,
             )
           : `To go back, ${noHost} ${rollbackNote}`

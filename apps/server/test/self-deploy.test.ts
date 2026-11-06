@@ -269,10 +269,11 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const c = (ctx = await setup());
       const x = await stepsOf(c, { ...LAYOUT, bluegreen: false });
       const text = [...x.handSteps!, x.rollback!].join("\n");
-      expect(text).toContain("cd /srv/bm/src && scripts/deploy.sh --commit " + B);
+      // deploy.sh's own git checkout/merge write the checkout, so both run in the umask subshell (DR-028).
+      expect(commands(x.handSteps!)).toContain("(umask 022 && cd /srv/bm/src && scripts/deploy.sh --commit " + B + ")");
       expect(text).not.toContain("rebuild-live.sh");
       expect(text).not.toContain("/mnt/NVME_Apps");
-      expect(x.rollback).toContain("scripts/deploy.sh --rollback");
+      expect(commands([x.rollback!])).toEqual(["(umask 022 && cd /srv/bm/src && scripts/deploy.sh --rollback)"]);
     });
 
     it("picks rebuild-live.sh on blue/green and uses the reported live colour", async () => {
@@ -354,9 +355,10 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
           const where = JSON.stringify({ layout, change });
           expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse, where).toEqual([]);
           expect(all.join("\n"), where).not.toMatch(/docs\/0\d/);
-          // Every git the server writes runs in the umask subshell (DR-028), never after a bare umask.
-          for (const k of commands(all).filter((k) => /\bgit\b/.test(k))) {
-            expect(k, where).toMatch(/^\(umask 022 && cd \/srv\/bm\/src && git [^()]*\)/);
+          // Every git the server writes runs in the umask subshell (DR-028), never after a bare umask; so does
+          // deploy.sh, which runs git checkout/merge itself (the lint can't see inside a script).
+          for (const k of commands(all).filter((k) => /\bgit\b|scripts\/deploy\.sh/.test(k))) {
+            expect(k, where).toMatch(/^\(umask 022 && cd \/srv\/bm\/src && (git|scripts\/deploy\.sh) [^()]*\)/);
             gitCommands++;
           }
           cards++;
