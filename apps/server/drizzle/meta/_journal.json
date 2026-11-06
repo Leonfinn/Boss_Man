@@ -668,10 +668,10 @@
       "breakpoints": true
     },
     {
-      "idx": 105,
+      "idx": 108,
       "version": "7",
-      "when": 1793945000000,
-      "tag": "0105_company_fence_mode",
+      "when": 1793950000000,
+      "tag": "0108_company_fence_mode",
       "breakpoints": true
     }
   ]
