@@ -34,6 +34,7 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/scheduler.ts", kind: "nudge_loop", why: "two agents nudging each other" },
   { file: "services/scheduler.ts", kind: "could_not_start", why: "a run that couldn't start" },
   { file: "services/scheduler.ts", kind: "alert", why: "the add-on notice" },
+  { file: "services/watchdog.ts", kind: "quota_held", why: "work held by the usage limit" },
 ];
 
 describe("the alert kinds table (DR-017 A, BOS-469)", () => {
@@ -74,7 +75,7 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
       expect(["scrum_master", "ceo", "owner"]).toContain(row.topRung);
     }
     // The alert kinds that must stop at the CEO (DR-017 A).
-    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "runner_boot"] as const) {
+    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "runner_boot", "quota_held"] as const) {
       expect(kindCeiling(kind, undefined), kind).toBe("ceo");
       expect(kindRow(kind, undefined).topRung, kind).toBe("ceo");
     }

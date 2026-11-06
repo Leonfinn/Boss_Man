@@ -23,7 +23,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, memory, checks, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
+const { app, launcher, memory, checks, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -93,6 +93,7 @@ let resumeMergesSince: Date | null = null;
 leader.onPromote(() => {
   resumeMergesSince = new Date();
   bg.startBackground();
+  void launcher.syncAll(); // once per promotion: runners that outlived a deploy get their allow list (git hosts) without a restart
 });
 leader.onDemote(() => bg.stopBackground());
 // Host signals only (no HTTP endpoint changes the role): SIGUSR1 = hand over, SIGUSR2 = take over.

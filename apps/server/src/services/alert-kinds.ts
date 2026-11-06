@@ -144,6 +144,12 @@ export const ALERT_KINDS = {
     groupBy: (c) => (c.runnerId && c.bootId ? `runner-boot:${c.runnerId}:${c.bootId}` : null),
     title: (_c, n) => `${n} run${n === 1 ? "" : "s"} didn't start after a runner restart`,
   },
+  // watchdog.ts quotaHeldAlerts (BOS-450): a wake held by the subscription usage limit for too long. One card per held wake.
+  // It closes once the account has room again, by the same test the scheduler uses.
+  quota_held: {
+    topRung: "ceo",
+    clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
+  },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
     topRung: "ceo",
