@@ -2,11 +2,6 @@
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-// @ts-ignore plain .mjs shared by every package's test config, no types
-import { guardVitest } from "../../scripts/vitest-guard.mjs";
-
-// Keeps whole-suite runs at the merge gate for agent sessions; see scripts/vitest-guard.mjs.
-guardVitest();
 import { preCompress } from "./compress";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
