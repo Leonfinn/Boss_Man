@@ -69,6 +69,8 @@ describe("compose memory limits", () => {
     const launcherEnv = parse(readFileSync(path.join(root, "docker-compose.yml"), "utf8")).services.launcher.environment;
     expect(launcherEnv.BOSSMAN_RUNNER_CPU_SHARES).toContain("BOSSMAN_RUNNER_CPU_SHARES:-512");
     expect(launcherEnv.BOSSMAN_RUNNER_CPUS).toContain("BOSSMAN_RUNNER_CPUS");
+    // The reserved core (BOS-586) defaults to auto; the launcher works out the threads at runtime.
+    expect(launcherEnv.BOSSMAN_RESERVED_THREADS).toContain("BOSSMAN_RESERVED_THREADS:-auto");
   });
 
   it("tool servers are the first to be killed", () => {

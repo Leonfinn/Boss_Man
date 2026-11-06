@@ -398,6 +398,7 @@ export async function buildApp(opts: AppOptions) {
     },
     errors: errorBuffer,
     stalls: () => stalls.summary(),
+    cpuReserve: () => launch.cpuReserve(),
     permissions: (companyId: string) => permLog.summary(companyId),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),

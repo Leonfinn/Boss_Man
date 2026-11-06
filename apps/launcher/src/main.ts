@@ -7,6 +7,7 @@
 //   BOSSMAN_RUNNER_CPU_SHARES  CPU weight per runner against 1024 for the server and database (default 512)
 //   BOSSMAN_CHECK_SLOTS         full checks a runner may run at once (default 1; each extra one needs about 3 GB of runner memory)
 //   BOSSMAN_RUNNER_CPUS    optional hard CPU cap per runner, e.g. 4 (default none)
+//   BOSSMAN_RESERVED_THREADS  threads kept back for the server, database and proxy: auto (default: 2 on hosts with 6+ threads), off, or a number
 //   BOSSMAN_NETGUARD       auto (default), enforce or off: the network guard that keeps runners off private networks
 //   BOSSMAN_NETGUARD_ALLOW extra host:port entries (space separated) every runner may reach on the private networks
 //   BOSSMAN_LAUNCHER_KEY_FILE  the key the server sends; made on first start if missing
@@ -14,6 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, siblingsFromSysfs } from "./cpu-layout.js";
 import { dockerClient } from "./docker.js";
 import { launcher, launcherServer } from "./launcher.js";
 import { parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, type LauncherConfig } from "./spec.js";
@@ -24,7 +26,11 @@ if (!dataRoot || !path.isAbsolute(dataRoot)) {
   console.error("Set BOSSMAN_DATA to an absolute host folder, mounted at the same path in this container.");
   process.exit(1);
 }
+const cpuPlan = planReserve(parseReservedThreads(env.BOSSMAN_RESERVED_THREADS), allowedThreads(), siblingsFromSysfs);
+console.log(JSON.stringify({ at: new Date().toISOString(), msg: "cpu reserve", on: cpuPlan.on, reason: cpuPlan.reason }));
 const cfg: LauncherConfig = {
+  cpuPlan,
+  ...(cpuPlan.on ? { cpuset: formatCpuList(cpuPlan.runnerThreads) } : {}),
   dataRoot,
   network: env.BOSSMAN_RUNNER_NETWORK ?? "boss-man_default",
   serverUrl: env.BOSSMAN_RUNNER_URL ?? "ws://server:3100/api/runner/connect",

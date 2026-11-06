@@ -98,6 +98,16 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
   return {
     enabled: !!opts,
 
+    /** Whether runners keep a core back for the server, database and proxy, and which threads. Null when the launcher is off or can't be reached. */
+    async cpuReserve(): Promise<unknown> {
+      if (!opts) return null;
+      try {
+        return await call<unknown>("GET", "/cpu");
+      } catch {
+        return null;
+      }
+    },
+
     /** Tells the launcher the company's tool servers again (after one is added or removed). Best effort: a launcher that is down picks them up at the next start. */
     async syncAllow(companyId: string) {
       if (!opts) return;
