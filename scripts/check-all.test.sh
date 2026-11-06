@@ -74,7 +74,10 @@ fi
 if command -v flock >/dev/null; then
   mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
   lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" "$@" ./scripts/check-all.sh 2>&1); }
-  hold() { ( exec 8>"$t/lock.slot.$1"; flock 8; sleep "$2" ) & }
+  # A hold starts counting its seconds only once a waiter has queued behind it (a queue entry newer than the hold),
+  # so no case depends on how long check-all takes to reach the lock under load (BOS-563). Hold 3600 and kill for "until released".
+  hold() { local st="$t/stamp.$1.$RANDOM"; : >"$st"; ( exec 8>"$t/lock.slot.$1"; flock 8; for _ in $(seq 1500); do [ -n "$(find "$t/lock.queue" -type f -newer "$st" 2>/dev/null | head -1)" ] && break; sleep 0.1; done; exec sleep "$2" ) & }
+  waitq() { for _ in $(seq 1500); do [ "$(find "$t/lock.queue" -type f 2>/dev/null | wc -l)" -ge "$1" ] && return 0; sleep 0.1; done; return 1; }
 
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
@@ -143,8 +146,10 @@ if command -v flock >/dev/null; then
 
   # BOS-370: a merge check with no CHECK_ALL_LOCK_WAIT keeps waiting while the queue moves (the slot's holder changes)...
   hold 1 7; h1=$!; hold 2 7; h2=$!; sleep 0.3
+  lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_STUCK_AFTER=3 >"$t/moving.out" & mw=$!
+  waitq 1   # the mover starts once the waiter is in the queue, however long that took
   ( for i in 1 2 3 4 5 6; do echo "$i $i" >"$t/lock.holder.1"; sleep 1; done ) & mover=$!
-  out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_STUCK_AFTER=3) || fail "moving queue: expected to keep waiting and get in, got: $out"
+  mrc=0; wait "$mw" || mrc=$?; out=$(cat "$t/moving.out"); [ "$mrc" = 0 ] || fail "moving queue: expected to keep waiting and get in, got: $out"
   grep -q "lock held" <<<"$out" || fail "moving queue: lock not acquired: $out"
   wait "$h1" "$h2" "$mover"
   # ...and gives up, saying so, only when the same holder sits there past the bound (a dead holder that never lets go).
@@ -180,12 +185,13 @@ if command -v flock >/dev/null; then
   wait "$h1"
 
   # Queue order: a merge check that arrives later goes ahead of a hand-run check; hand-run checks keep their order.
-  hold 1 3; h1=$!; hold 2 3; h2=$!; sleep 0.3
+  rm -rf "$t/lock.queue"; hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
   ( lock env >"$t/hand1.out"; date +%s%N >"$t/hand1.at" ) & hand1=$!
-  sleep 0.3
+  waitq 1   # each check is in the queue before the next starts, so the order is the one asserted
   ( lock env >"$t/hand2.out"; date +%s%N >"$t/hand2.at" ) & hand2=$!
-  sleep 0.3
+  waitq 2
   ( lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=20 >"$t/merge.out"; date +%s%N >"$t/merge.at" ) & merge=$!
+  waitq 3; kill "$h1" "$h2" 2>/dev/null || true
   wait "$h1" "$h2" "$hand1" "$hand2" "$merge"
   for f in hand1 hand2 merge; do grep -q "lock held" "$t/$f.out" || fail "queue: $f did not get a slot: $(cat "$t/$f.out")"; done
   grep -q "place 3 of 3" "$t/hand2.out" || grep -q "place 2 of 3" "$t/hand2.out" || fail "queue: no place shown: $(cat "$t/hand2.out")"
