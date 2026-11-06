@@ -6,7 +6,8 @@
 import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { checkResults, companies, decisions, ticketDependencies, tickets } from "../db/schema.js";
+import { checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
+import { evaluate } from "./review-kinds.js";
 
 /** How many recently finished items the screen shows. */
 export const RECENT_LIMIT = 10;
@@ -122,6 +123,16 @@ export const mergeQueueQueries = {
       .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")))
       .orderBy(tickets.stateChangedAt)
       .limit(200),
+  /**
+   * The latest review round of the given tickets, one row per ticket and kind: whether it is approved.
+   * The waiting list keeps only tickets whose reviews are all approved (a ticket still with its
+   * reviewers is not waiting to merge), which is the same test the rest of the server uses.
+   */
+  latestReviews: (db: Db, ticketIds: string[]) =>
+    db
+      .select()
+      .from(reviewRequests)
+      .where(inArray(reviewRequests.ticketId, ticketIds)),
   /** Recently finished merges: a company+state index range since a cut-off. */
   recentlyDone: (db: Db, companyId: string, since: Date) =>
     db
@@ -210,6 +221,28 @@ export function mergeQueueService(
     return out.sort((a, b) => b.at.localeCompare(a.at)).slice(0, RECENT_LIMIT);
   }
 
+  /**
+   * Keep only the tickets that are waiting to merge: those whose latest review round has no review
+   * still to come and none that asked for changes. A ticket with no reviews at all has no verdict
+   * yet, so it is not waiting; a sign-off (a risk card) is still waiting, as it must be approved.
+   */
+  async function approvedOnly<T extends { id: string }>(rows: T[]): Promise<T[]> {
+    if (!rows.length) return rows;
+    const reviews = await mergeQueueQueries.latestReviews(db, rows.map((r) => r.id));
+    const byTicket = new Map<string, Map<number, typeof reviews>>();
+    for (const r of reviews) {
+      const rounds = byTicket.get(r.ticketId) ?? new Map<number, typeof reviews>();
+      rounds.set(r.round, [...(rounds.get(r.round) ?? []), r]);
+      byTicket.set(r.ticketId, rounds);
+    }
+    return rows.filter((row) => {
+      const rounds = byTicket.get(row.id);
+      if (!rounds?.size) return false;
+      const latest = [...rounds.keys()].sort((a, b) => b - a)[0]!;
+      return evaluate(rounds.get(latest)!) === "passed";
+    });
+  }
+
   return {
     async get(companyId: string): Promise<MergeQueueView> {
       const t = now();
@@ -241,8 +274,10 @@ export function mergeQueueService(
         };
       });
 
-      // Waiting: approved work still in review, a ticket's own last approval is its last activity here.
-      const inReview = await mergeQueueQueries.inReview(db, companyId);
+      // Waiting: approved work still in review. A ticket still with its reviewers is not waiting to
+      // merge, so only those whose latest review round is all approved (or overruled) are kept.
+      const inReviewAll = await mergeQueueQueries.inReview(db, companyId);
+      const inReview = await approvedOnly(inReviewAll);
       const ids = inReview.map((r) => r.id);
       const checks = await latestChecks(ids);
       const cards = await ownerCards(ids);

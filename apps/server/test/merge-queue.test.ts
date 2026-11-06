@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkResults, decisions, ticketDependencies, tickets } from "../src/db/schema.js";
+import { checkResults, decisions, reviewRequests, ticketDependencies, tickets } from "../src/db/schema.js";
 import { failingLine, failingStep } from "../src/services/merge-queue.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -26,6 +26,9 @@ async function setup() {
 }
 
 const queue = (c: Awaited<ReturnType<typeof setup>>) => c.req("GET", `/api/companies/${c.company.id}/merge-queue`).then((r) => r.json());
+// An approved review is what makes a ticket "waiting to merge"; without it, it is still with its reviewers.
+const approve = (c: Awaited<ReturnType<typeof setup>>, ticketId: string, status = "approved") =>
+  c.db.insert(reviewRequests).values({ ticketId, kind: "code", round: 1, status });
 
 describe("merge queue screen (BOS-587)", () => {
   it("reads a failing step in one plain line", () => {
@@ -40,6 +43,7 @@ describe("merge queue screen (BOS-587)", () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the login" })).json() as { id: string; number: number };
     await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    await approve(c, t.id);
     await c.db.insert(checkResults).values({ companyId: c.company.id, ticketId: t.id, kind: "verify", passed: false, detail: "error TS1: bad" });
     const data = await queue(c);
     const row = data.waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
@@ -52,6 +56,7 @@ describe("merge queue screen (BOS-587)", () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Needs a nudge" })).json() as { id: string };
     await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    await approve(c, t.id);
     const [d] = await c.db
       .insert(decisions)
       .values({ companyId: c.company.id, kind: "question", question: "Check stuck?", options: ["Run the check again"], recommendedOption: "Run the check again", tier: "ceo", dedupeKey: `merge-stuck:${t.id}`, context: { type: "check_stuck", ticketId: t.id, command: "verify", output: "" } })
@@ -67,6 +72,8 @@ describe("merge queue screen (BOS-587)", () => {
     const wait = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Just waiting" })).json() as { id: string };
     await c.db.update(tickets).set({ systemState: "review" }).where(and(eq(tickets.id, sign.id)));
     await c.db.update(tickets).set({ systemState: "review" }).where(and(eq(tickets.id, wait.id)));
+    await approve(c, sign.id);
+    await approve(c, wait.id);
     const [d] = await c.db
       .insert(decisions)
       .values({ companyId: c.company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge"], recommendedOption: "Approve and merge", tier: "owner", dedupeKey: `risk-review:${sign.id}`, context: { type: "risk_review", ticketId: sign.id } })
@@ -83,6 +90,7 @@ describe("merge queue screen (BOS-587)", () => {
     // Approved 61 minutes ago: the ticket is in review, and nothing has touched it since.
     const waited = new Date(Date.now() - 61 * 60_000);
     await c.db.update(tickets).set({ systemState: "review", lastActivityAt: waited, stateChangedAt: waited }).where(eq(tickets.id, t.id));
+    await approve(c, t.id);
     const data = await queue(c);
     const row = data.waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
     expect(row).toMatchObject({ state: "waiting_for_slot", stuck: true });
@@ -90,14 +98,40 @@ describe("merge queue screen (BOS-587)", () => {
     // A ticket only a few minutes old is not stuck.
     const fresh = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Just arrived" })).json() as { id: string };
     await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, fresh.id));
+    await approve(c, fresh.id);
     const again = await queue(c);
     expect(again.waiting.find((r: { ticketId: string }) => r.ticketId === fresh.id)).toMatchObject({ state: "waiting_for_slot", stuck: false });
+  });
+
+  it("leaves out a ticket still with its reviewers, and keeps an approved one", async () => {
+    const c = (ctx = await setup());
+    const [a, b, d] = await Promise.all([
+      c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Still reviewing" }),
+      c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Approved already" }),
+      c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Changes asked for" }),
+    ]).then((rs) => rs.map((r) => r.json() as { id: string }));
+    await c.db.update(tickets).set({ systemState: "review" }).where(and(eq(tickets.id, a!.id)));
+    await c.db.update(tickets).set({ systemState: "review" }).where(and(eq(tickets.id, b!.id)));
+    await c.db.update(tickets).set({ systemState: "review" }).where(and(eq(tickets.id, d!.id)));
+    // One review still pending, one its reviewer approved, and one whose reviewer sent it back.
+    await c.db.insert(reviewRequests).values({ ticketId: a!.id, kind: "code", round: 1, status: "pending" });
+    await approve(c, b!.id);
+    await approve(c, d!.id, "changes_requested");
+    const data = await queue(c);
+    const ids = data.waiting.map((r: { ticketId: string }) => r.ticketId);
+    expect(ids).not.toContain(a!.id);
+    expect(ids).not.toContain(d!.id);
+    expect(ids).toContain(b!.id);
+    expect(data.waitingCount).toBe(1);
+    // The badge counts only what is really waiting to merge.
+    expect(data.waitingCount).toBe(data.waiting.length);
   });
 
   it("shows running work, and puts it in no waiting list", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Merging now" })).json() as { id: string };
     await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    await approve(c, t.id);
     // Start a tracked landing, the same marker the ticket page polls.
     await c.review.startLanding(t.id, "the reviewer").catch(() => undefined);
     const data = await queue(c);

@@ -10,7 +10,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { PGlite } from "@electric-sql/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import * as schema from "../src/db/schema.js";
-import { agents, checkResults, decisions, notifications, nudges, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, checkResults, decisions, notifications, nudges, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { migrationsFolder } from "../src/db/client.js";
 import { runOriginQuery } from "../src/services/runs.js";
 import { mergeQueueQueries } from "../src/services/merge-queue.js";
@@ -200,16 +200,20 @@ describe("the merge queue's reads (BOS-587)", () => {
     await c.db.insert(tickets).values(n2.map((n) => ({ companyId: w.company.id, projectId: w.project.id, number: n + 2, title: `T${n}`, systemState: (["backlog", "ready", "in_progress", "review", "done"] as const)[n % 5]!, mergeCommit: n % 5 === 4 ? "abcdef1234" : null })));
     const rows = await c.db.select({ id: tickets.id }).from(tickets);
     await c.db.insert(checkResults).values(rows.map((r, n) => ({ companyId: w.company.id, ticketId: r.id, kind: "verify", passed: n % 4 === 0, at: ts(n) })));
+    await c.db.insert(reviewRequests).values(rows.map((r, n) => ({ ticketId: r.id, kind: "code", round: 1, seq: 0, status: n % 3 === 0 ? "pending" : "approved" })));
     await c.client.exec("analyze");
 
-    // Every read the screen makes, exactly as the service builds it.
+    // Every read the screen makes, exactly as the service builds it. The reviews read is keyed by the
+    // ticket ids the in-review read returns, so it is bounded by them and uses the ticket index.
     const since = ts(7 * 24 * 60);
-    for (const q of [mergeQueueQueries.inReview(c.db, w.company.id), mergeQueueQueries.recentlyDone(c.db, w.company.id, since), mergeQueueQueries.recentFailedChecks(c.db, w.company.id, since)]) {
+    const someIds = rows.slice(0, 50).map((r) => r.id);
+    for (const q of [mergeQueueQueries.inReview(c.db, w.company.id), mergeQueueQueries.recentlyDone(c.db, w.company.id, since), mergeQueueQueries.recentFailedChecks(c.db, w.company.id, since), mergeQueueQueries.latestReviews(c.db, someIds)]) {
       const { sql: text, params } = q.toSQL();
       const plan = (await c.client.query(`explain ${text}`, params)).rows.map((r) => String(Object.values(r as Record<string, unknown>)[0])).join("\n");
-      // A whole-table scan on check_results or tickets is the thing this ticket forbids.
+      // A whole-table scan on check_results, tickets or review_requests is the thing this ticket forbids.
       expect(plan, text).not.toMatch(/Seq Scan on (public\.)?check_results/);
       expect(plan, text).not.toMatch(/Seq Scan on (public\.)?tickets/);
+      expect(plan, text).not.toMatch(/Seq Scan on (public\.)?review_requests/);
     }
   });
 });
