@@ -11,6 +11,8 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { addonList, checkAddons } from "./addons.js";
@@ -19,12 +21,57 @@ import { RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
+/**
+ * Asks the Boss Man MCP server for its tool list, the same way an agent would (BOS-552). OpenCode
+ * silently drops an MCP server it can't reach at session/new, so a run with mcpRequired must check
+ * first: a server that answers with tools is healthy, anything else stops the run instead of letting
+ * it work blind. Returns the tool names on success, or a short reason on failure.
+ */
+export async function checkBossManTools(url: string, token: string): Promise<{ ok: boolean; tools?: string[]; reason?: string }> {
+  const client = new Client({ name: "bossman-preflight", version: "0.0.1" }, { capabilities: {} });
+  try {
+    const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } });
+    await client.connect(transport);
+    const listed = await client.listTools();
+    const tools = (listed.tools ?? []).map((t) => t.name);
+    if (!tools.length) return { ok: false, reason: "it answered but listed no tools" };
+    return { ok: true, tools };
+  } catch (err) {
+    return { ok: false, reason: String((err as Error)?.message ?? err).slice(0, 200) };
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+/** How long one preflight attempt may take before it counts as failed, and how many attempts a run makes. */
+const MCP_PREFLIGHT_TIMEOUT_MS = 10_000;
+const MCP_PREFLIGHT_ATTEMPTS = 3;
+const MCP_PREFLIGHT_DELAY_MS = 2_000;
+
+/** A preflight attempt that hangs counts as a failure, so a stuck server can't hold a run forever. */
+async function withTimeout<T extends { ok: boolean; reason?: string }>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, reason: `no answer within ${Math.round(ms / 1000)}s` } as T), ms);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export type SessionManagerOptions = {
   emit: (event: RunnerEvent) => void;
   /** The company's granted secrets for this run, fetched from the server (which logs the access). */
   resolveEnv: (runId: string) => Promise<Record<string, string>>;
   /** Boss Man's MCP endpoint as agents reach it. */
   mcpUrl: string;
+  /**
+   * Confirms the Boss Man tools are reachable before an mcpRequired run starts (BOS-552). The default
+   * asks the live server for its tool list; tests override it to drive the success and failure paths.
+   */
+  checkBossManTools?: (url: string, token: string) => Promise<{ ok: boolean; tools?: string[]; reason?: string }>;
   /** Environment every agent inherits (PATH, HOME, proxy settings); secrets are added per run. */
   baseEnv?: NodeJS.ProcessEnv;
   /** How long a permission request waits for a verdict before it is refused. */
@@ -783,8 +830,29 @@ export class SessionManager {
       }
 
       const mcpServers: McpServer[] = [{ type: "http", name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
-      // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
       const supported = (init.agentCapabilities as { mcpCapabilities?: Record<string, boolean | undefined> } | undefined)?.mcpCapabilities;
+      // Boss Man tools are required (BOS-552): OpenCode accepts a session/new even when its MCP server
+      // is unreachable and then runs with no tools, so check the tools are really there first. Checking
+      // before session/new means a run that can't reach them never reaches run.started: it ends with a
+      // clear error, which the ticket feed shows as "Run ended: error: ...".
+      if (cmd.mcpRequired) {
+        if (!supported?.http) {
+          finish(null, `This run was stopped because ${cmd.agentKind} doesn't support HTTP MCP servers, so it would start without the Boss Man tools.`);
+          return;
+        }
+        const check = this.opts.checkBossManTools ?? checkBossManTools;
+        let result = await withTimeout(check(this.opts.mcpUrl, cmd.mcpToken), MCP_PREFLIGHT_TIMEOUT_MS);
+        for (let attempt = 1; !result.ok && attempt < MCP_PREFLIGHT_ATTEMPTS && this.runs.has(cmd.runId); attempt++) {
+          await new Promise((r) => setTimeout(r, MCP_PREFLIGHT_DELAY_MS));
+          if (!this.runs.has(cmd.runId)) return;
+          result = await withTimeout(check(this.opts.mcpUrl, cmd.mcpToken), MCP_PREFLIGHT_TIMEOUT_MS);
+        }
+        if (!result.ok) {
+          finish(null, `This run was stopped because it couldn't reach the Boss Man tools (${result.reason ?? "no answer"}), so it would have worked blind. It runs again when the server is reachable.`);
+          return;
+        }
+      }
+      // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
       for (const m of cmd.mcpServers ?? []) {
         const token = m.secretEnv ? secrets[m.secretEnv] : undefined;
         if (m.secretEnv && !token) continue;
