@@ -6,7 +6,8 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, decisions, fundingSources, quotaSamples, runners, runs as runsTable, tickets, wakes } from "../src/db/schema.js";
+import { clearWhenOf } from "../src/services/alert-clearing.js";
+import { activity, decisions, fundingSources, notifications, quotaSamples, runners, runs as runsTable, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -15,11 +16,11 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup() {
+async function setup(o: { trustedProxies?: string[]; fetch?: typeof fetch } = {}) {
   const { db, close } = await openPglite();
   let offset = 0;
   const clock = () => new Date(Date.now() + offset);
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: clock });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: clock, ...o });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
@@ -256,5 +257,85 @@ describe("one closer for Boss Man's own cards (DR-016, BOS-470)", () => {
     const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, card.id));
     expect(row!.status).toBe("open");
     expect((row!.context as { clearWhen?: unknown }).clearWhen).toBeUndefined();
+  });
+});
+
+describe("an add-on's setup card closes itself once the add-on works (DR-023 D, BOS-522)", () => {
+  const raiseSetup = async (c: NonNullable<typeof ctx>, ticketId: string) =>
+    c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Put Boss Man behind Tailscale?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: ticketId, triedFirst: "No host access from a runner", steps: ["Install Tailscale on the server."], setsUp: "tailscale" });
+  const row = async (c: NonNullable<typeof ctx>, id: string) => (await c.db.select().from(decisions).where(eq(decisions.id, id)))[0]!;
+
+  it("stays open on a Tailscale reading from before the card, closes after a request through the edge, frees the ticket and tells the owner", async () => {
+    // Inject's peer is 127.0.0.1, so naming it as the edge makes every request "through Tailscale".
+    ctx = await setup({ trustedProxies: ["127.0.0.1"] });
+    const t = await ctx.ticket({ title: "Reach Boss Man from the phone", assigneeAgentId: ctx.worker.id });
+    ctx.advance(60_000);
+    const card = await raiseSetup(ctx, t.id);
+    expect((await row(ctx, card.id)).context).toMatchObject({ setsUp: "tailscale", clearWhen: [{ kind: "addonRunning", addon: "tailscale" }] });
+    const [held] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(held!.systemState).toBe("blocked");
+
+    // Tailscale reads running from the setup requests, but those came before the card: not proof it's fixed.
+    await ctx.sweeps.run();
+    expect((await row(ctx, card.id)).status).toBe("open");
+
+    ctx.advance(60_000);
+    await ctx.req("GET", "/api/decisions");
+    await ctx.sweeps.run();
+    const after = await row(ctx, card.id);
+    expect(after.status).toBe("withdrawn");
+    expect((after.context as { withdrawn?: { by: string; note: string } }).withdrawn).toMatchObject({ by: "system", note: expect.stringMatching(/^Tailscale is running \(last request through the trusted edge/) });
+    // The ticket no longer waits on it.
+    expect(await ctx.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, card.id))).toEqual([]);
+    const [freed] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(freed!.systemState).toBe("ready");
+    // The owner reads it on the ticket's activity and under "Settled or withdrawn by the team".
+    expect((await ctx.db.select().from(activity)).some((a) => a.kind === "decision_withdrawn" && a.ticketId === t.id && /by itself: Tailscale is running/.test(a.summary))).toBe(true);
+    const advised = (await ctx.req("GET", "/api/decisions/advised")).json() as Array<{ id: string; withdrawn?: { by: string; note: string } }>;
+    expect(advised.find((a) => a.id === card.id)?.withdrawn).toMatchObject({ by: "Boss Man", note: expect.stringMatching(/Tailscale is running/) });
+  });
+
+  it("stays open while the add-on isn't running, however many requests come in", async () => {
+    ctx = await setup();
+    const t = await ctx.ticket({ title: "Reach Boss Man from the phone", assigneeAgentId: ctx.worker.id });
+    const card = await raiseSetup(ctx, t.id);
+    ctx.advance(60_000);
+    await ctx.req("GET", "/api/decisions");
+    await ctx.sweeps.run();
+    expect((await row(ctx, card.id)).status).toBe("open");
+    const [held] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(held!.systemState).toBe("blocked");
+  });
+
+  it("keeps an ntfy setup card open while ntfy is not set up, unknown or stopped, and closes it once a push goes through", async () => {
+    // No push may leave the test: any the app sends get a 200 here.
+    ctx = await setup({ fetch: async () => new Response("", { status: 200 }) });
+    const t = await ctx.ticket({ title: "Phone pushes", assigneeAgentId: ctx.worker.id });
+    const card = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.worker.id, question: "Turn on phone pushes?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: t.id, triedFirst: "Needs the owner's phone", steps: ["Install the ntfy app."], setsUp: "ntfy" });
+    const status = async () => (await row(ctx!, card.id)).status;
+    const push = { requested: "page", level: "page", title: "x", link: "#/decisions" } as const;
+
+    await ctx.sweeps.run(); // not_set_up
+    expect(await status()).toBe("open");
+    await ctx.notes.setSettings({ ...(await ctx.notes.getSettings()), ntfy: { url: "https://ntfy.example", topic: "bm", tokenSecretId: null } });
+    await ctx.sweeps.run(); // unknown: set up, nothing pushed yet
+    expect(await status()).toBe("open");
+    ctx.advance(60_000);
+    await ctx.db.insert(notifications).values({ ...push, createdAt: ctx.clock(), pushError: "ntfy answered 401" });
+    await ctx.sweeps.run(); // stopped
+    expect(await status()).toBe("open");
+
+    ctx.advance(60_000);
+    await ctx.db.insert(notifications).values({ ...push, createdAt: ctx.clock(), pushedAt: ctx.clock() });
+    await ctx.sweeps.run(); // running, after the card
+    const after = await row(ctx, card.id);
+    expect(after.status).toBe("withdrawn");
+    expect((after.context as { withdrawn?: { by: string; note: string } }).withdrawn).toMatchObject({ by: "system", note: expect.stringMatching(/^ntfy is running \(the last phone push went through, at \d\d:\d\d\)$/) });
+    const [freed] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(freed!.systemState).toBe("ready");
+  });
+
+  it("ignores an add-on name it doesn't know rather than guess", () => {
+    expect(clearWhenOf({ clearWhen: [{ kind: "addonRunning", addon: "grafana" }, { kind: "addonRunning", addon: "ntfy" }] })).toEqual([{ kind: "addonRunning", addon: "ntfy" }]);
   });
 });

@@ -640,17 +640,31 @@
       "breakpoints": true
     },
     {
-      "idx": 91,
+      "idx": 101,
       "version": "7",
       "when": 1793734891370,
       "tag": "0101_ticket_owner_setup",
       "breakpoints": true
     },
     {
-      "idx": 92,
+      "idx": 102,
       "version": "7",
       "when": 1793802700000,
       "tag": "0102_owner_replies",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1793937277960,
+      "tag": "0103_run_query_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1793941639218,
+      "tag": "0104_standing_rules",
       "breakpoints": true
     }
   ]

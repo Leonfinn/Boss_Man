@@ -8,6 +8,8 @@ import {
   effectiveDueDate,
   evaluatePermission,
   isBossmanCall,
+  readCriteria,
+  unreportedAfterMerge,
   ruleFor,
   rankDecision,
   ticketRef,
@@ -38,7 +40,8 @@ import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
 import { REVIEW_REASON } from "./review-kinds.js";
-import { type CardLint, NOT_OVERRIDABLE, lintLines, lintOwnerSteps } from "./steps.js";
+import { type CardLint, type HostFacts, NOT_OVERRIDABLE, lintLines, lintOwnerSteps } from "./steps.js";
+import type { Addon, AddonFacts } from "./addons.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
@@ -168,6 +171,8 @@ export type DecisionContext =
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   /** A display-name change for an agent (BOS-265); only the name moves, never the id. */
   | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string }
+  /** A change to the company's standing rules (BOS-353), applied when the owner approves. */
+  | { type: "standing_rules"; text: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A model-setup change for an existing agent (BOS-128): the owner approves, edits or rejects it. */
   | { type: "model_change"; agentId: string; before: AgentModelConfig; proposed: AgentModelConfig; byAgentId: string; runningRunId?: string | null; applied?: { at: string; afterRunId: string | null; config?: AgentModelConfig } }
@@ -273,6 +278,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "hire",
   "instructions",
   "rename",
+  "standing_rules",
   "model_change",
   "team_plan",
   "risk_review",
@@ -498,8 +504,12 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * the card keeps (warnings, and a CEO override). Every route that raises an agent card calls this, so the lint
  * can't be skipped: raise_decision, the CEO's reissue and escalate, and the Scrum Master's raise_decision.
  * `lintOverride` lets a refusal through with a reason; only the CEO may pass one (`byCeo`), and never past R3/R4.
+ * `hosts` are the host facts Boss Man recorded (BOS-427): when given, R6 checks a login-run block against what the
+ * host says it can read; without them it only checks that every block names a host and an account.
+ * `addons` are the add-on facts for R9 (DR-023); a route that has them passes them, and `setsUp` names the
+ * add-on this card sets up, so its own setup steps aren't refused for it not running yet.
  */
-export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean }): { error: string; lint?: undefined } | { error: null; lint?: CardLint } {
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; addons?: AddonFacts; setsUp?: Addon }): { error: string; lint?: undefined } | { error: null; lint?: CardLint } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -511,7 +521,7 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
   if (override !== undefined && !a.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the steps instead, or ask the CEO to raise the card." };
   if (override !== undefined && override.length < 10) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
   if (!a.steps?.length) return { error: null };
-  const { refuse, warn } = lintOwnerSteps(a.steps);
+  const { refuse, warn } = lintOwnerSteps(a.steps, { ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}) });
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
   const soft = refuse.filter((f) => !NOT_OVERRIDABLE.has(f.rule));
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
@@ -723,7 +733,7 @@ export type RetroHook = {
   checked(changeId: string, answer: string): Promise<unknown>;
   lessonAnswered(decisionId: string, answer: string, note?: string): Promise<unknown>;
 };
-type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" | "rename" }>, companyId: string, approved: boolean) => Promise<unknown>;
+type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" | "rename" | "standing_rules" }>, companyId: string, approved: boolean) => Promise<unknown>;
 type ModelChangeHook = (ctx: Extract<DecisionContext, { type: "model_change" }>, companyId: string, config: AgentModelConfig) => Promise<{ afterRunId: string | null }>;
 
 /**
@@ -754,6 +764,35 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
   });
   if (answered) lines.push(`- You asked "${answered.question}"; the answer was: ${answered.answer}`);
   return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
+}
+
+/**
+ * The owner's answer on a card that blocks a ticket settles that ticket's after-merge criteria (DR-024 #5):
+ * the card was how the owner was to check the live work, so the answer is its pass or fail. The criterion's
+ * own words are written into the state note with the verdict, so the done gate reads it like any other report.
+ * Returns the tickets it wrote to; a ticket whose criteria were already reported is left as it is.
+ */
+async function recordOwnerHostChecks(db: Db, d: { question: string; answer: string | null }, ticketIds: string[], by: string, now: () => Date): Promise<string[]> {
+  const answer = (d.answer ?? "").trim();
+  if (!ticketIds.length || !answer) return [];
+  const rows = await db.select({ id: tickets.id, criteria: tickets.acceptanceCriteria, note: tickets.stateNote, merged: tickets.mergeCommit }).from(tickets).where(inArray(tickets.id, ticketIds));
+  // A problem word wins over a "yes"/"works"; anything with no pass word at all (an answer to a "How did
+  // it look?" card) is a fail, so the assignee has to look rather than the ticket closing on a shrug. The
+  // owner's plain words are quoted on the note either way.
+  const fail = /\b(fail|failed|fails|failing|broken|not|didn't|doesn't|can't|cannot|red|no|✗|✘)\b/i.test(answer);
+  const pass = /\b(pass|passed|passes|passing|ok|done|yes|green|works|working|✓|✔)\b/i.test(answer);
+  const verdict = fail || !pass ? "fail" : "pass";
+  const said = answer.replace(/\s+/g, " ").slice(0, 200);
+  const wrote: string[] = [];
+  for (const r of rows) {
+    const criteria = readCriteria(r.criteria);
+    // Only a merged ticket has after-merge checks to settle; before that its own assignee reports them.
+    if (!r.merged || !unreportedAfterMerge(criteria, r.note).length) continue;
+    const line = `Owner answered "${d.question.split("\n")[0]!.slice(0, 120)}" (${by}): ${unreportedAfterMerge(criteria, r.note).map((c) => `"${c}" ${verdict}`).join("; ")} — "${said}"`;
+    await db.update(tickets).set({ stateNote: `${(r.note ?? "").trim()}${r.note ? ". " : ""}${line}`.slice(0, 4000), stateNoteAt: now() }).where(eq(tickets.id, r.id));
+    wrote.push(r.id);
+  }
+  return wrote;
 }
 
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}, workspaceRoot?: string) {
@@ -1480,7 +1519,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; setsUp?: Addon }) {
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -1491,7 +1530,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
-            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}) },
+            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}),
+              // An add-on's setup card closes itself once the add-on is seen working (DR-023 D, BOS-522).
+              ...(input.setsUp ? { setsUp: input.setsUp, clearWhen: [{ kind: "addonRunning", addon: input.setsUp }] } : {}),
+            },
           })
           .returning();
         if (input.blocksTicketId) {
@@ -2205,7 +2247,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const withdrawn = await db
         .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context })
         .from(decisions)
-        .where(and(eq(decisions.status, "withdrawn"), sql`${decisions.context}->'withdrawn'->>'by' = 'ceo'`, sql`(${decisions.context}->'withdrawn'->>'at')::timestamptz > ${withdrawnSince.toISOString()}::timestamptz`))
+        // Plus an add-on setup card Boss Man closed once the add-on worked (BOS-522): the owner set it up, so they see it's done.
+        .where(and(eq(decisions.status, "withdrawn"), sql`(${decisions.context}->'withdrawn'->>'by' = 'ceo' or (${decisions.context}->'withdrawn'->>'by' = 'system' and ${decisions.context}->>'setsUp' is not null))`, sql`(${decisions.context}->'withdrawn'->>'at')::timestamptz > ${withdrawnSince.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
       // Alerts the Scrum Master settled from the watchdog tool: alert_resolved records who and why (BOS-119).
@@ -2248,7 +2291,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }),
         ...withdrawn.map((r) => {
           const w = (r.context as { withdrawn: Withdrawal }).withdrawn;
-          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), withdrawn: { by: w.name ?? "the CEO", note: w.note } };
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), withdrawn: { by: w.name ?? (w.by === "system" ? "Boss Man" : "the CEO"), note: w.note } };
         }),
         ...fromAlerts,
       ];
@@ -2494,7 +2537,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           await db.update(decisions).set({ status: "open", answer: null, answeredAt: null, context: d.context as object }).where(eq(decisions.id, id));
           throw err;
         }
-      } else if (ctx.type === "hire" || ctx.type === "instructions" || ctx.type === "rename") {
+      } else if (ctx.type === "hire" || ctx.type === "instructions" || ctx.type === "rename" || ctx.type === "standing_rules") {
         try {
           await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
         } catch (err) {
@@ -2578,6 +2621,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+      // A card that blocked a merged ticket was how the owner checked its live work: their answer is the
+      // criterion's pass or fail (DR-024 #5). Only the owner's own answer counts: a CEO settling an agent's
+      // question isn't the owner looking at the host, and the assignee still reports that one.
+      if (!extra.settledBy && ctx.type === "question") {
+        try {
+          await recordOwnerHostChecks(db, { question: d.question, answer }, [...new Set(freed.map((f) => f.ticketId))], "the owner", now);
+        } catch (err) {
+          // The answer is saved; a failed write here must not stop it reaching the asker.
+          log(`answering decision ${id} was saved, but recording the owner's host check on its ticket failed: ${(err as Error).message}`);
+        }
+      }
       // The activity line is cut at 300 characters, so a long permission card is shortened here to keep the answer and reason in it.
       const asked = settled && d.question.length > 120 ? `${d.question.slice(0, 119)}…` : d.question;
       await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
