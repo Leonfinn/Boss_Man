@@ -4,6 +4,7 @@ import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
 import { usePoll, useRoute } from "./hooks";
+import { useNewBuild } from "./new-build";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
 import { Decisions } from "./pages/Decisions";
@@ -85,6 +86,19 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
   );
 }
 
+/** On every page once the server serves newer screens than this tab is running (BOS-550): the owner reloads when ready. */
+export function NewBuildBanner({ newer }: { newer: boolean }) {
+  if (!newer) return null;
+  return (
+    <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span>Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.</span>
+      <button className="btn" type="button" onClick={() => window.location.reload()}>
+        Reload
+      </button>
+    </p>
+  );
+}
+
 function Signed({ onLogout }: { onLogout: () => void }) {
   const [route, go] = useRoute();
   const page = route[0] ?? "dashboard";
@@ -97,6 +111,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const feed = usePoll((signal) => api<NoticeFeed>("/api/notifications", { signal }), 10_000, "notifications");
   const maintenance = usePoll((signal) => api<Maintenance>("/api/maintenance", { signal }), 5_000, "maintenance");
   const unprocessed = usePoll((signal) => api<Record<string, number>>("/api/feedback/unprocessed", { signal }), 30_000, "unprocessed");
+  const newer = useNewBuild();
   useFeedNotifications(feed.data);
   // Moving between screens refreshes the company list, so names and agents are never stale.
   const reloadCompanies = companies.reload;
@@ -167,6 +182,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
         {lost ? (
           <State img={art.stuck} alt="Lost connection to the server" title="Lost connection to the server">

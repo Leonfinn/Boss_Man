@@ -48,3 +48,18 @@ it("skips a loop's ticks while its last pass is still running, and only that loo
   // The other loop kept its own pace.
   expect(fast).toBeGreaterThan(3);
 });
+
+it("runs a loop's first pass after firstAfterMs, long before its interval (BOS-416)", async () => {
+  let n = 0;
+  const bg = createBackground([{ name: "daily", everyMs: 3_600_000, firstAfterMs: 5, run: async () => void n++ }]);
+  bg.startBackground();
+  await new Promise((r) => setTimeout(r, 40));
+  expect(n).toBe(1);
+  await bg.stopBackground();
+  // stopping before the first pass cancels it
+  const bg2 = createBackground([{ name: "daily", everyMs: 3_600_000, firstAfterMs: 30, run: async () => void n++ }]);
+  bg2.startBackground();
+  await bg2.stopBackground();
+  await new Promise((r) => setTimeout(r, 60));
+  expect(n).toBe(1);
+});
