@@ -287,6 +287,10 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     c.fake.broken.add("app-co");
     await c.maintenance.start();
     await c.maintenance.step();
+    c.advance(31_000);
+    await c.maintenance.step();
+    c.advance(31_000);
+    await c.maintenance.step(); // third failed try: now it counts as failed
     expect(await getHold(c.db)).toBeNull();
     expect(await c.maint()).toMatchObject({ on: false, last: { ok: false }, healthy: false });
     c.fake.runnersBySlug.get("app-co")!.current = true; // it came back by itself (compose recreated it)
