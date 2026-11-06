@@ -15,6 +15,8 @@ export type AddonState = "not_set_up" | "stopped" | "needs_login" | "running" | 
 /** One add-on's state, when it was last seen in it (null when that isn't known) and what the state was read from. */
 export type AddonFact = { state: AddonState; since: string | null; source: string; detail?: string };
 export type AddonFacts = Record<Addon, AddonFact>;
+/** Each add-on's name as the owner reads it. */
+export const ADDON_LABELS: Record<Addon, string> = { tailscale: "Tailscale", ntfy: "ntfy", penpot: "Penpot" };
 
 /**
  * A request through the edge counts as Tailscale running for this long. Past it the overlay may have
