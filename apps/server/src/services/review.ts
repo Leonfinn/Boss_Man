@@ -790,7 +790,7 @@ export function reviewService(
      */
     async moveAfterMerge(ticketId: string, criteria: string[]) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
-      if (!t || t.systemState !== "review") return;
+      if (!t || t.systemState === "done") return;
       const move = new Set(criteria);
       const next = readCriteria(t.acceptanceCriteria).map((c) => (!isAfterMerge(c) && move.has(criterionText(c)) ? { text: criterionText(c), after: "merge" as const } : c));
       await db.update(tickets).set({ acceptanceCriteria: next }).where(eq(tickets.id, ticketId));
@@ -801,7 +801,8 @@ export function reviewService(
       await record(db, { companyId: t.companyId, ticketId, kind: "review_overruled", summary: `Stuck review: ${criteria.map((c) => `"${c}"`).join(", ")} moved to after the merge, so the changes requested on them no longer hold the ticket.` });
       await reviveSkipped(db, rows);
       const reviewer = failed.find((r) => r.reviewerAgentId)?.reviewerAgentId;
-      if (!reviewer) return;
+      // A review the owner gave straight from the ticket page has no review rows: the move is the approval.
+      if (!reviewer) return failed.length ? undefined : this.approve(t, { reviewer: "the owner", background: true });
       return this.settle(t, { verdict: "approved", reviewer: "the owner", reviewerAgentId: reviewer, before });
     },
 
