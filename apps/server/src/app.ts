@@ -609,6 +609,7 @@ export async function buildApp(opts: AppOptions) {
     restoreState: (ticketId, state) => work.updateTicket(ticketId, { state, overLimit: true }),
     // A trip means the Scrum Master is the problem: straight to the owner.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
+    alertCeo: (input) => alerts.raise(input),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
     localHour: (t) => Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ }).format(t)),
