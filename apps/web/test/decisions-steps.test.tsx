@@ -66,3 +66,17 @@ describe("command blocks say where and as whom (BOS-427)", () => {
     expect(screen.queryByText((_, el) => el?.tagName === "DIV" && /^On \S/.test(el.textContent ?? ""))).toBeNull();
   });
 });
+
+describe("labelled fences render as command blocks, wherever they sit (BOS-550)", () => {
+  it("shows a labelled fence inside a numbered list item as a command with its Copy button, and no raw fence text", async () => {
+    setSecure(true);
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const step = "1. Read the deployer folder from your settings file:\n   ```sh host=\"app01\" as=\"root\"\n   D=$(sed -n 's/^DEPLOYER=//p' .env)\n   ```";
+    const { container } = render(<Decisions decisions={[card([step])]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
+    expect(line(/^On app01, as root\.$/)).toBeTruthy();
+    expect(container.querySelector("[data-steps]")!.textContent).not.toMatch(/```|host=|as="/);
+    fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("D=$(sed -n 's/^DEPLOYER=//p' .env)"));
+  });
+});

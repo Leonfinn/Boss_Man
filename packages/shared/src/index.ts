@@ -30,3 +30,4 @@ export * from "./permission-judge.js";
 export * from "./second-opinion.js";
 export * from "./owner-message.js";
 export * from "./compression.js";
+export * from "./step-text.js";
