@@ -168,6 +168,36 @@ refresh_available() {
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
+# Host facts (BOS-427): the machine's own name and, for the folders it knows, their owner, group and mode,
+# read with `stat` only (never their contents). The server's owner-card lint (R6) uses this to refuse a step
+# that would run as the owner's login and hit a folder that login can't read. Every folder is optional: one
+# that isn't there is skipped, and a stat that fails is skipped too, so a host on another layout still gets a
+# record. The file is written mode 644 (no secrets in it) and only replaced when it changed.
+write_host_facts() {
+  local f="$OUTBOX/host.json"
+  ((DRY)) && { log "[dry-run] would write $f"; return 0; }
+  local name; name="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost)"
+  name="${name%%[[:space:]]*}"
+  [[ $name =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || name="localhost"
+  local rows="" sep="" p o g m
+  # The install folder (the deployer's parent), the deployer folder, backups, data and the checkout's secrets.
+  local -a folders=("$D/.." "$D" "${BOSSMAN_BACKUP_DIR:-$D/..}" "${BOSSMAN_DATA:-/srv/boss-man/data}" "$REPO/secrets")
+  for p in "${folders[@]}"; do
+    [[ -n $p && -d $p ]] || continue
+    p="$(cd "$p" 2>/dev/null && pwd)" || continue
+    [[ -n $p ]] || continue
+    o="$(stat -c %U "$p" 2>/dev/null || stat -c %u "$p" 2>/dev/null)" || continue
+    g="$(stat -c %G "$p" 2>/dev/null || stat -c %g "$p" 2>/dev/null)" || continue
+    m="$(stat -c %a "$p" 2>/dev/null)" || continue
+    [[ $m =~ ^[0-7]{3,4}$ ]] || continue
+    # Avoid listing the same folder twice (install and backups can be the same folder).
+    [[ $rows == *"\"path\": $(jstr "$p")"* ]] && continue
+    rows+="$sep{\"path\": $(jstr "$p"), \"owner\": $(jstr "$o"), \"group\": $(jstr "$g"), \"mode\": \"$m\"}"; sep=", "
+  done
+  printf '{"version": 1, "name": %s, "writtenAt": %s, "ownership": [%s]}\n' "$(jstr "$name")" "$(jstr "$(now)")" "$rows" >"$f.tmp"
+  chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
+}
+
 # One function per action, so a later phase can change what "deploy the server" means in one place.
 do_deploy_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
 # No --now: update-runner.sh builds and checks the image, then asks Boss Man to drain (inbox/drain.json) and returns,
@@ -492,8 +522,37 @@ do_rollback_bluegreen() {
 # Booleans print True/False because callers compare against "True".
 deploy_status_field() { jfield "$1" <"${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" 2>/dev/null || true; }
 
+# A run that was cut off (killed, host restart) leaves status.json saying "running" for ever, the checkout ahead of what
+# runs and maybe a soak file for a release that never went live. We hold the lock here, so no run is active: say so
+# (the server refuses new deploys while the status is "running"), and make the checkout and soak match what really answers.
+# Only files and git are touched; never a container.
+recover_interrupted() {
+  local sf="$OUTBOX/status.json" st live="" head reset="" sc=""
+  [[ -f $sf && ! -L $sf ]] || return 0
+  st="$(cat "$sf")"
+  [[ $(jfield result <<<"$st") == running ]] || return 0
+  ((DRY)) && { log "[dry-run] the last run was cut off (status still 'running'); a real tick would mark it failed"; return 0; }
+  REQ_ID="$(jfield id <<<"$st")" TARGET="$(jfield target <<<"$st")" STARTED="$(jfield started <<<"$st")" FROM="$(jfield from_commit <<<"$st")" COMMIT="$(jfield to_commit <<<"$st")"
+  head="$(g rev-parse HEAD 2>/dev/null || true)"
+  if [[ $TARGET == server ]] && bluegreen_enabled; then
+    live="$(jfield commit <<<"$(probe proxy 3100 /api/ready 2>/dev/null || true)")"
+    if [[ $live =~ ^[0-9a-f]{40}$ && $live != "$head" ]] && g cat-file -e "$live^{commit}" 2>/dev/null; then
+      g reset --quiet --hard "$live" && reset=" The checkout was put back on ${live:0:8}, which is what answers."
+    fi
+    if [[ -f $STATE/soak && -n $live ]]; then
+      sc="$(sed -n 's/.* commit=\([0-9a-f]\{40\}\) .*/\1/p' "$STATE/soak" | head -1)"
+      if [[ $sc != "$live" ]]; then rm -f "$STATE/soak"; reset+=" A trial window for ${sc:0:8} was dropped because that version is not the one running."; fi
+    fi
+  fi
+  [[ -z $REQ_ID ]] && REQ_ID="interrupted-$(date +%s)"
+  finish failed "The ${TARGET:-deploy} run for ${COMMIT:0:8} was cut off before it finished (the deployer was stopped part-way).$reset Check what runs before deploying again."
+}
+
 main() {
   local req="$INBOX/request.json"
+  # What this host says about itself (BOS-427), refreshed every tick, so an owner card's steps can be
+  # checked against the real folders before they reach the owner.
+  write_host_facts || true  # never let a stat failure stop a deploy
   if ((ROLLBACK)); then
     bluegreen_enabled || { echo "ERROR: this install does not use blue/green; use scripts/deploy.sh --rollback." >&2; exit 1; }
     local rrc=0
@@ -506,6 +565,7 @@ main() {
     post_webhook "${BG_RESULT:-failed}" "${BG_MSG:-Rollback failed.}"
     exit "$rrc"
   fi
+  recover_interrupted
   if bluegreen_enabled; then soak_tick; fi
   if [[ ! -e $req && ! -L $req ]]; then refresh_available; exit 0; fi
 

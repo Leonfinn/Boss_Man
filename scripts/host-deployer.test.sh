@@ -78,6 +78,14 @@ has "$D/outbox/available.json" '"bluegreen": false, "liveColour": ""'
 hasnt "$D/outbox/available.json" '"soakSeconds"' # a single server has no standby window to report
 has "$D/outbox/available.json" 'change apps/server/a'
 [[ ! -e $D/outbox/status.json ]] || fail "status written with no request"
+# 1a. Host facts (BOS-427): the machine's name, and the ownership of the folders it knows, read with stat only.
+has "$D/outbox/host.json" '{"version": 1, "name":'
+has "$D/outbox/host.json" "\"path\": \"$(cd "$T/deployer" && pwd)\""
+has "$D/outbox/host.json" "\"path\": \"$(cd "$D" && pwd)\""
+has "$D/outbox/host.json" '"mode": "'
+hasnt "$D/outbox/host.json" '"login"' # the deployer runs as root and doesn't guess the owner's account
+[[ $(stat -c %a "$D/outbox/host.json") == 644 ]] || fail "host.json is not mode 644"
+node -e 'const h=require(process.argv[1]);if(!Array.isArray(h.ownership)||!h.ownership.length)process.exit(1);for(const o of h.ownership)if(!/^\/[^"]*$/.test(o.path)||!/^[0-7]{3,4}$/.test(o.mode)||!o.owner||!o.group)process.exit(2)' "$D/outbox/host.json" || fail "host.json ownership is malformed: $(cat "$D/outbox/host.json")"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
 sed -i 's/^AVAILABLE_REFRESH_SECONDS=0$/AVAILABLE_REFRESH_SECONDS=300/' "$D/host.conf"
 printf '{"tip":"stale"}\n' >"$D/outbox/available.json"
@@ -493,6 +501,20 @@ hasnt "$DL" "signal"; live_is green
 # Not blue/green: refused.
 unset COMPOSE_FILE; "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without blue/green should fail"; has "$T/out" "does not use blue/green"
 export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
+
+# 30. A run that was cut off (status stuck on "running"): the next tick marks it failed, puts the checkout back on what answers,
+# drops a trial window for a version that is not running, and touches no container (BOS-494).
+reset_world blue "$P"; git -C "$T/src" fetch -q origin 2>/dev/null || true; git -C "$T/src" reset -q --hard "$b1"
+printf '{"id": "%s", "target": "server", "result": "running", "message": "Running", "from_commit": "%s", "to_commit": "%s", "started": "2026-11-04T23:05:00Z", "ended": "", "at": "2026-11-04T23:05:00Z", "backup": ""}\n' "11111111-1111-1111-1111-111111111111" "$P" "$b1" >"$D/outbox/status.json"
+printf 'old=blue new=green deadline=%s commit=%s prev=%s\n' "$(($(date +%s) + 900))" "$b1" "$P" >"$D/state/soak"
+: >"$DL"; bg
+[[ $(status result) == failed ]] || fail "interrupted run: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "cut off"
+[[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout not put back on the running commit"
+[[ ! -e $D/state/soak ]] || fail "soak for a version that is not running was kept"
+hasnt "$DL" "stopped"; hasnt "$DL" "signal"; live_is blue
+# Ticking again changes nothing more.
+bg; [[ $(status result) == failed ]] || fail "second tick changed the status"
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"

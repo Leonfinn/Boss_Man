@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -154,7 +155,7 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
   const body = () => withAttachments(form.body, img.attached).trim();
   const submit = async (e?: FormEvent) => {
     e?.preventDefault();
-    if (!form.title.trim() || busy) return;
+    if (!form.title.trim() || busy || tooLongToSend(body())) return;
     setBusy(true);
     try {
       if (isFeature) await onAddFeature({ title: form.title.trim(), description: body() || null, planWithCeo: form.plan && hasCeo, ...form.goal });
@@ -182,13 +183,22 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
   };
   // Hands the draft to the CEO, who questions the owner in chat and then creates it.
   const grill = async () => {
-    if (!form.title.trim() || busy) return;
+    if (!form.title.trim() || busy || tooLongToSend(body())) return;
     setBusy(true);
     try {
       await onGrill({ kind: mode, title: form.title.trim(), description: body() || null });
     } catch (err) {
       setError((err as Error).message);
       setBusy(false);
+    }
+  };
+  // Too long for the description: put it in a .txt file and link that instead, so it isn't cut.
+  const bodyAsFile = async (long: string) => {
+    try {
+      const markdown = await img.uploadText(long, "description.txt");
+      setForm((f) => ({ ...f, body: withAttachments("The text was too long for the description box, so it's in this file:\n\n", [markdown]) }));
+    } catch (err) {
+      setError((err as Error).message);
     }
   };
   const agentChosen = !isFeature && !!form.assignee && form.assignee !== "owner";
@@ -216,26 +226,25 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
       </div>
       <div className="field">
         <label htmlFor="nt-body">{isFeature ? "What problem does it solve, and for whom?" : "Description"}</label>
-        <textarea
+        <OwnerMessageBox
           id="nt-body"
+          label={isFeature ? "What problem does it solve, and for whom?" : "Description"}
           rows={6}
-          maxLength={20_000}
           placeholder={isFeature ? "" : "What should be done, and what counts as finished."}
           value={form.body}
-          onChange={(e) => setForm({ ...form, body: e.target.value })}
+          onChange={(text) => setForm({ ...form, body: text })}
           onPaste={img.onPaste}
-          style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
-        />
-        <ImagePreviews attached={img.attached} onRemove={img.remove} />
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {img.button}
-          <small className="muted">Or paste a screenshot into the description.</small>
-        </div>
-        {img.error && (
-          <p className="error" role="alert">
-            {img.error}
-          </p>
-        )}
+          onSendAsFile={bodyAsFile}
+          attaching={img.busy}
+          error={img.error}
+          textareaStyle={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
+        >
+          <ImagePreviews attached={img.attached} onRemove={img.remove} />
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {img.button}
+            <small className="muted">Or paste a screenshot into the description.</small>
+          </div>
+        </OwnerMessageBox>
       </div>
       {!isFeature && (
         <div className="field">
@@ -337,11 +346,11 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
         </p>
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <button className="btn primary" type="submit" disabled={busy || !form.title.trim()}>
+        <button className="btn primary" type="submit" disabled={busy || !form.title.trim() || tooLongToSend(body())}>
           {isFeature ? "Add feature" : agentChosen ? "Add and start" : "Add to backlog"}
         </button>
         {hasCeo && (
-          <button className="btn" type="button" disabled={busy || !form.title.trim()} onClick={() => void grill()}>
+          <button className="btn" type="button" disabled={busy || !form.title.trim() || tooLongToSend(body())} onClick={() => void grill()}>
             Let the CEO question me first
           </button>
         )}

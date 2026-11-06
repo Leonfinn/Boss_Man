@@ -14,7 +14,8 @@ import type { NotifyInput } from "./notifications.js";
 export const MAINTENANCE_KEY = "maintenance";
 /** Said to every running agent when a runner update starts waiting, and after each ticket move while it waits. */
 export const WRAP_UP = "A runner update is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the update is done.";
-/** How the last runner update ended, for Settings: {at, startedAt, ok, title, body}. */
+/** How the last runner update ended, for Settings (BOS-465). `swapped` says which companies it swapped, so a later Settings visit knows which history belongs to which runner. */
+export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string; swapped?: Record<string, string> };
 export const MAINTENANCE_LAST_KEY = "maintenance:last";
 /** The status_reason a held wake carries; it stays queued (like a paused company's) and launches once the hold lifts. */
 export const HOLD_REASON = "update pending";
@@ -81,7 +82,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
   async function end(title: string, level: NotifyInput["level"], body: string) {
     const h = await getHold(db);
-    const last = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body };
+    const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
     await db.insert(settings).values({ key: MAINTENANCE_LAST_KEY, value: last }).onConflictDoUpdate({ target: settings.key, set: { value: last } });
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
     await withdrawQuestion();
@@ -127,7 +128,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     async status() {
       const h = await getHold(db);
       const [l] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MAINTENANCE_LAST_KEY));
-      const last = (l?.value ?? null) as { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
+      const last = (l?.value ?? null) as LastUpdate | null;
       // A past failure is history once every runner is connected on the new image: say so, not the old problem.
       let healthy = false;
       if (!h && last && !last.ok) {
