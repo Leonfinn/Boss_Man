@@ -46,5 +46,6 @@ export default defineConfig({
     hookTimeout: 30_000,
     maxWorkers: workers(),
     globalSetup: ["test/global-setup.ts"],
+    setupFiles: ["test/live-run-tokens.ts"],
   },
 });

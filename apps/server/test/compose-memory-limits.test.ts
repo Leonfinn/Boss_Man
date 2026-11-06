@@ -71,6 +71,17 @@ describe("compose memory limits", () => {
     expect(launcherEnv.BOSSMAN_RUNNER_CPUS).toContain("BOSSMAN_RUNNER_CPUS");
     // The reserved core (BOS-586) is off unless the owner turns it on; the launcher works out the threads at runtime.
     expect(launcherEnv.BOSSMAN_RESERVED_THREADS).toContain("BOSSMAN_RESERVED_THREADS:-off");
+    // The compose runner passes the check-slot setting on too (BOS-542); empty by default, so an unset setting leaves a hand-made proof file alone.
+    expect(String(runner.environment.BOSSMAN_CHECK_SLOTS)).toBe("${BOSSMAN_CHECK_SLOTS:-}");
+  });
+
+  // BOS-602: compose passes only the variables it lists, so the profiler's off switch must be listed for every server.
+  it("the stall profiler's off switch reaches the single server and both blue/green colours", () => {
+    const main = services("docker-compose.yml") as Record<string, Service & { environment?: Record<string, string> }>;
+    const bg = services("deploy/truenas-bluegreen.yml") as typeof main;
+    for (const [n, s] of [["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]]] as const) {
+      expect(s!.environment?.BOSSMAN_STALL_PROFILE, n).toBe("${BOSSMAN_STALL_PROFILE:-}");
+    }
   });
 
   it("tool servers are the first to be killed", () => {
