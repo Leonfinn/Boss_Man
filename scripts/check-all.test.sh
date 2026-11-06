@@ -218,7 +218,7 @@ if command -v flock >/dev/null; then
   rc=0; out=$(lock env CHECK_ALL_BOOT_ID=thisboot) || rc=$?
   [ "$rc" = 75 ] || fail "older rules: expected exit 75, got $rc: $out"
   grep -q "merge origin/main" <<<"$out" || fail "older rules: no 'merge origin/main' message: $out"
-  [ "$(ls "$t/lock.queue" | wc -l)" = 1 ] || fail "older rules: leaving waiter kept its queue entry"
+  [ "$(find "$t/lock.queue" -type f | wc -l)" = 1 ] || fail "older rules: leaving waiter kept its queue entry"
   rm -rf "$t/lock.queue"
   kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
 

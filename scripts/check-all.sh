@@ -153,7 +153,7 @@ if command -v flock >/dev/null; then
   STALL_AFTER=${CHECK_ALL_STALL_AFTER:-120}; [[ $STALL_AFTER =~ ^[0-9]{1,9}$ ]] || STALL_AFTER=120
   boot_id() {  # kernel boot id plus when pid 1 started: the second part changes when the runner container restarts too
     local b="" s=""; read -r b </proc/sys/kernel/random/boot_id 2>/dev/null || true
-    s=$(</proc/1/stat 2>/dev/null) || s=""; s=${s##*) }; set -- $s; echo "${b:-noboot}-${20:-nopid1}"
+    local f=(); s=$(</proc/1/stat) || s=""; s=${s##*) }; read -ra f <<<"$s"; echo "${b:-noboot}-${f[19]:-nopid1}"
   }
   BOOT=${CHECK_ALL_BOOT_ID:-$(boot_id)}; BOOT=${BOOT//[^A-Za-z0-9._-]/_}
   write_entry() { printf '%s\nrules=%s\nboot=%s\n' "$FOLDER" "$RULES" "$BOOT" >"$qfile"; }
@@ -201,7 +201,7 @@ if command -v flock >/dev/null; then
   # A waiter further back sees a place past the scan and keeps waiting.
   queue_place() {
     # Serving order: aged hand-run entries, then merge checks, then the other hand-run entries (each group oldest first).
-    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now stale=0 nA=0 nM=0 nH=0 myclass="" myidx=0 newer=0 sig="" el1 el2 el3; now=$(date +%s)
+    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now stale=0 nA=0 nM=0 nH=0 myclass="" myidx=0 newer=0 sig="" el2 el3; now=$(date +%s)
     # A live waiter touches its entry every report, so age is read from the file's modification time (a bash test,
     # no subprocess per entry), not from the name: a check that has waited more than 2 h in a long queue keeps its place.
     touch -d "@$((now - 7200))" "$AGEREF" 2>/dev/null && stale=1
@@ -216,7 +216,7 @@ if command -v flock >/dev/null; then
       qts=$((10#${BASH_REMATCH[1]} / 1000000000)); qpid=$((10#${BASH_REMATCH[2]}))
       if [ ! -d "/proc/$qpid" ] || [ $((qts - now)) -gt 60 ] || { [ "$stale" = 1 ] && [ "$f" -ot "$AGEREF" ]; }; then rm -f "$f"; continue; fi
       # Version lines (BOS-591): an entry from an older runner boot is dropped; one with newer rules than mine is noted.
-      el1=""; el2=""; el3=""; { read -r el1; read -r el2; read -r el3; } <"$f" 2>/dev/null || true
+      el2=""; el3=""; { read -r _; read -r el2; read -r el3; } <"$f" 2>/dev/null || true
       if [[ $el3 == boot=* ]] && [ "${el3#boot=}" != "$BOOT" ]; then rm -f "$f"; continue; fi
       if [[ $el2 =~ ^rules=([0-9]{1,6})$ ]] && [ $((10#${BASH_REMATCH[1]})) -gt "$RULES" ] && [ "$f" != "$qfile" ]; then newer=$((10#${BASH_REMATCH[1]})); fi
       sig="$sig $base"
