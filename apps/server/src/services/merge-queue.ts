@@ -109,6 +109,38 @@ export const PHASE_LABEL: Record<MergePhase, string> = {
   waiting_to_retry: "trying again after the runner restarted",
 };
 
+/**
+ * The queries the screen runs, at module level so a test can EXPLAIN exactly what ships and prove
+ * none of them scans a whole table (BOS-587's performance criterion).
+ */
+export const mergeQueueQueries = {
+  /** Approved work still in review, oldest state change first: a company+state index range. */
+  inReview: (db: Db, companyId: string) =>
+    db
+      .select({ id: tickets.id, number: tickets.number, title: tickets.title, urgent: tickets.urgent, risk: tickets.risk, pullRequestUrl: tickets.pullRequestUrl, pullRequestNote: tickets.pullRequestNote, lastActivityAt: tickets.lastActivityAt, stateChangedAt: tickets.stateChangedAt })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")))
+      .orderBy(tickets.stateChangedAt)
+      .limit(200),
+  /** Recently finished merges: a company+state index range since a cut-off. */
+  recentlyDone: (db: Db, companyId: string, since: Date) =>
+    db
+      .select({ id: tickets.id, number: tickets.number, title: tickets.title, mergeCommit: tickets.mergeCommit, at: tickets.stateChangedAt })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), gte(tickets.stateChangedAt, since)))
+      .orderBy(desc(tickets.stateChangedAt))
+      .limit(RECENT_LIMIT * 2),
+  /** Failed checks on finished tickets, through the company+time index (0105). */
+  recentFailedChecks: (db: Db, companyId: string, since: Date) =>
+    db
+      .select({ ticketId: checkResults.ticketId, at: checkResults.at, detail: checkResults.detail, title: tickets.title, number: tickets.number })
+      .from(checkResults)
+      .innerJoin(tickets, eq(tickets.id, checkResults.ticketId))
+      .where(and(eq(checkResults.companyId, companyId), eq(checkResults.passed, false), gte(checkResults.at, since), eq(tickets.systemState, "done")))
+      .orderBy(desc(checkResults.at))
+      .limit(RECENT_LIMIT),
+};
+
 export function mergeQueueService(
   db: Db,
   deps: {
@@ -162,25 +194,14 @@ export function mergeQueueService(
   /** Recently finished merges and failed checks, newest first. */
   async function recent(companyId: string, prefix: string | null, t: Date): Promise<RecentRow[]> {
     const since = new Date(t.getTime() - 7 * 24 * 3_600_000);
-    const done = await db
-      .select({ id: tickets.id, number: tickets.number, title: tickets.title, mergeCommit: tickets.mergeCommit, at: tickets.stateChangedAt })
-      .from(tickets)
-      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), gte(tickets.stateChangedAt, since)))
-      .orderBy(desc(tickets.stateChangedAt))
-      .limit(RECENT_LIMIT * 2);
+    const done = await mergeQueueQueries.recentlyDone(db, companyId, since);
     const merged: RecentRow[] = done
       .filter((r) => r.mergeCommit)
       .slice(0, RECENT_LIMIT)
       .map((r) => ({ ticketId: r.id, ref: ticketRef(prefix, r.number), title: r.title, result: "merged", detail: `merged as ${r.mergeCommit!.slice(0, 7)}`, at: r.at.toISOString() }));
 
     // Failed checks on finished tickets, so a failure that stopped a merge shows its step.
-    const failed = await db
-      .select({ ticketId: checkResults.ticketId, at: checkResults.at, detail: checkResults.detail, title: tickets.title, number: tickets.number })
-      .from(checkResults)
-      .innerJoin(tickets, eq(tickets.id, checkResults.ticketId))
-      .where(and(eq(checkResults.companyId, companyId), eq(checkResults.passed, false), gte(checkResults.at, since), eq(tickets.systemState, "done")))
-      .orderBy(desc(checkResults.at))
-      .limit(RECENT_LIMIT);
+    const failed = await mergeQueueQueries.recentFailedChecks(db, companyId, since);
     const out = [...merged];
     for (const f of failed) {
       if (out.some((r) => r.ticketId === f.ticketId)) continue;
@@ -221,12 +242,7 @@ export function mergeQueueService(
       });
 
       // Waiting: approved work still in review, a ticket's own last approval is its last activity here.
-      const inReview = await db
-        .select({ id: tickets.id, number: tickets.number, title: tickets.title, urgent: tickets.urgent, risk: tickets.risk, pullRequestUrl: tickets.pullRequestUrl, pullRequestNote: tickets.pullRequestNote, lastActivityAt: tickets.lastActivityAt, stateChangedAt: tickets.stateChangedAt })
-        .from(tickets)
-        .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")))
-        .orderBy(tickets.stateChangedAt)
-        .limit(200);
+      const inReview = await mergeQueueQueries.inReview(db, companyId);
       const ids = inReview.map((r) => r.id);
       const checks = await latestChecks(ids);
       const cards = await ownerCards(ids);

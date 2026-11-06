@@ -4,15 +4,16 @@
 // planner picks for each query it was added for.
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { desc, eq, inArray, isNull, lte, isNotNull, and, sql } from "drizzle-orm";
+import { desc, eq, gte, inArray, isNull, lte, isNotNull, and, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { PGlite } from "@electric-sql/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import * as schema from "../src/db/schema.js";
-import { agents, decisions, notifications, nudges, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, checkResults, decisions, notifications, nudges, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { migrationsFolder } from "../src/db/client.js";
 import { runOriginQuery } from "../src/services/runs.js";
+import { mergeQueueQueries } from "../src/services/merge-queue.js";
 
 type Db = ReturnType<typeof drizzle<typeof schema>>;
 let ctx: { db: Db; client: PGlite; close: () => Promise<void> } | undefined;
@@ -140,6 +141,8 @@ const INDEXES: Array<{ name: string; table: string; definition: string; query?: 
   { name: "tickets_watcher", table: "tickets", definition: 'ON public.tickets USING btree (watcher_agent_id) WHERE (watcher_agent_id IS NOT NULL)', query: (db) => db.select({ id: tickets.id }).from(tickets).where(sql`${tickets.watcherAgentId} is not null`) },
   { name: "tickets_monitor_at", table: "tickets", definition: 'ON public.tickets USING btree (monitor_at) WHERE (monitor_at IS NOT NULL)', query: (db) => db.select({ id: tickets.id }).from(tickets).where(lte(tickets.monitorAt, new Date())) },
   { name: "notifications_unread_decision", table: "notifications", definition: 'ON public.notifications USING btree (decision_id) WHERE (read_at IS NULL)', query: (db, w) => db.select({ id: notifications.id }).from(notifications).where(and(isNull(notifications.readAt), eq(notifications.decisionId, w.decisionId))) },
+  // The merge queue's recently-failed-checks read (BOS-587, migration 0105): its own query, by company and time.
+  { name: "check_results_company_at", table: "check_results", definition: 'ON public.check_results USING btree (company_id, at)', query: (db, w) => db.select({ id: checkResults.id }).from(checkResults).where(and(eq(checkResults.companyId, w.company.id), gte(checkResults.at, ts(7 * 24 * 60)))) },
 ];
 
 describe("the indexes the BOS-407 migration adds", () => {
@@ -182,6 +185,31 @@ describe("the indexes the BOS-407 migration adds", () => {
       expect(plan, ix.name).toMatch(new RegExp(ix.name));
       // ...and it must not change the answer.
       expect(pinned, ix.name).toEqual(answer);
+    }
+  });
+});
+
+describe("the merge queue's reads (BOS-587)", () => {
+  it("are plain index scans, never a whole-table scan, on a busy company", async () => {
+    const c = await setup();
+    const w = await world(c);
+    // A busy company: many tickets in every state and thousands of check results, so a sequential
+    // scan would be the cheap plan if the indexes weren't there.
+    const N = 3000;
+    const n2 = Array.from({ length: N }, (_, n) => n);
+    await c.db.insert(tickets).values(n2.map((n) => ({ companyId: w.company.id, projectId: w.project.id, number: n + 2, title: `T${n}`, systemState: (["backlog", "ready", "in_progress", "review", "done"] as const)[n % 5]!, mergeCommit: n % 5 === 4 ? "abcdef1234" : null })));
+    const rows = await c.db.select({ id: tickets.id }).from(tickets);
+    await c.db.insert(checkResults).values(rows.map((r, n) => ({ companyId: w.company.id, ticketId: r.id, kind: "verify", passed: n % 4 === 0, at: ts(n) })));
+    await c.client.exec("analyze");
+
+    // Every read the screen makes, exactly as the service builds it.
+    const since = ts(7 * 24 * 60);
+    for (const q of [mergeQueueQueries.inReview(c.db, w.company.id), mergeQueueQueries.recentlyDone(c.db, w.company.id, since), mergeQueueQueries.recentFailedChecks(c.db, w.company.id, since)]) {
+      const { sql: text, params } = q.toSQL();
+      const plan = (await c.client.query(`explain ${text}`, params)).rows.map((r) => String(Object.values(r as Record<string, unknown>)[0])).join("\n");
+      // A whole-table scan on check_results or tickets is the thing this ticket forbids.
+      expect(plan, text).not.toMatch(/Seq Scan on (public\.)?check_results/);
+      expect(plan, text).not.toMatch(/Seq Scan on (public\.)?tickets/);
     }
   });
 });
