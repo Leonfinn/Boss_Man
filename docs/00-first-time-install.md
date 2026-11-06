@@ -385,6 +385,7 @@ On 3 Nov 2026 a headless browser with no memory limit used up the whole host's m
 | `BOSSMAN_RUNNER_PIDS` | processes and threads per runner | `4096` |
 | `BOSSMAN_RUNNER_CPU_SHARES` | CPU priority of each runner against the server, database and proxy (1024 each, proxy 2048). Not a cap: only matters when the host is busy, and an idle host still lets runners use every core | `512` |
 | `BOSSMAN_RUNNER_CPUS` | optional hard CPU cap per runner (e.g. `4`). Leave empty unless the host is shared with other workloads: one runner hosts all of a company's agents and the merge check, so a low cap slows them all even when the host is idle | none |
+| `BOSSMAN_CHECK_SLOTS` | how many full checks (the merge gate's and agents' `check-quick`) a runner may run at once; the rest wait in line. Each extra one peaks at about 3 GB, so raise `BOSSMAN_RUNNER_MEMORY` with it (for 2 slots, `8g` or more) and keep the host's free memory above that. Takes effect when the runner container is recreated (it is read at runner start) | `1` |
 | `BOSSMAN_SERVER_MEMORY` / `BOSSMAN_SERVER_MEMORY_RESERVED` | the server (single, or each blue/green colour): limit / amount kept for it. No cap by default (`0`), because the server currently uses 10-13 GiB; set a value only once measured | `0` / `512m` |
 | `BOSSMAN_DB_MEMORY` / `BOSSMAN_DB_MEMORY_RESERVED` | Postgres: limit / amount kept for it | `0` (no cap) / `256m` |
 | `BOSSMAN_TOOLSERVER_MEMORY`, `BOSSMAN_TOOLSERVER_PIDS`, `BOSSMAN_TOOLSERVER_SHM` | tool servers that run a browser (crawl4ai, scrapling), see below | `2g`, `512`, `512m` |

@@ -40,7 +40,7 @@ import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
 import { REVIEW_REASON } from "./review-kinds.js";
-import { type CardLint, NOT_OVERRIDABLE, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
+import { type CardLint, type HostFacts, NOT_OVERRIDABLE, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -171,6 +171,8 @@ export type DecisionContext =
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   /** A display-name change for an agent (BOS-265); only the name moves, never the id. */
   | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string }
+  /** A change to the company's standing rules (BOS-353), applied when the owner approves. */
+  | { type: "standing_rules"; text: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A model-setup change for an existing agent (BOS-128): the owner approves, edits or rejects it. */
   | { type: "model_change"; agentId: string; before: AgentModelConfig; proposed: AgentModelConfig; byAgentId: string; runningRunId?: string | null; applied?: { at: string; afterRunId: string | null; config?: AgentModelConfig } }
@@ -276,6 +278,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "hire",
   "instructions",
   "rename",
+  "standing_rules",
   "model_change",
   "team_plan",
   "risk_review",
@@ -501,12 +504,14 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * the card keeps (warnings, and a CEO override). Every route that raises an agent card calls this, so the lint
  * can't be skipped: raise_decision, the CEO's reissue and escalate, and the Scrum Master's raise_decision.
  * `lintOverride` lets a refusal through with a reason; only the CEO may pass one (`byCeo`), and never past R3/R4/R10 (`NOT_OVERRIDABLE`).
+ * `hosts` are the host facts Boss Man recorded (BOS-427): when given, R6 checks a login-run block against what the
+ * host says it can read; without them it only checks that every block names a host and an account.
  * `addons` are the add-on facts for R9 (DR-023); a route that has them passes them, and `setsUp` names the
  * add-on this card sets up, so its own setup steps aren't refused for it not running yet.
  * `proof` says how host commands were proven (R11, DR-024); a malformed one is refused before the lint runs,
  * and a good one is kept on the card for its banner.
  */
-export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; addons?: AddonFacts; setsUp?: Addon; proof?: string }): { error: string; lint?: undefined } | { error: null; lint?: CardLint } {
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; addons?: AddonFacts; setsUp?: Addon; proof?: string }): { error: string; lint?: undefined } | { error: null; lint?: CardLint } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -520,7 +525,7 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
   if (!a.steps?.length) return { error: null };
   const proof = a.proof?.trim() ? parseProof(a.proof) : undefined;
   if (typeof proof === "string") return { error: `The ${proof}.` };
-  const { refuse, warn } = lintOwnerSteps(a.steps, a.addons ? { addons: a.addons, setsUp: a.setsUp } : undefined, proof);
+  const { refuse, warn } = lintOwnerSteps(a.steps, { ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}) }, proof);
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
   const soft = refuse.filter((f) => !NOT_OVERRIDABLE.has(f.rule));
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
@@ -730,7 +735,7 @@ export type RetroHook = {
   checked(changeId: string, answer: string): Promise<unknown>;
   lessonAnswered(decisionId: string, answer: string, note?: string): Promise<unknown>;
 };
-type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" | "rename" }>, companyId: string, approved: boolean) => Promise<unknown>;
+type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" | "rename" | "standing_rules" }>, companyId: string, approved: boolean) => Promise<unknown>;
 type ModelChangeHook = (ctx: Extract<DecisionContext, { type: "model_change" }>, companyId: string, config: AgentModelConfig) => Promise<{ afterRunId: string | null }>;
 
 /**
@@ -2521,7 +2526,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           await db.update(decisions).set({ status: "open", answer: null, answeredAt: null, context: d.context as object }).where(eq(decisions.id, id));
           throw err;
         }
-      } else if (ctx.type === "hire" || ctx.type === "instructions" || ctx.type === "rename") {
+      } else if (ctx.type === "hire" || ctx.type === "instructions" || ctx.type === "rename" || ctx.type === "standing_rules") {
         try {
           await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
         } catch (err) {

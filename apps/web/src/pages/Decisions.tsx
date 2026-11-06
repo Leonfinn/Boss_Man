@@ -187,9 +187,11 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
   );
 }
 
-/** Text with ticket references the server resolved (BOS-70) turned into links; anything else stays plain text. */
+/** Where a command runs and as whom (BOS-427), read from its fence line: sh host="nas01" as="login". */
+type Where = { host: string; as: "root" | "login" };
+
 /** One command to paste, in its own block with a Copy button that copies exactly this text (BOS-269). */
-function CommandBlock({ command }: { command: string }) {
+function CommandBlock({ command, where }: { command: string; where?: Where }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const pre = useRef<HTMLPreElement>(null);
   const copy = async () => {
@@ -200,31 +202,44 @@ function CommandBlock({ command }: { command: string }) {
   };
   const label = state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy, select the text instead" : "Copy";
   return (
-    <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start", margin: "6px 0" }}>
-      <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
-        <code>{command}</code>
-      </pre>
-      <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
+    <div style={{ margin: "6px 0" }}>
+      {where && (
+        <div style={{ fontSize: 13, color: "var(--muted, #888)", margin: "0 0 2px 2px" }}>
+          On <strong>{where.host}</strong>, as {where.as === "root" ? <strong>root</strong> : "the logged-in account"}.
+        </div>
+      )}
+      <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
+          <code>{command}</code>
+        </pre>
+        <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
+      </div>
     </div>
   );
 }
 
-/** A step's text: sentences as before, and each fenced ```sh block as its own command with a Copy button. */
+/** The fence line's host and account for a block written by hand at raise time; a bare ```sh names neither. */
+function whereOf(lang: string): Where | undefined {
+  const m = /^sh\s+host="([^"]+)"\s+as="(root|login)"$/.exec(lang.trim());
+  return m ? { host: m[1]!, as: m[2] as Where["as"] } : undefined;
+}
+
+/** A step's text: sentences as before, and each fenced block as its own command with a Copy button (BOS-269, BOS-427). */
 function StepText({ text, refs }: { text: string; refs?: Decision["refs"] }) {
-  const parts: Array<{ command: boolean; text: string }> = [];
-  const re = /```[a-z]*\n([\s\S]*?)\n```/g;
+  const parts: Array<{ command: boolean; text: string; where?: Where }> = [];
+  const re = /```([^\n`]*)\n([\s\S]*?)\n```/g;
   let last = 0;
   for (let m = re.exec(text); m; m = re.exec(text)) {
     const before = text.slice(last, m.index).trim();
     if (before) parts.push({ command: false, text: before });
-    parts.push({ command: true, text: m[1]! });
+    parts.push({ command: true, text: m[2]!, ...(whereOf(m[1]!) ? { where: whereOf(m[1]!) } : {}) });
     last = m.index + m[0].length;
   }
   const rest = text.slice(last).trim();
   if (rest || parts.length === 0) parts.push({ command: false, text: parts.length === 0 ? text : rest });
   return (
     <>
-      {parts.map((p, i) => (p.command ? <CommandBlock key={i} command={p.text} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
+      {parts.map((p, i) => (p.command ? <CommandBlock key={i} command={p.text} where={p.where} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
     </>
   );
 }
@@ -695,6 +710,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\nNew instructions:")[0]!} refs={d.refs} /></h2>
                         <MoreText label="New instructions" text={d.context.instructions} />
+                      </>
+                    ) : d.context?.type === "standing_rules" ? (
+                      <>
+                        {/* The decision holds the exact text that will be saved, already stripped and capped; show all of it. */}
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question} refs={d.refs} /></h2>
+                        {d.context.text ? <MoreText label="New rules" text={d.context.text} /> : <p>This clears the standing rules.</p>}
                       </>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>

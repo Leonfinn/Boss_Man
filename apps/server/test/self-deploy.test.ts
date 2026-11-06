@@ -27,6 +27,8 @@ async function setup(opts: { deployer?: boolean } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "bm-deployer-"));
   await mkdir(path.join(dir, "inbox"));
   await mkdir(path.join(dir, "outbox"));
+  // What the host recorded about itself (BOS-427): its name goes on every command block.
+  await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:00:00Z", ownership: [] }));
   // The app uses a counting handle on the same database, so a test can prove a pass made no queries (BOS-414).
   const made: string[] = [];
   const logQuery = { logQuery: (sql: string) => made.push(sql) };
@@ -300,6 +302,15 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(x.handSteps!.join("\n")).toContain("can't tell where it is installed");
     });
 
+    it("shows no command when the host hasn't recorded its name yet (BOS-427), and still passes the lint", async () => {
+      const c = (ctx = await setup());
+      await rm(path.join(c.dir, "outbox", "host.json"));
+      const x = await stepsOf(c, LAYOUT);
+      expect(commands(x.handSteps!)).toEqual([]);
+      expect([...x.handSteps!, x.rollback!].join("\n")).toContain("hasn't been told this machine's name");
+      expect(lintOwnerSteps([...x.handSteps!, x.rollback!]).refuse).toEqual([]);
+    });
+
     it("adds the rebuild-the-runners step only when the runner changed, and the card agrees", async () => {
       const c = (ctx = await setup());
       const no = await stepsOf(c, LAYOUT);
@@ -338,7 +349,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
           const x = (await stepsOf(c, { ...layout, ...change })) as { handSteps?: string[]; rollback?: string; check?: string };
           const all = [...x.handSteps!, ...(x.rollback ? [x.rollback] : []), ...(x.check ? [x.check] : [])];
           const where = JSON.stringify({ layout, change });
-          expect(lintOwnerSteps(all).refuse, where).toEqual([]);
+          // R11 (DR-024) is an agent's claim about rehearsal, checked when an agent raises a card (checkAsk); these
+          // cards are Boss Man's own and never go through it, so only the other rules apply.
+          expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11"), where).toEqual([]);
           expect(all.join("\n"), where).not.toMatch(/docs\/0\d/);
           cards++;
         }
@@ -347,7 +360,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(lintOwnerSteps(["Boss Man can't tell where it is installed, so no command is shown here. The folder is in docs/06-install-truenas.md; ask us on this ticket for the exact commands."]).refuse).not.toEqual([]);
     });
 
-    it("renders every command as its own block holding only the command", async () => {
+    it("renders every command as its own block holding only the command, on the recorded host as root (BOS-427)", async () => {
       const c = (ctx = await setup());
       const x = await stepsOf(c, { ...LAYOUT, infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts"], runnerChanged: true });
       const all = [...x.handSteps!, x.rollback!];
@@ -356,7 +369,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       for (const k of cmds) expect(commandProblem(k)).toBeNull();
       // Each fenced block is exactly one command; no command text is left in the sentences.
       for (const t of all) for (const p of parseStep(t)) if (p.type === "text") expect(p.text).not.toMatch(/\b(?:cd \/|scripts\/|docker compose|git (?:checkout|merge))/);
-      expect(all.join("\n").match(/```sh\n/g)!.length).toBe(cmds.length);
+      // Every block says where it runs and as whom; the host line is not part of what the owner pastes.
+      expect(all.join("\n").match(/```sh host="nas01" as="root"\n/g)!.length).toBe(cmds.length);
     });
   });
 

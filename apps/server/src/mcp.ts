@@ -18,6 +18,7 @@ import { imageMarkdown, TicketImageError, type ticketImagesService } from "./ser
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { AnswerError, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
+import type { hostFactsService } from "./services/host-facts.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
@@ -44,6 +45,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
 import { ADDONS, type AddonFacts } from "./services/addons.js";
 
@@ -133,6 +135,8 @@ type Services = {
   alerts: ReturnType<typeof alertLadder>;
   retro: ReturnType<typeof retroService>;
   serverStatus: ReturnType<typeof serverStatusService>;
+  /** What each host recorded about itself (BOS-427), for the owner-card lint's R6. */
+  hostFacts: ReturnType<typeof hostFactsService>;
   /** Add-on facts for server_status and the card lint's R9 (addons.ts, DR-023). Absent: R9 is not checked. */
   addons?: () => Promise<AddonFacts>;
 };
@@ -180,7 +184,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
  * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, addons }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, addons }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -497,7 +501,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, proof }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       const [me] = lintOverride !== undefined && scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
-      const ask = checkAsk({ triedFirst, ownerMustDo, steps, lintOverride, byCeo: me?.role === "ceo", addons: steps?.length ? await addons?.() : undefined, setsUp, proof });
+      const ask = checkAsk({ triedFirst, ownerMustDo, steps, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), addons: steps?.length ? await addons?.() : undefined, setsUp, proof });
       if (ask.error) return fail(ask.error);
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
@@ -707,6 +711,34 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         return text(r.delivered === "woken" ? "That run had ended; the agent is woken again with your message." : `Message ${r.delivered}.`);
       } catch (err) {
         if (err instanceof RunError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  // Standing rules (BOS-353): the CEO writes them here; the owner has their own route, and no other agent can change them.
+  server.registerTool(
+    "standing_rules",
+    {
+      description:
+        `For CEOs only: the company-wide "Standing rules" every agent reads at the start of every run (at most ${STANDING_RULES_MAX} characters). action read shows the current text and who changed it last; action write replaces it with text. Only you and the owner can change them; agents cannot. Unless the owner has asked to approve your edits, a change is applied at once, notifies the owner and can be undone on the Settings page; otherwise it waits in Decisions. Write rules that fit any host and any company (for example "never force-push"), not one-off instructions for a single ticket.`,
+      inputSchema: { action: z.enum(["read", "write"]), text: z.string().max(20_000).optional() },
+    },
+    async ({ action, text: body }) => {
+      const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (me?.role !== "ceo") return fail("Only your company's CEO can change the standing rules.");
+      if (action === "read") {
+        const r = await getStandingRules(db, scope.companyId);
+        return text(r.text ? `Standing rules (last changed by ${r.by ?? "someone"}):\n\n${r.text}` : "No standing rules are set.");
+      }
+      if (body === undefined) return fail("Give the text to save, or an empty string to clear them.");
+      try {
+        const r = await team.proposeStandingRules(scope.companyId, scope.agentId!, body);
+        if ("decisionId" in r) return text(`The change is waiting for the owner's approval (decision ${r.decisionId}).`);
+        return text(r.saved.text ? "Standing rules saved; every run from now on reads them." : "Standing rules cleared.");
+      } catch (err) {
+        if (err instanceof StandingRulesError) return fail(err.message);
+        if (err instanceof AgentError) return fail(err.message);
         throw err;
       }
     },
@@ -1063,7 +1095,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           let r;
           if (input.outcome === "reissue") {
             if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
-            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, lintOverride: input.lintOverride, byCeo: true, addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof });
+            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof });
             if (ask.error) return fail(ask.error);
             r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: input.steps?.length ? input.steps : undefined, lint: ask.lint });
           } else if (input.outcome === "advice") {

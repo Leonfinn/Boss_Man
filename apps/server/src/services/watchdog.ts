@@ -10,7 +10,7 @@ import { activity, agents, companies, decisions, engagements, notifications, rev
 import { record } from "./activity.js";
 import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
-import type { CardLint } from "./steps.js";
+import type { CardLint, HostFacts } from "./steps.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
@@ -70,6 +70,8 @@ export type WatchdogDeps = {
   alert: (companyId: string, question: string) => Promise<unknown>;
   notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string }) => Promise<unknown>;
   now?: () => Date;
+  /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
+  hosts?: () => Promise<HostFacts[]>;
   /** The owner's local hour (0-23) at a moment; the daily summary goes out from 8. Defaults to UTC. */
   localHour?: (t: Date) => number;
   log?: (msg: string) => void;
@@ -1083,7 +1085,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
-      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, proof: input.proof, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
