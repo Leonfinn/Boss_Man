@@ -75,7 +75,7 @@ import { applyPackage, ImportError, previewPackage, readPackage } from "./servic
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
-import { createMemorySampler } from "./services/memory-sampler.js";
+import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
@@ -352,6 +352,12 @@ export async function buildApp(opts: AppOptions) {
         socketBuffered += c.bufferedAmount;
       }
       return { sockets, socketBufferedKiB: Math.round(socketBuffered / 1024), runnerEventsWaiting: runnerIngestWaiting() };
+    },
+    // Catch the moment of a burst (5 Nov: 2-3 GiB to 15 GiB in one go) and what was running then.
+    jump: {
+      read: readRssAndPeak,
+      context: (windowMs) => stalls.activity(windowMs),
+      log: (line) => app.log.warn({ memoryJump: line }, "memory jump"),
     },
   });
   const serverStatus = serverStatusService(db, {

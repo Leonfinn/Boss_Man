@@ -4,6 +4,13 @@
 // series, no DB writes) and keeps the last two hours for server_status. Pure reading: no
 // behaviour change. It runs on every process, standby included, not as leader-only background
 // work, because the standby colour's numbers matter too.
+//
+// Jump watch (BOS-410 step 2): on 5 Nov the server went from 2-3 GiB to 15 GiB in one go somewhere in a
+// 35-minute window, then stayed flat, so a five-minute trend can't say what set it off. Every 15 s it reads
+// only rss and the peak rss (VmHWM); a rise of 512 MiB or more in either logs one "memory jump" line at once,
+// with the full breakdown and the requests open and just finished. The peak matters once the image's malloc
+// threshold hands big blocks straight back: a burst then leaves rss but still raises the peak.
+import { readFileSync } from "node:fs";
 import v8 from "node:v8";
 
 const MiB = 1024 * 1024;
@@ -42,7 +49,45 @@ export type MemorySamplerDeps = {
   native?: () => Promise<Record<string, number>>;
   /** How many samples to keep (default 24: two hours at five minutes). */
   keep?: number;
+  /** Jump watch (BOS-410): see createMemorySampler. Off when left out. */
+  jump?: JumpWatchDeps;
 };
+
+export type JumpWatchDeps = {
+  /** How often to look (default 15 s). */
+  everyMs?: number;
+  /** Rise in MiB since the last look that counts as a jump (default 512). */
+  thresholdMiB?: number;
+  /** Fewest ms between two jump lines (default 60 s); a held-back rise is reported at the next look after it. */
+  minGapMs?: number;
+  /** Cheap readings in MiB: rss now, and the peak rss so far (VmHWM) when the platform has one. */
+  read: () => { rss: number; peak: number | null };
+  /** What the server was doing (requests open and just finished, sockets), added to the line. */
+  context?: (windowMs: number) => Record<string, unknown>;
+  log: (line: MemoryJump) => void;
+};
+
+export type MemoryJump = {
+  seconds: number;
+  rss: { from: number; to: number };
+  peak: { from: number; to: number } | null;
+  sample: MemorySample;
+  context: Record<string, unknown>;
+};
+
+/** VmHWM and VmRSS from /proc/self/status (Linux), else process.memoryUsage.rss(); MiB. Sync: a ~1 KiB read. */
+export function readRssAndPeak(): { rss: number; peak: number | null } {
+  try {
+    const status = readFileSync("/proc/self/status", "utf8");
+    const kib = (key: string) => Number(new RegExp(`^${key}:\\s+(\\d+)`, "m").exec(status)?.[1] ?? NaN);
+    const rss = kib("VmRSS");
+    const peak = kib("VmHWM");
+    if (Number.isFinite(rss) && Number.isFinite(peak)) return { rss: Math.round(rss / 1024), peak: Math.round(peak / 1024) };
+  } catch {
+    // not Linux
+  }
+  return { rss: mib(process.memoryUsage.rss()), peak: null };
+}
 
 export const DEFAULT_MEMORY_LOG_MS = 5 * 60_000;
 
@@ -118,19 +163,88 @@ export function createMemorySampler(deps: MemorySamplerDeps) {
       .then(() => log(sample));
   }
 
+  const jump = deps.jump;
+  const jumpEveryMs = jump?.everyMs && jump.everyMs > 0 ? jump.everyMs : 15_000;
+  const jumpThreshold = jump?.thresholdMiB ?? 512;
+  const jumpGapMs = jump?.minGapMs ?? 60_000;
+  // The readings a rise is measured from; moved on only when no jump is pending, so a held-back rise still shows.
+  let jumpBase: { at: number; rss: number; peak: number | null } | null = null;
+  let lastJumpAt = -Infinity;
+  let jumpTimer: NodeJS.Timeout | null = null;
+
+  /** One jump look. Returns the line's promise when a jump was logged (for tests). */
+  function jumpTick(): Promise<void> | void {
+    if (!jump) return;
+    let cur: { rss: number; peak: number | null };
+    try {
+      cur = jump.read();
+    } catch {
+      return;
+    }
+    const at = now();
+    const base = jumpBase;
+    if (!base) {
+      jumpBase = { at, ...cur };
+      return;
+    }
+    const rose = cur.rss - base.rss >= jumpThreshold || (cur.peak != null && base.peak != null && cur.peak - base.peak >= jumpThreshold);
+    if (!rose || at - lastJumpAt < jumpGapMs) {
+      if (!rose) jumpBase = { at, ...cur };
+      return;
+    }
+    lastJumpAt = at;
+    jumpBase = { at, ...cur };
+    const windowMs = at - base.at;
+    let sample: MemorySample;
+    let context: Record<string, unknown> = {};
+    try {
+      sample = read(false);
+      context = jump.context?.(windowMs) ?? {};
+    } catch {
+      return;
+    }
+    const line: MemoryJump = {
+      seconds: Math.round(windowMs / 1000),
+      rss: { from: base.rss, to: cur.rss },
+      peak: cur.peak != null && base.peak != null ? { from: base.peak, to: cur.peak } : null,
+      sample,
+      context,
+    };
+    const emit = () => {
+      try {
+        jump.log(line);
+      } catch {
+        // logging must never take the server down
+      }
+    };
+    if (!deps.native) return emit();
+    return deps
+      .native()
+      .then((d) => { sample.native = d; }, () => undefined)
+      .then(emit);
+  }
+
   return {
     everyMs,
     tick,
-    /** First sample at once, then every everyMs. The timer never keeps the process alive. */
+    jumpTick,
+    /** First sample at once, then every everyMs; the jump watch every 15 s. The timers never keep the process alive. */
     start() {
       if (timer) return;
       void tick();
       timer = setInterval(() => void tick(), everyMs);
       timer.unref();
+      if (jump) {
+        jumpTick();
+        jumpTimer = setInterval(() => void jumpTick(), jumpEveryMs);
+        jumpTimer.unref();
+      }
     },
     stop() {
       if (timer) clearInterval(timer);
+      if (jumpTimer) clearInterval(jumpTimer);
       timer = null;
+      jumpTimer = null;
     },
     samples: () => [...ring],
     /** For server_status: a fresh reading, plus how each figure moved across the kept samples. */
