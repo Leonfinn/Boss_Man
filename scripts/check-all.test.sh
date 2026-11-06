@@ -193,6 +193,35 @@ if command -v flock >/dev/null; then
   grep -q "slot taken, running the checks" <<<"$out" || fail "merge wait: no start marker: $out"
   wait "$h1"
 
+  # BOS-591: an old copy of the script at the head of the line (no version lines, a live pid, ahead of everyone) with every
+  # slot free must not jam the line: a hand-run waiter that sees the line stand still takes the slot after the stall time.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  echo /old >"$t/lock.queue/0-1000000000000000000-$$"
+  rc=0; out=$(lock env CHECK_ALL_STALL_AFTER=2 timeout 60) || rc=$?
+  [ "$rc" = 0 ] || fail "stalled head: expected the waiter to get in, got rc $rc: $out"
+  grep -q "line stood still" <<<"$out" || fail "stalled head: no stall message: $out"
+  # ...but not while a slot is held (the line is just busy), and not before the stall time.
+  hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
+  rc=0; out=$(lock env CHECK_ALL_STALL_AFTER=1 CHECK_ALL_LOCK_WAIT=3 BOSSMAN_MERGE_CHECK=1) || rc=$?
+  [ "$rc" = 75 ] || fail "busy slot: the stall rule must not take a held slot, got rc $rc: $out"
+  kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
+  # An entry from an older runner boot is dropped; one with the same boot stays.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  printf '/x\nrules=2\nboot=oldboot\n' >"$t/lock.queue/0-1000000000000000000-$$"
+  printf '/x\nrules=2\nboot=thisboot\n' >"$t/lock.queue/0-1000000000000000001-$$"
+  hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
+  rc=0; out=$(lock env CHECK_ALL_BOOT_ID=thisboot BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2 CHECK_ALL_SLOTS=1) || rc=$?
+  grep -q "place 2 of 2" <<<"$out" || fail "older boot: expected place 2 of 2 (old-boot entry dropped, same-boot kept): $out"
+  [ ! -e "$t/lock.queue/0-1000000000000000000-$$" ] || fail "older boot: entry not dropped"
+  # An old copy of the script (older rules) finds a newer entry and leaves with exit 75, telling the user to merge origin/main.
+  rm -f "$t"/lock.queue/*; printf '/x\nrules=99\nboot=thisboot\n' >"$t/lock.queue/0-1000000000000000000-$$"
+  rc=0; out=$(lock env CHECK_ALL_BOOT_ID=thisboot) || rc=$?
+  [ "$rc" = 75 ] || fail "older rules: expected exit 75, got $rc: $out"
+  grep -q "merge origin/main" <<<"$out" || fail "older rules: no 'merge origin/main' message: $out"
+  [ "$(ls "$t/lock.queue" | wc -l)" = 1 ] || fail "older rules: leaving waiter kept its queue entry"
+  rm -rf "$t/lock.queue"
+  kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
+
   # Queue order: a merge check that arrives later goes ahead of a hand-run check; hand-run checks keep their order.
   rm -rf "$t/lock.queue"; hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
   ( lock env >"$t/hand1.out"; date +%s%N >"$t/hand1.at" ) & hand1=$!
