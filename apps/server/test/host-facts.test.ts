@@ -47,4 +47,31 @@ describe("hostFactsService", () => {
     const [h] = await hostFactsService({ dir }).hosts();
     expect(h!.ownership[0]).toEqual({ path: "/mnt/secrets", owner: "1000", group: "1000", mode: "700" });
   });
+
+  it("keeps a folder's role, and the strictest one when it has several (BOS-541)", async () => {
+    const dir = await withHost({
+      version: 1,
+      name: "nas01",
+      writtenAt: "2026-11-05T00:00:00Z",
+      login: "leon",
+      ownership: [
+        { path: "/mnt/bm", owner: "root", group: "root", mode: "755", roles: ["install", "backups"] },
+        { path: "/srv/boss-man/data", owner: "1000", group: "1000", mode: "700", roles: ["data"] },
+        { path: "/mnt/bm/deployer", owner: "root", group: "root", mode: "755", role: "deployer" },
+      ],
+    });
+    const [h] = await hostFactsService({ dir }).hosts();
+    // The install folder is also where backups live by default: R6 must read it as backups.
+    expect(h!.ownership[0]).toEqual({ path: "/mnt/bm", owner: "root", group: "root", mode: "755", role: "backups" });
+    expect(h!.ownership[1]!.role).toBe("data");
+    expect(h!.ownership[2]!.role).toBe("deployer");
+  });
+
+  it("still reads a record with no roles, and a bad role is no facts at all", async () => {
+    const dir = await withHost({ version: 1, name: "nas01", writtenAt: "2026-11-05T00:00:00Z", ownership: [{ path: "/mnt/backups", owner: "root", group: "root", mode: "700" }] });
+    const [h] = await hostFactsService({ dir }).hosts();
+    expect(h!.ownership[0]).toEqual({ path: "/mnt/backups", owner: "root", group: "root", mode: "700" });
+    const bad = await withHost({ version: 1, name: "nas01", writtenAt: "x", ownership: [{ path: "/b", owner: "root", group: "root", mode: "700", roles: ["admin"] }] });
+    expect(await hostFactsService({ dir: bad }).hosts()).toEqual([]);
+  });
 });
