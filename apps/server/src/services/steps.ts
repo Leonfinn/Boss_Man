@@ -7,9 +7,11 @@
 // ```sh host="nas01" as="login". That line is not part of what the owner pastes; the web app reads it and shows
 // "On nas01, as the logged-in account." above the command. A block with neither is refused (R6).
 
+import { HOST_NAME, parseStep, strayFence, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
 
-export type Where = { host: string; as: "root" | "login" };
+// The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
+export { parseStep, strayFence, type StepPiece, type Where };
 export type Command = { sh: string; where?: Where };
 
 /** Marks a command inside `step(...)`: it is rendered as its own block. `where` says where and as whom it runs. */
@@ -18,7 +20,7 @@ export const sh = (command: string, where?: Where): Command => ({ sh: command, .
 /** The fence line naming a block's host and account, e.g. sh host="nas01" as="root". It is not part of what the owner pastes. */
 export function whereFence(where: Where): string {
   // A recorded host's name is a plain DNS-style name: no spaces, quotes or shell syntax, so it can't break the fence.
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(where.host)) throw new Error(`Host is not a plain name (letters, digits, dot, dash, underscore): ${where.host}`);
+  if (!HOST_NAME.test(where.host)) throw new Error(`Host is not a plain name (letters, digits, dot, dash, underscore): ${where.host}`);
   if (where.as !== "root" && where.as !== "login") throw new Error(`A block runs as root or login, not ${String(where.as)}`);
   return `sh host="${where.host}" as="${where.as}"`;
 }
@@ -53,35 +55,6 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
       return "```" + (p.where ? whereFence(p.where) : "sh") + "\n" + p.sh + "\n```";
     })
     .join("\n\n");
-}
-
-export type StepPiece = { type: "text"; text: string } | { type: "command"; text: string; where?: Where };
-
-/**
- * The fence line's host and account. `sh` alone means an older block that names neither (R6 refuses it); a
- * fence line that isn't one of the two forms is not read as a guess, it is read as "no host" and R6 says so.
- */
-function fenceWhere(lang: string): { where?: Where } {
-  if (lang === "sh") return {};
-  const m = /^sh\s+host="([A-Za-z0-9][A-Za-z0-9_.-]{0,63})"\s+as="(root|login)"$/.exec(lang);
-  return m ? { where: { host: m[1]!, as: m[2] as Where["as"] } } : {};
-}
-
-/** Splits a step into sentences and command blocks; the web app has the same logic for rendering. */
-export function parseStep(text: string): StepPiece[] {
-  const out: StepPiece[] = [];
-  const re = /```([^\n`]*)\n([\s\S]*?)\n```/g;
-  let last = 0;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    const before = text.slice(last, m.index).trim();
-    if (before) out.push({ type: "text", text: before });
-    const { where } = fenceWhere(m[1]!.trim());
-    out.push({ type: "command", text: m[2]!, ...(where ? { where } : {}) });
-    last = m.index + m[0].length;
-  }
-  const rest = text.slice(last).trim();
-  if (rest) out.push({ type: "text", text: rest });
-  return out;
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
@@ -146,7 +119,7 @@ function pieces(text: string) {
   const blocks = blockPieces.map((p) => p.text);
   const prose = parts.filter((p) => p.type === "text").map((p) => p.text).join("\n");
   const inline = [...prose.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!);
-  return { blocks, blockPieces, inline, prose };
+  return { blocks, blockPieces, inline, prose, stray: strayFence(parts) };
 }
 
 /** Names a piece of shell sets: `X=…` (also inline, `X=1 cmd`, and after export/local), `read X Y`, `for X in`. */
@@ -168,8 +141,8 @@ function usesIn(code: string): string[] {
 /**
  * Checks an agent's owner steps the way the owner will read them (BOS-417, DR-008 Q1): refuse what can't work
  * as written, warn about what might not. R1 a pointer to another document instead of the action; R2 a shell
- * variable no step up to this one sets; R3 a command that isn't copy-safe (`commandProblem`), or a placeholder
- * in inline code; R4 a `{{…}}` token, which Boss Man can't fill in yet. Warnings: a wiki or ticket link, more
+ * variable no step up to this one sets; R3 a command that isn't copy-safe (`commandProblem`), a placeholder
+ * in inline code, or a ``` that isn't a complete block and would show as raw text (BOS-550); R4 a `{{…}}` token, which Boss Man can't fill in yet. Warnings: a wiki or ticket link, more
  * than one command in a step or more than 12 steps, and hedging next to a command.
  *
  * R6 (BOS-427) is the host and account check: every command block says where it runs and as whom, and a block
@@ -197,7 +170,9 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
     const step = i + 1;
-    const { blocks, blockPieces, inline, prose } = pieces(text);
+    const { blocks, blockPieces, inline, prose, stray } = pieces(text);
+    // A ``` the parser couldn't pair would reach the owner as raw text, with no Copy button (BOS-550).
+    if (stray !== null) refuse.push({ step, rule: "R3", problem: `has a \`\`\` that isn't a complete command block, so the owner would see it as raw text ("${stray.slice(0, 80)}"). Put the opening fence line, the command and a closing \`\`\` each on a line of its own` });
     const code = [...blocks, ...inline];
     for (const [re, problem] of DOC_POINTERS) {
       const m = re.exec(prose);
