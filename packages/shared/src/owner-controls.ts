@@ -1,6 +1,6 @@
 /**
  * The controls the owner can press in the web app, by screen (BOS-421, DR-009 L6). The owner-card lint refuses a
- * card that tells the owner to press something not on this list (`lintOwnerSteps`, rule R6), so a card can't send
+ * card that tells the owner to press something not on this list (`lintOwnerSteps`, rule R7), so a card can't send
  * them to a button that doesn't exist (3 Nov 15:10, "Overrule and merge").
  *
  * `apps/server/test/owner-control-list.test.ts` reads every <button> in apps/web/src and fails when a label is missing
@@ -22,6 +22,8 @@ export const OWNER_CONTROLS = {
     "Send as a .txt file", "Sending",
     // A picture opened from Markdown text.
     "Actual size", "Fit to window",
+    // The banner shown when Boss Man was updated after the page was opened (BOS-550).
+    "Reload",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
