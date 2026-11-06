@@ -142,6 +142,20 @@ describe("verify before done (R47)", () => {
     expect(res.output).toContain(`lock=${path.join(root, ".bossman-coord", "queue", "check-all")} store=${path.join(root, ".bossman-coord", "gate", "check-results")}`);
   });
 
+  it("runs a check's installs against the shared pnpm store, not a new one in HOME (BOS-568)", async () => {
+    const o = origin();
+    const { spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const store = path.join(root, "store");
+    const ws = new Workspaces(root, process.env, undefined, store);
+    await ws.ensure(spec);
+    expect((await ws.verify(spec, 'echo "store=${npm_config_store_dir:-unset}"')).output).toContain(`store=${store}`);
+    // A runner without one gives pnpm nothing, as before.
+    const plain = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    await plain.ensure(spec);
+    expect((await plain.verify(spec, 'echo "store=${npm_config_store_dir:-unset}"')).output).toContain("store=unset");
+  });
+
   it("counts the timeout from when a queued check starts, not from when it was queued", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");

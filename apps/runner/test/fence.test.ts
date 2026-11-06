@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { gitAuthEnv } from "../src/workspace.js";
-import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, probeLandlock, repoGrant, runnerFence, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
+import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, pnpmStoreDir, probeLandlock, repoGrant, runnerFence, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
 
 const { abi } = probeLandlock();
 const live = levelFor(abi).level !== "unavailable";
@@ -73,11 +73,21 @@ describe("the runner's fence setting", () => {
     expect(runnerFence("full", "/data", "/ws")).toEqual({ level: "full", agentsRoot: "/data/agents", pnpmStore: "/ws/.pnpm-store" });
   });
 
+  // BOS-568: the store can be moved with PNPM_STORE_DIR, e.g. to a bigger volume; it is never a relative path.
+  it("moves the shared pnpm store wherever PNPM_STORE_DIR says", () => {
+    expect(runnerFence("full", "/data", "/ws", "/big/pnpm")).toMatchObject({ pnpmStore: "/big/pnpm" });
+    expect(runnerFence("full", "/data", "/ws", "  ")).toMatchObject({ pnpmStore: "/ws/.pnpm-store" });
+    expect(pnpmStoreDir("/ws", "/big//pnpm/")).toBe("/big/pnpm");
+    expect(() => pnpmStoreDir("/ws", "pnpm-store")).toThrow(/absolute/);
+  });
+
   // main.ts starts the daemon, so no test runs it. Without this setting every run asked to be
   // fenced ran unfenced while hello still offered the fence (found building BOS-323).
   it("is passed to the runner's SessionManager from its self-test", () => {
     const main = readFileSync(path.join(import.meta.dirname, "..", "src", "main.ts"), "utf8");
-    expect(main).toMatch(/new SessionManager\(\{[\s\S]*?\n  fence: runnerFence\(sandbox\.level, dataDir, workspacesRoot\),[\s\S]*?\n\}\);/);
+    expect(main).toMatch(/new SessionManager\(\{[\s\S]*?\n  fence: \{ \.\.\.runnerFence\(sandbox\.level, dataDir, workspacesRoot, env\.PNPM_STORE_DIR\), pnpmStore: storeDir \},[\s\S]*?\n\}\);/);
+    // The merge check's own installs use the same store (BOS-568), not one in HOME on the root disk.
+    expect(main).toMatch(/new Workspaces\(workspacesRoot, process\.env, coordDir, storeDir\)/);
   });
 });
 

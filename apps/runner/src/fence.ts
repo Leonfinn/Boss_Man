@@ -168,11 +168,24 @@ export function addGitConfig(env: NodeJS.ProcessEnv, key: string, value: string)
 }
 
 /**
- * The runner's fence setting for its SessionManager: its self-tested level, each agent's home in
- * the runner's data volume, and the pnpm store pnpm already uses at the workspaces volume's root.
+ * The shared pnpm store every agent install uses (BOS-568): PNPM_STORE_DIR when the operator set one
+ * (an absolute path on a volume, so it works on any host), otherwise .pnpm-store at the workspaces
+ * volume's root. A relative setting is refused rather than resolved somewhere surprising.
  */
-export function runnerFence(level: FenceLevel, dataDir: string, workspacesRoot: string) {
-  return { level, agentsRoot: path.join(dataDir, "agents"), pnpmStore: path.join(workspacesRoot, ".pnpm-store") };
+export function pnpmStoreDir(workspacesRoot: string, setting: string | undefined) {
+  const wanted = (setting ?? "").trim();
+  if (!wanted) return path.join(workspacesRoot, ".pnpm-store");
+  if (!path.isAbsolute(wanted) || wanted.includes("\0")) throw new Error(`PNPM_STORE_DIR must be an absolute path, not ${wanted}`);
+  const p = path.normalize(wanted);
+  return p.length > 1 ? p.replace(/\/+$/, "") : p;
+}
+
+/**
+ * The runner's fence setting for its SessionManager: its self-tested level, each agent's home in
+ * the runner's data volume, and the shared pnpm store (pnpmStoreDir).
+ */
+export function runnerFence(level: FenceLevel, dataDir: string, workspacesRoot: string, storeSetting?: string) {
+  return { level, agentsRoot: path.join(dataDir, "agents"), pnpmStore: pnpmStoreDir(workspacesRoot, storeSetting) };
 }
 
 /**

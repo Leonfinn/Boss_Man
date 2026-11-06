@@ -16,7 +16,7 @@ const level = levelFor(probeLandlock().abi).level;
 const live = level !== "unavailable";
 const FAKE_REACH = path.join(import.meta.dirname, "fake-reach.mjs");
 
-type Reach = { wroteInside: boolean; wroteTmp: boolean; wroteOutside: boolean; readSecret: boolean; readSharedClaude: boolean; wroteQueue: boolean; wroteStore: boolean; wroteProof: boolean; env: Record<string, string | null> };
+type Reach = { wroteInside: boolean; wroteTmp: boolean; wroteOutside: boolean; readSecret: boolean; readSharedClaude: boolean; wroteQueue: boolean; wroteStore: boolean; wroteProof: boolean; wroteSharedStore: boolean; env: Record<string, string | null> };
 
 /** One run of the reach-probing adapter; `fence` is what the run asks for, `runnerLevel` what the runner can do. */
 async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel }) {
@@ -79,6 +79,8 @@ describe.skipIf(!live)("a fenced run", () => {
       GIT_CONFIG_KEY_0: "gc.auto",
     });
     expect(r.reach.env.npm_config_store_dir).toMatch(/\.pnpm-store$/);
+    // The shared store (BOS-568) is the one writable place outside HOME, so installs don't make a new store per run.
+    expect(r.reach).toMatchObject({ wroteSharedStore: true });
     expect(existsSync(path.join(r.home, "tmp", r.runId))).toBe(false);
   });
 

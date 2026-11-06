@@ -47,6 +47,9 @@ x-runner: &runner
   environment: &runner-env
     BOSSMAN_URL: ws://server:3100/api/runner/connect
     BOSSMAN_RUNNER_TOKEN_FILE: /run/secrets/runner_token
+    # Where every agent install keeps its pnpm packages (BOS-568). Empty = one store on the workspaces volume;
+    # set an absolute path to move it, e.g. onto a bigger volume mounted at that path.
+    PNPM_STORE_DIR: ${PNPM_STORE_DIR:-}
   # Agents run code: keep the container unprivileged and bounded. Never mount docker.sock;
   # use a deploy target with a socket proxy instead (R14).
   cap_drop: [ALL]

@@ -3,11 +3,12 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
-import { applyCheckSlots, runnerFence, sandboxSelfTest } from "./fence.js";
+import { applyCheckSlots, pnpmStoreDir, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
+import { movedLogFile, moveStore, oldStoreInHome, storeEnv, storeUnderPnpmHome } from "./store.js";
 import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
@@ -42,7 +43,17 @@ if (checkSlots > 1) {
     break;
   }
 }
-const workspaces = new Workspaces(workspacesRoot, process.env, coordDir);
+// One pnpm store for every install an agent's checks make (BOS-568): on the workspaces volume by default,
+// or at PNPM_STORE_DIR. Without it pnpm starts a fresh store in each agent's $HOME (on the root disk) and
+// the old ones are left behind.
+const storeDir = pnpmStoreDir(workspacesRoot, env.PNPM_STORE_DIR);
+mkdirSync(storeDir, { recursive: true });
+// The runner's own installs use the same store too, so the runner's ~1.3 GB isn't in a second store on the root
+// disk; a store pnpm left in HOME before this is moved into the shared one once.
+Object.assign(env, storeEnv(storeDir));
+const oldStore = oldStoreInHome(env.HOME ?? "/home/node");
+if (oldStore !== storeUnderPnpmHome(storeDir)) moveStore(oldStore, storeUnderPnpmHome(storeDir), movedLogFile(workspacesRoot), log);
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, storeDir);
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
 const sandbox = sandboxSelfTest();
@@ -62,7 +73,7 @@ const sessions = new SessionManager({
   reply: (requestId, result) => connection.reply(requestId, result),
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,
-  fence: runnerFence(sandbox.level, dataDir, workspacesRoot),
+  fence: { ...runnerFence(sandbox.level, dataDir, workspacesRoot, env.PNPM_STORE_DIR), pnpmStore: storeDir },
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

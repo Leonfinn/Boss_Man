@@ -42,6 +42,8 @@ export type LauncherConfig = {
   guardAllow?: string[];
   /** BOSSMAN_CHECK_SLOTS: full checks (merge gate and hand runs) a runner may run at once, 1 to 16. Unset = 1; the runner needs about 3 GB of its memory limit per extra slot. */
   checkSlots?: number;
+  /** PNPM_STORE_DIR: the shared pnpm store for every agent install (BOS-568), an absolute path inside the runner. Unset = the workspaces volume's .pnpm-store. */
+  pnpmStoreDir?: string;
   /** How long to wait for a new guard to load its rules (default 20 s). */
   guardReadyMs?: number;
 };
@@ -79,7 +81,12 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
   return {
     Image: IMAGE,
     User: "1000:1000",
-    Env: [`BOSSMAN_URL=${cfg.serverUrl}`, `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`, ...(cfg.checkSlots && cfg.checkSlots > 1 ? [`BOSSMAN_CHECK_SLOTS=${cfg.checkSlots}`] : [])],
+    Env: [
+      `BOSSMAN_URL=${cfg.serverUrl}`,
+      `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`,
+      ...(cfg.checkSlots && cfg.checkSlots > 1 ? [`BOSSMAN_CHECK_SLOTS=${cfg.checkSlots}`] : []),
+      ...(cfg.pnpmStoreDir ? [`PNPM_STORE_DIR=${cfg.pnpmStoreDir}`] : []),
+    ],
     Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug },
     HostConfig: {
       Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${tokenFile(cfg, slug)}:${TOKEN_TARGET}:ro`],
@@ -128,6 +135,17 @@ export function parseCheckSlots(v: string | undefined): number {
   if (!v || v.trim() === "") return 1;
   if (!/^\d{1,2}$/.test(v.trim()) || Number(v) < 1 || Number(v) > 16) throw new Error(`BOSSMAN_CHECK_SLOTS should be a whole number from 1 to 16, not ${v}`);
   return Number(v);
+}
+
+/**
+ * The shared pnpm store's path inside the runner (BOS-568). Empty means the workspaces volume's .pnpm-store,
+ * which every host has; a set value must be absolute, since it is what every install writes its packages to.
+ */
+export function parsePnpmStoreDir(v: string | undefined): string | undefined {
+  const p = (v ?? "").trim();
+  if (!p) return undefined;
+  if (!p.startsWith("/") || p.includes("\0") || p.split("/").includes("..")) throw new Error(`PNPM_STORE_DIR should be an absolute path inside the runner, like /home/node/workspaces/.pnpm-store, not ${v}`);
+  return p.length > 1 ? p.replace(/\/+$/, "") : p;
 }
 
 /** A CPU weight from 2 to 262144, as in compose's cpu_shares. */

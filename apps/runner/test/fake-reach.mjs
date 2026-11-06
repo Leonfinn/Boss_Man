@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // A stand-in ACP adapter that first tries to reach outside its fence (BOS-321) and writes what
 // worked to reach.json in its working folder, then answers a session and one prompt.
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
@@ -24,6 +24,15 @@ const reach = {
   wroteQueue: attempt(() => writeFileSync(path.join(path.dirname(env.CHECK_ALL_LOCK), "probe"), "")),
   wroteStore: attempt(() => writeFileSync(path.join(env.BOSSMAN_CHECK_STORE, "forged.json"), '{"status":"pass"}')),
   wroteProof: attempt(() => writeFileSync(env.CHECK_ALL_PAIR_PROOF, "forged")),
+  // The shared pnpm store (BOS-568) is writable, so an agent's install can add a package to it.
+  wroteSharedStore: (() => {
+    const store = env.npm_config_store_dir;
+    if (!store) return false;
+    const target = path.join(store, "probe-package");
+    if (!attempt(() => writeFileSync(target, "ok"))) return false;
+    attempt(() => unlinkSync(target));
+    return true;
+  })(),
   env: Object.fromEntries(["HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CACHE_HOME", "npm_config_store_dir", "CHECK_ALL_LOCK", "BOSSMAN_CHECK_STORE", "CHECK_ALL_PAIR_PROOF", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0"].map((k) => [k, env[k] ?? null])),
 };
 writeFileSync(path.join(process.cwd(), "reach.json"), JSON.stringify(reach));

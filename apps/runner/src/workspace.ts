@@ -105,6 +105,8 @@ export class Workspaces {
     private readonly baseEnv: NodeJS.ProcessEnv = process.env,
     /** check-all.sh's shared queue folder (checkQueueEnv), so the merge check takes turns with agents' checks. */
     private readonly coordDir?: string,
+    /** The shared pnpm store a check's install uses (BOS-568), so its packages aren't copied into the root disk's HOME. */
+    private readonly pnpmStore?: string,
   ) {}
 
   repoDir = (projectId: string) => path.join(this.root, "repos", `${projectId}.git`);
@@ -512,7 +514,8 @@ export class Workspaces {
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
         // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
-        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
+        // The shared pnpm store (BOS-568): without it pnpm starts a new one in HOME for every install, on the root disk.
+        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(this.pnpmStore ? { npm_config_store_dir: this.pnpmStore } : {}), ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
       });
       const killGroup = (signal: NodeJS.Signals) => {
         try {
