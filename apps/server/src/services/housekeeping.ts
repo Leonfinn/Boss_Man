@@ -7,7 +7,7 @@ import type { Db } from "../db/client.js";
  *  - the newest event of each runner, because the runner's resume point (lastSeq) is read from it;
  *  - events of runs still going, so a long run's transcript and recovery never lose their start.
  * Nothing else reads old events: cost comes from cost_events and forensics read the session
- * transcript. Only the Runs page transcript reads them, and it shows "Nothing recorded" for a pruned run.
+ * transcript. Only the Runs page transcript reads them, and it says "No events are kept for this run" for an ended pruned run.
  * `stop` lets a demotion end the pass between batches.
  */
 export async function pruneRunnerEvents(
