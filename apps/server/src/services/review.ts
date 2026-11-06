@@ -354,9 +354,13 @@ export function reviewService(
       if (!row?.branch) continue;
       // No pull request yet: the branch's own head at the host is what is waiting to land.
       const head = row.head ?? (await viaHost.branchHead(cfg, token, row.branch).catch((err) => {
+        // A branch the host has never seen carries nothing onto the target, so it can't be
+        // carried by this one either (BOS-577). Any other failure still refuses: the gate can't
+        // answer for a branch that does exist.
+        if (err instanceof GitHostError && err.status === 404) return null;
         throw new ReviewError(409, `Couldn't read the branch of "${o.title}" on the host, so it wasn't merged: ${(err as Error).message}`);
       }));
-      theirs.push({ ticketId: o.ticketId, head });
+      if (head) theirs.push({ ticketId: o.ticketId, head });
     }
     if (!theirs.length) return [];
     let mine: string[];
