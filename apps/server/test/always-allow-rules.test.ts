@@ -15,6 +15,8 @@ async function setup() {
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const co = (await built.app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "App Co" } })).json() as { company: { id: string }; ceo: { id: string } };
   const dev = (await built.app.inject({ method: "POST", url: `/api/companies/${co.company.id}/agents`, headers: { cookie }, payload: { name: "Dev" } })).json() as { id: string };
+  // With the CEO paused, an unrecognised tool's card goes straight to the owner, the only tier that is offered Always (BOS-295 sends it to the CEO first otherwise).
+  await built.app.inject({ method: "PATCH", url: `/api/agents/${co.ceo.id}`, headers: { cookie }, payload: { paused: true } });
   const reg = (await built.app.inject({ method: "POST", url: `/api/companies/${co.company.id}/runner`, headers: { cookie } })).json() as { runnerId: string };
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   let seq = 0;
@@ -61,6 +63,7 @@ describe("Always allow on a permission card (BOS-294)", () => {
 
   it("saves the rule once when the same card is answered twice at the same time", async () => {
     const card = await ctx.ask(ctx.dev.id, MD);
+    expect(card!.options).toContain(ALWAYS);
     const [a, b] = await Promise.all([ctx.answer(card!.id, ALWAYS), ctx.answer(card!.id, ALWAYS)]);
     expect([a.statusCode, b.statusCode].filter((c) => c === 200)).toHaveLength(1);
     expect(await ctx.rules()).toHaveLength(1);
@@ -101,15 +104,20 @@ describe("Always allow on a permission card (BOS-294)", () => {
 
   it("refuses a kind-wide file read or edit rule, even from a card raised before they were withdrawn", async () => {
     const card = await ctx.ask(ctx.dev.id, MD);
+    expect(card!.options).toContain(ALWAYS);
     const label = "Always allow agents to read files";
     const context = { ...(card!.context as object), always: [{ label, name: "Allow agents to read files", what: "read files", match: { kinds: ["read"], safeOnly: true } }] };
     await ctx.db.update(decisions).set({ context }).where(eq(decisions.id, card!.id));
+    // The stored choice is not in options, so also offer its label there, to reach the kind-wide guard rather than the options check.
+    await ctx.db.update(decisions).set({ options: [...(card!.options as string[]), label] }).where(eq(decisions.id, card!.id));
     const res = await ctx.answer(card!.id, label);
     expect(res.statusCode).toBe(422);
+    expect(res.json().error ?? res.body).not.toMatch(/must be one of/);
     expect(await ctx.rules()).toHaveLength(0);
   });
   it("never lets the CEO save a standing rule", async () => {
     const card = await ctx.ask(ctx.dev.id, MD);
+    expect(card!.options).toContain(ALWAYS);
     await expect(ctx.decisions.answer(card!.id, ALWAYS, { settledBy: { agentId: ctx.co.ceo.id }, by: "ceo" })).rejects.toBeInstanceOf(AnswerError);
     expect(await ctx.rules()).toHaveLength(0);
     const [still] = await ctx.db.select().from(decisions).where(eq(decisions.id, card!.id));
