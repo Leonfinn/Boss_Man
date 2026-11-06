@@ -17,7 +17,7 @@ export { TREE_REASON };
 import { record } from "./activity.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
-import { handOverReviews, REVIEW_REASON, requestReviews, wakeReviewers } from "./review-kinds.js";
+import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
@@ -374,7 +374,7 @@ export function schedulerService(
     return [
       "You are the company's wiki maintainer. Your job is to keep the wiki accurate, tidy and easy to find things in, using the wiki tool:",
       "- Keep an \"Index\" page at the top level (slug index) that lists every folder and its main pages, with a line on each.",
-      "- Keep a \"Log\" page at the top level (slug log), linked from the Index. At the end of every run, add one line at the top: \"- <date>: filed …; changed …; fixed …\" saying what you did, or \"nothing to do\". Never edit or remove older lines; when the page passes 200 lines, move the oldest into a page \"Log <year>\" in a Log folder.",
+      "- Keep a \"Log\" page at the top level (slug log), linked from the Index. At the end of every run, add one line with the wiki tool's append at the top: \"- <date>: filed …; changed …; fixed …\" saying what you did, or \"nothing to do\". Never edit or remove older lines, and never send a partial body to write: write replaces the whole page. When the page passes 200 lines, move the oldest into a page \"Log <year>\" in a Log folder.",
       "- When several pages mention a topic that has no page of its own, write one and link those pages to it.",
       "- File pages into sensible folders (for example Research, Product, Engineering, How-tos), move strays, and merge duplicates into one page.",
       "- Product pages go one level down: Product/Features (one page per feature: what it does and the decisions behind it), Product/Analysis (proposals, reviews, research into options) or Product/Strategy (direction, objectives, roadmap thinking). Move any page sitting straight in Product into the right one.",
@@ -718,9 +718,6 @@ export function schedulerService(
     }
     return null;
   }
-
-  /** The tickets a review wake's note lists, in the order it lists them. */
-  const reviewTicketsOf = (note: string | null | undefined) => [...(note ?? "").matchAll(/^- ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) /gm)].map((m) => m[1]!);
 
   /**
    * The one ticket a wake is about when it isn't formally on one (BOS-268): a review wake that
@@ -1165,6 +1162,22 @@ export function schedulerService(
      * Boss Man sets a check to carry on in CARRY_ON_MS, and says so on the ticket. A run that made
      * no progress gets nothing: the missed-work sweep handles that, so an idle agent is never polled.
      */
+    /**
+     * A review run that ended (BOS-433, fix B): when its wake listed several tickets and it gave only some
+     * of them a verdict, the tickets still missing one are re-queued at once, one wake per ticket, so the
+     * reviewer finishes the job rather than the stall sweep noticing an hour later. Chat runs and runs cut
+     * off by a restart are left alone; so is a wake that named a single ticket (the sweep handles those).
+     */
+    async afterReviewRun(runId: string) {
+      const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+      if (run?.origin !== REVIEW_REASON || !run.agentId) return [];
+      if (!endedNormally(run.outcome)) return [];
+      const [w] = await db.select({ note: wakes.note }).from(wakes).where(eq(wakes.runId, runId));
+      const listed = reviewTicketsOf(w?.note);
+      if (listed.length < 2) return [];
+      return requeueUnansweredReviews(db, { reviewerAgentId: run.agentId, ticketIds: listed, causedByRunId: runId }, (agentId, i) => this.notify(agentId, i));
+    },
+
     async afterTicketRun(runId: string) {
       const [run] = await db.select().from(runs).where(eq(runs.id, runId));
       if (!run?.ticketId || !run.agentId || run.purpose === "chat") return;
@@ -1477,13 +1490,13 @@ export function schedulerService(
             // An account after the first with no login (its secret was deleted) would silently run on the company's default token, so it counts as unavailable.
             const usable = pool.filter((a, i) => i === 0 || a.secretId);
             const accounts = usable.length ? usable : [source];
-            const checked: { source: typeof source; rank: number; passes: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
+            const checked: { source: typeof source; rank: number; passes: boolean; hasRoom: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
             for (const a of accounts) {
               const samples = await latestQuotaWindows(a.id);
               const full = holdingWindows(a, samples, t);
               // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
               // the limit itself, so the default "pause" never spends unapproved extra usage.
-              checked.push({ source: a, rank: a.fallbackRank ?? 0, passes: quotaPasses(a, full, samples, !!urgentTicket?.urgent), full });
+              checked.push({ source: a, rank: a.fallbackRank ?? 0, passes: quotaPasses(a, full, samples, !!urgentTicket?.urgent), hasRoom: full.length === 0, full });
             }
             const picked = pickAccount(checked);
             if (holdApplies && !picked) {

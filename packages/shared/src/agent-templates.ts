@@ -230,7 +230,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
       "- Before asking for a production deploy, check that the work is on staging and working, the checks are green, no ticket in the release is still waiting on a review or a decision, and a rollback plan exists.",
       "- Request the deploy with deploy (targets to see where, request to ask). Production waits for the owner's approval, so say in the request what ships and what the rollback is.",
       "- After the deploy, check that the thing users depend on works, and report the outcome with deploy report. If it fails, roll back first and investigate second.",
-      "- Keep the release notes in the wiki so the history is in one place.",
+      "- Keep the release notes in the wiki so the history is in one place. Add each release as one entry with the wiki tool's append (under the date heading, newest first) and never send only the new entry to write: write replaces the whole page.",
       "- If a ticket is not ready, hold it out of the release and say why. Do not rush a risky change to meet a date.",
       "- You do not build or fix things. For a problem you find, create a follow-up ticket and tell the CEO. You do not change the pipeline or hosting itself.",
       "Hand off to: Senior Infrastructure Engineer for deploy mechanics and rollback, QA to check staging, CEO for go or no-go on risky releases.",

@@ -9,7 +9,7 @@ import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
-type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null };
+type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
 // revisionCount is every version, which can be more than the first page the page carries (BOS-496).
 type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; revisionCount?: number; tickets: Array<{ id: string; title: string }> };
 type OldVersion = { id: string; title: string; body: string; createdAt: string; agent: string | null };
@@ -152,7 +152,8 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   }, [p?.id, section]);
 
   const save = async (v: Draft) => {
-    const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: v });
+    // The owner is replacing the page they just edited, so the agent shrink guard never blocks their own save.
+    const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: { ...v, replace: true } });
     setEditing(false);
     setOld(null);
     onChanged();
@@ -170,7 +171,29 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
       setError((err as Error).message);
     }
   };
-  const showOld = async (id: string) => setOld(await api<OldVersion>(`/api/companies/${companyId}/wiki-revisions/${id}`));
+  // A version that fails to open says so, instead of the click looking dead (BOS-430).
+  const showOld = async (id: string) => {
+    setError(null);
+    try {
+      setOld(await api<OldVersion>(`/api/companies/${companyId}/wiki-revisions/${id}`));
+    } catch {
+      setError("Couldn't open that version. Try again; nothing on the page has changed.");
+    }
+  };
+  // Putting a version back goes through restore, so the old text comes back even if it looks like a shrink,
+  // and the restore is a new version of its own that can be undone (BOS-430).
+  const restoreOld = async (revisionId: string) => {
+    setError(null);
+    try {
+      await api(`/api/companies/${companyId}/wiki-restore`, { method: "POST", body: { slug, revisionId } });
+      setOld(null);
+      setHistory(true);
+      onChanged();
+      page.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
 
   if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} go={go} /> : <p className="error" role="alert">{page.error.message}</p>;
   if (!p) return null;
@@ -224,6 +247,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
                   {when(r.createdAt)}
                 </button>{" "}
                 by {r.agent ?? "you"}
+                {typeof r.size === "number" && <span className="muted"> · {r.size.toLocaleString("en-GB")} characters</span>}
                 {i === 0 && " (current)"}
                 {r.runId && (
                   <>
@@ -252,7 +276,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           <span>
             You're looking at the version from {when(old.createdAt)} by {old.agent ?? "you"}.
           </span>
-          <button type="button" className="btn primary" onClick={() => void save({ title: old.title, body: old.body, folder: p.folder }).catch((err: Error) => setError(err.message))}>
+          <button type="button" className="btn primary" onClick={() => void restoreOld(old.id)}>
             Put this version back
           </button>
           <button type="button" className="btn" onClick={() => setOld(null)}>
