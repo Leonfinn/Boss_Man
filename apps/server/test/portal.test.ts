@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { brotliCompressSync, gzipSync, gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { feedbackNotes, insights } from "../src/db/schema.js";
@@ -126,7 +127,10 @@ describe("feedback portal", () => {
     mkdirSync(path.join(web, "assets"));
     writeFileSync(path.join(web, "portal.html"), "<!doctype html><title>portal</title>");
     writeFileSync(path.join(web, "index.html"), "<!doctype html><title>owner</title>");
-    writeFileSync(path.join(web, "assets", "portal-abc.js"), "console.log(1)");
+    const portalJs = `console.log("${"portal bundle ".repeat(120)}");`;
+    writeFileSync(path.join(web, "assets", "portal-abc.js"), portalJs);
+    writeFileSync(path.join(web, "assets", "portal-abc.js.gz"), gzipSync(portalJs));
+    writeFileSync(path.join(web, "assets", "portal-abc.js.br"), brotliCompressSync(portalJs));
     writeFileSync(path.join(web, "assets", "main-abc.js"), "console.log(2)");
     const portal = await buildPortalApp({ feedback: t!.feedback, webDir: web, secureCookies: true });
     try {
@@ -138,6 +142,14 @@ describe("feedback portal", () => {
       expect(page.headers["content-security-policy"]).toContain("default-src 'self'");
       expect(page.headers["referrer-policy"]).toBe("no-referrer");
       expect((await get("/assets/portal-abc.js")).statusCode).toBe(200);
+      // BOS-411: the build's sidecar is served when the browser accepts it, and never as a file of its own.
+      const compressed = await get("/assets/portal-abc.js", { "accept-encoding": "gzip" });
+      expect(compressed.statusCode).toBe(200);
+      expect(compressed.headers["content-encoding"]).toBe("gzip");
+      expect(compressed.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+      expect(gunzipSync(compressed.rawPayload).toString()).toBe(portalJs);
+      expect((await get("/assets/portal-abc.js.gz")).statusCode).toBe(404);
+      expect((await get("/assets/main-abc.js.br")).statusCode).toBe(404);
       expect((await get("/")).headers.location).toBe("/portal.html");
       for (const url of ["/index.html", "/assets/main-abc.js", "/api/setup", "/api/companies", "/api/me", "/mcp", "/api/runner/connect"]) expect([url, (await get(url)).statusCode]).toEqual([url, 404]);
       expect((await portal.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password: "correct horse battery" } })).statusCode).toBe(404);

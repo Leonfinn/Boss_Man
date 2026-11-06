@@ -28,7 +28,7 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, describeRoles, missingVerdicts, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -358,7 +358,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
-      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.`);
+      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${criteriaWarning(acceptanceCriteria)}`);
     },
   );
 
@@ -1136,7 +1136,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "review",
     {
       description:
-        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one, and when you request changes, name the criterion that fails. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off). You can't review a ticket assigned to you.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off). You can't review a ticket assigned to you.",
       inputSchema: {
         action: z.enum(["diff", "submit", "sequence", "overrule"]),
         ticketId: z.string().uuid(),
@@ -1177,9 +1177,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           // Keep the agent's context in check: the file list always, the patch up to 60 KB.
           const files = d.files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join("\n");
           const patch = d.diff.length > 60_000 ? `${d.diff.slice(0, 60_000)}\n[diff truncated]` : d.diff;
-          const checklist = rt.acceptanceCriteria.length
-            ? `Acceptance criteria:\n${readVerdicts(rt.acceptanceCriteria, rt.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`).join("\n")}\nIf one fails, request changes and name it.\n\n`
-            : "";
+          const checklist = criteriaChecklist(rt.acceptanceCriteria, rt.stateNote);
           // The owner's setup steps are judged like code (DR-011 point 2): seen next to the criteria, and
           // sent back if they are wrong, missing, or not in plain words by button path.
           const setup = rt.ownerSetup?.trim()
@@ -1242,6 +1240,25 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   if (skip?.size) (server.registerTool as unknown) = originalRegister;
 }
 
+
+/** One line per criterion with the author's verdict, the after-merge ones marked so they read as skippable (DR-024 #5). */
+function criterionLines(criteria: readonly Criterion[], note: string | null): string[] {
+  return readVerdicts(criteria, note).map((r, i) => `- [${r.verdict ?? "not reported"}] ${r.criterion}${isAfterMerge(criteria[i]!) ? " (checked after merge; don't fail the review on it)" : ""}`);
+}
+
+/** The reviewer's checklist, split so only the before-merge criteria can hold the review up (DR-024 #5). */
+function criteriaChecklist(criteria: readonly Criterion[], note: string | null): string {
+  if (!criteria.length) return "";
+  const lines = criterionLines(criteria, note);
+  const after = criteria.some(isAfterMerge);
+  return `Acceptance criteria:\n${lines.join("\n")}\nIf a before-merge one fails, request changes and name it.${after ? " The after-merge ones are checked once the work is live; review can approve with those still unreported, and an answer on the ticket's owner card closes them." : ""}\n\n`;
+}
+
+/** The plain-words warning for a live-looking criterion that isn't marked after merge; a trailing blank line for the reply. */
+const criteriaWarning = (criteria: readonly Criterion[] | undefined) => {
+  const w = criteria?.length ? afterMergeLint(criteria) : "";
+  return w ? `\n\nHeads-up: ${w}` : "";
+};
 
 /** What a verdict (or an overrule) did, in a sentence for the reviewer. */
 function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?: string }): string {
@@ -1345,11 +1362,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           "## Description",
           t.body ? cut(t.body, CAP, (m) => `continue with tickets read ticketId=${t.id} offset=${m}`, offset) : "(none)",
           ...(t.acceptanceCriteria?.length
-            ? [
-                "",
-                "## Acceptance criteria",
-                ...readVerdicts(t.acceptanceCriteria, t.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`),
-              ]
+            ? ["", "## Acceptance criteria", ...criterionLines(t.acceptanceCriteria, t.stateNote)]
             : []),
           ...(t.ownerSetup?.trim() ? ["", "## After it goes live, the owner will need to", ...t.ownerSetup.trim().split(/\r?\n/).map((l) => `- ${l.trim()}`)] : []),
           ...(t.plan && t.planApprovedAt ? ["", "## Approved plan", cut(t.plan, CAP, () => "the rest isn't shown here")] : []), // shortcut: plans over 40000 chars aren't paged; add an offset if one ever is
@@ -1916,7 +1929,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished (a no-code ticket assigned to you can be closed by you); ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies.",
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished (a no-code ticket assigned to you can be closed by you); ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria to check before merge, the summary must say pass or fail for each; a criterion marked checked after merge is reported once the work is live, and the ticket cannot be marked done until it is. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies.",
       inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional(), blocked_until: z.string().datetime({ offset: true }).optional(), blocked_reason: z.string().max(BLOCKED_UNTIL_REASON_MAX).optional(), ownerSetup: z.string().max(4000).optional().describe("The owner's steps, for a ticket whose change needs them to do something once it is live (a setting, a secret, a button): plain words by button path, one step per line, e.g. Settings → Funding → Add account. Boss Man raises their card with these steps when the change goes live, not at merge. Pass an empty string to clear it. Only the ticket's own assignee, CEO or a manager may set it.") },
     },
     async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason, ownerSetup }) => {
@@ -1980,10 +1993,19 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       if (!withCriteria) return fail("No ticket with that ID in your company.");
       // Same state again (DR-010): only the note changes. No enter-state hooks, no new review round.
       const sameState = withCriteria.prev === state;
-      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, summary ?? withCriteria.current) : [];
+      const note = summary ?? withCriteria.current;
+      // The done gate also reads the state note already on the ticket: the owner's answer on a linked card
+      // records its pass or fail there (DR-024 #5), so a short closing summary mustn't hide it.
+      const reported = state === "done" ? `${withCriteria.current ?? ""}\n${note ?? ""}` : note;
+      // A review only needs the before-merge criteria reported: an after-merge one can only be settled
+      // once the work is live, so it must not bounce rounds of review (DR-024 #5). Once the work has
+      // merged, the ticket can't be done until those after-merge criteria are reported pass or fail.
+      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, note, "before") : state === "done" ? unreportedAfterMerge(withCriteria.criteria, reported) : [];
       if (missing.length)
         return fail(
-          `This ticket has acceptance criteria, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".`,
+          state === "done"
+            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket): their answer records the check's pass or fail, so you can close it once they have.`
+            : `This ticket has acceptance criteria to report before it merges, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".${withCriteria.criteria.some(isAfterMerge) ? " The after-merge criteria don't need a verdict at review." : ""}`,
         );
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
       // tickets are marked "no code" and are not held to this.
@@ -2576,7 +2598,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
       try {
         const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);
-        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.`);
+        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${criteriaWarning(input.acceptanceCriteria)}`);
       } catch (err) {
         return workFail(err);
       }
