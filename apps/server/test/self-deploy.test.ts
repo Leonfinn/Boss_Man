@@ -595,7 +595,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       await c.selfDeploy.sync();
       expect(c.made.slice(start)).toEqual([]);
       // The result lands: the pass runs at once, well inside the minute, and tells the owner.
-      await c.status({ id: randomUUID(), result: "deployed", message: "Deployed.", to_commit: B, ended: "2026-10-20T12:05:30Z" });
+      // The message differs in length from "running"/"Deploying.", so the file token (mtime:size) changes even when both writes land in one clock tick.
+      await c.status({ id: randomUUID(), result: "deployed", message: "Deployed and healthy on the new version.", to_commit: B, ended: "2026-10-20T12:05:30Z" });
       await c.selfDeploy.sync();
       expect(c.made.length).toBeGreaterThan(start);
       expect((await c.db.select().from(notifications)).map((n) => n.title)).toContain("Boss Man updated to bbbbbbbb");
