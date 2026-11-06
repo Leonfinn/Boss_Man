@@ -106,7 +106,7 @@ describe("rule 1: every writer of a decision card is classified", () => {
  * Beyond the reason given, none of them stores an approveSummary (checked below), which rule 1 needs.
  */
 const WRITERS: Record<string, { counts: Record<string, number>; why: string }> = {
-  "src/app.ts": { counts: { raise: 8 }, why: "alerts.raise (tier ceo, ladder) and decisionsSvc.raise with agentId null (merge failed, import checklist)" },
+  "src/app.ts": { counts: { raise: 9 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425) and decisionsSvc.raise with agentId null (merge failed, import checklist)" },
   "src/mcp.ts": { counts: { raise: 1 }, why: "raise_decision: the one eligible path, when plain and with an approveSummary" },
   "src/services/watchdog.ts": { counts: { raise: 1 }, why: "the Scrum Master's raise_decision always blocks its ticket (ticketId, blocker)" },
   "src/services/agents.ts": { counts: { insert: 5 }, why: "kind approval: hire, model_change, instructions, team_plan, rename" },

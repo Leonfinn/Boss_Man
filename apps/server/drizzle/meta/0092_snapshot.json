@@ -1,6 +1,6 @@
 {
-  "id": "99dab82a-90cf-4d27-ab87-c1e84cbaa34d",
-  "prevId": "0194062d-95a9-4073-80a6-76602755e7f7",
+  "id": "25a902ea-629a-4c2c-b381-fe95a4183679",
+  "prevId": "b3ea7be0-a520-4d72-8352-ae717d0a4b6f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -790,160 +790,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.approve_tokens": {
-      "name": "approve_tokens",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "decision_id": {
-          "name": "decision_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "answer": {
-          "name": "answer",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "token_hash": {
-          "name": "token_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "decision_rev": {
-          "name": "decision_rev",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "claimed_at": {
-          "name": "claimed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "used_at": {
-          "name": "used_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "revoked_at": {
-          "name": "revoked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "approve_tokens_live": {
-          "name": "approve_tokens_live",
-          "columns": [
-            {
-              "expression": "decision_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"approve_tokens\".\"used_at\" is null and \"approve_tokens\".\"revoked_at\" is null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "approve_tokens_company_expires": {
-          "name": "approve_tokens_company_expires",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "approve_tokens_company_id_companies_id_fk": {
-          "name": "approve_tokens_company_id_companies_id_fk",
-          "tableFrom": "approve_tokens",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "approve_tokens_decision_id_decisions_id_fk": {
-          "name": "approve_tokens_decision_id_decisions_id_fk",
-          "tableFrom": "approve_tokens",
-          "tableTo": "decisions",
-          "columnsFrom": [
-            "decision_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "approve_tokens_token_hash_unique": {
-          "name": "approve_tokens_token_hash_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "token_hash"
-          ]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.budget_policies": {
       "name": "budget_policies",
       "schema": "",
@@ -1396,19 +1242,12 @@
           "notNull": true,
           "default": 120
         },
-        "permission_judge": {
-          "name": "permission_judge",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'watch'"
-        },
         "watchdog": {
           "name": "watchdog",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2}'::jsonb"
+          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -3231,12 +3070,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "fallback_rank": {
-          "name": "fallback_rank",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
         "quota_hold_at": {
           "name": "quota_hold_at",
           "type": "real",
@@ -4678,102 +4511,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.phone_action_hits": {
-      "name": "phone_action_hits",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "ip": {
-          "name": "ip",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "at": {
-          "name": "at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "phone_action_hits_ip_at": {
-          "name": "phone_action_hits_ip_at",
-          "columns": [
-            {
-              "expression": "ip",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "phone_action_hits_company_at": {
-          "name": "phone_action_hits_company_at",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "phone_action_hits_company_id_companies_id_fk": {
-          "name": "phone_action_hits_company_id_companies_id_fk",
-          "tableFrom": "phone_action_hits",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.policy_rules": {
       "name": "policy_rules",
       "schema": "",
@@ -5743,18 +5480,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "boot_id": {
-          "name": "boot_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "boot_pulled_at": {
-          "name": "boot_pulled_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "disk_used_bytes": {
           "name": "disk_used_bytes",
           "type": "bigint",
@@ -5833,12 +5558,6 @@
           "primaryKey": true,
           "notNull": true,
           "default": "gen_random_uuid()"
-        },
-        "funding_source_id": {
-          "name": "funding_source_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         },
         "company_id": {
           "name": "company_id",
@@ -5966,35 +5685,10 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
-        },
-        "last_post_at": {
-          "name": "last_post_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "silent_steered_at": {
-          "name": "silent_steered_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
       "foreignKeys": {
-        "runs_funding_source_id_funding_sources_id_fk": {
-          "name": "runs_funding_source_id_funding_sources_id_fk",
-          "tableFrom": "runs",
-          "tableTo": "funding_sources",
-          "columnsFrom": [
-            "funding_source_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
         "runs_company_id_companies_id_fk": {
           "name": "runs_company_id_companies_id_fk",
           "tableFrom": "runs",
@@ -7971,12 +7665,6 @@
           "notNull": true,
           "default": 5
         },
-        "monitor_restart_at": {
-          "name": "monitor_restart_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "custom_fields": {
           "name": "custom_fields",
           "type": "jsonb",
@@ -7997,18 +7685,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
-        },
-        "owner_setup": {
-          "name": "owner_setup",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "owner_setup_decision_id": {
-          "name": "owner_setup_decision_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         },
         "urgent": {
           "name": "urgent",
@@ -8032,12 +7708,6 @@
         },
         "state_note_at": {
           "name": "state_note_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_post_at": {
-          "name": "last_post_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -8269,19 +7939,6 @@
           "tableTo": "tickets",
           "columnsFrom": [
             "parent_ticket_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "tickets_owner_setup_decision_id_decisions_id_fk": {
-          "name": "tickets_owner_setup_decision_id_decisions_id_fk",
-          "tableFrom": "tickets",
-          "tableTo": "decisions",
-          "columnsFrom": [
-            "owner_setup_decision_id"
           ],
           "columnsTo": [
             "id"
@@ -10043,8 +9700,8 @@
   "policies": {},
   "views": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   }
 }

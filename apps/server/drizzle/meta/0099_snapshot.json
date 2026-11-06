@@ -1,6 +1,6 @@
 {
   "id": "b7b30b78-8edf-4bd8-9e17-56afc610ec93",
-  "prevId": "c2a2d247-a7ca-4a36-8725-c794d4172799",
+  "prevId": "99cadf6e-fa67-4f6e-bf0a-377d998ba255",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1242,6 +1242,13 @@
           "notNull": true,
           "default": 120
         },
+        "permission_judge": {
+          "name": "permission_judge",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'watch'"
+        },
         "watchdog": {
           "name": "watchdog",
           "type": "jsonb",
@@ -1286,12 +1293,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "permission_judge": {
-          "name": "permission_judge",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
         }
       },
       "indexes": {},
@@ -3076,6 +3077,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "fallback_rank": {
+          "name": "fallback_rank",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "quota_hold_at": {
           "name": "quota_hold_at",
           "type": "real",
@@ -3118,12 +3125,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "fallback_rank": {
-          "name": "fallback_rank",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -5492,6 +5493,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "boot_id": {
+          "name": "boot_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "boot_pulled_at": {
+          "name": "boot_pulled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "disk_used_bytes": {
           "name": "disk_used_bytes",
           "type": "bigint",
@@ -5528,18 +5541,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "boot_pulled_at": {
-          "name": "boot_pulled_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "boot_id": {
-          "name": "boot_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -5582,6 +5583,12 @@
           "primaryKey": true,
           "notNull": true,
           "default": "gen_random_uuid()"
+        },
+        "funding_source_id": {
+          "name": "funding_source_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         },
         "company_id": {
           "name": "company_id",
@@ -5709,16 +5716,23 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
-        },
-        "funding_source_id": {
-          "name": "funding_source_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
       "foreignKeys": {
+        "runs_funding_source_id_funding_sources_id_fk": {
+          "name": "runs_funding_source_id_funding_sources_id_fk",
+          "tableFrom": "runs",
+          "tableTo": "funding_sources",
+          "columnsFrom": [
+            "funding_source_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
         "runs_company_id_companies_id_fk": {
           "name": "runs_company_id_companies_id_fk",
           "tableFrom": "runs",
@@ -5790,19 +5804,6 @@
           "tableTo": "ceo_chapters",
           "columnsFrom": [
             "chapter_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "runs_funding_source_id_funding_sources_id_fk": {
-          "name": "runs_funding_source_id_funding_sources_id_fk",
-          "tableFrom": "runs",
-          "tableTo": "funding_sources",
-          "columnsFrom": [
-            "funding_source_id"
           ],
           "columnsTo": [
             "id"
@@ -7708,6 +7709,12 @@
           "notNull": true,
           "default": 5
         },
+        "monitor_restart_at": {
+          "name": "monitor_restart_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "custom_fields": {
           "name": "custom_fields",
           "type": "jsonb",
@@ -7799,12 +7806,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "monitor_restart_at": {
-          "name": "monitor_restart_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -9745,9 +9746,12 @@
   },
   "schemas": {},
   "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   }
 }
