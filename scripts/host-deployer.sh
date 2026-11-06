@@ -359,8 +359,10 @@ switch_back() {
   if ((ok)); then wait_ready "server-$BG_LIVE" leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
   if ((ok)); then flip_proxy "$BG_LIVE" || ok=0; fi
   if ((ok)); then wait_ready proxy leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
-  compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
-  g reset --quiet --hard "$BG_PREV" || true
+  # Never roll back to nothing: the new colour is stopped only once the old one answers as the leader.
+  if ((ok)); then compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+  else log "The old colour $BG_LIVE did not take over; leaving $BG_IDLE running so something still answers."; fi
+  ((ok)) && { g reset --quiet --hard "$BG_PREV" || true; }
   ((ok))
 }
 
@@ -508,6 +510,32 @@ do_rollback_bluegreen() {
 # Booleans print True/False because callers compare against "True".
 deploy_status_field() { jfield "$1" <"${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" 2>/dev/null || true; }
 
+# A run that was cut off (killed, host restart) leaves status.json saying "running" for ever, the checkout ahead of what
+# runs and maybe a soak file for a release that never went live. We hold the lock here, so no run is active: say so
+# (the server refuses new deploys while the status is "running"), and make the checkout and soak match what really answers.
+# Only files and git are touched; never a container.
+recover_interrupted() {
+  local sf="$OUTBOX/status.json" st live="" head reset="" sc=""
+  [[ -f $sf && ! -L $sf ]] || return 0
+  st="$(cat "$sf")"
+  [[ $(jfield result <<<"$st") == running ]] || return 0
+  ((DRY)) && { log "[dry-run] the last run was cut off (status still 'running'); a real tick would mark it failed"; return 0; }
+  REQ_ID="$(jfield id <<<"$st")" TARGET="$(jfield target <<<"$st")" STARTED="$(jfield started <<<"$st")" FROM="$(jfield from_commit <<<"$st")" COMMIT="$(jfield to_commit <<<"$st")"
+  head="$(g rev-parse HEAD 2>/dev/null || true)"
+  if [[ $TARGET == server ]] && bluegreen_enabled; then
+    live="$(jfield commit <<<"$(probe proxy 3100 /api/ready 2>/dev/null || true)")"
+    if [[ $live =~ ^[0-9a-f]{40}$ && $live != "$head" ]] && g cat-file -e "$live^{commit}" 2>/dev/null; then
+      g reset --quiet --hard "$live" && reset=" The checkout was put back on ${live:0:8}, which is what answers."
+    fi
+    if [[ -f $STATE/soak && -n $live ]]; then
+      sc="$(sed -n 's/.* commit=\([0-9a-f]\{40\}\) .*/\1/p' "$STATE/soak" | head -1)"
+      if [[ $sc != "$live" ]]; then rm -f "$STATE/soak"; reset+=" A trial window for ${sc:0:8} was dropped because that version is not the one running."; fi
+    fi
+  fi
+  [[ -z $REQ_ID ]] && REQ_ID="interrupted-$(date +%s)"
+  finish failed "The ${TARGET:-deploy} run for ${COMMIT:0:8} was cut off before it finished (the deployer was stopped part-way).$reset Check what runs before deploying again."
+}
+
 main() {
   local req="$INBOX/request.json"
   # What this host says about itself (BOS-427), refreshed every tick, so an owner card's steps can be
@@ -525,6 +553,7 @@ main() {
     post_webhook "${BG_RESULT:-failed}" "${BG_MSG:-Rollback failed.}"
     exit "$rrc"
   fi
+  recover_interrupted
   if bluegreen_enabled; then soak_tick; fi
   if [[ ! -e $req && ! -L $req ]]; then refresh_available; exit 0; fi
 
