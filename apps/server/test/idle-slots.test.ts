@@ -219,4 +219,41 @@ describe("free run slots go to idle in-progress work (BOS-574)", () => {
     expect(woken).toEqual([ids.Urgent!, ids.Oldest!].sort());
     expect(await c.scheduler.freeSlots(c.company.id)).toBe(0);
   });
+
+  it("never takes a slot from a wake already held at the limit: that wake gets the next free slot", async () => {
+    const c = (ctx = await setup());
+    // A connected runner that accepts every command, so a wake that has room really starts.
+    c.runners.connect(c.runnerId, () => true);
+    // Company limit 4 keeps one slot for cards: three runs fill it.
+    await c.db.insert(settings).values({ key: "run_limits", value: { instance: 10, company: 4 } });
+    const busy: string[] = [];
+    for (const n of ["Busy 1", "Busy 2", "Busy 3"]) {
+      const a = await c.hire(n);
+      busy.push((await c.run(a.id, await c.working(n, a.id, 0), { lastEventAgoMs: MIN })).id);
+    }
+    // Another company's message has waited 18 hours (the HolidayHours case, 6 Nov).
+    const ceo = await c.hire("Gandalf");
+    const [held] = await c.db.insert(wakes).values({ companyId: c.company.id, agentId: ceo.id, reason: "engagement", note: "Engagement: the server is back", createdAt: new Date(Date.now() - 18 * 60 * MIN) }).returning();
+    // And an idle in-progress ticket the filler would otherwise wake.
+    const idle = await c.hire("Idle");
+    await c.working("Idle work", idle.id, 25 * MIN);
+
+    await c.scheduler.tickOnce();
+    expect((await c.db.select().from(wakes).where(eq(wakes.id, held!.id)))[0]).toMatchObject({ status: "queued", statusReason: "at a concurrency limit" });
+    expect(await c.scheduler.freeSlots(c.company.id)).toBe(0);
+    expect(await c.sweeps.run()).toMatchObject({ idleSlots: { woken: 0 } });
+
+    // That sweep also raised a card for the CEO about the hour-long runs; someone waits on it, so it goes first.
+    const [card] = await c.wakesOf("decision");
+    expect(card).toMatchObject({ status: "queued" });
+
+    // Two runs end: the slots they free go to the card and to the held wake, none to a new filler.
+    for (const id of busy.slice(0, 2)) await c.emit({ type: "run.ended", runId: id, stopReason: "end_turn", error: null });
+    await c.flush();
+    expect(await c.scheduler.freeSlots(c.company.id)).toBe(0);
+    await c.scheduler.tickOnce();
+    expect((await c.db.select().from(wakes).where(eq(wakes.id, card!.id)))[0]!.status).toBe("launched");
+    expect((await c.db.select().from(wakes).where(eq(wakes.id, held!.id)))[0]!.status).toBe("launched");
+    expect(await c.wakesOf(IDLE_SLOT_REASON)).toEqual([]);
+  });
 });
