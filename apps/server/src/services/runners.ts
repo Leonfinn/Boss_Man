@@ -58,6 +58,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   const features = new Map<string, string[]>();
   // shortcut: when each runner last connected; lost on a server restart, which only makes "settling" read false.
   const connectedAt = new Map<string, number>();
+  // shortcut: when this server first saw each runner's current process after a restart (BOS-579). Lost on a server
+  // restart: a hello after that compares the boot id with the stored one, so only a server restart in the few
+  // minutes between a runner's restart and the lost-run sweep misses its stale runs.
+  const restartedAt = new Map<string, number>();
 
   /** Marks a run ended and logs it. */
   async function markEnded(runId: string, at: Date, outcome: string | null, usage?: { inputTokens: number; outputTokens: number; cachedReadTokens: number; cachedWriteTokens: number }) {
@@ -251,6 +255,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       if (!bootId || bootId === runner.bootId) return 0;
       failPending(runner.id, "The runner restarted while this was running.");
       const at = new Date();
+      // A runner with no boot id on record (new, or older than BOS-352) can't be told apart from a reconnect.
+      if (runner.bootId) restartedAt.set(runner.id, at.getTime());
       await db.update(runners).set({ bootId }).where(eq(runners.id, runner.id));
       if (runner.bootPulledAt && at.getTime() - runner.bootPulledAt.getTime() < RESTART_PULL_COOLDOWN_MS) return 0;
       const pending = await db
@@ -293,6 +299,12 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
      * queued behind it are still being started and "never started" alerts can wait.
      */
     isSettling: (runnerId: string, at: Date = new Date()) => at.getTime() - (connectedAt.get(runnerId) ?? -Infinity) < RUNNER_SETTLE_MS,
+
+    /**
+     * When this server saw the runner's current process start, if it saw a restart (BOS-579). A run
+     * that began before then was on the old process: the new one can't carry it on or report on it.
+     */
+    restartedAt: (runnerId: string) => (restartedAt.has(runnerId) ? new Date(restartedAt.get(runnerId)!) : null),
 
     connectedSince: (runnerId: string) => (connectedAt.has(runnerId) && connected.has(runnerId) ? new Date(connectedAt.get(runnerId)!) : null),
 
