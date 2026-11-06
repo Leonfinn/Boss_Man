@@ -98,10 +98,22 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   }
 
   /**
+   * Whether an error is a data or constraint error (SQLSTATE class 22 or 23), which the same event
+   * will hit on every resend: the payload or the row it points at is wrong, not the connection. Those
+   * must not be retried for ever (BOS-584), unlike a dropped connection or a serialization failure.
+   */
+  function isPermanentApplyError(err: unknown): boolean {
+    for (let e = err as { code?: unknown; cause?: unknown } | null, i = 0; e && i < 3; e = e.cause as { code?: unknown; cause?: unknown } | null, i++) {
+      if (typeof e.code === "string" && /^2[23]/.test(e.code)) return true;
+    }
+    return false;
+  }
+
+  /**
    * Applies one newly stored event inside `tx`, so the event insert and its effects commit together
-   * and a failure rolls the insert back for the runner's resend (BOS-584). Returns the work that must
-   * run after the commit because it talks to the outside world (the permission hook may send a verdict
-   * over the socket and wake the CEO); it uses its own handle and is safe to repeat.
+   * and a transient failure rolls the insert back for the runner's resend (BOS-584). Returns the work
+   * that must run after the commit because it talks to the outside world (the permission hook may send
+   * a verdict over the socket and wake the CEO); it uses its own handle and is safe to repeat.
    */
   async function apply(tx: Tx, runner: Runner, event: RunnerEvent, at: Date): Promise<Array<() => Promise<unknown>>> {
     // Any word from a run counts as a sign of life for stall detection (R32).
@@ -210,6 +222,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       const at = new Date(entry.at);
       // The event and everything it changes are one transaction (BOS-584): if applying throws, the
       // insert rolls back too, so the runner's resend is a new event and gets applied, not skipped.
+      // A data or constraint error is the exception: it repeats on every resend, and retrying it
+      // would stall every later event for this company (acks are cumulative). Then the effect is
+      // rolled back and the event is kept, marked and logged, so the stream moves on.
+      let skipped: string | null = null;
       const { inserted, afterCommit } = await db.transaction(async (tx) => {
         const rows = await tx
           .insert(runnerEvents)
@@ -217,7 +233,23 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
           .onConflictDoNothing()
           .returning({ id: runnerEvents.id });
         if (rows.length === 0) return { inserted: false, afterCommit: [] as Array<() => Promise<unknown>> };
-        return { inserted: true, afterCommit: await apply(tx, runner, entry.event, at) };
+        // The savepoint separates applying from storing, so a data error can undo only the effects
+        // while the event row stays and the stream moves on.
+        try {
+          const work = await tx.transaction((sp) => apply(sp, runner, entry.event, at));
+          return { inserted: true, afterCommit: work };
+        } catch (err) {
+          if (!isPermanentApplyError(err)) throw err;
+          skipped = (err as Error).message;
+          await record(tx, {
+            companyId: runner.companyId,
+            kind: "runner_event_failed",
+            summary: `Runner event ${entry.seq} (${entry.event.type}) could not be applied and was skipped: ${skipped}`,
+            detail: { seq: entry.seq, type: entry.event.type, error: skipped },
+            at,
+          });
+          return { inserted: true, afterCommit: [] as Array<() => Promise<unknown>> };
+        }
       });
       if (inserted) {
         // Only outward-facing work (the permission hook) runs after the commit, and it is repeatable.

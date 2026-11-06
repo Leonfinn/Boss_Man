@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { costEvents, fundingSources, quotaSamples, runnerEvents, runners, runs } from "../src/db/schema.js";
+import { activity, costEvents, fundingSources, quotaSamples, runnerEvents, runners, runs } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -90,8 +90,7 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
   });
 
-  it("records a quota reading and the event in one go", async () => {
-    const c = (ctx = await setup());
+  it("records a quota reading and the event in one go", async () => {    const c = (ctx = await setup());
     const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
     const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.quota" as const, fundingSourceId: fs!.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 40, resetsAt: "2026-11-07T14:00:00Z" } } } } } as never };
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
@@ -99,5 +98,37 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
     expect(await c.db.select().from(quotaSamples)).toHaveLength(1);
+  });
+
+  it("keeps and marks an event that can never apply, and the next event still lands (BOS-584)", async () => {
+    const c = (ctx = await setup());
+    // A cost reported for an account the owner deleted meanwhile: the FK fails on every resend.
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: crypto.randomUUID(), model: "opus", costMicrosDelta: 5_000 } as never };
+    // It is recorded and acked (true), not retried for ever.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
+    expect(await c.db.select().from(costEvents)).toHaveLength(0);
+    const [failed] = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")));
+    expect(failed?.summary).toMatch(/seq 2 \(run.cost\)|Runner event 2/);
+
+    // A later event for the same runner is not stuck behind it: the run still ends.
+    const ended = { seq: 3, at: new Date().toISOString(), event: { type: "run.ended" as const, runId: c.runId, stopReason: "end_turn", error: null } };
+    expect(await c.runners.ingest(c.runnerRow, ended)).toBe(true);
+    const [run] = await c.db.select().from(runs).where(eq(runs.id, c.runId));
+    expect(run!.endedAt).not.toBeNull();
+  });
+
+  it("still retries a connection-style failure on the resend (not marked as failed)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    // A dropped connection is not a data error: the event is not stored, so the resend applies it.
+    vi.spyOn(c.funding, "recordCost").mockImplementationOnce(async () => {
+      throw Object.assign(new Error("connection reset"), { code: "08006" });
+    });
+    await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("connection reset");
+    expect(await c.db.select().from(runnerEvents).where(eq(runnerEvents.runnerId, c.runnerRow.id))).toHaveLength(1); // only run.started
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(costEvents)).toHaveLength(1);
   });
 });
