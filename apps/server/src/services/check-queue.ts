@@ -134,13 +134,17 @@ export function checkQueue(db: Db) {
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
   async function claimNext(runnerId: string | null, now = new Date(), companyId?: string): Promise<CheckJob[]> {
     const limit = await slots();
-    const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(companyId ? and(eq(checkJobs.state, "running"), eq(checkJobs.companyId, companyId)) : eq(checkJobs.state, "running"))) as [{ n: number }];
+    const candidates = (await servable()).filter((j) => !companyId || j.companyId === companyId);
+    // Count and claim under one lock so two concurrent pumps can't both see a free slot.
+    return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"check_jobs_claim"}))`);
+    const [{ n }] = (await tx.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(companyId ? and(eq(checkJobs.state, "running"), eq(checkJobs.companyId, companyId)) : eq(checkJobs.state, "running"))) as [{ n: number }];
     const free = limit - n;
     if (free <= 0) return [];
     const claimed: CheckJob[] = [];
-    for (const j of (await servable()).filter((j) => !companyId || j.companyId === companyId).slice(0, free)) {
+    for (const j of candidates.slice(0, free)) {
       // Guarded on state so two callers can't both start the same job.
-      const [row] = await db
+      const [row] = await tx
         .update(checkJobs)
         .set({ state: "running", runnerId, startedAt: now, lastOutputAt: now, reason: null })
         .where(and(eq(checkJobs.id, j.id), eq(checkJobs.state, "queued")))
@@ -148,6 +152,7 @@ export function checkQueue(db: Db) {
       if (row) claimed.push(row);
     }
     return claimed;
+    });
   }
 
   /** Note output from a running job (for the no-output limit) and keep its log tail. */
