@@ -254,13 +254,15 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     /**
      * Closes this runner's open runs that its hello list leaves out, as "lost: runner doesn't have it",
      * and hands each to the lost listeners to resume (BOS-583). Runs started within the grace period
-     * are left alone. Returns the ids closed. A runner that sent no list never gets here.
+     * are left alone, measured back from the hello (helloAt), not from when this check runs: a run
+     * started just before the hello may not have reached the runner yet. Returns the ids closed.
+     * A runner that sent no list never gets here.
      */
-    async reconcileLive(runner: Runner, liveRunIds: string[], at: Date = new Date()): Promise<string[]> {
+    async reconcileLive(runner: Runner, liveRunIds: string[], at: Date = new Date(), helloAt: Date = at): Promise<string[]> {
       const open = await db
         .select({ id: runs.id })
         .from(runs)
-        .where(and(eq(runs.companyId, runner.companyId), isNull(runs.endedAt), lt(runs.startedAt, new Date(at.getTime() - LIVE_RUNS_GRACE_MS))));
+        .where(and(eq(runs.companyId, runner.companyId), isNull(runs.endedAt), lt(runs.startedAt, new Date(helloAt.getTime() - LIVE_RUNS_GRACE_MS))));
       const live = new Set(liveRunIds);
       const closed: string[] = [];
       for (const { id: runId } of open) {
@@ -274,9 +276,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
 
     /** Waits for the runner to replay anything it finished offline, then reconciles, if it is still connected. */
     reconcileLater(runner: Runner, liveRunIds: string[]) {
+      const helloAt = new Date();
       const timer = setTimeout(() => {
         if (!connected.has(runner.id)) return;
-        void this.reconcileLive(runner, liveRunIds).catch(() => {});
+        void this.reconcileLive(runner, liveRunIds, new Date(), helloAt).catch(() => {});
       }, liveRunsDelayMs);
       timer.unref();
     },

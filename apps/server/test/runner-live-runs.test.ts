@@ -8,7 +8,7 @@ import { eq } from "drizzle-orm";
 import { Journal, RunnerConnection } from "@boss-man/runner";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, runs, wakes } from "../src/db/schema.js";
+import { agents, deployTargets, deploys, runs, wakes } from "../src/db/schema.js";
 
 const HEARTBEAT = 100;
 const OLD = () => new Date(Date.now() - 10 * 60_000);
@@ -68,6 +68,19 @@ describe("runner lists its live runs in hello (BOS-583)", () => {
     expect(await outcome(a)).toBeNull();
     expect(await outcome(b)).toBeNull();
     expect(await outcome(fresh)).toBeNull();
+    conn.stop();
+  });
+
+  it("a deploy cut off this way is failed and never restarted: the resume run carries no deploy", async () => {
+    const c = await open();
+    const [target] = await ctx.db.insert(deployTargets).values({ companyId: ctx.companyId, name: "prod", kind: "ssh", endpoint: "example.invalid", isProduction: true }).returning();
+    const [deploy] = await ctx.db.insert(deploys).values({ companyId: ctx.companyId, targetId: target!.id, agentId: ctx.agent.id, ref: "main", status: "running", runId: c }).returning();
+    const conn = connect([]);
+    expect(await waitFor(() => outcome(c), (o) => !!o)).toBe("lost: runner doesn't have it");
+    const resumes = await waitFor(async () => (await ctx.db.select().from(wakes)).filter((w) => w.resumeRunId === c), (w) => w.length === 1);
+    expect(resumes[0]!.deployId).toBeNull();
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.deployId, deploy!.id))).toHaveLength(0);
+    expect((await ctx.db.select().from(deploys).where(eq(deploys.id, deploy!.id)))[0]!.status).toBe("failed");
     conn.stop();
   });
 

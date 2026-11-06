@@ -503,7 +503,7 @@ export async function buildApp(opts: AppOptions) {
       const { type: _type, ...report } = event;
       void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err, companyId: runner.companyId }, "disk report handling failed"));
     }
-  if (event.type === "run.ended") {
+    if (event.type === "run.ended") {
       // A deploy whose run ended without a report is failed, which also ends its secrets.
       // An interrupted run gets a recovery run (R42).
       void deploysSvc
