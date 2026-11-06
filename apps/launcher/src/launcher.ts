@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, wri
 import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
-import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_IMAGE, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
+import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, PREVIOUS_IMAGE, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_IMAGE, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
 const MAX_BODY = 4096;
@@ -161,13 +161,13 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     renameSync(tmp, path.join(dir, "allow"));
   }
 
-  async function create(slug: string) {
+  async function create(slug: string, image: string = IMAGE) {
     // Every bind source must exist first: Docker would make a missing one owned by root, which the runner can't write.
     for (const [sub] of MOUNTS) mkdirSync(path.join(companyDir(cfg, slug), sub), { recursive: true, mode: 0o700 });
     if (!existsSync(path.join(netguardDir(cfg, slug), "allow"))) writeAllow(slug, []);
     const old = await ours(slug);
     if (old) await removeSettled(docker, old.Id);
-    const id = await docker.create(containerName(slug), containerSpec(cfg, slug));
+    const id = await docker.create(containerName(slug), containerSpec(cfg, slug, image));
     await docker.start(id);
     try {
       await guard(slug, id);
@@ -310,9 +310,18 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     },
 
     /** One company's runner again on the current image, with its own token: how a drain swaps runners one by one. // leader-only (the server decides when) */
+    // A failed earlier try may have left no container (create removes the old one first), so a company that still has its
+    // token counts as ours: the drain retries it (BOS-382). Stop removes the token, so a stopped company is still refused.
     recreate: (slug: string) => locked(slug, async () => {
-      if (!(await ours(slug))) throw new LauncherError(404, "There's no runner for that company.");
+      if (!(await ours(slug)) && !existsSync(tokenFile(cfg, slug))) throw new LauncherError(404, "There's no runner for that company.");
       return { slug, id: await create(slug) };
+    }),
+
+    /** BOS-382: the swap to the new image failed, so this company's runner goes back on the image it ran before. // leader-only */
+    rollback: (slug: string) => locked(slug, async () => {
+      if (!(await ours(slug)) && !existsSync(tokenFile(cfg, slug))) throw new LauncherError(404, "There's no runner for that company.");
+      if (!(await docker.imageId(PREVIOUS_IMAGE))) throw new LauncherError(409, `There is no previous runner image (${PREVIOUS_IMAGE}) to go back to.`);
+      return { slug, id: await create(slug, PREVIOUS_IMAGE), image: PREVIOUS_IMAGE };
     }),
 
     /** For scripts/update-runner.sh --now: every runner again on the current image, with its own token. */
@@ -381,7 +390,7 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, await api.list());
       }
-      const m = /^\/runners\/([^/]+)(\/restart|\/recreate|\/allow)?$/.exec(url.pathname);
+      const m = /^\/runners\/([^/]+)(\/restart|\/recreate|\/previous|\/allow)?$/.exec(url.pathname);
       if (!m) throw new LauncherError(404, "Unknown call.");
       const slug = decodeURIComponent(m[1]!);
       if (!SLUG.test(slug)) throw new LauncherError(400, "Bad company slug.");
@@ -395,7 +404,7 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
       if (m[2]) {
         if (req.method !== "POST") throw new LauncherError(405, "Only POST here.");
         if (body !== undefined && !(typeof body === "object" && body && Object.keys(body).length === 0)) throw new LauncherError(400, "Restart and recreate take no body.");
-        return send(200, m[2] === "/recreate" ? await api.recreate(slug) : await api.restart(slug));
+        return send(200, m[2] === "/recreate" ? await api.recreate(slug) : m[2] === "/previous" ? await api.rollback(slug) : await api.restart(slug));
       }
       if (req.method === "PUT") {
         if (!body || typeof body !== "object" || Array.isArray(body)) throw new LauncherError(400, "Send { token }.");
@@ -409,7 +418,7 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
         if (body !== undefined) throw new LauncherError(400, "Delete takes no body.");
         return send(200, await api.remove(slug));
       }
-      throw new LauncherError(405, "Use PUT, DELETE, or POST …/restart or …/recreate.");
+      throw new LauncherError(405, "Use PUT, DELETE, or POST …/restart, …/recreate or …/previous.");
     } catch (err) {
       if (err instanceof LauncherError) return send(err.status, { error: err.message });
       if (err instanceof DockerError) {

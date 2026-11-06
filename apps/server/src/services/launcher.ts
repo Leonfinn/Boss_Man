@@ -144,6 +144,11 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       await call("POST", `/runners/${slug}/recreate`);
     },
 
+    /** BOS-382: the swap failed, so the company's runner goes back on the image it ran before. // leader-only */
+    async rollback(slug: string) {
+      await call("POST", `/runners/${slug}/previous`);
+    },
+
     async status(companyId: string): Promise<{ slug: string; container: LaunchedRunner | null; error?: string } | null> {
       if (!opts) return null;
       const slug = await slugFor(companyId);

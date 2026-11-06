@@ -337,6 +337,7 @@ export async function buildApp(opts: AppOptions) {
   const maintenance = maintenanceService(db, {
     fleet: async () => (launch.enabled ? launch.fleet() : []),
     recreate: (slug) => launch.recreate(slug),
+    rollback: (slug) => launch.rollback(slug),
     connected: async (companyId) => {
       const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
       return !!r && runners.isConnected(r.id);

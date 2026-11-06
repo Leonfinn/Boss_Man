@@ -6,6 +6,8 @@ import path from "node:path";
 export const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 /** The runner image. The launcher never pulls: scripts/update-runner.sh builds and tags it. */
 export const IMAGE = "boss-man-runner:current";
+/** The image the runner ran before the last update (scripts/update-runner.sh keeps it): what a failed swap goes back to (BOS-382). */
+export const PREVIOUS_IMAGE = "boss-man-runner:previous";
 export const LABEL = "boss-man.launcher";
 export const COMPANY_LABEL = "boss-man.company";
 /** The network guard (BOS-324): a sidecar in each runner's network namespace that blocks private networks. */
@@ -76,12 +78,12 @@ export const netguardDir = (cfg: LauncherConfig, slug: string) => path.join(comp
 export const tokenFile = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "runner.token");
 
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
-export function containerSpec(cfg: LauncherConfig, slug: string) {
+export function containerSpec(cfg: LauncherConfig, slug: string, image: string = IMAGE) {
   if (!SLUG.test(slug)) throw new Error("bad slug");
   if (cfg.network === "host" || cfg.network === "none" || cfg.network.startsWith("container:")) throw new Error("bad network");
   const dir = companyDir(cfg, slug);
   return {
-    Image: IMAGE,
+    Image: image,
     User: "1000:1000",
     Env: [`BOSSMAN_URL=${cfg.serverUrl}`, `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`, ...(cfg.checkSlots && cfg.checkSlots > 1 ? [`BOSSMAN_CHECK_SLOTS=${cfg.checkSlots}`] : [])],
     Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug },

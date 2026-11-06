@@ -14,7 +14,7 @@ const TOKEN = `bmr_${"t".repeat(43)}`;
 /** A stand-in Docker that keeps containers in memory and records each call. */
 function fakeDocker() {
   const containers = new Map<string, { id: string; labels: Record<string, string>; spec: unknown; state: string; imageId: string; startedAt: number; health?: string; exitCode?: number }>();
-  const fail = { guard: false, nft: false, bad: false, hang: false, slow: false, pause: false, guardImage: false };
+  const fail = { guard: false, nft: false, bad: false, hang: false, slow: false, pause: false, guardImage: false, noPrevious: false };
   let clock = 0;
   const image = { current: "img1" };
   const calls: string[] = [];
@@ -34,6 +34,7 @@ function fakeDocker() {
     },
     async imageId(ref) {
       if (fail.guardImage && ref.includes("netguard")) return null;
+      if (fail.noPrevious && ref.endsWith(":previous")) return null;
       return image.current;
     },
     async pause(id) {
@@ -312,6 +313,38 @@ describe("the runner launcher (R55)", () => {
     expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-runner-app-co", "create boss-man-netguard-app-co"]);
     expect((await api.list()).map((r) => [r.slug, r.current])).toEqual([["homelab", false], ["app-co", true]]);
     await expect(api.recreate("nobody")).rejects.toMatchObject({ status: 404 });
+  });
+
+  // BOS-382: a drain's swap that keeps failing is tried again, then goes back to the image the runner ran before.
+  it("tries a recreate again after a failed one left no container, and can go back to the previous image", async () => {
+    const cfg = config();
+    const fake = fakeDocker();
+    const api = launcher(cfg, fake.docker);
+    await api.put("app-co", TOKEN);
+    // A failed swap: the old runner was removed first and the new one never made it.
+    fake.containers.delete("boss-man-runner-app-co");
+    expect(await api.recreate("app-co")).toMatchObject({ slug: "app-co" });
+    fake.containers.delete("boss-man-runner-app-co");
+    fake.calls.length = 0;
+    expect(await api.rollback("app-co")).toMatchObject({ slug: "app-co", image: "boss-man-runner:previous" });
+    expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-runner-app-co", "create boss-man-netguard-app-co"]);
+    expect((fake.containers.get("boss-man-runner-app-co")!.spec as { Image: string }).Image).toBe("boss-man-runner:previous");
+    fake.fail.noPrevious = true;
+    await expect(api.rollback("app-co")).rejects.toMatchObject({ status: 409 });
+    // A company the owner stopped (token removed) is still refused: a retry never brings back a stopped runner.
+    await api.remove("app-co");
+    await expect(api.recreate("app-co")).rejects.toMatchObject({ status: 404 });
+    await expect(api.rollback("app-co")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("exposes going back over HTTP: POST /runners/<slug>/previous, no body", async () => {
+    const s = await serve();
+    await s.call("PUT", "/runners/app-co", { token: TOKEN });
+    expect((await s.call("GET", "/runners/app-co/previous")).status).toBe(405);
+    expect((await s.call("POST", "/runners/app-co/previous", { image: "alpine" })).status).toBe(400);
+    expect((await s.call("POST", "/runners/nobody/previous")).status).toBe(404);
+    expect((await s.call("POST", "/runners/app-co/previous")).status).toBe(200);
+    expect((await s.call("POST", "/runners/app-co/previous", undefined, null)).status).toBe(401);
   });
 
   it("exposes recreate over HTTP: POST only, no body, only its own containers", async () => {
