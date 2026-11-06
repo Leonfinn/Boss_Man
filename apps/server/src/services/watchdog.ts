@@ -9,6 +9,7 @@ import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, engagements, notifications, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
+import type { AddonFacts } from "./addons.js";
 import type { CardLint } from "./steps.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
@@ -57,6 +58,8 @@ type Notify = (agentId: string, input: { ticketId?: string | null; reason: strin
 type Nudge = (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string; wakeId: string } | { ok: false; error: string }>;
 
 export type WatchdogDeps = {
+  /** Add-on facts for the card lint's R9 (DR-023). Absent: R9 is not checked. */
+  addons?: () => Promise<AddonFacts>;
   notify: Notify;
   nudge: Nudge;
   raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint }) => Promise<{ id: string }>;
@@ -1080,7 +1083,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
-      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps });
+      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
