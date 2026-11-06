@@ -447,7 +447,9 @@ export function reviewService(
   async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null) {
     await db.update(tickets).set({ mergeCommit: commit, pullRequestNote: null }).where(eq(tickets.id, t.id));
     const left = afterMergeLeft(t);
-    await deps.work.updateTicket(t.id, { state: "done", outcome: "completed", overLimit: true });
+    // With a live check still to show, the ticket isn't finished: go straight to the assignee without a
+    // brief done state in between, so done hooks (worktree release, notifications) never fire for it.
+    if (!left) await deps.work.updateTicket(t.id, { state: "done", outcome: "completed", overLimit: true });
     return { outcome: "merged" as const, delivered: null, detail: { commit, ...(left ? { afterMerge: left } : {}) } };
   }
 
@@ -472,7 +474,7 @@ export function reviewService(
     if (repoUrl?.repoUrl) await deps.work.updateTicket(t.id, { state: "in_progress", overLimit: true, internal: true, noCode: true });
     const delivered = await tellAgent(
       { ...t, systemState: "in_progress" },
-      `${merged}The work is live, so these checks can only be made now: ${r.detail.afterMerge!.map((c) => `"${c}"`).join(", ")}. Report pass or fail for each and move the ticket to done. If only the owner can check one, put a card in front of them (raise_decision with blocksTicketId) and their answer closes it.`,
+      `${merged}The work is live, so these checks can only be made now: ${r.detail.afterMerge!.map((c) => `"${c}"`).join(", ")}. Report pass or fail for each and move the ticket to done. If only the owner can check one, put a card in front of them (raise_decision with blocksTicketId): answering it records their answer as that check's pass or fail, so you can close the ticket once they have.`,
       "after merge",
       causedByRunId,
     ).catch(() => null);

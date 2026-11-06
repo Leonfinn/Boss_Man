@@ -5,10 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { DEFAULT_REVIEW_POLICY, afterMergeLint, isAfterMerge, missingVerdicts, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, afterMergeLint, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, reviewRequests, runners, tickets, wakes } from "../src/db/schema.js";
+import { agents, decisions, reviewRequests, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { landingText } from "../src/services/review.js";
 
@@ -165,6 +165,54 @@ describe("after-merge criteria", () => {
     const words = landingText(r, { branch: "main", assignee: "Dev" });
     expect(words).toContain("stays open");
     expect(words).toContain(LIVE.text);
+  });
+
+  it("the owner's answer on the linked card records the after-merge criterion, so the ticket can close", { timeout: 120_000 }, async () => {
+    const { db, req, co, dev, project } = ctx;
+    await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
+    const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
+    ctx.runners.connect(reg.runnerId, (command) => {
+      const ok = (data: unknown) => queueMicrotask(() => ctx.runners.resolveReply({ requestId: (command as { requestId: string }).requestId, ok: true, data }));
+      if (command.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
+      if (command.type === "workspace.merge") ok({ status: "merged", commit: "e".repeat(40) });
+      if (command.type === "workspace.carried") ok({ carried: [] });
+      if (command.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
+      return true;
+    });
+    const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Owner checks the host", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE] })).json() as { id: string };
+    await db.update(tickets).set({ branch: `bossman/${t.id}`, stateNote: "Health check returns 200 pass" }).where(eq(tickets.id, t.id));
+    await db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    expect((await ctx.review.landVisible(t.id, "the owner")).outcome).toBe("merged");
+    expect((await ctx.row(t.id)).systemState).toBe("in_progress");
+
+    // The assignee puts the live check in front of the owner; the owner answers the card.
+    const c = await ctx.agent(dev.id);
+    const asked = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does it answer from your Tailscale name on your machine?", options: ["Yes, it works", "No, it does not"], recommended: "Yes, it works", triedFirst: "Deployed it and checked from my own shell; only the owner's host can reach it.", blocksTicketId: t.id } }));
+    expect(asked).toMatch(/decision/i);
+    const [card] = await db.select().from(decisions).where(eq(decisions.question, "Does it answer from your Tailscale name on your machine?"));
+    expect((await req("POST", `/api/decisions/${card!.id}/answer`, { answer: "Yes, it works" })).statusCode).toBe(200);
+
+    const recorded = await ctx.row(t.id);
+    expect(recorded.stateNote).toContain(LIVE.text);
+    expect(recorded.stateNote).toMatch(/\bpass\b/i);
+    expect(unreportedAfterMerge(readCriteria(recorded.acceptanceCriteria), recorded.stateNote)).toEqual([]);
+    // And the ticket closes on the owner's answer, with no verdict of the agent's own.
+    const done = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Closed on the owner's answer." } });
+    expect(textOf(done)).toContain("is now done");
+    expect((await ctx.row(t.id)).systemState).toBe("done");
+  });
+
+  it("the owner's answer records a fail, which keeps the ticket open", async () => {
+    const t = await ctx.ticket({ acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "Does the host answer?", options: ["Yes, it works", "No, it does not"], recommendedOption: "Yes, it works", context: { type: "question" }, raisedByAgentId: ctx.dev.id }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
+    await ctx.decisions.answer(d!.id, "No, it does not");
+    const recorded = await ctx.row(t.id);
+    expect(recorded.stateNote).toContain(LIVE.text);
+    // The owner's answer is read as a fail for that criterion, so it is reported (with a fail), and the
+    // ticket's own assignee has to fix it before it can close.
+    expect(readVerdicts(readCriteria(recorded.acceptanceCriteria), recorded.stateNote).find((r) => r.criterion === LIVE.text)?.verdict).toBe("fail");
+    expect(recorded.systemState).toBe("in_progress");
   });
 
   it("a merge with only before-merge criteria closes the ticket as it always did", async () => {

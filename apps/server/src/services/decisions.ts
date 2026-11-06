@@ -8,6 +8,8 @@ import {
   effectiveDueDate,
   evaluatePermission,
   isBossmanCall,
+  readCriteria,
+  unreportedAfterMerge,
   ruleFor,
   rankDecision,
   ticketRef,
@@ -738,6 +740,35 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
   });
   if (answered) lines.push(`- You asked "${answered.question}"; the answer was: ${answered.answer}`);
   return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
+}
+
+/**
+ * The owner's answer on a card that blocks a ticket settles that ticket's after-merge criteria (DR-024 #5):
+ * the card was how the owner was to check the live work, so the answer is its pass or fail. The criterion's
+ * own words are written into the state note with the verdict, so the done gate reads it like any other report.
+ * Returns the tickets it wrote to; a ticket whose criteria were already reported is left as it is.
+ */
+async function recordOwnerHostChecks(db: Db, d: { question: string; answer: string | null }, ticketIds: string[], by: string, now: () => Date): Promise<string[]> {
+  const answer = (d.answer ?? "").trim();
+  if (!ticketIds.length || !answer) return [];
+  const rows = await db.select({ id: tickets.id, criteria: tickets.acceptanceCriteria, note: tickets.stateNote, merged: tickets.mergeCommit }).from(tickets).where(inArray(tickets.id, ticketIds));
+  // A problem word wins over a "yes"/"works"; anything with no pass word at all (an answer to a "How did
+  // it look?" card) is a fail, so the assignee has to look rather than the ticket closing on a shrug. The
+  // owner's plain words are quoted on the note either way.
+  const fail = /\b(fail|failed|fails|failing|broken|not|didn't|doesn't|can't|cannot|red|no|✗|✘)\b/i.test(answer);
+  const pass = /\b(pass|passed|passes|passing|ok|done|yes|green|works|working|✓|✔)\b/i.test(answer);
+  const verdict = fail || !pass ? "fail" : "pass";
+  const said = answer.replace(/\s+/g, " ").slice(0, 200);
+  const wrote: string[] = [];
+  for (const r of rows) {
+    const criteria = readCriteria(r.criteria);
+    // Only a merged ticket has after-merge checks to settle; before that its own assignee reports them.
+    if (!r.merged || !unreportedAfterMerge(criteria, r.note).length) continue;
+    const line = `Owner answered "${d.question.split("\n")[0]!.slice(0, 120)}" (${by}): ${unreportedAfterMerge(criteria, r.note).map((c) => `"${c}" ${verdict}`).join("; ")} — "${said}"`;
+    await db.update(tickets).set({ stateNote: `${(r.note ?? "").trim()}${r.note ? ". " : ""}${line}`.slice(0, 4000), stateNoteAt: now() }).where(eq(tickets.id, r.id));
+    wrote.push(r.id);
+  }
+  return wrote;
 }
 
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}, workspaceRoot?: string) {
@@ -2494,6 +2525,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+      // A card that blocked a merged ticket was how the owner checked its live work: their answer is the
+      // criterion's pass or fail (DR-024 #5). Only the owner's own answer counts: a CEO settling an agent's
+      // question isn't the owner looking at the host, and the assignee still reports that one.
+      if (!extra.settledBy && ctx.type === "question") {
+        try {
+          await recordOwnerHostChecks(db, { question: d.question, answer }, [...new Set(freed.map((f) => f.ticketId))], "the owner", now);
+        } catch (err) {
+          // The answer is saved; a failed write here must not stop it reaching the asker.
+          log(`answering decision ${id} was saved, but recording the owner's host check on its ticket failed: ${(err as Error).message}`);
+        }
+      }
       // The activity line is cut at 300 characters, so a long permission card is shortened here to keep the answer and reason in it.
       const asked = settled && d.question.length > 120 ? `${d.question.slice(0, 119)}…` : d.question;
       await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });

@@ -1938,14 +1938,17 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // Same state again (DR-010): only the note changes. No enter-state hooks, no new review round.
       const sameState = withCriteria.prev === state;
       const note = summary ?? withCriteria.current;
+      // The done gate also reads the state note already on the ticket: the owner's answer on a linked card
+      // records its pass or fail there (DR-024 #5), so a short closing summary mustn't hide it.
+      const reported = state === "done" ? `${withCriteria.current ?? ""}\n${note ?? ""}` : note;
       // A review only needs the before-merge criteria reported: an after-merge one can only be settled
       // once the work is live, so it must not bounce rounds of review (DR-024 #5). Once the work has
       // merged, the ticket can't be done until those after-merge criteria are reported pass or fail.
-      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, note, "before") : state === "done" ? unreportedAfterMerge(withCriteria.criteria, note) : [];
+      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, note, "before") : state === "done" ? unreportedAfterMerge(withCriteria.criteria, reported) : [];
       if (missing.length)
         return fail(
           state === "done"
-            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put the answer on the owner card instead.`
+            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket): their answer records the check's pass or fail, so you can close it once they have.`
             : `This ticket has acceptance criteria to report before it merges, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".${withCriteria.criteria.some(isAfterMerge) ? " The after-merge criteria don't need a verdict at review." : ""}`,
         );
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
