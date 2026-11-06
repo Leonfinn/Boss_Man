@@ -96,6 +96,34 @@ if command -v flock >/dev/null; then
   [ "$rc" -eq 0 ] || fail "queued run rc $rc: $(cat "$t/out")"
   logged "pnpm --filter @boss-man/web typecheck" "ran after the slot freed"
   grep -q "^PASS  typecheck @boss-man/web" "$t/out" || fail "queued PASS line: $(cat "$t/out")"
+
+  # A lost slot wait (check-all exit 75, nothing ran) is not a failure: check-quick says so and exits 75, which the
+  # merge gate retries, keeping check-all's "gave up waiting" line it matches on. A real failure elsewhere still wins (exit 1).
+  (exec 8>"$t/lock.slot.1"; flock 8; sleep 6) & holder=$!
+  sleep 1
+  run 75 "lost slot wait" CHECK_ALL_LOCK_WAIT=2
+  grep -q "^SKIP  heavy phase (typecheck, related tests): gave up waiting for a check slot (nothing ran)" "$t/out" || fail "no SKIP line: $(cat "$t/out")"
+  grep -q "check-all: gave up waiting for the heavy-phase lock" "$t/out" || fail "gate wording lost: $(cat "$t/out")"
+  ! grep -q "check-quick: FAILED" "$t/out" || fail "lost wait reported as FAILED: $(cat "$t/out")"
+  notlogged "typecheck" "lost slot wait"
+  logged "pnpm --filter @boss-man/web build" "steps after a lost wait still run"
+  run 1 "lost slot wait plus a failed build" CHECK_ALL_LOCK_WAIT=2 FAIL_ON=build
+  grep -q "^SKIP  heavy phase" "$t/out" || fail "no SKIP line with a failure: $(cat "$t/out")"
+  grep -q "^FAIL  build web" "$t/out" || fail "build FAIL line: $(cat "$t/out")"
+  grep -q "check-quick: FAILED" "$t/out" || fail "no FAILED summary: $(cat "$t/out")"
+  wait "$holder" || true
+
+  # check-all killed by a signal while it waits: a FAIL line names the signal (it used to be a bare "check-quick: FAILED").
+  (exec 8>"$t/lock.slot.1"; flock 8; sleep 8) & holder=$!
+  sleep 1
+  : >"$LOG"
+  (cd "$repo" && ./scripts/check-quick.sh >"$t/out" 2>&1) & cq=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q "waiting for a free check slot" "$t/out" && break; sleep 0.5; done
+  kill -TERM $(pgrep -f "$repo/scripts/check-all.sh") || fail "no check-all to signal: $(cat "$t/out")"
+  rc=0; wait "$cq" || rc=$?; wait "$holder" || true
+  [ "$rc" -eq 1 ] || fail "signalled run rc $rc: $(cat "$t/out")"
+  grep -q "^FAIL  heavy phase (typecheck, related tests): killed by signal TERM (exit 143)" "$t/out" || fail "no signal FAIL line: $(cat "$t/out")"
+  notlogged "typecheck" "signalled run"
 fi
 
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.
