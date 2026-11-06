@@ -9,6 +9,7 @@ import { pictureType } from "./company-import.js";
 import { shrinkPicture } from "./picture-shrink.js";
 import { MODEL_APPROVE, MODEL_EDIT, MODEL_REJECT, TEAM_HIRE, TEAM_NOT_NOW, type AgentModelConfig, type HireProposal, type TeamHire } from "./decisions.js";
 import type { ModelChoice } from "./models.js";
+import { getStandingRules, normalizeStandingRules, setStandingRules, standingRulesError, StandingRulesError } from "./standing-rules.js";
 
 export class AgentError extends Error {
   constructor(
@@ -278,6 +279,51 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     },
 
     /**
+     * The CEO changes the company's standing rules (BOS-353). Like an instruction change it is
+     * applied at once with a notification and Undo in the history, unless the owner wants to
+     * approve edits too, in which case it waits in Decisions. Nobody else can change them.
+     */
+    async proposeStandingRules(companyId: string, ceoId: string, text: string, reason?: string): Promise<{ saved: Awaited<ReturnType<typeof getStandingRules>> } | { decisionId: string }> {
+      // Normalise and check once, before anything is shown or saved: the text the owner reads on the
+      // card is exactly the text that gets saved, so blank space can't hide the real rules (security review).
+      const rules = normalizeStandingRules(text);
+      const problem = standingRulesError(rules);
+      if (problem) throw new AgentError(422, problem);
+      if ((await approvals(companyId)) === "hires_and_edits") {
+        const [d] = await db
+          .insert(decisions)
+          .values({
+            companyId,
+            raisedByAgentId: ceoId,
+            kind: "approval",
+            tier: "owner",
+            question: [rules ? "The CEO wants to change the company's standing rules." : "The CEO wants to clear the company's standing rules.", reason ? `Why: ${reason}` : null].filter(Boolean).join("\n\n"),
+            options: [APPLY, KEEP],
+            recommendedOption: APPLY,
+            context: { type: "standing_rules", text: rules, byAgentId: ceoId },
+          })
+          .returning({ id: decisions.id });
+        return { decisionId: d!.id };
+      }
+      const saved = await this.applyStandingRules(companyId, ceoId, rules);
+      await notify({ companyId, agentId: ceoId, level: "note", title: saved.text ? "The CEO changed the standing rules" : "The CEO cleared the standing rules", body: `${reason ? `${reason}\n` : ""}Every run from now on reads them. See them, or undo the change, on the Settings page.`, link: "#/settings" });
+      return { saved };
+    },
+
+    /** Saves the standing rules as the CEO (or the owner's approval of the CEO's proposal). */
+    async applyStandingRules(companyId: string, ceoId: string, text: string) {
+      const [ceo] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, ceoId));
+      try {
+        const saved = await setStandingRules(db, companyId, { text, by: ceo?.name ?? "the CEO", byAgentId: ceoId });
+        await logActivity(db, { companyId, agentId: ceoId, kind: "settings", summary: saved.text ? `${ceo?.name ?? "The CEO"} updated the standing rules` : `${ceo?.name ?? "The CEO"} cleared the standing rules` });
+        return saved;
+      } catch (err) {
+        if (err instanceof StandingRulesError) throw new AgentError(422, err.message);
+        throw err;
+      }
+    },
+
+    /**
      * The CEO renames an agent (BOS-265). The name is display only: the id ties tickets, runs,
      * notes and history to the agent, so nothing else moves. The CEO can't be renamed this way,
      * and the name must be new to the company. Like an instruction change it is applied with a
@@ -465,10 +511,11 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       return { hired, failed };
     },
 
-    /** The owner's answer to a hire, instructions or rename decision. */
-    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string } | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string }, companyId: string, approved: boolean) {
+    /** The owner's answer to a hire, instructions, rename or standing-rules decision. */
+    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string } | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string } | { type: "standing_rules"; text: string; byAgentId: string }, companyId: string, approved: boolean) {
       if (!approved) return null;
       if (ctx.type === "rename") return this.applyRename(ctx.agentId, ctx.newName, ctx.byAgentId, "The owner approved it.");
+      if (ctx.type === "standing_rules") return this.applyStandingRules(companyId, ctx.byAgentId, ctx.text);
       if (ctx.type === "hire") {
         const config = await validateModelConfig(companyId, ctx.proposal);
         const hired = await this.hire(companyId, { ...ctx.proposal, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ctx.byAgentId);
