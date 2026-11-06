@@ -30,6 +30,7 @@ import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
@@ -65,6 +66,7 @@ import { SkillError, skillsService } from "./services/skills.js";
 import { hashFiles } from "./services/skill-files.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
+import { ownerRepliesService } from "./services/owner-replies.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
@@ -358,6 +360,8 @@ export async function buildApp(opts: AppOptions) {
     isSettling: (id, at) => runners.isSettling(id, at),
     connectedSince: (id) => runners.connectedSince(id),
     deploy: () => selfDeploy.overview(),
+    // Both colours, the same probe as GET /api/bluegreen (DR-020 E). `build` is defined further down; this only runs per request.
+    colours: () => probeColours(colour(), build),
     hold: async () => {
       const h = await getHold(db);
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
@@ -378,7 +382,14 @@ export async function buildApp(opts: AppOptions) {
   const runsSvc = runsService(db, { runners, now: opts.now });
   decisionsSvc.setCancelHook((runId) => runsSvc.cancel(runId));
   runsSvc.setWakeHook((w) => scheduler.wake(w));
-  const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w) });
+  // The owner's unanswered ticket messages (BOS-425). The scheduler and the alert ladder are built
+  // further down, so the hooks look them up when they run, not when this is built.
+  const ownerReplies = ownerRepliesService(db, {
+    notify: (agentId, w) => scheduler.notify(agentId, w),
+    alert: (input) => alerts.raise(input),
+    now: opts.now,
+  });
+  const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w), replies: ownerReplies });
   const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
   app.addHook("onClose", async () => semantic.stop());
   const wiki = wikiService(db, semantic);
@@ -466,6 +477,8 @@ export async function buildApp(opts: AppOptions) {
           const [run] = await db.select().from(runsTable).where(eq(runsTable.id, event.runId));
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
         })
+        // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
+        .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
         .then(() => (event.interrupted ? null : scheduler.afterReviewRun(event.runId)))
         .then(() => scheduler.tick())
@@ -521,6 +534,8 @@ export async function buildApp(opts: AppOptions) {
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),
+    // The owner's messages on tickets that nobody has answered (BOS-425).
+    ownerReplies: (t) => ownerReplies.sweep(t),
   });
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
@@ -749,21 +764,7 @@ export async function buildApp(opts: AppOptions) {
   await app.register(async (owner) => {
     owner.addHook("preHandler", requireOwner);
     /** Blue/green at a glance: each colour's own /api/health over the compose network, or down when it doesn't answer. */
-    owner.get("/api/bluegreen", async () => {
-      const self = colour();
-      if (!self) return { enabled: false };
-      const peek = async (c: string) => {
-        if (c === self) return { ...build(), colour: c, up: true };
-        try {
-          const r = await fetch(`http://server-${c}:3100/api/health`, { signal: AbortSignal.timeout(2000) });
-          const h = (await r.json()) as { role?: string; commit?: string; startedAt?: string };
-          return { colour: c, up: r.ok, role: h.role ?? null, commit: h.commit ?? null, startedAt: h.startedAt ?? null };
-        } catch {
-          return { colour: c, up: false, role: null, commit: null, startedAt: null };
-        }
-      };
-      return { enabled: true, self, colours: await Promise.all(["blue", "green"].map(peek)) };
-    });
+    owner.get("/api/bluegreen", async () => probeColours(colour(), build));
 
     owner.get("/api/me", async () => {
       const [o] = await db.select({ username: owners.username }).from(owners);
@@ -1801,6 +1802,8 @@ export async function buildApp(opts: AppOptions) {
     // A page's address can hold folders ("research/agent-landscape"), so it's the rest of the path.
     const SlugParams = z.object({ id: Uuid, "*": z.string().min(1).max(500) }).transform((p) => ({ id: p.id, slug: p["*"] }));
     const PageBody = z.object({ title: z.string().trim().min(1).max(200), body: z.string().max(MAX_BODY), folder: z.string().max(400).optional() });
+    // The owner's own editor may replace a page outright; the shrink guard is for agents (BOS-430).
+    const OwnerPageBody = PageBody.extend({ replace: z.boolean().optional() });
     // The CEO-style brief, built when asked and never stored as a page (R84).
     owner.get("/api/companies/:id/brief", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1828,11 +1831,18 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.put("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
-      return wiki.write(id, { ...PageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
+      return wiki.write(id, { ...OwnerPageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
     });
     owner.delete("/api/companies/:id/wiki/*", async (req, reply) => {
       const { id, slug } = SlugParams.parse(req.params);
       return wiki.remove(id, slug).then(() => reply.code(204).send(), wikiErrors(reply));
+    });
+    // Put an old version back (BOS-430): a new version of its own, so the restore can be undone.
+    // The page's slug goes in the body, as a page address can hold folders and Fastify's wildcard must be last.
+    owner.post("/api/companies/:id/wiki-restore", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ slug: z.string().min(1).max(500), revisionId: Uuid }).parse(req.body);
+      return wiki.restore(id, { ...b, agentId: null, runId: null, isCeo: true }).then((r) => r.page, wikiErrors(reply));
     });
     owner.get("/api/companies/:id/wiki-revisions/:rev", async (req, reply) => {
       const { id, rev } = z.object({ id: Uuid, rev: Uuid }).parse(req.params);
@@ -2587,5 +2597,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, memory, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, memory, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
 }

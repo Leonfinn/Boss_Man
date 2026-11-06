@@ -57,6 +57,9 @@ describe("wake classes: the table", () => {
     "the skill it would replace has been edited since this was proposed",
     "the skill it would replace has been deleted since the review",
     "the stored files no longer match their fingerprint",
+    // A command's options in the owner-replies service (BOS-425), not a wake.
+    "unanswered at 5 minutes, the agent is woken again",
+    "unanswered at 10 minutes, the CEO is asked",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {
@@ -248,6 +251,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/scheduler.ts": CHECKS_OUTCOME + " (check due retries next tick; nudge reports the drop)",
     "services/stale-requests.ts": CHECKS_OUTCOME + " (a dropped check is skipped)",
     "services/sweeps.ts": NEVER_DROPPED,
+    "services/owner-replies.ts": CHECKS_OUTCOME + " (a dropped re-wake still counts as the one try; the 10-minute ask does not need it to land)",
     "services/ticket-chat.ts": NEVER_DROPPED,
     "services/watchdog.ts": CHECKS_OUTCOME + " (a dropped wake is reported, not counted as sent)",
   };
