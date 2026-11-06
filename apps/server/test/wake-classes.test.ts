@@ -146,7 +146,7 @@ describe("wake classes: scheduled wakes", () => {
     expect(ctx!.commands.map((c) => c.agentId)).toEqual([b.id]);
   });
 
-  it("ages an agent-started wake like a scheduled one (DR-030; DR-002 left them flat)", async () => {
+  it("ages an agent-started wake like a scheduled one (DR-031; DR-002 left them flat)", async () => {
     ctx = await setup({ instance: 1, company: 1 });
     const a = await ctx!.agent("A");
     const b = await ctx!.agent("B");

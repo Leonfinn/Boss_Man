@@ -1358,7 +1358,7 @@ export function schedulerService(
       if (queue.length === 0) return result;
       // Priority order, but a wake Boss Man scheduled or an agent started gains 1 for every 15 minutes
       // it has waited, up to a cap, so neither a low-priority watch nor an engagement or nudge can wait
-      // for ever behind a full house of newer work (DR-002, DR-030). The stored priority, and so the
+      // for ever behind a full house of newer work (DR-002, DR-031). The stored priority, and so the
       // quota hold, is untouched. Someone-is-waiting wakes go first. Equal ranks go oldest first.
       // A wake for an urgent ticket gains 1 more, within its class (BOS-346): the ticket's flag counts, not only the reason.
       const queuedTicketIds = [...new Set(queue.flatMap((w) => (w.ticketId ? [w.ticketId] : [])))];

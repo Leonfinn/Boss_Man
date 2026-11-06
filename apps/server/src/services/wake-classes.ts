@@ -4,7 +4,7 @@
 //
 //  - waiting:   a person or a card is waiting on this run. Never dropped; loop protection raises an alert instead.
 //  - scheduled: Boss Man set it up itself. Never dropped; a newer one replaces an unstarted one; ages in the queue.
-//  - agent:     started by an agent's own action. Rate-limited when it has no ticket; ages in the queue like scheduled (DR-030).
+//  - agent:     started by an agent's own action. Rate-limited when it has no ticket; ages in the queue like scheduled (DR-031).
 //
 // The reasons are written out here rather than imported from the modules that define them,
 // because those modules import the scheduler; the test checks each constant against this table.
@@ -62,14 +62,14 @@ export type WakeOutcome = "queued" | "deferred" | "steered" | "merged" | "droppe
 export const AGE_STEP_MS = 15 * 60_000;
 
 /**
- * Ageing stops at this rank (BOS-579, DR-030): above every stored priority, and reached by a
+ * Ageing stops at this rank (BOS-579, DR-031): above every stored priority, and reached by a
  * priority-2 wake after 2 hours. Once wakes reach it they are equal, and the oldest goes first, so
  * no class or priority can keep a wake waiting for ever, however much newer work keeps arriving.
  */
 export const AGE_RANK_CAP = 10;
 
 /**
- * A queued wake's rank (DR-002, DR-030). A wake someone is waiting on keeps its priority: its class
+ * A queued wake's rank (DR-002, DR-031). A wake someone is waiting on keeps its priority: its class
  * already goes first. Scheduled and agent wakes both gain 1 for every 15 minutes waited, up to the
  * cap; a stored priority above the cap is kept as it is.
  */
