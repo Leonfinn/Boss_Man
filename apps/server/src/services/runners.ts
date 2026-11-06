@@ -237,11 +237,9 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     async endRun(runId: string, outcome: string, at: Date = new Date(), how: { interrupted?: boolean } = {}): Promise<boolean> {
       const [run] = await db.select().from(runs).where(and(eq(runs.id, runId), isNull(runs.endedAt)));
       if (!run) return false;
-      const ended = await db.transaction(async (tx) => {
+      await db.transaction(async (tx) => {
         await markEnded(tx, runId, at, outcome);
-        return true;
       });
-      if (!ended) return false;
       const [runner] = await db.select().from(runners).where(eq(runners.companyId, run.companyId));
       const endedRunner = runner ?? ({ companyId: run.companyId } as Runner);
       const event = { type: "run.ended" as const, runId, stopReason: null, error: null, ...(how.interrupted ? { interrupted: true } : {}) };
