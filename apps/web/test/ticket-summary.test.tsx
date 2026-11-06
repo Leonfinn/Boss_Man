@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { splitDetails, TicketActivity } from "../src/components/TicketActivity";
+import { replyState, splitDetails, TicketActivity } from "../src/components/TicketActivity";
 import { Ticket } from "../src/pages/Ticket";
 
 Element.prototype.scrollIntoView = () => {};
@@ -113,7 +113,7 @@ describe("approve and merge", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
-        if (url === "/api/tickets/t1/review" && init?.method === "POST") {
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST") {
           landing = { state: "running", startedAt: new Date().toISOString(), command: "pnpm test" };
           return json({ verdict: "approved", outcome: "landing", landing }, 202);
         }
@@ -254,7 +254,7 @@ describe("review card during a merge", () => {
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
         if (url === "/api/tickets/t1/landing") return json({ landing: landing() });
-        if (url === "/api/tickets/t1/review" && init?.method === "POST" && onReview) return onReview();
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST" && onReview) return onReview();
         if (url === "/api/tickets/t1") return json(ticket);
         if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
         if (url.includes("/features")) return json({ features: [] });
@@ -376,5 +376,36 @@ describe("typing on a phone (BOS-245)", () => {
     fireEvent.change(box, { target: { value: "quick reply" } });
     fireEvent.keyDown(box, { key: "Enter" });
     await waitFor(() => expect(posts).toEqual([{ text: "quick reply", interrupt: false }]));
+  });
+});
+
+describe("an owner message's delivery state (BOS-425)", () => {
+  type Msg = Parameters<typeof replyState>[0];
+  const omsg = (over: Record<string, unknown>) => ({ author: "owner", agent: "Engineer", text: "Use the brand blue", delivery: null, createdAt: "2026-10-19T10:00:00Z", replyState: null, replyReminders: 0, replyClearedAt: null, ...over } as unknown as Msg);
+
+  it("says how it reached the agent, when it waits its turn, and when it has gone unanswered", () => {
+    expect(replyState(omsg({ delivery: "live", replyState: "delivered", replyReminders: 0 }))).toBe("delivered to the running agent");
+    expect(replyState(omsg({ delivery: "woken", replyState: "delivered", replyReminders: 0 }))).toBe("waiting: the agent will see it when it next starts a run");
+    expect(replyState(omsg({ delivery: "queued", replyState: "queued", replyReminders: 0 }))).toBe("waiting behind the agent's other work");
+    expect(replyState(omsg({ delivery: "woken", replyState: "delivered", replyReminders: 1 }))).toBe("not answered yet; the agent has been asked again");
+    expect(replyState(omsg({ delivery: "woken", replyState: "delivered", replyReminders: 2 }))).toBe("not answered after 10 minutes, and the CEO has been asked");
+  });
+
+  it("says nothing once it is answered, for an unassigned ticket's note, or for an agent's message", () => {
+    expect(replyState(omsg({ delivery: "woken", replyState: "delivered", replyReminders: 1, replyClearedAt: "2026-10-19T10:05:00Z" }))).toBeNull();
+    expect(replyState(omsg({ delivery: "unassigned", replyState: null }))).toBeNull();
+    expect(replyState(omsg({ text: "Done.", replyState: null }))).toBeNull();
+  });
+
+  it("shows the state under the message on the ticket", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/messages")) return json({ live: null, items: [omsg({ delivery: "woken", replyState: "delivered", replyReminders: 2 })] });
+        return json([]);
+      }),
+    );
+    render(<TicketActivity ticketId="t1" assignee="Engineer" />);
+    expect(await screen.findByText("not answered after 10 minutes, and the CEO has been asked")).toBeTruthy();
   });
 });

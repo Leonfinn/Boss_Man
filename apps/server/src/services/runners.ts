@@ -6,7 +6,7 @@ import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerComman
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { costEvents, decisions, engagements, runnerEvents, runners, runs, settings, tickets } from "../db/schema.js";
+import { costEvents, decisions, engagements, notifications, runnerEvents, runners, runs, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
 /** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
@@ -14,6 +14,17 @@ const RESTART_PULL_MAX = 20;
 const RESTART_PULL_COOLDOWN_MS = 10 * 60_000;
 
 type Runner = typeof runners.$inferSelect;
+/**
+ * The runner a request went to has gone away (it disconnected or restarted), so no reply will ever come (DR-014).
+ * Callers that run long work on a runner treat this as the host being cut off, not the work failing.
+ */
+export class RunnerGone extends Error {
+  constructor(message = "The runner restarted while this was running.") {
+    super(message);
+    this.name = "RunnerGone";
+  }
+}
+
 export type CommandSender = (command: RunnerCommand) => boolean;
 
 export type PermissionHook = (runner: Runner, event: Extract<RunnerEvent, { type: "run.permission_request" }>) => Promise<unknown>;
@@ -30,7 +41,16 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   const resumeListeners: Array<(runner: Runner, pending: Array<{ runId: string; requestId: string }>) => unknown> = [];
   // shortcut: pending requests and live sockets belong to this process; lost on restart, harmless because runners reconnect and callers time out.
   /** Requests waiting for a runner's reply, by request id. */
-  const pending = new Map<string, { resolve: (data: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
+  const pending = new Map<string, { resolve: (data: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout; runnerId: string }>();
+  /** Fails every request still waiting on this runner at once, so nothing waits for a reply that can't come (DR-014). */
+  const failPending = (runnerId: string, reason: string) => {
+    for (const [id, p] of [...pending]) {
+      if (p.runnerId !== runnerId) continue;
+      clearTimeout(p.timer);
+      pending.delete(id);
+      p.reject(new RunnerGone(reason));
+    }
+  };
   // shortcut: live sockets belong to this process; lost on restart, harmless because runners reconnect.
   /** Live connections, so commands can reach a runner. */
   const connected = new Map<string, CommandSender>();
@@ -49,17 +69,15 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         ...(usage ? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedReadTokens: usage.cachedReadTokens, cachedWriteTokens: usage.cachedWriteTokens } : {}),
       })
       .where(eq(runs.id, runId))
-      .returning({ companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
-    // A finished run's own questions are moot: its permission requests and stall alerts leave the
-    // queue, and a stall alert says why it went (BOS-217): the run ended by itself.
-    const note = `the run ended normally at ${at.toISOString().slice(11, 16)}`;
-    const withdrawn = { by: "system", note, at: at.toISOString() };
-    const stalledAlerts = await db
-      .update(decisions)
-      .set({ status: "withdrawn", dedupeKey: null, context: sql`jsonb_set(${decisions.context}, '{withdrawn}', ${`${JSON.stringify(withdrawn)}`}::jsonb, true)` })
-      .where(and(eq(decisions.status, "open"), eq(decisions.kind, "stalled_run"), sql`${decisions.context}->>'runId' = ${runId}`))
-      .returning({ companyId: decisions.companyId, question: decisions.question });
-    for (const d of stalledAlerts) await record(db, { companyId: d.companyId, kind: "decision_withdrawn", summary: `Boss Man closed "${d.question.slice(0, 120)}" by itself: ${note}`, at });
+      .returning({ fundingSourceId: runs.fundingSourceId, companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
+    // A run refused with "weekly limit" proves its account is full whatever the last reading said: mark it
+    // full for an hour so new runs go to the next account instead of failing there again (BOS-463). A
+    // real reading from the account replaces this as soon as one arrives.
+    if (ended?.fundingSourceId && outcome && /weekly limit/i.test(outcome)) {
+      await funding.recordQuota(ended.fundingSourceId, [{ provider: "anthropic", window: "seven_day", utilization: 1, resetsAt: new Date(at.getTime() + 60 * 60_000), status: "rejected", overageInUse: false }], at);
+    }
+    // A finished run's own questions are moot: its permission requests leave the queue, and its
+    // stall alert is closed by the one closer on `runActive`, which says why it went (DR-016, BOS-470).
     await db
       .update(decisions)
       .set({
@@ -68,6 +86,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         context: sql`jsonb_set(${decisions.context}, '{withdrawn}', ${JSON.stringify({ by: "system", note: "The agent finished before this was answered, so there is nothing left to approve. No action needed.", at: at.toISOString() })}::jsonb, true)`,
       })
       .where(and(eq(decisions.status, "open"), eq(decisions.kind, "permission"), sql`${decisions.context}->>'runId' = ${runId}`));
+    // Those cards are settled, so their notifications are read now rather than on the next feed poll (BOS-413).
+    await db
+      .update(notifications)
+      .set({ readAt: at })
+      .where(and(isNull(notifications.readAt), sql`${notifications.decisionId} in (select ${decisions.id} from ${decisions} where coalesce(${decisions.context}->>'runId', '') = ${runId} and ${decisions.status} <> 'open')`));
     if (ended && ended.purpose !== "chat") await record(db, { companyId: ended.companyId, agentId: ended.agentId, ticketId: ended.ticketId, kind: "run_ended", summary: `Run ended: ${ended.outcome ?? "ended"}`, at });
     return ended;
   }
@@ -226,6 +249,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
      */
     async bootSeen(runner: Runner, bootId: string | undefined): Promise<number> {
       if (!bootId || bootId === runner.bootId) return 0;
+      failPending(runner.id, "The runner restarted while this was running.");
       const at = new Date();
       await db.update(runners).set({ bootId }).where(eq(runners.id, runner.id));
       if (runner.bootPulledAt && at.getTime() - runner.bootPulledAt.getTime() < RESTART_PULL_COOLDOWN_MS) return 0;
@@ -246,9 +270,12 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       connected.set(runnerId, send);
       connectedAt.set(runnerId, Date.now());
       features.set(runnerId, feats);
-      for (const l of connectListeners) void Promise.resolve(l(runnerId)).catch(() => {});
+      for (const l of [...connectListeners]) void Promise.resolve(l(runnerId)).catch(() => {});
       return () => {
-        if (connected.get(runnerId) === send) connected.delete(runnerId);
+        if (connected.get(runnerId) === send) {
+          connected.delete(runnerId);
+          failPending(runnerId, "The runner disconnected while this was running.");
+        }
       };
     },
 
@@ -269,6 +296,27 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
 
     connectedSince: (runnerId: string) => (connectedAt.has(runnerId) && connected.has(runnerId) ? new Date(connectedAt.get(runnerId)!) : null),
 
+    /**
+     * Resolves true once the runner is connected (at once if it already is), false after maxMs.
+     * A runner swap takes minutes; callers wait here instead of using up their retries (DR-014).
+     */
+    waitConnected(runnerId: string, maxMs: number): Promise<boolean> {
+      if (connected.has(runnerId)) return Promise.resolve(true);
+      return new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => {
+          connectListeners.splice(connectListeners.indexOf(listener), 1);
+          resolve(false);
+        }, maxMs);
+        const listener = (id: string) => {
+          if (id !== runnerId) return;
+          clearTimeout(timer);
+          connectListeners.splice(connectListeners.indexOf(listener), 1);
+          resolve(true);
+        };
+        connectListeners.push(listener);
+      });
+    },
+
     /** Sends a request command and waits for the runner's reply. */
     request<T>(runnerId: string, build: (requestId: string) => RunnerCommand, timeoutMs = 15_000): Promise<T> {
       const requestId = randomBytes(12).toString("base64url");
@@ -277,11 +325,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
           pending.delete(requestId);
           reject(new Error("The runner didn't answer in time."));
         }, timeoutMs);
-        pending.set(requestId, { resolve: resolve as (d: unknown) => void, reject, timer });
+        pending.set(requestId, { resolve: resolve as (d: unknown) => void, reject, timer, runnerId });
         if (!connected.get(runnerId)?.(build(requestId))) {
           clearTimeout(timer);
           pending.delete(requestId);
-          reject(new Error("The company's runner is offline."));
+          reject(new RunnerGone("The company's runner is offline."));
         }
       });
     },

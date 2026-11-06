@@ -9,7 +9,10 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
+import type { BlueGreen } from "./bluegreen.js";
 import type { ErrorBuffer } from "./error-buffer.js";
+import type { MemorySampler } from "./memory-sampler.js";
+import type { StallSummary } from "./stall-monitor.js";
 
 export type ServerStatusDeps = {
   /** "leader", "standby" or "single" (leader.ts). */
@@ -22,23 +25,80 @@ export type ServerStatusDeps = {
   connectedSince?: (runnerId: string) => Date | null;
   /** What the host deployer last reported (selfDeployService.overview). */
   deploy: () => Promise<{ enabled: boolean; status: unknown; available: unknown; pending: boolean }>;
+  /** Both colours' /api/health, the same probe as GET /api/bluegreen (DR-020 E). Absent: treated as a single server. */
+  colours?: () => Promise<BlueGreen>;
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
   errors: ErrorBuffer;
+  /** Event-loop stalls, GC pauses and memory (stall-monitor.ts, BOS-432). Server-wide; route patterns only, no ids. */
+  stalls?: () => StallSummary;
   /** The last hour of permission decisions for one company (permission-log.ts, BOS-306). */
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
+  /** Where this process's memory sits, server-wide like commit (memory-sampler.ts, BOS-410). */
+  memory?: Pick<MemorySampler, "status">;
   commit: string;
   startedAt: Date;
   now?: () => Date;
 };
 
 type DeployStatus = { target?: string; result?: string; to_commit?: string; from_commit?: string; ended?: string; message?: string } | null;
-type Available = { deployed?: string; tip?: string; checkedAt?: string } | null;
+type Available = { deployed?: string; tip?: string; checkedAt?: string; soakSeconds?: number | null } | null;
+export type Stack = "healthy" | "degraded" | "down";
+
+/** The host's default standby window (SOAK_SECONDS in host-deployer.sh) when the host doesn't report its own. */
+const DEFAULT_SOAK_SECONDS = 900;
+const leads = (role: string | null | undefined) => role === "leader" || role === "single";
+
+/**
+ * One word for the whole stack (DR-020 E), with the reasons in plain words. "down": no database or
+ * no leader. "degraded": the deployer's last result was failed or partial (it stays degraded until a
+ * later deploy result replaces it), two leaders, or the other colour is down while the deployer's
+ * plan has it running. Outside the standby window after a swap the other colour is stopped on
+ * purpose (host-deployer.sh soak_tick), so its being down then is healthy.
+ * TODO(DR-020 D): when the deployer reports its health checklist, take its overall result here too.
+ */
+export function stackSummary(input: { role: string; colours: BlueGreen | null; dbStartedAt: string | null; status: DeployStatus; available: Available; now: Date }): { stack: Stack; why: string[] } {
+  const down: string[] = [];
+  const degraded: string[] = [];
+  if (!input.dbStartedAt) down.push("The database did not answer.");
+  const bg = input.colours;
+  const self = bg?.enabled ? bg.colours.find((c) => c.colour === bg.self) : undefined;
+  const others = bg?.enabled ? bg.colours.filter((c) => c.colour !== bg.self) : [];
+  // This process's own role is fresher than its probe entry, so it is counted from deps.role.
+  const leaders = (leads(input.role) ? 1 : 0) + others.filter((c) => c.up && leads(c.role)).length;
+  if (leaders === 0) down.push("No server answers as leader.");
+  if (leaders > 1) degraded.push("More than one server says it leads.");
+  if (bg === null) degraded.push("The other colour could not be checked.");
+  const s = input.status;
+  if (s && (s.result === "failed" || s.result === "partial")) degraded.push(`The last ${s.target === "runner" ? "runner" : "server"} deploy ${s.result === "partial" ? "only partly worked" : "failed"}${s.message ? `: ${s.message}` : "."}`);
+  if (bg?.enabled && self) {
+    const ended = s?.target === "server" && s.result === "deployed" && s.ended ? Date.parse(s.ended) : NaN;
+    const soakMs = (input.available?.soakSeconds ?? DEFAULT_SOAK_SECONDS) * 1000;
+    const inStandbyWindow = !Number.isNaN(ended) && input.now.getTime() < ended + soakMs;
+    for (const c of others) if (!c.up && inStandbyWindow) degraded.push(`${c.colour} is down, but it should be running as a standby until the standby window after the last update ends.`);
+  }
+  if (down.length) return { stack: "down", why: [...down, ...degraded] };
+  if (degraded.length) return { stack: "degraded", why: degraded };
+  return { stack: "healthy", why: [] };
+}
 
 const short = (sha: string | undefined | null) => (sha ? sha.slice(0, 8) : null);
 const ageSeconds = (since: Date | null | undefined, now: Date) => (since ? Math.max(0, Math.round((now.getTime() - since.getTime()) / 1000)) : null);
+
+/** When the database server last started (pg_postmaster_start_time), or null if it didn't answer. */
+async function databaseStartedAt(db: Db): Promise<string | null> {
+  try {
+    const res = (await db.execute(sql`select pg_postmaster_start_time() as started`)) as unknown as { rows?: Array<{ started: unknown }> } | Array<{ started: unknown }>;
+    const v = (Array.isArray(res) ? res : (res.rows ?? []))[0]?.started;
+    if (v === null || v === undefined) return null;
+    const d = v instanceof Date ? v : new Date(String(v));
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  } catch {
+    return null;
+  }
+}
 
 /** The last migration this database applied, from drizzle's own table and the journal. */
 async function latestMigration(db: Db): Promise<{ appliedAt: string | null; name: string | null }> {
@@ -116,14 +176,28 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
       const recentErrors = deps.errors.recent(20, companyId);
       // Only a finished SERVER deploy says which commit is live. A refused or failed request (e.g. a runner update) names a commit that never went live.
       const serverDeployed = status?.target === "server" && status.result === "deployed";
+      // A failed probe is "couldn't check", never "single server": that would hide a down colour.
+      const colours = deps.colours ? await deps.colours().catch(() => null) : ({ enabled: false } as const);
+      const dbStartedAt = await databaseStartedAt(db);
+      const role = deps.role();
+      const { stack, why } = stackSummary({ role, colours, dbStartedAt, status, available, now: at });
 
       return {
+        // Report "up" only from this (DR-020 E): one server answering says nothing about the rest.
+        stack,
+        stackWhy: why,
+        colours,
+        database: { startedAt: dbStartedAt },
         server: {
-          role: deps.role(),
+          role,
           commit: short(deps.commit),
           startedAt: deps.startedAt.toISOString(),
           uptimeSeconds: ageSeconds(deps.startedAt, at),
+          // This process only (the colour that answered), in MiB; no company data (BOS-410).
+          memory: deps.memory ? deps.memory.status() : null,
         },
+        // Freezes over 1 s with memory, GC and requests in flight (BOS-432), plus the memory reading now.
+        stalls: deps.stalls?.() ?? null,
         deploy: {
           enabled: !!deploy?.enabled,
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),

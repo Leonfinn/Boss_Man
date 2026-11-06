@@ -16,7 +16,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
       │                  server writes inbox/request.json (tmp + rename)
       └─ checks it, runs deploy.sh or update-runner.sh ─▶ outbox/status.json
                                        │
-            server poller (5 s) ◀──────┘  notification + Settings "last deploy" + webhook on failure
+            server poller (30 s) ◀──────┘  notification + Settings "last deploy" + webhook on failure
 ```
 
 ## Decisions made
@@ -136,6 +136,7 @@ Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that c
 - **Notifications** (from the poller, once per result; the ladder): deployed = note, refused = flag, failed / partial / rolled back = page (phone through ntfy if configured). They link to Settings. The result is also stored on the decision and in the activity feed. `notifications.decision_id` is unique and already used by the "ask" notification, so the result notification is not linked to the decision row.
 - **Settings > Server and runner > Updates** shows the last deploy (result, commit, time, message), what is waiting, and the button.
 - The poller and the request writer are marked `// leader-only` in the code (`main.ts`, `self-deploy.ts`) for phase 3.
+- The poller runs every 30 s, and skips the pass when neither `available.json` nor `status.json` (nor a waiting request) has changed by mtime and size, and it is under a minute since the last pass that ran (BOS-414). The host replaces those files by rename, so their identity moves with their content; the minute-long forced pass covers anything that doesn't show in a file.
 
 ## Security: what a merged PR could and could not do
 
@@ -239,6 +240,7 @@ Built ahead of blue/green; on today's single server nothing changes. Nothing her
 |---|---|---|
 | `BOSSMAN_ROLE` | `auto` | `auto` contests the lock at boot. `standby` does not contest until `SIGUSR2`. |
 | `BOSSMAN_LEADER_LOCK` | on | `0` is the kill switch: no lock, always the leader, exactly as before. |
+| `BOSSMAN_LEADER_MISSES` | `2` | Heartbeats in a row with no reply (3 s each, counted only while the server is not frozen) before the leader steps down. A connection or query error still steps down at once. `1` is the old behaviour. Read at start, so a change needs a server restart. |
 | `BOSSMAN_MIGRATE_ON_START` | on | `0` skips migrating at start (only checks the database is current). |
 | `BOSSMAN_MIGRATE_LOCK_TIMEOUT_MS` | `60000` | How long `migrate.js` waits for another migration. |
 

@@ -537,6 +537,43 @@ describe("BOS-149 round 6 regressions (BOS-184)", () => {
     expect((await row(d!.id)).status).toBe("open");
   });
 
+  it("11: the CEO may clear a stale owner-tier info-only alert about an agent's run, but not a live one (BOS-469 point 4)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Some work");
+    const card = async (state: "in_progress" | "done") => {
+      await c.work.updateTicket(t.id, { state: state === "done" ? "done" : "in_progress", overLimit: true, ...(state === "done" ? { outcome: "completed" as const } : {}) });
+      const [d] = await c.db
+        .insert(decisions)
+        .values({
+          companyId: c.company.id,
+          kind: "question",
+          question: "Zippy has hit the same failure 3 times in 2 hours",
+          options: ["Got it"],
+          recommendedOption: "Got it",
+          tier: "owner",
+          context: {
+            type: "question",
+            ladder: { rung: "owner", since: new Date().toISOString(), ticketId: t.id, about: [], hops: [] },
+          },
+        })
+        .returning();
+      return d!;
+    };
+    // Live: the card is the owner's, so the CEO leaves it.
+    await c.work.updateTicket(t.id, { state: "in_progress", overLimit: true });
+    let d = await card("in_progress");
+    expect(isError(await ceoCall(c, { action: "withdraw", id: d.id, note: "Nothing to do on this one any more." }))).toBe(true);
+    expect((await row(d.id)).status).toBe("open");
+    // Stale (its ticket is finished and it asks nothing of the owner): the CEO may clear it, as before the ladder.
+    await c.work.updateTicket(t.id, { state: "in_progress", overLimit: true });
+    await c.db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, d.id));
+    await c.db.delete(decisions).where(eq(decisions.id, d.id));
+    d = await card("done");
+    const r = await ceoCall(c, { action: "withdraw", id: d.id, note: "The run's problem cleared and it finished; this is noise now." });
+    expect(isError(r)).toBe(false);
+    expect((await row(d.id)).status).toBe("withdrawn");
+  });
+
   it("8: the audit list label matches the 30 days that withdrawals are kept", () => {
     const page = readFileSync(
       fileURLToPath(

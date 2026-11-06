@@ -25,7 +25,7 @@ STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
 # them, after a pause, only when the failure output shows that kind of error; any other failure is final.
 if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   attempts="${BOSSMAN_CHECK_ATTEMPTS:-3}"
-  budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-1500}"  # Boss Man kills the merge check at 30 min; stay well inside it
+  budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-3000}"  # Boss Man kills the merge check 60 min after its slot is taken (VERIFY_TIMEOUT_MS); stay well inside it
   pause="${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
   log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
   trap 'rm -f "$log" "$began_file"' EXIT
@@ -101,9 +101,13 @@ fi
 # BOSSMAN_CHECK_BODY replaces the checks below with a stub command (for check-all.test.sh).
 if [ -n "${BOSSMAN_CHECK_BODY:-}" ]; then bash -c "$BOSSMAN_CHECK_BODY"; exit; fi
 
-pnpm install --frozen-lockfile --prefer-offline >/dev/null
-node --test scripts/*.test.mjs
-node scripts/lint-migrations.mjs
+# CHECK_ALL_SLOT_COMMAND (used by check-quick.sh, with BOSSMAN_CHECK_CHILD=1): wait for a slot exactly like a hand-run check,
+# run that one command while holding it, and exit with its status. None of the full checks run.
+if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
+  pnpm install --frozen-lockfile --prefer-offline >/dev/null
+  node --test scripts/*.test.mjs
+  node scripts/lint-migrations.mjs
+fi
 # The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS checks (1 until a side-by-side pair has passed, then 2) run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
 # A waiter prints its place and an estimated wait. Hand-run checks never give up. A merge check keeps its place for as
@@ -229,14 +233,17 @@ fi
 [ -z "${CHECK_ALL_STARTED_FILE:-}" ] || date +%s >"$CHECK_ALL_STARTED_FILE"
 # Test hook: scripts/check-all.test.sh stops here once the lock is held.
 [ -z "${CHECK_ALL_STOP_AFTER_LOCK:-}" ] || { echo "check-all: lock held"; exit 0; }
-node scripts/check-in-memory-state.mjs
+if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
+# step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
+step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
+step in-memory-state node scripts/check-in-memory-state.mjs
 # Memory-safe on a shared runner (a 12 GB cgroup shared with other agents, two checks at once): one package at a time,
 # at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),
 # and a capped heap for tsc only. Callers can override any of these.
 export BOSSMAN_TEST_MAX_WORKERS="${BOSSMAN_TEST_MAX_WORKERS:-2}"
-NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}" pnpm -r --workspace-concurrency=1 typecheck
-pnpm -r --workspace-concurrency=1 test
-pnpm build
-scripts/check-shell.sh
-scripts/test-shell.sh
+NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}" step typecheck pnpm -r --workspace-concurrency=1 typecheck
+step test pnpm -r --workspace-concurrency=1 test
+step build pnpm build
+step shellcheck scripts/check-shell.sh
+step shell-tests scripts/test-shell.sh
 echo "check-all: everything passed"

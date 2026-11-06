@@ -1,6 +1,6 @@
 {
   "id": "99cadf6e-fa67-4f6e-bf0a-377d998ba255",
-  "prevId": "b3ea7be0-a520-4d72-8352-ae717d0a4b6f",
+  "prevId": "92fb4a4b-261f-489c-bb8b-2aeaec293afa",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -5487,6 +5487,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "boot_id": {
+          "name": "boot_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "boot_pulled_at": {
+          "name": "boot_pulled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "disk_used_bytes": {
           "name": "disk_used_bytes",
           "type": "bigint",
@@ -7524,6 +7536,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "checked_commit": {
+          "name": "checked_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "pull_request_url": {
           "name": "pull_request_url",
           "type": "text",
@@ -7665,6 +7683,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": 5
+        },
+        "monitor_restart_at": {
+          "name": "monitor_restart_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "custom_fields": {
           "name": "custom_fields",
@@ -9701,8 +9725,8 @@
   "policies": {},
   "views": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   }
 }

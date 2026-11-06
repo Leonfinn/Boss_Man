@@ -9,25 +9,32 @@
 //
 // A rung is skipped, and the alert falls through, when its agent is missing or paused, is one of
 // the agents the alert is about (it may be the one looping), is over its hourly cap, or its wake
-// is dropped; when the company is paused it goes straight to the owner. Nothing is ever dropped:
-// the last rung is always the owner.
+// is dropped; when the company is paused it goes straight to the owner. A card whose kind stops at
+// the CEO does not fall through, though (DR-017 A, BOS-469): when the CEO can't take it, for any
+// reason, it parks on the CEO's rung with its clock stopped and is offered again when the reason
+// is gone. Only a kind allowed to reach the owner goes past the CEO.
 import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { readWatchdogSettings, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
+import type { ClearWhen } from "./alert-clearing.js";
 import { CANCEL_RUN, checkAsk } from "./decisions.js";
+import { type AlertCause, type AlertKind, type AlertRung, isAlertKind, kindCeiling, kindRow, kindStart } from "./alert-kinds.js";
 import { ALERT_REASON, SCRUM_MASTER_DUTY, WATCHDOG_REWAKE_REASON, WatchdogError, watchdogPausedUntil, type watchdogService } from "./watchdog.js";
 
 /** The most a card waits with the CEO, counted from when it was raised, whether or not a CEO run has started (BOS-180). */
 export const CEO_OUTER_CAP_MINUTES = 20;
 
-export type Rung = "scrum_master" | "ceo" | "owner";
+export type Rung = AlertRung;
 const RUNGS: Rung[] = ["scrum_master", "ceo", "owner"];
+const RANK: Record<Rung, number> = { scrum_master: 0, ceo: 1, owner: 2 };
 const LABEL: Record<Rung, string> = { scrum_master: "the Scrum Master", ceo: "the CEO", owner: "the owner" };
 export const GOT_IT = "Got it";
 /** A skip that only happens because the watchdog is rehearsing (BOS-166). */
 const RECORD_SKIP = /record-only/i;
+/** A run end that says the account couldn't run it (DR-015 A): a usage limit, an auth error, identity verification. */
+const USAGE_OR_AUTH_OUTCOME = /error:.*(usage limit|rate limit|weekly limit|5-hour limit|five-hour limit|quota|limit reached|authentication|unauthori[sz]ed|forbidden|identity verification|invalid api key|credit balance)/i;
 
 export type Ladder = {
   rung: Rung;
@@ -42,6 +49,14 @@ export type Ladder = {
   duty?: boolean;
   /** The wake that was dropped, which the Scrum Master may start again with a fresh chain. */
   rewake?: { agentId: string; ticketId: string | null; reason: string } | null;
+  /** The alert's kind (DR-017 A): the table row that sets its top rung, its cause key and its closer. */
+  kind?: AlertKind;
+  /** The highest rung the card may reach; it never moves above this. */
+  topRung?: Rung;
+  /** The cause key: raises with the same key fold into one card (DR-017 B). */
+  groupBy?: string | null;
+  /** Why the CEO isn't holding it right now (DR-017 A, BOS-469 point 7); the clock is stopped while set. */
+  parked?: string | null;
   hops: Array<{ to: Rung; at: string; why: string }>;
 };
 
@@ -52,19 +67,69 @@ export type AlertInput = {
   about?: Array<string | null | undefined>;
   /** The lowest rung allowed to settle it: "ceo" when the fix is beyond the Scrum Master (stopping work, a review outcome, host access). */
   from?: Rung;
+  /** Why it starts on that rung, said on the card's ladder (e.g. "the CEO is the target"). */
+  why?: string;
+  /** The kind of alert (DR-017 A). Every raise names one; a raise without one is checked by alert-kinds.test.ts. */
+  kind?: AlertKind;
+  /** The account, run or agents the alert is about, for its cause key and closer (DR-017 B, DR-016). */
+  cause?: AlertCause;
+  /** The decisions-table kind ("question", "approval", "stalled_run"); defaults to a plain question. */
+  cardKind?: "question" | "approval" | "stalled_run";
   rewake?: Ladder["rewake"];
   /** A duty alert goes to the Scrum Master even while the watchdog is off. */
   duty?: boolean;
   raisedByAgentId?: string | null;
-  /** Defaults to a "Got it" question; the review loop and the stall sweep bring their own options and context. */
-  kind?: "question" | "approval" | "stalled_run";
+  /** Defaults to a plain "Got it" question; the review loop and the stall sweep bring their own context. */
   options?: string[];
   recommended?: string;
   context?: Record<string, unknown>;
   dedupeKey?: string;
+  /**
+   * When the card's cause is gone, in a form the server can check (DR-016, BOS-470). The closer
+   * (alert-clearing.ts) closes the card on any tier, the owner's included, with the reason. A raise
+   * without one is filled in from the dedupe key where that names the cause exactly (stalled run,
+   * start failure, runner-offline, self/chain/ticketless loop, usage limit); anything else stays as
+   * it was rather than guessing.
+   */
+  clearWhen?: ClearWhen[];
 };
 
+/** The first part of a raise's cause key, e.g. "start-fail" from "start-fail:<agent>:<wake>". */
+const keyPrefix = (key: string | undefined) => (key ?? "").split(":")[0] ?? "";
+
 type Notify = (agentId: string, input: { ticketId?: string | null; reason: string; note?: string | null; priority?: number }) => Promise<{ id: string; status: string; statusReason?: string | null }>;
+
+/**
+ * The condition for a raise that didn't give one, where its cause key says exactly what would
+ * clear it (DR-017's alert kinds table). Anything else gets none: a condition that is true too
+ * early would hide a live problem, so nothing is guessed from the question's words or a timeout.
+ */
+async function inferClearWhen(input: AlertInput): Promise<ClearWhen[]> {
+  const key = input.dedupeKey;
+  if (!key) return [];
+  const parts = key.split(":");
+  switch (keyPrefix(key)) {
+    case "stalled":
+      return parts[1] ? [{ kind: "runActive", runId: parts[1] }] : [];
+    case "start-fail": {
+      if (!parts[1] || !parts[2]) return [];
+      // The card names the runner-offline case in its question (flagFailedStart only raises it for "runner offline").
+      // The key is "start-fail:<agentId>:<wakeId>"; a wake id has no colons, so the rest is the wake.
+      if (!/runner offline/i.test(input.question)) return [];
+      return [{ kind: "runnerConnected", companyId: input.companyId, wakeId: parts.slice(2).join(":") }];
+    }
+    case "alert": {
+      // The agent is in both the key and `about`; the key is the one this card was built from.
+      const agentId = parts[2];
+      const what = parts[1];
+      return agentId && (what === "self" || what === "chain" || what === "ticketless") ? [{ kind: "agentRanOk", agentId }] : [];
+    }
+    case "limit":
+      return parts[1] ? [{ kind: "limitReset", fundingSourceId: parts[1] }] : [];
+    default:
+      return [];
+  }
+}
 
 export function alertLadder(
   db: Db,
@@ -74,6 +139,14 @@ export function alertLadder(
     watchdog: ReturnType<typeof watchdogService>;
     /** Passes the Scrum Master's nudge to a colleague; used on stalled-run alerts. */
     nudge?: (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string } | { ok: false; error: string }>;
+    /**
+     * Whether the CEO could run right now (DR-015 A, BOS-469 point 1): an account with room and no
+     * usage/auth error standing in the way. A card that stops at the CEO waits while this says no.
+     * Left out, the CEO is taken to be able to run.
+     */
+    ceoCanRun?: (companyId: string) => Promise<boolean>;
+    /** The one closer for Boss Man's own cards (DR-016, BOS-469 point 2): closes a card whose cause is gone, on any tier. */
+    clearExpired?: () => Promise<number>;
     now?: () => Date;
   },
 ) {
@@ -98,12 +171,17 @@ export function alertLadder(
    */
   async function dueAt(companyId: string, ladder: Ladder, minutes: number): Promise<number> {
     const raised = new Date(ladder.since).getTime();
+    // A CEO-ceiling card that is parked, or whose time is up but cannot go higher, never falls through
+    // to the owner (DR-017 A, DR-015): its clock stops where it is.
+    if (ladder.rung === "ceo" && (ladder.parked || !canClimb(ladder))) return Infinity;
     if (ladder.rung !== "ceo") return raised + minutes * 60_000;
     const cap = raised + Math.max(minutes, CEO_OUTER_CAP_MINUTES) * 60_000;
     const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
     if (!ceo) return raised + minutes * 60_000;
+    // A CEO run that failed to start, or ended on a usage/auth error, doesn't start the clock (DR-015 A).
+    // Only a run that began, and didn't end that way, can have the card steered into it.
     const [run] = await db
-      .select({ startedAt: runs.startedAt })
+      .select({ startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome })
       .from(runs)
       .where(and(eq(runs.agentId, ceo.id), gte(runs.startedAt, new Date(raised)), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
       .orderBy(asc(runs.startedAt))
@@ -114,8 +192,20 @@ export function alertLadder(
       .from(runs)
       .where(and(eq(runs.agentId, ceo.id), isNull(runs.ticketId), lt(runs.startedAt, new Date(raised)), or(isNull(runs.endedAt), gte(runs.endedAt, new Date(raised))), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
       .limit(1);
-    const start = live ? raised : run?.startedAt.getTime();
+    const start = live ? raised : run && !USAGE_OR_AUTH_OUTCOME.test(run.outcome ?? "") ? run.startedAt.getTime() : undefined;
     return start === undefined ? cap : Math.min(cap, start + minutes * 60_000);
+  }
+
+  /** Whether a card may move above the rung it is on now: never above its kind's highest rung. */
+  function canClimb(ladder: Ladder): boolean {
+    const top = ladder.topRung ?? "owner";
+    return RANK[top] > RANK[ladder.rung];
+  }
+
+  /** Why the CEO can't take a card right now, or null when the CEO rung can. */
+  async function ceoBlocked(companyId: string): Promise<string | null> {
+    if (!deps.ceoCanRun) return null;
+    return (await deps.ceoCanRun(companyId)) ? null : "the CEO can't run right now (usage or auth)";
   }
 
   /** Who holds this rung now, or why nobody can. */
@@ -141,11 +231,15 @@ export function alertLadder(
       if ((n?.n ?? 0) >= s.maxSmRunsPerHour) return { skip: "the Scrum Master is at its hourly limit" };
       return { agent: sm };
     }
+    // The CEO's account test (DR-015 A): while the CEO can't run, a card waiting on it would only time out.
+    const cannotRun = await ceoBlocked(companyId);
+    if (cannotRun) return { skip: cannotRun };
     const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
     if (!ceo) return { skip: "there is no CEO" };
     if (ceo.paused) return { skip: "the CEO is paused" };
     if (about.includes(ceo.id)) return { skip: "the alert is about the CEO" };
-    // Each hop starts a CEO run, so a loop raising alerts on many tickets could feed itself; past the cap they go to the owner as before.
+    // Each hop starts a CEO run, so a loop raising alerts on many tickets could feed itself; past the cap the
+    // CEO is skipped, and place() then holds a CEO-ceiling card with it (or passes an owner kind on).
     const [n] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(watchdogActions)
@@ -182,7 +276,22 @@ export function alertLadder(
     const minutes = readWatchdogSettings(c?.watchdog).alertMinutes;
     let reason = why;
     for (const rung of RUNGS.slice(RUNGS.indexOf(start))) {
-      const hop = (to: Rung, w: string): Ladder => ({ ...ladder, rung: to, since: now().toISOString(), hops: [...ladder.hops, { to, at: now().toISOString(), why: w }] });
+      const hop = (to: Rung, w: string): Ladder => ({ ...ladder, rung: to, since: now().toISOString(), parked: null, hops: [...ladder.hops, { to, at: now().toISOString(), why: w }] });
+      // A card whose kind stops at the CEO never passes it (DR-017 A, BOS-469 point 7): when the CEO can't
+      // take it, for any reason, it parks on the CEO rung with its clock stopped rather than going to the
+      // owner. It is offered to the CEO again each sweep once the reason has gone.
+      if (rung === "owner" && ladder.topRung !== "owner" && ladder.topRung !== undefined) {
+        const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+        const next: Ladder = { ...ladder, rung: "ceo", parked: reason, topRung: ladder.topRung, hops: [...ladder.hops, { to: "ceo", at: now().toISOString(), why: reason }] };
+        const held = await db
+          .update(decisions)
+          .set({ tier: "ceo", forAgentId: null, context: { ...(d.context as object), ...extra, ladder: next } })
+          .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+          .returning({ id: decisions.id });
+        if (!held.length) return null;
+        await log(d.companyId, { kind: "alert_hop", ticketId: ladder.ticketId, targetAgentId: ceo?.id ?? null, decisionId: d.id, reason, summary: `Held with the CEO: ${reason}` });
+        return "ceo";
+      }
       if (rung === "owner") {
         const next = hop("owner", reason);
         const tried = (extra.triedFirst as string | undefined) ?? (ladder.hops.length ? `Boss Man tried the team first: ${ladder.hops.map((h) => `${LABEL[h.to]} (${h.why})`).join(", then ")}. Neither could settle it.` : undefined);
@@ -214,6 +323,18 @@ export function alertLadder(
       const w = await deps.notify(h.agent.id, rung === "ceo" ? { ticketId: null, reason: "decision", priority: 3, note: note(rung, d, next, minutes) } : { ticketId: ladder.ticketId, reason: ALERT_REASON, priority: 3, note: note(rung, d, next, minutes) });
       if (w.status === "dropped") {
         reason = `${LABEL[rung]} was skipped: its wake was dropped (${w.statusReason ?? "no reason given"})`;
+        if (rung === "ceo" && ladder.topRung !== undefined && ladder.topRung !== "owner") {
+          // The CEO couldn't be woken: a CEO-ceiling card is held there, not passed on (DR-017 A, BOS-469 point 7).
+          const held: Ladder = { ...ladder, rung: "ceo", parked: reason, topRung: ladder.topRung, hops: [...ladder.hops, { to: "ceo", at: now().toISOString(), why: reason }] };
+          const kept = await db
+            .update(decisions)
+            .set({ tier: "ceo", forAgentId: null, context: { ...(d.context as object), ladder: held } })
+            .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+            .returning({ id: decisions.id });
+          if (!kept.length) return null;
+          await log(d.companyId, { kind: "alert_hop", ticketId: ladder.ticketId, targetAgentId: h.agent.id, decisionId: d.id, reason, summary: `Held with the CEO: ${reason}` });
+          return "ceo";
+        }
         continue;
       }
       await log(d.companyId, { kind: "alert_hop", ticketId: ladder.ticketId, targetAgentId: h.agent.id, decisionId: d.id, reason, summary: `Alert handed to ${h.agent.name}: ${reason}` });
@@ -240,42 +361,140 @@ export function alertLadder(
     return { d, ladder };
   }
 
+  /** True when the reason a card is parked with the CEO has gone: the CEO can run, and the cap has room for one more. */
+  async function ceoTakesAgain(companyId: string): Promise<boolean> {
+    const h = await holder(companyId, "ceo", []);
+    return !("skip" in h);
+  }
+
+  /**
+   * Offers a card parked with the CEO to it again, once the reason it was held has gone (BOS-469 point 7).
+   * It keeps the CEO's rung with a fresh clock and wakes the CEO once for all such cards, as place() does.
+   */
+  async function offerAgain(d: typeof decisions.$inferSelect, ladder: Ladder): Promise<boolean> {
+    const [c] = await db.select({ watchdog: companies.watchdog }).from(companies).where(eq(companies.id, d.companyId));
+    const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+    if (!ceo) return false;
+    const back = await ceoTakesAgain(d.companyId);
+    const why = ladder.parked ?? "it waited for the CEO";
+    if (!back) {
+      // Still blocked. The reason can change (the cap frees and the account becomes the next one), so name
+      // the current one on the card without waking anyone. The clock is stopped either way.
+      const h = await holder(d.companyId, "ceo", []);
+      const blocked = "skip" in h ? `${LABEL.ceo} was skipped: ${h.skip}` : why;
+      if (blocked !== why) {
+        const kept: Ladder = { ...ladder, parked: blocked, hops: [...ladder.hops, { to: "ceo", at: now().toISOString(), why: blocked }] };
+        const [row] = await db.update(decisions).set({ context: { ...(d.context as object), ladder: kept } }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open"))).returning({ id: decisions.id });
+        if (!row) return false;
+        await log(d.companyId, { kind: "alert_hop", ticketId: ladder.ticketId, targetAgentId: ceo.id, decisionId: d.id, reason: blocked, summary: `Held with the CEO: ${blocked}` });
+      }
+      return false;
+    }
+    const minutes = readWatchdogSettings(c?.watchdog).alertMinutes;
+    const next: Ladder = { ...ladder, rung: "ceo", since: now().toISOString(), parked: null, hops: [...ladder.hops, { to: "ceo", at: now().toISOString(), why: "the CEO can take it again" }] };
+    const [moved] = await db
+      .update(decisions)
+      .set({ tier: "ceo", forAgentId: null, context: { ...(d.context as object), ladder: next } })
+      .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (!moved) return false;
+    // High priority, as a hand-over: it waited for the CEO, so quiet hours must not delay it further.
+    const w = await deps.notify(ceo.id, { ticketId: null, reason: "decision", priority: 3, note: note("ceo", d, next, minutes) });
+    await log(d.companyId, { kind: "alert_hop", ticketId: ladder.ticketId, targetAgentId: ceo.id, decisionId: d.id, reason: "the CEO can take it again", summary: `Alert handed to ${ceo.name}: the CEO can take it again` });
+    return w.status !== "dropped";
+  }
+
   return {
+    /**
+     * Adds a raise to the open card with the same cause (DR-017 B, BOS-469 point 6): its text and count are
+     * rewritten, no second card and no new wake. The kinds table supplies a heading for the folded card;
+     * without one the original question stays and only the list of items is added.
+     */
+    async append(open: typeof decisions.$inferSelect, input: AlertInput, heading?: (cause: AlertCause, count: number) => string): Promise<void> {
+      const ctx = open.context as { items?: Array<{ question: string; at: string; agents?: string[] }>; pageUrl?: string } & Record<string, unknown>;
+      const items = [...(ctx.items ?? []), { question: input.question, at: now().toISOString(), ...(input.cause?.agents?.length ? { agents: input.cause.agents.filter((x): x is string => !!x) } : {}) }];
+      // The cause carries every agent named so far, so the heading says how many, not just the last one.
+      const agents = [...new Set(items.flatMap((i) => i.agents ?? []))];
+      const question = heading ? heading({ ...input.cause, agents }, items.length) : open.question;
+      await db
+        .update(decisions)
+        .set({ question, context: { ...(open.context as object), items, lastAppendedAt: now().toISOString() } })
+        .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")));
+    },
+
     /** Raises one of Boss Man's own alerts on the ladder. Null when the dedupe key says it's already open. */
     async raise(input: AlertInput): Promise<{ id: string; rung: Rung } | null> {
+      const kindId: AlertKind | undefined = isAlertKind(input.kind) ? input.kind : undefined;
+      const cause: AlertCause = { ...input.cause, agents: input.cause?.agents?.length ? input.cause.agents : input.about };
+      const row = kindRow(kindId, input.from);
+      const start = kindStart(input.from);
+      const ceiling = kindCeiling(kindId, input.from);
+      // `foldKey` is the cause key (only kinds with a groupBy fold, DR-017 B); `groupKey` is that or the
+      // caller's own dedupe key, so a repeat of one alert never raises a second card.
+      const foldKey = row.groupBy?.(cause) ?? null;
+      const groupKey = foldKey ?? input.dedupeKey ?? null;
+      /** The card's own kind, kept in its context as `decisionsKind` so a fold finds only its own kind. */
+      const decisionsKind = foldKey ? `alert:${kindId ?? "alert"}` : (input.context?.decisionsKind as string | undefined);
       const ladder: Ladder = {
-        rung: input.from ?? "scrum_master",
+        rung: start,
         since: now().toISOString(),
         ticketId: input.ticketId ?? null,
         about: [...new Set(input.about?.filter((x): x is string => !!x) ?? [])],
         duty: input.duty ?? false,
         rewake: input.rewake ?? null,
+        ...(kindId ? { kind: kindId } : {}),
+        topRung: ceiling,
+        groupBy: groupKey,
+        parked: null,
         hops: [],
       };
+      const clearWhen = input.clearWhen ?? (row.clearWhen && kindId ? row.clearWhen(cause) : await inferClearWhen(input));
+      // One cause, one card (DR-017 B, BOS-469 points 3 and 6): a raise whose cause key matches an open card
+      // adds its item to that card and no wake is sent. Only cards of the same kind fold together.
+      if (foldKey) {
+        const [open] = await db
+          .select()
+          .from(decisions)
+          .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'decisionsKind' = ${decisionsKind}`, sql`${decisions.context}->'ladder'->>'groupBy' = ${foldKey}`))
+          .limit(1);
+        if (open) {
+          await this.append(open, input, row.title);
+          return { id: open.id, rung: ((open.context as { ladder: Ladder }).ladder.rung) };
+        }
+      }
       const [d] = await db
         .insert(decisions)
         .values({
           companyId: input.companyId,
-          kind: input.kind ?? "question",
+          kind: input.cardKind ?? "question",
           question: input.question,
           options: input.options ?? [GOT_IT],
           recommendedOption: input.recommended ?? GOT_IT,
           raisedByAgentId: input.raisedByAgentId ?? null,
           // Not on any rung's queue until place() puts it there; the owner is not notified before.
           tier: "ceo",
-          dedupeKey: input.dedupeKey,
-          context: { type: "question", ...input.context, ladder },
+          dedupeKey: groupKey,
+          context: {
+            type: "question",
+            ...(decisionsKind ? { decisionsKind } : {}),
+            ...(groupKey ? { items: [{ question: input.question, at: now().toISOString(), ...(cause.agents?.length ? { agents: cause.agents.filter((x): x is string => !!x) } : {}) }] } : {}),
+            ...input.context,
+            ladder,
+            ...(clearWhen.length ? { clearWhen } : {}),
+          },
           createdAt: now(),
         })
         .onConflictDoNothing()
         .returning();
       if (!d) return null;
-      const rung = await place(d, ladder, ladder.rung, input.from === "ceo" ? "only the CEO or the owner can act on it" : input.from === "owner" ? "only the owner can act on it" : "raised by Boss Man");
+      const rung = await place(d, ladder, ladder.rung, input.why ?? (start === "ceo" ? "only the CEO or the owner can act on it" : start === "owner" ? "only the owner can act on it" : "raised by Boss Man"));
       return rung ? { id: d.id, rung } : null;
     },
 
     /** Moves alerts that sat on a rung past the time limit up one rung. Run on the leader's timer. */
     async sweep() {
+      // Cards whose cause has gone close themselves first, on any tier, with a logged reason (DR-016, BOS-469 point 2).
+      if (deps.clearExpired) await deps.clearExpired();
       const open = await db
         .select({ d: decisions, watchdog: companies.watchdog })
         .from(decisions)
@@ -285,6 +504,12 @@ export function alertLadder(
       for (const { d, watchdog } of open) {
         const ladder = (d.context as { ladder: Ladder }).ladder;
         const minutes = ladder.minutes ?? readWatchdogSettings(watchdog).alertMinutes;
+        // A card parked with the CEO is offered to it again as soon as the reason has gone (BOS-469 point 7).
+        // Its clock is stopped, so this is checked before the timeout rather than after it.
+        if (ladder.parked) {
+          if (await offerAgain(d, ladder)) moved++;
+          continue;
+        }
         if ((await dueAt(d.companyId, ladder, minutes)) > now().getTime()) continue;
         if (await place(d, ladder, RUNGS[RUNGS.indexOf(ladder.rung) + 1]!, `${LABEL[ladder.rung]} didn't settle it within ${minutes} minutes`)) moved++;
       }
@@ -359,14 +584,16 @@ export function alertLadder(
     },
 
     /** The CEO can't settle it: it goes to the owner with what was tried and the steps (the raise_decision rules). */
-    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; steps?: string[]; ownerMustDo?: boolean }) {
+    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; steps?: string[]; ownerMustDo?: boolean; lintOverride?: string }) {
       const [ceo] = await db.select().from(agents).where(and(eq(agents.id, ceoId), eq(agents.companyId, companyId), eq(agents.role, "ceo")));
       if (!ceo) throw new WatchdogError(403, "Only the CEO passes alerts to the owner.");
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
-      const bad = checkAsk(input);
-      if (bad) throw new WatchdogError(422, bad);
-      if (!(await place(d, ladder, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
+      const ask = checkAsk({ ...input, byCeo: true });
+      if (ask.error) throw new WatchdogError(422, ask.error);
+      // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
+      // card may reach the owner (DR-017 A), so the ceiling doesn't apply to a deliberate escalation.
+      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), ...(ask.lint ? { lint: ask.lint } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
       return { id: d.id };
     },
   };
