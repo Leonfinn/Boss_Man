@@ -950,7 +950,7 @@ export const failureSignatures = pgTable(
     sample: text("sample").notNull(),
     createdAt: createdAt(),
   },
-  (t) => [index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt)],
+  (t) => [index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt), index("failure_signatures_company_recent").on(t.companyId, t.createdAt)],
 );
 
 /** Agent-to-agent nudges (R86), kept for the pair rate limit and ping-pong detection. */
