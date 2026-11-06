@@ -263,7 +263,7 @@ if command -v flock >/dev/null; then
       # own missing-file error instead of the trap (BOS-345 merge check, 2 Nov).
       rm -rf "$t/ksto" "$t/lock.queue" "$t/kill.out" "$t/kill.pid"; hold 1 3600; h1=$!; sleep 0.3
       ( cd "$repo" && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/none" BOSSMAN_CHECK_STORE="$t/ksto" \
-          setsid env --default-signal=HUP,INT,TERM bash -c 'echo $ >"$1"; exec ./scripts/check-all.sh' _ "$t/kill.pid" >"$t/kill.out" 2>&1 ) & k=$!
+          setsid env --default-signal=HUP,INT,TERM bash -c 'echo $$ >"$1"; exec ./scripts/check-all.sh' _ "$t/kill.pid" >"$t/kill.out" 2>&1 ) & k=$!
       # The queue entry is written before the wait loop, so wait on it (not on the printed line, which the slot
       # scan can delay); then require the "waiting" line before signalling, so the check is provably waiting.
       for _ in $(seq 150); do [ -n "$(ls "$t/lock.queue" 2>/dev/null)" ] && grep -q "waiting for a free check slot" "$t/kill.out" 2>/dev/null && break; sleep 0.2; done
