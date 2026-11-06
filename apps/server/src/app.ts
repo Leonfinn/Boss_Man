@@ -649,19 +649,24 @@ export async function buildApp(opts: AppOptions) {
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
     // A stalled-review card's actions (BOS-404, BOS-426): take it, hand it to another reviewer, send it back, or leave it.
     reviewStall: (ctx, answer, byAgentId) => review.reviewStall(ctx, answer, byAgentId),
-    // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
-    // Decisions show "Checking and merging" while it runs (including lock retries), rather than inviting
-    // another approval. A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
+    // Answering "Approve and merge" on the sign-off card starts a tracked landing without holding the
+    // answer open: the check can take 10+ minutes, so the card closes at once and the ticket page and
+    // Decisions show "Checking and merging" while it runs (including lock retries) (BOS-559). The merge
+    // result arrives in the feed as it does today: a failed landing is recorded on the ticket and raised
+    // as a card by land()/startLanding(), so the owner is still told and can approve it again.
     land: (ticketId, reviewer, merge) =>
       (merge?.markDone
         ? // Nothing to merge (no repo, or a no-code ticket): the owner's own sign-off finishes it in the same press (BOS-471).
           work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true, stateNote: "The owner approved and signed it off; there was nothing to merge." })
-        : review.landVisible(ticketId, reviewer)
+        : review.startLanding(ticketId, reviewer)
       ).catch(async (err) => {
-        // Another sign-off card for the same ticket being settled is a wait, not a failed merge (BOS-471).
+        // Waiting on the sign-off, or another merge already running, is a wait, not a failed merge: no card.
         if (isSignoffPending(err)) return;
-        const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
+        if (err instanceof ReviewError && /already being checked and merged/i.test(err.message)) return;
+        // A landing that couldn't start has already left a trail and a card (startLanding), so raise nothing
+        // more, so a single failed press never leaves two cards saying the same thing; log it in case an
+        // unexpected error got this far without one.
+        app.log.warn(`the sign-off answer started no merge for ${ticketId}: ${(err as Error).message}`);
       }),
     // An answer that arrives after the ticket moved on is told to the owner, not thrown back at them.
     landAgain: (ticketId, skipChecks) =>
@@ -2587,8 +2592,8 @@ export async function buildApp(opts: AppOptions) {
     /**
      * "Approve and merge" on the ticket page (BOS-471): when the owner's sign-off card is open, this answers
      * it exactly as Decisions does (same answer path, so the sign-off is settled and any stale merge-retry
-     * card is cleared) and then starts the tracked merge. Without a card it is the plain approval. On a
-     * ticket with no repo it marks it done, as before.
+     * card is cleared) and then starts the tracked merge in the background, so the press returns at once
+     * (BOS-559). Without a card it is the plain approval. On a ticket with no repo it marks it done, as before.
      */
     owner.post("/api/tickets/:id/approve-merge", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -2615,10 +2620,12 @@ export async function buildApp(opts: AppOptions) {
           throw err;
         }
         try {
-          // The answer's own hook (setLoopHooks.land above) already ran and finished the merge before it
-          // returned, so start nothing more here: a second start would merge twice (BOS-471, review round 1).
-          // A press that found the sign-off already settled (r === null) started no landing, so start one now.
-          const landing = signoffAnswered ? null : await review.startLanding(id, "the owner");
+          // The answer's own hook (setLoopHooks.land above) now starts the merge in the background and
+          // returns at once, so the card closes before the check finishes (BOS-559). It started a landing
+          // only when it settled the sign-off, so hand that running landing back for the page to poll;
+          // start nothing more, or it would merge twice (BOS-471). A press that found the sign-off already
+          // settled (r === null) started no landing, so start one now.
+          const landing = signoffAnswered ? await review.landing(id) : await review.startLanding(id, "the owner");
           return { outcome: "landing" as const, signoffAnswered, landing };
         } catch (err) {
           // A sign-off still open here is the owner's next answer, not a failed merge: say so, and raise no card.
