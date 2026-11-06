@@ -150,12 +150,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "image_id": {
-          "name": "image_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -171,19 +165,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "agent_avatars_image_id_ticket_images_id_fk": {
-          "name": "agent_avatars_image_id_ticket_images_id_fk",
-          "tableFrom": "agent_avatars",
-          "tableTo": "ticket_images",
-          "columnsFrom": [
-            "image_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -9676,8 +9657,8 @@
   "policies": {},
   "views": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   }
 }
