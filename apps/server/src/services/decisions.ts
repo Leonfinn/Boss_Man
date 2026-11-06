@@ -149,7 +149,7 @@ export type DecisionContext =
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; result?: { result: string; message: string; at: string } }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
-  | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
+  | { type: "review_loop"; ticketId: string; message: string; reviewer: string; /** The failed checks the "move to after the merge" choice would move (BOS-422). */ movable?: string[] }
   /** A review woken this round again and again with no verdict (BOS-404, BOS-426): the CEO acts on it. */
   | { type: "review_stall"; ticketId: string; reviewId: string; reviewerAgentId: string; kind: string }
   | { type: "ticket_cap"; ticketId: string }
@@ -201,7 +201,9 @@ export const APPROVE_PLAN = "Approve plan";
 export const KEEP_PLANNING = "Keep planning";
 export const APPROVE_MERGE = "Approve and merge";
 export const SEND_IT_BACK = "Send it back";
-export const CHECK_AGAIN = "Run the check again";
+/** The stuck-review card's third choice (BOS-422): offered when the reviewers fail only checks that need the live work. */
+export const MOVE_AFTER_MERGE = "Move these checks to after the merge";
+export const CHECK_AGAIN ="Run the check again";
 export const CHECK_SEND_BACK = "Send it back to the agent";
 export const CHECK_SKIP = "Merge without the check";
 /** A stalled review (BOS-404, BOS-426): real actions on the review instead of "Got it". */
@@ -711,6 +713,8 @@ type DeployHook = (deployId: string, approved: boolean) => Promise<unknown>;
 export type LoopHooks = {
   sendBack(ticketId: string, text: string, reviewer: string): Promise<unknown>;
   stopTicket(ticketId: string): Promise<unknown>;
+  /** Marks the named criteria "after the merge" and clears the failed reviews that only failed them (BOS-422). */
+  moveAfterMerge(ticketId: string, criteria: string[]): Promise<unknown>;
   raiseCap(ticketId: string): Promise<unknown>;
   /** Merges an approved ticket once the owner has signed off on it (R48); `merge.markDone` finishes a ticket with nothing to merge. */
   land(ticketId: string, reviewer: string, merge?: AnswerExtra["merge"]): Promise<unknown>;
@@ -2539,6 +2543,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // Free the ticket from this decision first, so the action below sets its final state.
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         if (answer === "Stop work on it") await loopHooks?.stopTicket(ctx.ticketId);
+        else if (ctx.type === "review_loop" && answer === MOVE_AFTER_MERGE && ctx.movable?.length) await loopHooks?.moveAfterMerge(ctx.ticketId, ctx.movable);
         else if (ctx.type === "review_loop") await loopHooks?.sendBack(ctx.ticketId, ctx.message, ctx.reviewer);
         else await loopHooks?.raiseCap(ctx.ticketId);
       } else if (ctx.type === "project_cap") {

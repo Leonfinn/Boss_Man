@@ -3,11 +3,12 @@
 // failed checks) are reduced to signatures; the same one three times in two hours means the
 // agent is going round in circles and needs a different approach.
 import { and, count, eq, gt } from "drizzle-orm";
-import { failureSignature, findingFingerprint, type ReviewComment } from "@boss-man/shared";
+import { failureSignature, findingFingerprint, movableFailures, readCriteria, type ReviewComment } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { decisions, failureSignatures, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { AlertInput } from "./alert-ladder.js";
+import { MOVE_AFTER_MERGE } from "./decisions.js";
 
 export type LoopLimits = { repeatedFinding: number; maxRounds: number; circularFailures: number; circularWindowMs: number };
 export const DEFAULT_LOOP_LIMITS: LoopLimits = { repeatedFinding: 3, maxRounds: 3, circularFailures: 3, circularWindowMs: 2 * 3_600_000 };
@@ -55,11 +56,13 @@ export function loopGuards(
         repeatedIdx !== -1
           ? `the same comment has now come back ${seen.get(fingerprints[repeatedIdx]!)} times: "${input.comments[repeatedIdx]!.path}: ${input.comments[repeatedIdx]!.body.slice(0, 200)}"`
           : `it has been sent back ${rounds.length} times`;
+      // Offered only when the reviewers fail nothing but checks that can only be made on the live work (BOS-422).
+      const movable = movableFailures(readCriteria(t!.acceptanceCriteria), input.comments, input.message);
       const ask = {
         companyId: t!.companyId,
-        question: `Review of "${t!.title}" looks stuck: ${why}. Send the review back again, or stop work on the ticket?`,
-        options: [SEND_BACK, STOP_WORK],
-        context: { type: "review_loop", ticketId: input.ticketId, message: input.message, reviewer: input.reviewer },
+        question: `Review of "${t!.title}" looks stuck: ${why}. Send the review back again, or stop work on the ticket?${movable.length ? ` Or move ${movable.map((c) => `"${c}"`).join(", ")} to after the merge, since it can only be checked once the work is live?` : ""}`,
+        options: movable.length ? [SEND_BACK, STOP_WORK, MOVE_AFTER_MERGE] : [SEND_BACK, STOP_WORK],
+        context: { type: "review_loop", ticketId: input.ticketId, message: input.message, reviewer: input.reviewer, ...(movable.length ? { movable } : {}) },
       };
       const [d] = opts.alert
         ? [await opts.alert({ ...ask, cardKind: "approval", kind: "review_loop", recommended: STOP_WORK, ticketId: input.ticketId, from: "ceo" })]

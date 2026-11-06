@@ -678,6 +678,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
       await work.updateTicket(ticketId, { state: "done", outcome: "cancelled", overLimit: true });
     },
+    moveAfterMerge: (ticketId, criteria) => review.moveAfterMerge(ticketId, criteria),
     raiseCap: async (ticketId) => {
       const [t] = await db.select({ cap: tickets.costCapMicros, projectCap: projects.ticketCostCapMicros }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, ticketId));
       const cap = t?.cap ?? t?.projectCap;
