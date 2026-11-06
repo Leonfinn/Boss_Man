@@ -55,4 +55,14 @@ describe("command blocks say where and as whom (BOS-427)", () => {
     expect(screen.queryByText((_, el) => el?.tagName === "DIV" && /^On \S/.test(el.textContent ?? ""))).toBeNull();
     expect(screen.getByText("ls")).toBeTruthy();
   });
+
+  it("accepts the same host names as the server: a plain name only (BOS-541)", () => {
+    // The server's fenceWhere allows letters, digits, dot, dash and underscore, starting with a letter or digit.
+    render(<Decisions decisions={[card(['Check it:\n\n```sh host="nas-01.home_lab" as="root"\nid\n```'])]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
+    expect(line(/^On nas-01\.home_lab, as root\.$/)).toBeTruthy();
+    cleanup();
+    // A host with a space is not one the server can name, so the app must not read it as one either.
+    render(<Decisions decisions={[card(['Check it:\n\n```sh host="nas 01" as="root"\nid\n```'])]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
+    expect(screen.queryByText((_, el) => el?.tagName === "DIV" && /^On \S/.test(el.textContent ?? ""))).toBeNull();
+  });
 });
