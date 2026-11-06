@@ -2,7 +2,7 @@
 # A 2-5 minute check of what this branch changed, for authors and reviewers. Only the merge gate runs the full
 # scripts/check-all.sh. Prints one PASS/FAIL line per step (output of a failed step follows it) and exits non-zero on any failure.
 # BASE (default origin/main) is the branch to compare with. Tests stub the commands through PATH.
-# Typecheck and vitest are heavy (1-1.5 GB, up to 30 min), so they run only while holding the merge gate's one-slot check lock
+# Typecheck and vitest are heavy (1-1.5 GB, up to an hour), so they run only while holding the merge gate's one-slot check lock
 # (scripts/check-all.sh does the waiting and prints "waiting for a free check slot (place N ...)"); the gate keeps priority.
 # Never skipped in a merge-gate run (BOSSMAN_MERGE_CHECK set). A broad related-test list (over CHECK_QUICK_BROAD_FILES files, default 15, or app.ts/main.ts/mcp.ts) is skipped unless CHECK_QUICK_FORCE_RELATED=1.
 set -uo pipefail

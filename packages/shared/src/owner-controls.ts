@@ -18,6 +18,8 @@ export const OWNER_CONTROLS = {
     "Agents", "Skills", "Runs", "Scrum Master", "Workflow", "Engagements", "Settings",
     "Switch company", "Create", "New company", "Close menu", "Menu …", "Turn on browser notifications", "Log out",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
+    // The owner's message box (Ticket, Board, Chat, Decisions and Run show it).
+    "Send as a .txt file", "Sending",
     // A picture opened from Markdown text.
     "Actual size", "Fit to window",
   ],
@@ -65,6 +67,7 @@ export const OWNER_CONTROLS = {
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
   Plan: ["Refresh"],
   Wiki: [
+    "Show older versions", "Loading",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page",
   ],
@@ -89,6 +92,8 @@ export const OWNER_CONTROLS = {
   ],
   "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …"],
   Settings: [
+    // Standing rules.
+    "Clear", "Undo last change",
     // The tabs along the top.
     "Server and runner", "Access and funding", "Reviews and CEO", "Import and export", "Funding", "Rules", "Secrets",
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",

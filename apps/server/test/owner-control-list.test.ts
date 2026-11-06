@@ -6,14 +6,14 @@ import { OWNER_CONTROLS, type OwnerScreen } from "@boss-man/shared";
 import { checkAsk } from "../src/services/decisions.js";
 import { lintOwnerSteps } from "../src/services/steps.js";
 
-// R6 of the owner-card lint (BOS-421, DR-009 L6): a card may only send the owner to a button the app has.
+// R7 of the owner-card lint (BOS-421, DR-009 L6): a card may only send the owner to a button the app has.
 
 const WEB = fileURLToPath(new URL("../../web/src/", import.meta.url));
-const r6 = (steps: string[], options: string[] = []) => lintOwnerSteps(steps, options).refuse.filter((f) => f.rule === "R6");
+const r7 = (steps: string[], options: string[] = []) => lintOwnerSteps(steps, { options }).refuse.filter((f) => f.rule === "R7");
 
-describe("R6: a card names a button that doesn't exist", () => {
+describe("R7: a card names a button that doesn't exist", () => {
   it("refuses the 15:10 card, and names the ticket screen's buttons", () => {
-    const [f, ...more] = r6(["Open BOS-368 and press Overrule and merge."]);
+    const [f, ...more] = r7(["Open BOS-368 and press Overrule and merge."]);
     expect(more).toEqual([]);
     expect(f!.problem).toContain('"Overrule and merge"');
     expect(f!.problem).toContain("The buttons on Ticket are:");
@@ -30,7 +30,7 @@ describe("R6: a card names a button that doesn't exist", () => {
       "Press the Merge Now button.",
       "Open Settings → Server and runner and click Restart server.",
     ])
-      expect(r6([s]).length, s).toBe(1);
+      expect(r7([s]).length, s).toBe(1);
   });
 
   it("accepts real buttons, menu items, tabs, keys and the card's own options", () => {
@@ -52,11 +52,11 @@ describe("R6: a card names a button that doesn't exist", () => {
       "Open Projects, open Acme, click Config, then click Re-detect.",
       "Click the Budget tab.",
     ];
-    for (const s of ok) expect(r6([s], ["Yes, move it", "No"]), s).toEqual([]);
+    for (const s of ok) expect(r7([s], ["Yes, move it", "No"]), s).toEqual([]);
   });
 
   it("refuses a quoted name that only starts with a real label", () => {
-    expect(r6(['Press "Approve anyway".'])).toHaveLength(1);
+    expect(r7(['Press "Approve anyway".'])).toHaveLength(1);
   });
 
   it("is a refusal checkAsk passes on, with the card's options counted as buttons", () => {
@@ -66,7 +66,7 @@ describe("R6: a card names a button that doesn't exist", () => {
     // Overridable by the CEO with a reason, like R1 and R2 (the list can't see a label set in code).
     const ceo = checkAsk({ ...base, steps: ["Press Copied under the command."], lintOverride: "The Copy button says Copied after a press.", byCeo: true });
     expect(ceo.error).toBeNull();
-    expect(ceo.lint?.override?.findings.map((x) => x.rule)).toEqual(["R6"]);
+    expect(ceo.lint?.override?.findings.map((x) => x.rule)).toEqual(["R7"]);
   });
 });
 
@@ -83,6 +83,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/ImageAttach.tsx": "Any screen",
   // Opened from a picture in any Markdown text.
   "components/Lightbox.tsx": "Any screen",
+  // The owner's message box, on five screens (Ticket, Board, Chat, Decisions, Run).
+  "components/OwnerMessageBox.tsx": "Any screen",
   "components/SaveButton.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
   "components/ReviewPolicy.tsx": "Settings",

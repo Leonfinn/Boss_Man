@@ -29,3 +29,5 @@ export * from "./sizing.js";
 export * from "./permission-judge.js";
 export * from "./second-opinion.js";
 export * from "./owner-controls.js";
+export * from "./owner-message.js";
+export * from "./compression.js";
