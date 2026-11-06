@@ -8,11 +8,25 @@ import { api, type Agent } from "../api";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
 import { ImagePreviews, useImageAttach, withAttachments } from "./ImageAttach";
+import { OwnerMessageBox, tooLongToSend } from "./OwnerMessageBox";
 import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
 
-type Message = { id: string; author: "owner" | "agent" | "system"; agent: string | null; runId: string | null; text: string; delivery: string | null; createdAt: string };
+type Message = {
+  id: string;
+  author: "owner" | "agent" | "system";
+  agent: string | null;
+  runId: string | null;
+  text: string;
+  delivery: string | null;
+  createdAt: string;
+  /** The waiting-for-an-answer state of an owner message (BOS-425); null for anything else. */
+  replyState?: "delivered" | "queued" | null;
+  replyReminders?: number | null;
+  replyClearedAt?: string | null;
+  replyClearedBy?: string | null;
+};
 type Conversation = { items: Message[]; live: { id: string; agent: string | null } | null };
 type RunRow = { id: string; agent: string | null; startedAt: string; endedAt: string | null; outcome: string | null };
 
@@ -29,6 +43,16 @@ export function splitDetails(text: string): { summary: string; details: string |
   if (!m) return { summary: text, details: null };
   const details = text.slice(m.index + m[0].length).trim();
   return { summary: text.slice(0, m.index).trim(), details: details || null };
+}
+
+/** Under an owner message: whether it reached the agent, is waiting its turn, or has gone unanswered (BOS-425). Nothing once it is answered. */
+export function replyState(m: Message): string | null {
+  if (m.author !== "owner" || m.delivery === "unassigned" || !m.replyState) return null;
+  if (m.replyClearedAt) return null;
+  if (m.replyState === "queued") return "waiting behind the agent's other work";
+  if ((m.replyReminders ?? 0) >= 2) return "not answered after 10 minutes, and the CEO has been asked";
+  if ((m.replyReminders ?? 0) >= 1) return "not answered yet; the agent has been asked again";
+  return m.delivery === "live" ? "delivered to the running agent" : "waiting: the agent will see it when it next starts a run";
 }
 
 function byline(m: Message) {
@@ -152,6 +176,21 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  // Too long for a message: send it as a .txt file on the ticket, which the agent opens whole.
+  const sendAsFile = async (long: string) => {
+    try {
+      const markdown = await img.uploadText(long, "message.txt");
+      const outgoing = withAttachments("I've sent the text as a file (below); please read it before answering.", [markdown]);
+      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: outgoing, ...(other ? { agentId: other.id } : {}) } });
+      setText("");
+      img.clear();
+      setNote({ ok: true, text: "Sent as a .txt file on the ticket." });
+      convo.reload();
+      runs.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
   const stop = async () => {
     if (!live) return;
     try {
@@ -217,6 +256,11 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
               <small>
                 {byline(m!)} · {when(m!.createdAt)}
               </small>
+              {replyState(m!) && (
+                <p className="muted reply-state" style={{ fontSize: 12, margin: "2px 0 0" }}>
+                  {replyState(m!)}
+                </p>
+              )}
             </div>
           ),
         )}
@@ -238,24 +282,25 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
             </select>
           </div>
         )}
-        <label htmlFor="activity-text" className="sr-only">
-          Message to the agent
-        </label>
-        <textarea
+        <OwnerMessageBox
           id="activity-text"
+          label="Message to the agent"
           rows={2}
-          maxLength={4000}
           enterKeyHint={NEWLINE_KEY_HINT}
           placeholder={placeholder}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={setText}
           onKeyDown={onKey}
           onPaste={img.onPaste}
-        />
-        <ImagePreviews attached={img.attached} onRemove={img.remove} />
+          onSendAsFile={sendAsFile}
+          attaching={img.busy}
+          error={img.error}
+        >
+          {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+        </OwnerMessageBox>
         <div className="compose-actions">
           {img.button}
-          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy}>
+          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)}>
             Send
           </button>
           {live && (
@@ -270,11 +315,6 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           )}
         </div>
       </form>
-      {img.error && (
-        <p className="error" role="alert" style={{ padding: "0 18px 14px" }}>
-          {img.error}
-        </p>
-      )}
       {note && (
         <p className={note.ok ? "muted" : "error"} role={note.ok ? "status" : "alert"} style={{ padding: "0 18px 14px" }}>
           {note.text}

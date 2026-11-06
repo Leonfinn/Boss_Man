@@ -27,7 +27,12 @@ async function setup(opts: { deployer?: boolean } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "bm-deployer-"));
   await mkdir(path.join(dir, "inbox"));
   await mkdir(path.join(dir, "outbox"));
-  const { db, close } = await openPglite();
+  // What the host recorded about itself (BOS-427): its name goes on every command block.
+  await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:00:00Z", ownership: [] }));
+  // The app uses a counting handle on the same database, so a test can prove a pass made no queries (BOS-414).
+  const made: string[] = [];
+  const logQuery = { logQuery: (sql: string) => made.push(sql) };
+  const { db, close } = await openPglite(undefined, logQuery);
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, deployerDir: opts.deployer === false ? undefined : dir });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
@@ -40,7 +45,7 @@ async function setup(opts: { deployer?: boolean } = {}) {
     outbox("status.json", { id: "", target: "server", result: "deployed", message: "Deployed.", from_commit: A, to_commit: B, started: "2026-10-20T12:01:00Z", ended: "2026-10-20T12:03:00Z", backup: "", ...over });
   const open = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "self_deploy");
   const todos = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "owner_todo");
-  return { ...built, db, close, dir, req, available, status, open, todos };
+  return { ...built, db, close, dir, req, available, status, open, todos, made };
 }
 
 describe("self-deploy (docs/09-self-deploy.md)", () => {
@@ -297,6 +302,15 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(x.handSteps!.join("\n")).toContain("can't tell where it is installed");
     });
 
+    it("shows no command when the host hasn't recorded its name yet (BOS-427), and still passes the lint", async () => {
+      const c = (ctx = await setup());
+      await rm(path.join(c.dir, "outbox", "host.json"));
+      const x = await stepsOf(c, LAYOUT);
+      expect(commands(x.handSteps!)).toEqual([]);
+      expect([...x.handSteps!, x.rollback!].join("\n")).toContain("hasn't been told this machine's name");
+      expect(lintOwnerSteps([...x.handSteps!, x.rollback!]).refuse).toEqual([]);
+    });
+
     it("adds the rebuild-the-runners step only when the runner changed, and the card agrees", async () => {
       const c = (ctx = await setup());
       const no = await stepsOf(c, LAYOUT);
@@ -335,7 +349,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
           const x = (await stepsOf(c, { ...layout, ...change })) as { handSteps?: string[]; rollback?: string; check?: string };
           const all = [...x.handSteps!, ...(x.rollback ? [x.rollback] : []), ...(x.check ? [x.check] : [])];
           const where = JSON.stringify({ layout, change });
-          expect(lintOwnerSteps(all).refuse, where).toEqual([]);
+          expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse, where).toEqual([]);
           expect(all.join("\n"), where).not.toMatch(/docs\/0\d/);
           cards++;
         }
@@ -344,7 +358,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(lintOwnerSteps(["Boss Man can't tell where it is installed, so no command is shown here. The folder is in docs/06-install-truenas.md; ask us on this ticket for the exact commands."]).refuse).not.toEqual([]);
     });
 
-    it("renders every command as its own block holding only the command", async () => {
+    it("renders every command as its own block holding only the command, on the recorded host as root (BOS-427)", async () => {
       const c = (ctx = await setup());
       const x = await stepsOf(c, { ...LAYOUT, infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts"], runnerChanged: true });
       const all = [...x.handSteps!, x.rollback!];
@@ -353,7 +367,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       for (const k of cmds) expect(commandProblem(k)).toBeNull();
       // Each fenced block is exactly one command; no command text is left in the sentences.
       for (const t of all) for (const p of parseStep(t)) if (p.type === "text") expect(p.text).not.toMatch(/\b(?:cd \/|scripts\/|docker compose|git (?:checkout|merge))/);
-      expect(all.join("\n").match(/```sh\n/g)!.length).toBe(cmds.length);
+      // Every block says where it runs and as whom; the host line is not part of what the owner pastes.
+      expect(all.join("\n").match(/```sh host="nas01" as="root"\n/g)!.length).toBe(cmds.length);
     });
   });
 
@@ -504,6 +519,89 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(await c.open()).toHaveLength(0);
   });
 
+  // BOS-414: the pass used to run every 5 s; now it skips the pass when the host's files haven't changed.
+  describe("skips a pass when the host's files haven't changed (BOS-414)", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it("makes no database queries when status.json and available.json are unchanged", async () => {
+      const c = (ctx = await setup());
+      await c.available();
+      await c.selfDeploy.sync(); // the first pass reads the files
+      const start = c.made.length;
+      await c.selfDeploy.sync();
+      await c.selfDeploy.sync();
+      expect(c.made.slice(start)).toEqual([]);
+    });
+
+    it("runs again as soon as one of the files changes, and at least once a minute whatever the files say", async () => {
+      // Only the clock: the pass must still be able to read the files.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-20T12:05:00Z"));
+      const c = (ctx = await setup());
+      await c.available();
+      await c.selfDeploy.sync();
+      const start = c.made.length;
+      await c.selfDeploy.sync();
+      expect(c.made.slice(start)).toEqual([]);
+      // A new offer changes available.json: the pass runs and raises the Deploy card.
+      await c.available({ tip: C });
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => (d.context as { commit: string }).commit === C)).toHaveLength(1);
+      // Nothing new for a minute: the forced pass still reads the files and the database.
+      vi.setSystemTime(new Date("2026-10-20T12:06:01Z"));
+      const ranFrom = c.made.length;
+      await c.selfDeploy.sync();
+      expect(c.made.length).toBeGreaterThan(ranFrom);
+    });
+
+    // BOS-414 review: the poller runs every 30 s, so skipped calls must not push the forced pass back.
+    it("forces a pass a minute after the last one that ran, even when every 30 s call since then was skipped", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-20T12:05:00Z"));
+      const c = (ctx = await setup());
+      await c.available({ deployed: B });
+      await c.selfDeploy.sync(); // the pass that runs, at 12:05:00
+      const ranFrom = c.made.length;
+      // Unchanged files, called every 30 s: the 30 s call skips and must not move the clock.
+      vi.setSystemTime(new Date("2026-10-20T12:05:30Z"));
+      await c.selfDeploy.sync();
+      expect(c.made.slice(ranFrom)).toEqual([]);
+      // At the minute mark, still unchanged, the forced pass runs and reads the database.
+      vi.setSystemTime(new Date("2026-10-20T12:06:00Z"));
+      await c.selfDeploy.sync();
+      expect(c.made.length).toBeGreaterThan(ranFrom);
+      // And the next window is measured from that pass, not from the skipped call before it.
+      const ranAgain = c.made.length;
+      vi.setSystemTime(new Date("2026-10-20T12:06:30Z"));
+      await c.selfDeploy.sync();
+      expect(c.made.slice(ranAgain)).toEqual([]);
+      vi.setSystemTime(new Date("2026-10-20T12:07:00Z"));
+      await c.selfDeploy.sync();
+      expect(c.made.length).toBeGreaterThan(ranAgain);
+    });
+
+    it("skips nothing once a deploy has finished, and runs again the moment its result lands", async () => {
+      // Only the clock: the result lands well inside the minute, so the forced pass must not explain the run.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-20T12:05:00Z"));
+      const c = (ctx = await setup());
+      await c.available();
+      await c.selfDeploy.sync();
+      // The host says it is deploying: status.json changed, so the pass reads it and records "running".
+      await c.status({ id: randomUUID(), result: "running", message: "Deploying.", to_commit: B });
+      await c.selfDeploy.sync();
+      // Nothing has changed since: nothing to do.
+      const start = c.made.length;
+      await c.selfDeploy.sync();
+      expect(c.made.slice(start)).toEqual([]);
+      // The result lands: the pass runs at once, well inside the minute, and tells the owner.
+      await c.status({ id: randomUUID(), result: "deployed", message: "Deployed.", to_commit: B, ended: "2026-10-20T12:05:30Z" });
+      await c.selfDeploy.sync();
+      expect(c.made.length).toBeGreaterThan(start);
+      expect((await c.db.select().from(notifications)).map((n) => n.title)).toContain("Boss Man updated to bbbbbbbb");
+    });
+  });
+
   describe("runner update waits for the server update trial (BOS-368)", () => {
     afterEach(() => vi.useRealTimers());
     const target = (d: { context: unknown }) => d.context as { target: string; commit: string };
@@ -611,19 +709,23 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       // The owner is told the switch-back happened, but the notify fails: the run dies before the seen mark is saved.
       const notify = c.notes.notify;
       (c.notes as { notify: unknown }).notify = vi.fn().mockRejectedValueOnce(new Error("crash"));
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-03T01:03:30Z"));
       await c.status({ id: randomUUID(), result: "rolled_back", message: "Switched back.", from_commit: B, to_commit: A, ended: "2026-11-03T01:03:00Z" });
       await expect(c.selfDeploy.sync()).rejects.toThrow("crash");
       // Nothing was marked seen, and the card the crash left behind is still open.
       expect(await c.db.select().from(settings).where(eq(settings.key, "self_deploy"))).toHaveLength(0);
       (c.notes as { notify: unknown }).notify = notify;
-      // The next pass runs it all again, safely: the withdraw happens, and the owner gets exactly one note.
+      // The next pass (a minute later, after BOS-414's fingerprint window) runs it all again, safely: the
+      // withdraw happens, and the owner gets exactly one note.
+      vi.setSystemTime(new Date("2026-11-03T01:05:00Z"));
       await c.selfDeploy.sync();
-      expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(0);
       const seen = (await c.db.select().from(settings).where(eq(settings.key, "self_deploy")))[0]!.value as { notified: string };
       expect(seen.notified).toMatch(/:rolled_back:2026-11-03T01:03:00Z$/);
       const told = (await c.db.select().from(notifications)).filter((n) => n.level !== "ask");
       expect(told).toHaveLength(1);
       // A further pass changes nothing: the mark now holds.
+      vi.setSystemTime(new Date("2026-11-03T01:06:00Z"));
       await c.selfDeploy.sync();
       expect((await c.db.select().from(notifications)).filter((n) => n.level !== "ask")).toHaveLength(1);
     });

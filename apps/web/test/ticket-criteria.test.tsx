@@ -36,7 +36,7 @@ describe("acceptance criteria on the ticket page", () => {
     await screen.findByText("Done when");
     const rows = container.querySelectorAll('[data-testid="criterion"]');
     expect([...rows].map((r) => r.getAttribute("data-verdict"))).toEqual(["pass", "none"]);
-    expect(container.textContent).toContain("Not every criterion has the author's pass or fail");
+    expect(container.textContent).toContain("Not every criterion to check before merge");
   });
 
   it("counts criteria as '1 criterion' or 'N criteria'", async () => {
@@ -62,6 +62,37 @@ describe("acceptance criteria on the ticket page", () => {
     fireEvent.change(box, { target: { value: "   " } });
     fireEvent.click(screen.getByRole("button", { name: "Save criteria" }));
     await waitFor(() => expect(patches.at(-1)).toEqual({ acceptanceCriteria: [] }));
+  });
+
+  it("marks an on-a-real-host criterion, skips it in the review warning, and saves the tick with a text edit (DR-024 #5)", async () => {
+    const patches: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      stub({ acceptanceCriteria: [{ text: "Health check returns 200", after: "merge" }, "Secrets are never logged"], stateNote: "Secrets are never logged pass" }, patches),
+    );
+    const { container } = render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByText("Done when");
+    const rows = container.querySelectorAll('[data-testid="criterion"]');
+    expect([...rows].map((r) => r.getAttribute("data-after"))).toEqual(["merge", null]);
+    expect(container.textContent).toContain("on a real host, checked after merge");
+    // The after-merge check is unreported but doesn't raise the "reviewer has been told" warning.
+    expect(container.textContent).not.toContain("Not every criterion to check before merge has the author");
+    fireEvent.click(screen.getByText("Edit criteria"));
+    const box = screen.getByLabelText("Acceptance criteria, one per line") as HTMLTextAreaElement;
+    expect(box.value).toBe("Health check returns 200\nSecrets are never logged");
+    // A text edit keeps the after-merge mark on its line.
+    fireEvent.change(box, { target: { value: "Health check returns 200\nSecrets are never logged\nAnswers from the owner's Tailscale name on a real host" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save criteria" }));
+    await waitFor(() =>
+      expect(patches.at(-1)).toEqual({
+        acceptanceCriteria: [{ text: "Health check returns 200", after: "merge" }, "Secrets are never logged", "Answers from the owner's Tailscale name on a real host"],
+      }),
+    );
+    // A tick saves the after-merge mark; a plain save adds new lines as before-merge ones.
+    const ticks = screen.getAllByRole("checkbox") as HTMLInputElement[];
+    fireEvent.click(ticks.at(-1)!);
+    fireEvent.click(screen.getByRole("button", { name: "Save criteria" }));
+    await waitFor(() => expect((patches.at(-1) as { acceptanceCriteria: unknown[] }).acceptanceCriteria.at(-1)).toEqual({ text: "Answers from the owner's Tailscale name on a real host", after: "merge" }));
   });
 
   it("a ticket with no criteria shows just the editor", async () => {

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Checks check-quick.sh in a scratch repo with stub pnpm/node/shellcheck commands that log what they were asked to run.
 set -euo pipefail
+# The merge gate runs this with BOSSMAN_MERGE_CHECK set; the cases below set it themselves where they need it.
+unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
@@ -27,6 +29,7 @@ fi
 echo "node $*" >>"$LOG"
 S
 chmod +x "$t/bin/pnpm" "$t/bin/node"
+unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED CHECK_QUICK_BROAD_FILES CHECK_ALL_FORCE
 export PATH="$t/bin:$PATH" LOG="$t/log" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_PAIR_PROOF="$t/proof" CHECK_ALL_QUEUE_REPORT=1
 
 g() { git -C "$repo" -c user.name=t -c user.email=t@t "$@"; }
