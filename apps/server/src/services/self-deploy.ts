@@ -264,7 +264,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         ? host
           ? step(
               bg ? "To go back, run this on the machine that runs Boss Man:" : "To go back, run this on the machine that runs Boss Man (code only, never the database):",
-              cmd(bg ? `(umask 022 && cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh)` : `cd ${src} && scripts/deploy.sh --rollback`),
+              cmd(bg ? `(umask 022 && cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh)` : `(umask 022 && cd ${src} && scripts/deploy.sh --rollback)`),
               rollbackNote,
             )
           : `To go back, ${noHost} ${rollbackNote}`
