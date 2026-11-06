@@ -78,6 +78,14 @@ has "$D/outbox/available.json" '"bluegreen": false, "liveColour": ""'
 hasnt "$D/outbox/available.json" '"soakSeconds"' # a single server has no standby window to report
 has "$D/outbox/available.json" 'change apps/server/a'
 [[ ! -e $D/outbox/status.json ]] || fail "status written with no request"
+# 1a. Host facts (BOS-427): the machine's name, and the ownership of the folders it knows, read with stat only.
+has "$D/outbox/host.json" '{"version": 1, "name":'
+has "$D/outbox/host.json" "\"path\": \"$(cd "$T/deployer" && pwd)\""
+has "$D/outbox/host.json" "\"path\": \"$(cd "$D" && pwd)\""
+has "$D/outbox/host.json" '"mode": "'
+hasnt "$D/outbox/host.json" '"login"' # the deployer runs as root and doesn't guess the owner's account
+[[ $(stat -c %a "$D/outbox/host.json") == 644 ]] || fail "host.json is not mode 644"
+node -e 'const h=require(process.argv[1]);if(!Array.isArray(h.ownership)||!h.ownership.length)process.exit(1);for(const o of h.ownership)if(!/^\/[^"]*$/.test(o.path)||!/^[0-7]{3,4}$/.test(o.mode)||!o.owner||!o.group)process.exit(2)' "$D/outbox/host.json" || fail "host.json ownership is malformed: $(cat "$D/outbox/host.json")"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
 sed -i 's/^AVAILABLE_REFRESH_SECONDS=0$/AVAILABLE_REFRESH_SECONDS=300/' "$D/host.conf"
 printf '{"tip":"stale"}\n' >"$D/outbox/available.json"

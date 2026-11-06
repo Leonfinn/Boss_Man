@@ -649,6 +649,32 @@ describe("stalled runs (R32)", () => {
     expect(row!.question).toContain("It is still inside pnpm check-all, so it may just be a long command.");
   });
 
+  it("doesn't alert at 15 or 60 minutes while a check script waits for the check slot, but does after 2 hours (BOS-518)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run quick check", rawInput: { command: "cd /work && scripts/check-quick.sh" }, status: "in_progress" } } as unknown as RunnerEvent);
+    for (const minutes of [16, 44, 30]) {
+      ctx.advance(minutes * 60_000);
+      await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+      expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    }
+    expect(await ctx.alerts()).toEqual([]);
+    ctx.advance(29 * 60_000);
+    await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    expect(await ctx.alerts()).toEqual([]);
+    ctx.advance(2 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+  });
+
+  it("still alerts after 15 minutes for a silent command that is not a check script (BOS-518)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run other", rawInput: { command: "sleep 9999 # scripts/check-quick.sh.bak" }, status: "in_progress" } } as unknown as RunnerEvent);
+    ctx.advance(16 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+  });
+
   it("doesn't raise the 5-minute alert while a connected runner is still answering pings mid-command (BOS-217)", async () => {
     ctx = await setup();
     const { runId } = await launch();
