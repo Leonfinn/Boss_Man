@@ -3,7 +3,7 @@
 // edits, browsers) can only write the session's own folders, and can't read other agents' files
 // and secrets, signal the runner, or reach other sessions' sockets. Proven in the BOS-315 spike.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -206,4 +206,27 @@ export function sandboxSelfTest(): SandboxReport {
     }
   }
   return { landlockAbi: abi, errno, level: probe === false ? "unavailable" : level, missing, userns, probe };
+}
+
+/**
+ * Applies the operator's BOSSMAN_CHECK_SLOTS (how many full checks may run at once on this host) by writing
+ * or removing the proof file in gate/, which sessions can only read. Unset, empty, "1" or anything that is not
+ * a whole number from 2 to 16 means one at a time (the safe default). A hand-made proof file (a pair-measurement
+ * note) is left alone when the setting is unset, but a number written earlier by this function is removed.
+ * Returns the slots set, or 0 when the setting was unset.
+ */
+export function applyCheckSlots(dir: string, raw: string | undefined): number {
+  const { gate } = checkQueueDirs(dir);
+  const proof = path.join(gate, "check-pair-passed");
+  const text = (raw ?? "").trim();
+  if (text === "") {
+    if (existsSync(proof) && /^\d+\s*$/.test(readFileSync(proof, "utf8"))) rmSync(proof, { force: true });
+    return 0;
+  }
+  const n = /^\d{1,2}$/.test(text) ? Number(text) : 1;
+  const slots = n >= 2 && n <= 16 ? n : 1;
+  mkdirSync(gate, { recursive: true });
+  if (slots > 1) writeFileSync(proof, `${slots}\n`);
+  else rmSync(proof, { force: true });
+  return slots;
 }

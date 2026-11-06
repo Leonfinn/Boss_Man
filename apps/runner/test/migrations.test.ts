@@ -163,7 +163,7 @@ describe("the merge gate and the migration journal (BOS-360)", () => {
     if (r.status !== "migration_journal") return;
     expect(r.problems.join(" ")).toContain("0003_old");
     expect(r.problems.join(" ")).toContain(stepsToTake);
-    expect(r.problems.join(" ")).toContain("Date.now()");
+    expect(r.problems.join(" ")).toContain("run drizzle-kit generate again");
     expect(git(o.url, "rev-parse", "main")).toBe(git(o.seed, "rev-parse", "HEAD")); // nothing was pushed
   });
 

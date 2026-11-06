@@ -3,9 +3,10 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { DockerError } from "../src/docker.js";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, netguardSpec, parseAllow, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
@@ -120,6 +121,11 @@ describe("the runner launcher (R55)", () => {
     // BOS-412: weight can be changed, and a hard cap is only set when asked for.
     expect(containerSpec({ ...config(), cpuShares: 256, cpus: 1.5 }, "app-co").HostConfig).toMatchObject({ CpuShares: 256, NanoCpus: 1_500_000_000 });
     expect(containerSpec(config(), "app-co").HostConfig).not.toHaveProperty("NanoCpus");
+    expect(containerSpec({ ...config(), checkSlots: 2 }, "app-co").Env).toContain("BOSSMAN_CHECK_SLOTS=2");
+    expect(containerSpec({ ...config(), checkSlots: 1 }, "app-co").Env.join()).not.toContain("BOSSMAN_CHECK_SLOTS");
+    expect([parseCheckSlots(undefined), parseCheckSlots(""), parseCheckSlots("2")]).toEqual([1, 1, 2]);
+    expect(() => parseCheckSlots("0")).toThrow();
+    expect(() => parseCheckSlots("lots")).toThrow();
     expect(parseCpuShares(undefined)).toBe(512);
     expect(parseCpuShares("1024")).toBe(1024);
     expect(() => parseCpuShares("1")).toThrow();
@@ -387,4 +393,34 @@ describe("the runner launcher (R55)", () => {
     expect(parseGuardMode(undefined)).toBe("auto");
     expect(() => parseGuardMode("maybe")).toThrow();
   });
+
+  it("treats a removal racing another ('already in progress') as success once the container is gone, and a problem only if it is still there", async () => {
+    const cfg = config();
+    const fake = fakeDocker();
+    const settle = new Map<string, boolean>();
+    // A stand-in for Docker's answer while another removal of the same container is finishing: the remove waits,
+    // and the container is gone a moment later (finished = true) or stays and the remove fails (finished = false).
+    const racing: Docker = {
+      ...fake.docker,
+      async remove(id) {
+        if (!settle.has(id)) return fake.docker.remove(id);
+        await new Promise((r) => setTimeout(r, 1000));
+        if (settle.get(id)) {
+          for (const [name, c] of fake.containers) if (c.id === id) fake.containers.delete(name);
+          return;
+        }
+        throw new DockerError(409, "Removing the runner failed: Docker is still removing the old container after a minute. Wait a minute and run the update again.");
+      },
+    };
+    const api = launcher(cfg, racing);
+    await api.put("app-co", TOKEN);
+    const old = fake.containers.get("boss-man-runner-app-co")!.id;
+
+    // Gone by the time it is looked at: the new runner is made and the old one is not reported as a failure.
+    settle.set(old, true);
+    fake.containers.delete("boss-man-netguard-app-co");
+    await expect(api.recreate("app-co")).resolves.toMatchObject({ slug: "app-co" });
+    const fresh = fake.containers.get("boss-man-runner-app-co")!.id;
+    expect(fresh).not.toBe(old);
+  }, 20_000);
 });
