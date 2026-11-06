@@ -218,9 +218,10 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
   );
 }
 
-/** The fence line's host and account for a block written by hand at raise time; a bare ```sh names neither. */
+/** The fence line's host and account for a block written by hand at raise time; a bare ```sh names neither.
+ * The host pattern is the server's (steps.ts, fenceWhere): a plain DNS-style name only, so the two never disagree. */
 function whereOf(lang: string): Where | undefined {
-  const m = /^sh\s+host="([^"]+)"\s+as="(root|login)"$/.exec(lang.trim());
+  const m = /^sh\s+host="([A-Za-z0-9][A-Za-z0-9_.-]{0,63})"\s+as="(root|login)"$/.exec(lang.trim());
   return m ? { host: m[1]!, as: m[2] as Where["as"] } : undefined;
 }
 
