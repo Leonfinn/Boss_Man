@@ -44,7 +44,7 @@ const arrayBuffer = (b: Uint8Array) => b.buffer.slice(b.byteOffset, b.byteOffset
 export const MAX_DECODE_PIXELS = 40_000_000;
 
 /** The size the picture's header claims, so an oversized canvas is turned away before decoding. */
-function claimedSize(bytes: Uint8Array): { width: number; height: number } | null {
+export function claimedSize(bytes: Uint8Array): { width: number; height: number } | null {
   const type = pictureType(bytes);
   // PNG: the 8-byte signature, then IHDR, whose first 8 bytes are the width and height, big-endian.
   if (type === "image/png" && bytes.length >= 24) {
@@ -59,6 +59,24 @@ function claimedSize(bytes: Uint8Array): { width: number; height: number } | nul
       if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return { width: (bytes[i + 7]! << 8) | bytes[i + 8]!, height: (bytes[i + 5]! << 8) | bytes[i + 6]! };
     }
   }
+  if (type === "image/webp" && bytes.length >= 20) return webpClaimedSize(bytes);
+  return null;
+}
+
+/**
+ * A WebP's canvas, read from its first chunk (bytes 12-15 name it): "VP8X" an extended file, "VP8L" a
+ * lossless one, "VP8 " a simple lossy one. Each stores the width and height in a different place. A
+ * WebP the format doesn't recognise is refused rather than decoded blind.
+ */
+function webpClaimedSize(bytes: Uint8Array): { width: number; height: number } | null {
+  const chunk = Buffer.from(bytes.subarray(12, 16)).toString("latin1");
+  const u24 = (at: number) => bytes[at]! | (bytes[at + 1]! << 8) | (bytes[at + 2]! << 16);
+  if (chunk === "VP8X" && bytes.length >= 30) return { width: u24(24) + 1, height: u24(27) + 1 };
+  if (chunk === "VP8L" && bytes.length >= 25) {
+    const bits = bytes[21]! | (bytes[22]! << 8) | (bytes[23]! << 16) | (bytes[24]! << 24);
+    return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+  }
+  if (chunk === "VP8 " && bytes.length >= 30) return { width: (((bytes[27]! << 8) | bytes[26]!) & 0x3fff), height: (((bytes[29]! << 8) | bytes[28]!) & 0x3fff) };
   return null;
 }
 
@@ -98,13 +116,15 @@ const scaled = (image: Pixels, width: number, height: number) => resize(image as
 /**
  * Reduces an image to fit `maxBytes`, keeping its format. Tries gentle first: at full quality, then
  * lighter settings (for JPEG and WebP), then smaller and smaller pictures. Returns null when the
- * bytes aren't an image this can decode (a corrupt file, say), or claim more pixels than
- * MAX_DECODE_PIXELS, so the caller can say so plainly.
+ * bytes aren't an image this can decode (a corrupt file, say), whose header can't be read, or that
+ * claims more pixels than MAX_DECODE_PIXELS, so the caller can say so plainly.
  */
 export async function shrinkPicture(bytes: Uint8Array, type: PictureType, maxBytes: number): Promise<Buffer | null> {
   if (bytes.length <= maxBytes) return Buffer.from(bytes);
+  // Every format here has a readable header; one that doesn't is refused, since decoding it blind
+  // could still take unbounded memory.
   const claimed = claimedSize(bytes);
-  if (claimed && claimed.width * claimed.height > MAX_DECODE_PIXELS) return null;
+  if (!claimed || claimed.width * claimed.height > MAX_DECODE_PIXELS) return null;
   await init();
   let image: Pixels;
   try {

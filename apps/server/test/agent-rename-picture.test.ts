@@ -9,6 +9,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agentAvatars, agents, decisions, notifications, ticketImages } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { claimedSize, MAX_DECODE_PIXELS, shrinkPicture } from "../src/services/picture-shrink.js";
 
 // A 1x1 PNG, and a large PNG whose image data is garbage, so it can't be decoded.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -51,6 +52,28 @@ function noisyPng(width: number, height: number): Buffer {
   return pngOf(width, height, zlib.deflateSync(raw));
 }
 
+/** A WebP with a RIFF/WEBP wrapper and one named chunk after the given 16-byte head. */
+function webpOf(chunkType: string, payload: Buffer, padTo = 0): Buffer {
+  const chunk = Buffer.alloc(8);
+  chunk.write(chunkType, 0, "latin1");
+  chunk.writeUInt32LE(payload.length, 4);
+  const body = Buffer.concat([Buffer.from("WEBP", "latin1"), chunk, payload, payload.length % 2 ? Buffer.alloc(1) : Buffer.alloc(0), Buffer.alloc(padTo, 0xff)]);
+  const riff = Buffer.alloc(8);
+  riff.write("RIFF", 0, "latin1");
+  riff.writeUInt32LE(body.length, 4);
+  return Buffer.concat([riff, body]);
+}
+
+/** A WebP claiming the given canvas in a VP8X (extended) header, padded past the 256 KB cap. */
+function oversizedVp8xWebp(width: number, height: number): Buffer {
+  // The payload starts at file byte 20, so width-1 sits at 24-26 and height-1 at 27-29, after the
+  // flags and reserved bytes. VP8X is how a WebP states its canvas up front, even for 16k x 16k.
+  const vp8x = Buffer.alloc(10);
+  vp8x.writeUIntLE(width - 1, 4, 3);
+  vp8x.writeUIntLE(height - 1, 7, 3);
+  return webpOf("VP8X", vp8x, 300 * 1024);
+}
+
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
   await ctx?.close();
@@ -80,6 +103,35 @@ async function setup() {
 }
 
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+
+describe("the decode-size guard reads every picture's own header (BOS-320)", () => {
+  it("reads a WebP's claimed canvas from VP8X, VP8L and VP8 headers, and refuses one over the cap before decoding", async () => {
+    // VP8X: 24-bit little-endian width-1 at bytes 24-26, height-1 at 27-29.
+    const vp8x = Buffer.alloc(10);
+    vp8x.writeUIntLE(3999, 4, 3);
+    vp8x.writeUIntLE(2999, 7, 3);
+    expect(claimedSize(webpOf("VP8X", vp8x))).toEqual({ width: 4000, height: 3000 });
+    // VP8L: 14 bits of width-1 then 14 bits of height-1, little-endian from byte 21.
+    const vp8l = Buffer.alloc(5);
+    vp8l.writeUIntLE((4000 - 1) | ((3000 - 1) << 14), 1, 4);
+    expect(claimedSize(webpOf("VP8L", vp8l))).toEqual({ width: 4000, height: 3000 });
+    // VP8 (lossy): 14-bit width then height, little-endian, at bytes 26 and 28; the key frame
+    // start code sits just before them.
+    const vp8 = Buffer.alloc(10);
+    vp8[3] = 0x9d;
+    vp8[4] = 0x01;
+    vp8[5] = 0x2a;
+    vp8.writeUInt16LE(4000, 6);
+    vp8.writeUInt16LE(3000, 8);
+    expect(claimedSize(webpOf("VP8 ", vp8))).toEqual({ width: 4000, height: 3000 });
+    // A WebP the format doesn't recognise has no readable size, so it isn't decoded blind.
+    expect(claimedSize(webpOf("XXXX", Buffer.alloc(10)))).toBeNull();
+    // Over the cap: refused straight away, without the wasm codecs ever being started.
+    const bomb = oversizedVp8xWebp(16_000, 16_000);
+    expect(16_000 * 16_000).toBeGreaterThan(MAX_DECODE_PIXELS);
+    expect(await shrinkPicture(bomb, "image/webp", 256 * 1024)).toBeNull();
+  });
+});
 
 describe("the CEO renames an agent (BOS-265)", () => {
   it("renames from a run, keeps tickets and history to the id, and names the colleagues that still say the old name", async () => {
@@ -256,6 +308,9 @@ describe("the CEO sets an agent's picture (BOS-265)", () => {
     // So is one whose header claims a canvas too big to decode, before any memory is taken for it.
     const bomb = await upload(c, pngOf(40_000, 40_000, Buffer.alloc(300 * 1024, 1)), c.ticket.id);
     expect(textOf(await call({ imageId: bomb.id }))).toMatch(/couldn't be shrunk/);
+    // A WebP is read too: one whose VP8X header claims a vast canvas is refused the same way.
+    const webpBomb = await upload(c, oversizedVp8xWebp(16_000, 16_000), c.ticket.id);
+    expect(textOf(await call({ imageId: webpBomb.id }))).toMatch(/couldn't be shrunk/);
     // And a non-CEO isn't allowed at all.
     const worker = await c.mcp(c.engineer.id);
     expect(await worker.callTool({ name: "set_agent_picture", arguments: { agent: "Quinn - QA", imageId: theirs.id, reason: "Try it." } })).toMatchObject({ isError: true });
