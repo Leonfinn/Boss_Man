@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { loopGuards } from "../src/services/loop-guards.js";
 import { budgetPolicies, costEvents, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -235,5 +236,19 @@ describe("stuck review card: move the checks to after the merge (BOS-422)", () =
     await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "changes_requested", summary: `Fails: ${LIVE_CHECK}. Fails: Health check returns 200`, comments: [] });
     const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
     expect(d!.options).toEqual(["Send it back anyway", "Stop work on it"]);
+  });
+
+  it("does not offer it when one of two failing reviewers fails a before-merge criterion or leaves a line comment", async () => {
+    for (const other of [{ notes: "Criterion 2 fails: Health check returns 200", comments: [] }, { notes: `Criterion 1 fails: ${LIVE_CHECK}`, comments: [{ path: "a.ts", line: 1, body: "rename" }] }]) {
+      const c = (ctx = await setup({ maxRounds: 0 }));
+      await c.db.update(tickets).set({ acceptanceCriteria: [LIVE_CHECK, "Health check returns 200"] }).where(eq(tickets.id, c.ticket.id));
+      const mine = { notes: `Criterion 1 fails: ${LIVE_CHECK}`, comments: [] };
+      await loopGuards(c.db, { limits: { maxRounds: 0 } }).reviewRound({ ticketId: c.ticket.id, reviewer: "both", comments: other.comments, message: `${mine.notes}\n\n${other.notes}`, parts: [mine, other] });
+      const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+      expect(d!.options).toEqual(["Send it back anyway", "Stop work on it"]);
+      await ctx.app.close();
+      await ctx.close();
+      ctx = undefined;
+    }
   });
 });

@@ -41,7 +41,7 @@ export function loopGuards(
      * Records a "changes requested" round. If it would be the round that loops, it holds the
      * message back, blocks the ticket on an owner decision and returns that decision's id.
      */
-    async reviewRound(input: { ticketId: string; reviewer: string; comments: ReviewComment[]; message: string }): Promise<{ round: number; escalated: string | null }> {
+    async reviewRound(input: { ticketId: string; reviewer: string; comments: ReviewComment[]; message: string; /** Each failing review on its own, when several failed together. */ parts?: { notes: string; comments: ReviewComment[] }[] }): Promise<{ round: number; escalated: string | null }> {
       const fingerprints = input.comments.map((c) => findingFingerprint(c));
       await db.insert(ticketReviews).values({ ticketId: input.ticketId, reviewer: input.reviewer, verdict: "changes_requested", comments: input.comments, fingerprints, createdAt: now() });
       const rounds = await db.select({ fingerprints: ticketReviews.fingerprints }).from(ticketReviews).where(and(eq(ticketReviews.ticketId, input.ticketId), eq(ticketReviews.verdict, "changes_requested")));
@@ -57,7 +57,11 @@ export function loopGuards(
           ? `the same comment has now come back ${seen.get(fingerprints[repeatedIdx]!)} times: "${input.comments[repeatedIdx]!.path}: ${input.comments[repeatedIdx]!.body.slice(0, 200)}"`
           : `it has been sent back ${rounds.length} times`;
       // Offered only when the reviewers fail nothing but checks that can only be made on the live work (BOS-422).
-      const movable = movableFailures(readCriteria(t!.acceptanceCriteria), input.comments, input.message);
+      // With several reviewers each one must qualify on its own (their numbered verdicts would clash if read as one text).
+      const criteria = readCriteria(t!.acceptanceCriteria);
+      const parts = input.parts?.length ? input.parts : [{ notes: input.message, comments: input.comments }];
+      const each = parts.map((p) => movableFailures(criteria, p.comments, p.notes));
+      const movable = each.every((m) => m.length) ? [...new Set(each.flat())] : [];
       const ask = {
         companyId: t!.companyId,
         question: `Review of "${t!.title}" looks stuck: ${why}. Send the review back again, or stop work on the ticket?${movable.length ? ` Or move ${movable.map((c) => `"${c}"`).join(", ")} to after the merge, since it can only be checked once the work is live?` : ""}`,

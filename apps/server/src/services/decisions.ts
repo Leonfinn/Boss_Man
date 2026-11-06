@@ -203,7 +203,7 @@ export const APPROVE_MERGE = "Approve and merge";
 export const SEND_IT_BACK = "Send it back";
 /** The stuck-review card's third choice (BOS-422): offered when the reviewers fail only checks that need the live work. */
 export const MOVE_AFTER_MERGE = "Move these checks to after the merge";
-export const CHECK_AGAIN ="Run the check again";
+export const CHECK_AGAIN = "Run the check again";
 export const CHECK_SEND_BACK = "Send it back to the agent";
 export const CHECK_SKIP = "Merge without the check";
 /** A stalled review (BOS-404, BOS-426): real actions on the review instead of "Got it". */
