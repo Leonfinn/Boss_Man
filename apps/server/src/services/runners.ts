@@ -6,7 +6,7 @@ import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerComman
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { costEvents, decisions, engagements, runnerEvents, runners, runs, settings, tickets } from "../db/schema.js";
+import { costEvents, decisions, engagements, notifications, runnerEvents, runners, runs, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
 /** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
@@ -69,7 +69,13 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         ...(usage ? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedReadTokens: usage.cachedReadTokens, cachedWriteTokens: usage.cachedWriteTokens } : {}),
       })
       .where(eq(runs.id, runId))
-      .returning({ companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
+      .returning({ fundingSourceId: runs.fundingSourceId, companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
+    // A run refused with "weekly limit" proves its account is full whatever the last reading said: mark it
+    // full for an hour so new runs go to the next account instead of failing there again (BOS-463). A
+    // real reading from the account replaces this as soon as one arrives.
+    if (ended?.fundingSourceId && outcome && /weekly limit/i.test(outcome)) {
+      await funding.recordQuota(ended.fundingSourceId, [{ provider: "anthropic", window: "seven_day", utilization: 1, resetsAt: new Date(at.getTime() + 60 * 60_000), status: "rejected", overageInUse: false }], at);
+    }
     // A finished run's own questions are moot: its permission requests leave the queue, and its
     // stall alert is closed by the one closer on `runActive`, which says why it went (DR-016, BOS-470).
     await db
@@ -80,6 +86,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         context: sql`jsonb_set(${decisions.context}, '{withdrawn}', ${JSON.stringify({ by: "system", note: "The agent finished before this was answered, so there is nothing left to approve. No action needed.", at: at.toISOString() })}::jsonb, true)`,
       })
       .where(and(eq(decisions.status, "open"), eq(decisions.kind, "permission"), sql`${decisions.context}->>'runId' = ${runId}`));
+    // Those cards are settled, so their notifications are read now rather than on the next feed poll (BOS-413).
+    await db
+      .update(notifications)
+      .set({ readAt: at })
+      .where(and(isNull(notifications.readAt), sql`${notifications.decisionId} in (select ${decisions.id} from ${decisions} where coalesce(${decisions.context}->>'runId', '') = ${runId} and ${decisions.status} <> 'open')`));
     if (ended && ended.purpose !== "chat") await record(db, { companyId: ended.companyId, agentId: ended.agentId, ticketId: ended.ticketId, kind: "run_ended", summary: `Run ended: ${ended.outcome ?? "ended"}`, at });
     return ended;
   }
