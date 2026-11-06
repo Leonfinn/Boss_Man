@@ -87,14 +87,30 @@ describe("schedule_check", () => {
 });
 
 describe("firing", () => {
+  it("does not fire checks from the queue pass; the slower pass wakes one due at T within 30 s (BOS-414)", async () => {
+    const t = await working();
+    await schedule(await agent(ctx.co.ceo.id), t.id);
+    await due(t.id);
+    // Five 5 s queue passes run before the 30 s slower pass: none of them fires it.
+    for (let i = 0; i < 5; i++) await ctx.scheduler.tick();
+    expect(await checkWakes(t.id)).toHaveLength(0);
+    // The slower pass at 30 s does, at most one pass interval after it fell due.
+    await ctx.scheduler.slow();
+    const w = await checkWakes(t.id);
+    expect(w).toHaveLength(1);
+    expect(w[0]!.note).toMatch(/^Check due \(1 of 5\): CI on the PR\./);
+  });
+
   it("fires once per due time, counts the attempt and wakes with the note", async () => {
     const t = await working();
     await schedule(await agent(ctx.co.ceo.id), t.id);
     await ctx.scheduler.tick();
     expect(await checkWakes(t.id)).toHaveLength(0); // not due yet
     await due(t.id);
-    await Promise.all([ctx.scheduler.tick(), ctx.scheduler.tick()]);
+    // Scheduled checks ride the slower pass (BOS-414): the queue tick alone leaves a due check alone.
     await ctx.scheduler.tick();
+    expect(await checkWakes(t.id)).toHaveLength(0);
+    await Promise.all([ctx.scheduler.slow(), ctx.scheduler.slow()]);
     const w = await checkWakes(t.id);
     expect(w).toHaveLength(1);
     expect(w[0]!.agentId).toBe(ctx.co.ceo.id);
@@ -102,11 +118,11 @@ describe("firing", () => {
     expect(await row(t.id)).toMatchObject({ monitorAt: null, monitorAttempts: 1 });
   });
 
-  it("fires on the next tick after the owner's Check now", async () => {
+  it("fires on the next slower pass after the owner's Check now", async () => {
     const t = await working();
     await schedule(await agent(ctx.co.ceo.id), t.id);
     expect((await ctx.req("PUT", `/api/tickets/${t.id}/monitor`, { note: "CI on the PR" })).statusCode).toBe(200);
-    await ctx.scheduler.tick();
+    await ctx.scheduler.slow();
     expect(await checkWakes(t.id)).toHaveLength(1);
   });
 
@@ -126,15 +142,15 @@ describe("firing", () => {
     await schedule(me, t.id, { maxChecks: 2 });
     for (let i = 0; i < 2; i++) {
       await due(t.id);
-      await ctx.scheduler.tick();
+      await ctx.scheduler.slow();
       expect(await checkWakes(t.id)).toHaveLength(1);
       await ctx.db.delete(wakes).where(eq(wakes.reason, "check due")); // the agent got it
       await schedule(me, t.id, { maxChecks: 2 });
     }
     expect((await row(t.id)).monitorAttempts).toBe(2);
     await due(t.id);
-    await ctx.scheduler.tick();
-    await ctx.scheduler.tick();
+    await ctx.scheduler.slow();
+    await ctx.scheduler.slow();
     expect(await checkWakes(t.id)).toHaveLength(0);
     const a = (await alerts()).filter((d) => d.question.includes("still isn't resolved"));
     expect(a).toHaveLength(1);
@@ -148,7 +164,7 @@ describe("firing", () => {
     await ctx.work.updateTicket(t.id, { state: "done" });
     expect((await row(t.id)).monitorAt).toBeNull();
     await ctx.db.update(tickets).set({ monitorAt: new Date(Date.now() - 1000) }).where(eq(tickets.id, t.id));
-    await ctx.scheduler.tick();
+    await ctx.scheduler.slow();
     expect(await checkWakes(t.id)).toHaveLength(0);
     expect((await row(t.id)).monitorAt).toBeNull();
   });
@@ -158,11 +174,11 @@ describe("firing", () => {
     await schedule(await agent(ctx.co.ceo.id), t.id);
     await due(t.id);
     await ctx.db.update(companies).set({ paused: true }).where(eq(companies.id, ctx.co.company.id));
-    await ctx.scheduler.tick();
+    await ctx.scheduler.slow();
     expect(await checkWakes(t.id)).toHaveLength(0);
     expect((await row(t.id)).monitorAt).not.toBeNull();
     await ctx.db.update(companies).set({ paused: false }).where(eq(companies.id, ctx.co.company.id));
-    await ctx.scheduler.tick();
+    await ctx.scheduler.slow();
     expect(await checkWakes(t.id)).toHaveLength(1);
   });
 });

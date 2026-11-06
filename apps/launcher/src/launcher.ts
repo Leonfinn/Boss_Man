@@ -27,20 +27,12 @@ export type GuardStatus = "on" | "off" | "unavailable";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Removes a container, allowing for one that a removal already under way is finishing (Docker answers
- * "removal … is already in progress"). Waits for that one, looks again, and only says the removal
- * failed if the container is still there; gone means done.
+ * Removes a container. `docker.remove` already treats a concurrent removal ("removal … is already
+ * in progress") as success-in-progress: it waits for that one to finish and only fails if the
+ * container is still there afterwards.
  */
-async function removeSettled(docker: Docker, id: string, settleMs = 8000) {
-  if ((await docker.remove(id)) !== "racing") return;
-  const deadline = Date.now() + settleMs;
-  while (Date.now() < deadline) {
-    await sleep(250);
-    if (!(await docker.inspect(id))) return;
-  }
-  // Still there: ask again, and only now is the removal a failure.
-  if ((await docker.remove(id)) !== "racing" || !(await docker.inspect(id))) return;
-  throw new DockerError(500, "Removing the runner failed: it is still there");
+async function removeSettled(docker: Docker, id: string) {
+  await docker.remove(id);
 }
 
 /** The guard didn't come up. `hostCannot`: it said so itself (exit code 3), so retrying won't help. */

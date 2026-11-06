@@ -1,0 +1,95 @@
+import { randomUUID } from "node:crypto";
+import { afterEach, describe, expect, it } from "vitest";
+import { openPglite } from "../src/db/client.js";
+import type { BlueGreen } from "../src/services/bluegreen.js";
+import { serverStatusService, stackSummary } from "../src/services/server-status.js";
+
+// BOS-489 (DR-020 E): server_status names the whole stack, so one server answering is never read as "up".
+const NOW = new Date("2026-11-05T12:00:00Z");
+const DB = "2026-11-01T00:00:00.000Z";
+const colour = (c: string, up: boolean, role: string | null) => ({ colour: c, up, role, commit: up ? "abc" : null, startedAt: null });
+const bg = (green: ReturnType<typeof colour>): BlueGreen => ({ enabled: true, self: "blue", colours: [colour("blue", true, "leader"), green] });
+const single: BlueGreen = { enabled: false };
+const base = { role: "leader", colours: single, dbStartedAt: DB, status: null, available: null, now: NOW };
+const deployedAt = (secondsAgo: number) => ({ target: "server", result: "deployed", ended: new Date(NOW.getTime() - secondsAgo * 1000).toISOString(), message: "" });
+
+describe("stackSummary", () => {
+  it("is healthy on a single server with a database and no failed deploy", () => {
+    expect(stackSummary(base)).toEqual({ stack: "healthy", why: [] });
+    expect(stackSummary({ ...base, role: "single" }).stack).toBe("healthy");
+  });
+
+  it("reads a failed or partial deploy as degraded, with the deployer's message", () => {
+    const failed = stackSummary({ ...base, status: { target: "server", result: "failed", message: "the automatic switch-back to green ALSO failed" } });
+    expect(failed.stack).toBe("degraded");
+    expect(failed.why.join(" ")).toContain("ALSO failed");
+    expect(stackSummary({ ...base, status: { target: "runner", result: "partial", message: "" } }).stack).toBe("degraded");
+  });
+
+  it("clears once a later deploy result replaces the failed one", () => {
+    expect(stackSummary({ ...base, status: { target: "server", result: "deployed", ended: DB } }).stack).toBe("healthy");
+  });
+
+  it("is down with no database or no leader", () => {
+    expect(stackSummary({ ...base, dbStartedAt: null })).toMatchObject({ stack: "down", why: ["The database did not answer."] });
+    expect(stackSummary({ ...base, role: "standby", colours: bg(colour("green", false, null)) }).stack).toBe("down");
+  });
+
+  it("counts the other colour's leadership", () => {
+    expect(stackSummary({ ...base, role: "standby", colours: bg(colour("green", true, "leader")) }).stack).toBe("healthy");
+    expect(stackSummary({ ...base, colours: bg(colour("green", true, "leader")) })).toMatchObject({ stack: "degraded", why: ["More than one server says it leads."] });
+  });
+
+  it("wants the other colour up only during the standby window after a swap", () => {
+    const greenDown = bg(colour("green", false, null));
+    // Inside the window (default 900 s, or the host's soakSeconds) a down standby is degraded.
+    expect(stackSummary({ ...base, colours: greenDown, status: deployedAt(60) }).stack).toBe("degraded");
+    expect(stackSummary({ ...base, colours: greenDown, status: deployedAt(60), available: { soakSeconds: 30 } }).stack).toBe("healthy");
+    // After it the deployer stops the old colour on purpose.
+    expect(stackSummary({ ...base, colours: greenDown, status: deployedAt(901) }).stack).toBe("healthy");
+    expect(stackSummary({ ...base, colours: bg(colour("green", true, "standby")), status: deployedAt(60) }).stack).toBe("healthy");
+  });
+
+  it("is degraded when the colours could not be checked", () => {
+    expect(stackSummary({ ...base, colours: null })).toMatchObject({ stack: "degraded", why: ["The other colour could not be checked."] });
+  });
+});
+
+describe("server_status stack fields", () => {
+  let close: (() => Promise<void>) | undefined;
+  afterEach(async () => { await close?.(); close = undefined; });
+
+  async function status(deps: { colours?: () => Promise<BlueGreen>; status?: unknown }) {
+    const opened = await openPglite();
+    close = opened.close;
+    const svc = serverStatusService(opened.db, {
+      role: () => "leader", isConnected: () => false, hold: async () => null,
+      errors: { recent: () => [], count: () => 0, untagged: () => 0 } as never,
+      deploy: async () => ({ enabled: true, pending: false, status: deps.status ?? null, available: null }),
+      colours: deps.colours,
+      commit: "dev", startedAt: new Date(0), now: () => NOW,
+    });
+    return svc.status(randomUUID());
+  }
+
+  it("shows both colours, the database start time and the stack", async () => {
+    const both = bg(colour("green", true, "standby"));
+    const s = await status({ colours: async () => both });
+    expect(s).toMatchObject({ stack: "healthy", stackWhy: [], colours: both });
+    expect(Date.parse(s.database.startedAt!)).not.toBeNaN();
+  });
+
+  it("reports the 4 Nov case (server answers, switch-back failed) as degraded", async () => {
+    const s = await status({
+      colours: async () => bg(colour("green", false, null)),
+      status: { target: "server", result: "failed", message: "The checks on blue failed and the automatic switch-back to green ALSO failed" },
+    });
+    expect(s.stack).toBe("degraded");
+    expect(s.deploy.lastResult).toBe("failed");
+  });
+
+  it("reads a probe that throws as could-not-check, never as a single server", async () => {
+    const s = await status({ colours: async () => Promise.reject(new Error("boom")) });
+    expect(s).toMatchObject({ stack: "degraded", colours: null });
+  });
+});

@@ -14,7 +14,9 @@ export class DockerError extends Error {
 export type ContainerSummary = { Id: string; Names: string[]; Image: string; ImageID?: string; State: string; Status: string; Labels: Record<string, string>; Created: number };
 export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null }; State: { Status: string; StartedAt?: string; ExitCode?: number; Health?: { Status: string } } };
 
-export function dockerClient(socketPath = "/var/run/docker.sock") {
+export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs?: number; maxMs?: number } = {}) {
+  const pollMs = wait.pollMs ?? 500;
+  const maxMs = wait.maxMs ?? 60_000;
   function call<T>(method: string, path: string, body?: unknown): Promise<{ status: number; json: T | null }> {
     return new Promise((resolve, reject) => {
       const payload = body === undefined ? undefined : JSON.stringify(body);
@@ -76,15 +78,28 @@ export function dockerClient(socketPath = "/var/run/docker.sock") {
     },
     /**
      * Stops (30 s for the runner to finish its journal write) and removes it. Volumes and binds stay.
-     * Returns "racing" when another removal of the same container is finishing it: the caller waits and looks again.
+     * Another removal finishing it ("already in progress") is not a failure: waits for it to be gone, then returns.
      */
-    async remove(id: string): Promise<"gone" | "racing"> {
+    async remove(id: string): Promise<void> {
       const stop = await call("POST", `/containers/${encodeURIComponent(id)}/stop?t=30`);
       if (stop.status !== 204 && stop.status !== 304 && stop.status !== 404) fail(stop, "Stopping the runner failed");
       const r = await call("DELETE", `/containers/${encodeURIComponent(id)}?force=1`);
-      if (r.status === 409 && r.json && typeof r.json === "object" && /already in progress/i.test(String((r.json as { message?: unknown }).message ?? ""))) return "racing";
-      if (r.status !== 204 && r.status !== 404) fail(r, "Removing the runner failed");
-      return "gone";
+      if (r.status === 204 || r.status === 404) return;
+      // Another remove (a deploy, compose recreating the container) got there first: Docker answers
+      // 409 "removal of container X is already in progress". That is not a failure; wait for the
+      // container to be gone, then carry on.
+      const msg = r.json && typeof r.json === "object" && "message" in r.json ? String((r.json as { message: unknown }).message) : "";
+      if (r.status === 409 && /already in progress/i.test(msg)) {
+        const until = Date.now() + maxMs;
+        for (;;) {
+          const gone = await call("GET", `/containers/${encodeURIComponent(id)}/json`);
+          if (gone.status === 404) return;
+          if (gone.status !== 200) fail(gone, "Checking the runner was removed failed");
+          if (Date.now() >= until) throw new DockerError(409, "Removing the runner failed: Docker is still removing the old container after a minute. Wait a minute and run the update again.");
+          await new Promise((res) => setTimeout(res, pollMs));
+        }
+      }
+      fail(r, "Removing the runner failed");
     },
   };
 }
