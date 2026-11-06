@@ -762,6 +762,38 @@ export function reviewService(
       return `merge ${word} (since ${at(l.startedAt)})`;
     },
 
+    /**
+     * One line for `tickets read` (DR-024 #2): the host's checks on the head of the ticket's branch.
+     * Null when there's nothing to say (no branch, already merged, no known host or token). A host
+     * that refuses the token is said plainly, never shown as "no checks".
+     */
+    async branchChecksLine(ticketId: string, companyId?: string): Promise<string | null> {
+      try {
+        const { t, repoUrl, gitHost, gitApiBase } = await ticketWithRepo(ticketId, companyId);
+        if (!t.branch || t.mergeCommit || t.systemState === "done" || !deps.gitHosts) return null;
+        const a = repoUrl ? parseRepoUrl(repoUrl) : null;
+        const token = await deps.gitToken?.(t.companyId);
+        if (!a || (gitHost !== "github" && gitHost !== "gitea") || !gitApiBase || !token) return null;
+        const cfg = { kind: gitHost as GitHostKind, apiBase: gitApiBase, owner: a.owner, repo: a.repo };
+        const sha = await deps.gitHosts.branchHead(cfg, token, t.branch);
+        const c = await deps.gitHosts.checks(cfg, token, sha);
+        const at = sha.slice(0, 8);
+        const names = c.failing.join(", ");
+        if (c.state === "none") return `CI on branch head ${at}: no checks reported (yet).`;
+        if (c.state === "failed") return `CI on branch head ${at}: FAILED${names ? ` (${names})` : ""}.`;
+        if (c.state === "pending") return `CI on branch head ${at}: still running.`;
+        return `CI on branch head ${at}: passed${c.total ? ` (${c.total} check${c.total === 1 ? "" : "s"})` : ""}.`;
+      } catch (err) {
+        if (err instanceof GitHostError) {
+          const hint = err.status === 401 || err.status === 403 || err.status === 404
+            ? " The company's git token may lack read access to checks: on GitHub a fine-grained token needs Repository permissions → Checks: Read-only."
+            : "";
+          return `CI on branch head: not available (${err.message}).${hint}`;
+        }
+        return null;
+      }
+    },
+
     /** True while a merge for this ticket has said it is alive within the merge window (a check or lock wait under way). */
     landingActive(ticketId: string): boolean {
       return Date.now() - (landingBeat.get(ticketId) ?? 0) <= MERGE_MISSED_AFTER_MS;

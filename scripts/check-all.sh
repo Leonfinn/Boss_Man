@@ -101,6 +101,9 @@ fi
 # BOSSMAN_CHECK_BODY replaces the checks below with a stub command (for check-all.test.sh).
 if [ -n "${BOSSMAN_CHECK_BODY:-}" ]; then bash -c "$BOSSMAN_CHECK_BODY"; exit; fi
 
+# Clear old test scratch out of /tmp (older than 6 h, held by no process); best effort, never fails the check.
+"$(dirname "${BASH_SOURCE[0]}")/sweep-tmp.sh" || true
+
 # CHECK_ALL_SLOT_COMMAND (used by check-quick.sh, with BOSSMAN_CHECK_CHILD=1): wait for a slot exactly like a hand-run check,
 # run that one command while holding it, and exit with its status. None of the full checks run.
 if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
@@ -123,7 +126,10 @@ if command -v flock >/dev/null; then
   # (see the Build and test note). CHECK_ALL_PAIR_TRIAL=1 lets the two measuring runs use more slots.
   PROOF=${CHECK_ALL_PAIR_PROOF:-/var/tmp/bossman-check-pair-passed}
   SLOTS=1
-  if [ -s "$PROOF" ] || [ -n "${CHECK_ALL_PAIR_TRIAL:-}" ]; then SLOTS=${CHECK_ALL_SLOTS:-2}
+  # A proof file holding just a whole number sets the slot count (the runner writes it from BOSSMAN_CHECK_SLOTS, so sessions
+  # cannot); any other content (a pair-measurement note) keeps the old meaning: CHECK_ALL_SLOTS, default 2.
+  if [ -s "$PROOF" ] && [[ "$(tr -d '[:space:]' <"$PROOF" 2>/dev/null)" =~ ^[0-9]{1,2}$ ]]; then SLOTS=$((10#${BASH_REMATCH[0]})); [ "$SLOTS" -ge 1 ] || SLOTS=1; [ "$SLOTS" -le 16 ] || SLOTS=16
+  elif [ -s "$PROOF" ] || [ -n "${CHECK_ALL_PAIR_TRIAL:-}" ]; then SLOTS=${CHECK_ALL_SLOTS:-2}
   elif [ "${CHECK_ALL_SLOTS:-1}" -gt 1 ]; then echo "check-all: CHECK_ALL_SLOTS=$CHECK_ALL_SLOTS ignored, no passed side-by-side pair recorded in $PROOF; running one at a time"
   fi
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order

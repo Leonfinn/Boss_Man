@@ -38,6 +38,8 @@ export async function stampPost(db: Db, input: { runId?: string | null; ticketId
 export type ProgressDeps = {
   wake: (input: { agentId: string; ticketId?: string | null; reason: string; note?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
   alert: (input: AlertInput) => Promise<{ id: string } | null>;
+  /** True while the run waits inside a check script for the shared check slot and is still under the queue ceiling (BOS-518). */
+  inCheckQueue?: (runId: string, silentMs: number) => Promise<boolean>;
 };
 
 export async function progressSweep(db: Db, t: Date, deps: ProgressDeps) {
@@ -65,6 +67,7 @@ export async function progressSweep(db: Db, t: Date, deps: ProgressDeps) {
     const since = run.lastPostAt && run.lastPostAt > run.startedAt ? run.lastPostAt : run.startedAt;
     const silent = t.getTime() - since.getTime();
     const stage = silentStage(silent, s);
+    if (stage !== "ok" && deps.inCheckQueue && (await deps.inCheckQueue(run.id, silent))) continue;
     if (stage === "ok") continue;
     if (!run.silentSteeredAt) {
       // Claim it first, so two passes can't both ask.
