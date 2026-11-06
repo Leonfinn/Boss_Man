@@ -1077,6 +1077,7 @@ export async function buildApp(opts: AppOptions) {
       titlePattern: z.string().min(1).max(500).optional(),
       safeOnly: z.boolean().optional(),
       scratchOnly: z.boolean().optional(),
+      agentIds: z.array(z.string().min(1).max(64)).min(1).max(50).optional(),
     });
     const Outcome = z.enum(["allow", "ceo", "owner", "deny"]);
     const ruleErrors = (reply: FastifyReply) => (err: unknown) => {

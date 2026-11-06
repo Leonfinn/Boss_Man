@@ -166,10 +166,10 @@ describe("alwaysChoices", () => {
     const info = { title, kind, rawInput };
     return alwaysChoices(info, explainPermission(info, "A"));
   };
-  it("offers the exact tool or the whole server for an MCP tool, never Boss Man's own", () => {
+  it("offers only the exact tool for an MCP tool, never Boss Man's own", () => {
     const c = choices("mcp__crawl4ai__md", "other", null);
-    expect(c.map((x) => x.label)).toEqual(["Always allow crawl4ai's md tool", "Always allow every crawl4ai tool"]);
-    expect(c.map((x) => x.match.titlePattern)).toEqual(["^mcp__crawl4ai__md$", "^mcp__crawl4ai__"]);
+    expect(c.map((x) => x.label)).toEqual(["Always allow crawl4ai's md tool"]);
+    expect(c.map((x) => x.match.titlePattern)).toEqual(["^mcp__crawl4ai__md$"]);
     expect(choices("mcp__bossman__create_ticket", "other", null)).toEqual([]);
   });
   it("escapes regex characters in what it saves", () => {
@@ -192,7 +192,7 @@ describe("alwaysChoices", () => {
     expect(choices("Read", "read", { file_path: "a" })).toEqual([]);
     expect(choices("Read", "read", { file_path: "/root/.ssh/id_rsa" })).toEqual([]);
     expect(choices("Edit", "edit", { file_path: "/etc/passwd" })).toEqual([]);
-    expect(choices("WebFetch", "fetch", { url: "https://x.dev" }).map((x) => x.label)).toEqual(["Always allow agents to fetch web pages"]);
+    expect(choices("WebFetch", "fetch", { url: "https://x.dev" })).toEqual([]);
     const rule = [{ name: "all", match: { kinds: ["execute"], safeOnly: true }, outcome: "allow" as const }];
     const run = (command: string) => evaluatePermission({ title: command, kind: "execute", rawInput: { command } }, rule);
     expect(run("rm -rf /srv/dist").outcome).toBe("owner");

@@ -115,6 +115,30 @@ describe("Always allow on a permission card (BOS-294)", () => {
     expect(res.json().error ?? res.body).not.toMatch(/must be one of/);
     expect(await ctx.rules()).toHaveLength(0);
   });
+  it("offers only the exact tool, and refuses a server-wide or fetch-wide rule on an old card", async () => {
+    const card = await ctx.ask(ctx.dev.id, MD);
+    expect(card!.options).toEqual(["Allow once", ALWAYS, "Deny"]);
+    for (const [label, match] of [
+      ["Always allow every crawl4ai tool", { titlePattern: "^mcp__crawl4ai__", safeOnly: true }],
+      ["Always allow agents to fetch web pages", { kinds: ["fetch"], safeOnly: true }],
+    ] as const) {
+      const context = { ...(card!.context as object), always: [{ label, name: label, what: label, match }] };
+      await ctx.db.update(decisions).set({ context, options: ["Allow once", label, "Deny"] }).where(eq(decisions.id, card!.id));
+      const res = await ctx.answer(card!.id, label);
+      expect(res.statusCode).toBe(422);
+      expect(res.body).not.toMatch(/must be one of/);
+    }
+    expect(await ctx.rules()).toHaveLength(0);
+  });
+  it("keeps a rule's agent when it is edited without the agent condition", async () => {
+    const card = await ctx.ask(ctx.dev.id, MD);
+    await ctx.answer(card!.id, ALWAYS);
+    const [rule] = await ctx.rules();
+    const res = await ctx.app.inject({ method: "PATCH", url: `/api/policy-rules/${rule!.id}`, headers: { cookie: ctx.cookie }, payload: { match: { titlePattern: `^${MD}$`, safeOnly: true } } });
+    expect(res.statusCode).toBe(200);
+    const [after] = await ctx.rules();
+    expect(after!.condition).toMatchObject({ agentIds: [ctx.dev.id] });
+  });
   it("never lets the CEO save a standing rule", async () => {
     const card = await ctx.ask(ctx.dev.id, MD);
     expect(card!.options).toContain(ALWAYS);

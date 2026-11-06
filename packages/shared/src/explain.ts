@@ -763,7 +763,6 @@ export function explainPermission(info: PermissionInfo, agent: string): Permissi
 const SECRET_HINT = /(?:^|[\/\s=~])(?:\.ssh|\.aws|\.gnupg|\.netrc|\.npmrc|\.pgpass|\.docker\/config|\.env(?:\.\S*)?|id_(?:rsa|ed25519|ecdsa|dsa))(?:\W|$)|secret|passw(?:or)?d|credential|token|api[_-]?key|private[_-]?key|\.pem\b|\.p12\b|\.key\b|environ\b/i;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // File reads and edits get no Always choice: a kind-wide rule can't name a safe path, so it would cover secrets and files outside the checkout (BOS-294 security review).
-const KIND_RULE: Record<string, string> = { fetch: "fetch web pages" };
 
 /**
  * The standing rules offered for a request, narrowest first. Shell commands only when they
@@ -775,16 +774,14 @@ export function alwaysChoices(info: PermissionInfo, e: PermissionExplanation): A
   if (mcp) {
     const [, server, tool] = mcp as unknown as [string, string, string];
     if (server === "bossman") return [];
-    return [
-      { label: `Always allow ${server}'s ${tool} tool`, name: `Allow ${server}'s ${tool} tool`, what: `use ${server}'s ${tool} tool`, match: { titlePattern: `^${escapeRe(info.title!)}$`, safeOnly: true } },
-      { label: `Always allow every ${server} tool`, name: `Allow every ${server} tool`, what: `use every ${server} tool`, match: { titlePattern: `^mcp__${escapeRe(server)}__`, safeOnly: true } },
-    ];
+    // One exact tool only: a server-wide rule would cover destructive tools and ones added later (safeOnly checks shell commands only).
+    return [{ label: `Always allow ${server}'s ${tool} tool`, name: `Allow ${server}'s ${tool} tool`, what: `use ${server}'s ${tool} tool`, match: { titlePattern: `^${escapeRe(info.title!)}$`, safeOnly: true } }];
   }
   if (e.command) {
     return e.effect === "reads" && !e.summary.includes("secrets") && !SECRET_HINT.test(e.command) && e.command.length < 250
       ? [{ label: "Always allow this exact command", name: `Allow the command ${e.command.slice(0, 60)}`, what: `run exactly this command: ${e.command.slice(0, 120)}`, match: { kinds: ["execute"], commandPattern: `^${escapeRe(e.command)}$`, safeOnly: true } }]
       : [];
   }
-  const what = KIND_RULE[info.kind ?? ""];
-  return what ? [{ label: `Always allow agents to ${what}`, name: `Allow agents to ${what}`, what, match: { kinds: [info.kind!], safeOnly: true } }] : [];
+  // No kind-wide choices: a fetch rule has no address limit, so it would be a standing way to send data out in a URL.
+  return [];
 }

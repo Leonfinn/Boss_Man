@@ -85,10 +85,17 @@ export function policyRulesService(db: Db) {
     },
 
     async update(id: string, patch: { name?: string; match?: PolicyMatch; outcome?: PolicyOutcome }) {
-      if (patch.match) check(patch.match);
+      // An edit that doesn't carry the agent condition keeps it: a rule for one agent must not quietly become company-wide.
+      let match = patch.match;
+      if (match && !match.agentIds) {
+        const [old] = await db.select({ condition: policyRules.condition }).from(policyRules).where(eq(policyRules.id, id));
+        const kept = (old?.condition as PolicyMatch | undefined)?.agentIds;
+        if (kept) match = { ...match, agentIds: kept };
+      }
+      if (match) check(match);
       const [row] = await db
         .update(policyRules)
-        .set({ ...(patch.name ? { name: patch.name } : {}), ...(patch.match ? { condition: patch.match } : {}), ...(patch.outcome ? { outcome: patch.outcome } : {}) })
+        .set({ ...(patch.name ? { name: patch.name } : {}), ...(match ? { condition: match } : {}), ...(patch.outcome ? { outcome: patch.outcome } : {}) })
         .where(eq(policyRules.id, id))
         .returning();
       if (!row) throw new RuleError(404, "No such rule.");

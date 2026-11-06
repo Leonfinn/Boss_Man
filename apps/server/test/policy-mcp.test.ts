@@ -181,7 +181,7 @@ describe("permission requests through the policy engine", () => {
     await ctx.db.insert(policyRules).values({ companyId: ctx.homelab.company.id, name: "No crawl4ai JS", trigger: "permission", condition: { titlePattern: "^mcp__crawl4ai__execute_js$" }, outcome: "deny", position: 0 });
     ask("r1", "mcp__crawl4ai__md");
     const [d] = await open(1);
-    expect(d!.options).toEqual(["Allow once", "Always allow crawl4ai's md tool", "Always allow every crawl4ai tool", "Deny"]);
+    expect(d!.options).toEqual(["Allow once", "Always allow crawl4ai's md tool", "Deny"]);
     expect(d!.question).toMatch(/^CEO wants to use a tool/);
     const ans = await ctx.app.inject({ method: "POST", url: `/api/decisions/${d!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Always allow crawl4ai's md tool" } });
     expect(ans.json()).toMatchObject({ delivered: true });
