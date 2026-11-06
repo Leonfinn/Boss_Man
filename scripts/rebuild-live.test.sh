@@ -14,6 +14,7 @@ echo "docker $*" >>"$FAKE_LOG"
 case "$*" in
   *"pg_dump"*) echo "-- dump" ;;
   *"compose build"*) exit "${BUILD_RC:-0}" ;;
+  *"compose logs"*"server-"*) echo "Error: EACCES: permission denied, open /app/host-facts.ts" ;;
   *"kill -s SIGUSR2"*) echo "$(($(cat "$FAKE_DIR/signals" 2>/dev/null || echo 0) + 1))" >"$FAKE_DIR/signals" ;;
   *"exec -T server-"*"api/ready"*)
     # Prints what the in-container probe prints: "ok role commit", or nothing while the server isn't listening yet.
@@ -85,4 +86,26 @@ logged "compose build server-blue" || fail "didn't build the named colour"
 rm "$T/deployer/proxy/active.caddy"
 run && fail "ran without knowing the live colour"
 grep -q "can't find which colour is live" "$T/out" || fail "didn't explain the missing include"
+# The failure message ends with the last lines of that colour's log, so the cause is not hidden.
+LEADER_AFTER=999 REBUILD_WAIT_SECONDS=1 run green && fail "a standby server reported success"
+grep -q "Last 20 lines of the server-green log" "$T/out" && grep -q "EACCES: permission denied" "$T/out" || fail "didn't show the container log"
+logged "compose logs --no-color --tail 20 server-green" || fail "didn't ask for 20 log lines"
+
+# BOS-562: tracked files or folders the server (user node) can't read stop the rebuild before the backup, changing nothing.
+(cd "$T/repo" && echo a >tracked.txt && mkdir -p dir && echo b >dir/x && git add tracked.txt dir && git -c user.email=t@t -c user.name=t commit -q -m files && chmod 600 tracked.txt && chmod 700 dir)
+ls "$T/backups" >"$T/before"
+run green && fail "rebuilt with unreadable files"
+grep -q "^  tracked.txt$" "$T/out" && grep -q "^  dir$" "$T/out" || fail "didn't list the unreadable paths"
+grep -q "chmod go+r" "$T/out" || fail "didn't print the fix"
+[[ ! -s $FAKE_LOG ]] || fail "touched docker despite unreadable files"
+[[ "$(ls "$T/backups")" == "$(cat "$T/before")" ]] || fail "made a backup despite unreadable files"
+# More than 10 are cut to 10 paths.
+(cd "$T/repo" && mkdir many && for i in $(seq 1 15); do echo "$i" >"many/f$i"; done && git add many && git -c user.email=t@t -c user.name=t commit -q -m many && chmod 600 many/*)
+run green && fail "rebuilt with many unreadable files"
+[[ $(grep -c "^  many/f" "$T/out") == 10 ]] || fail "expected 10 listed paths, got $(grep -c "^  many/f" "$T/out")"
+grep -q "STOPPED: 17 file(s)" "$T/out" || fail "didn't count all of them"
+# The printed fix works.
+eval "$(sed -n 's/^  cd /cd /p' "$T/out")"
+git -C "$T/repo" rev-parse HEAD >"$T/commit" # the repo has new commits now
+run green || fail "the printed fix did not make the rebuild go through"
 echo "rebuild-live.sh: all checks passed"

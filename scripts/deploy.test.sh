@@ -61,4 +61,23 @@ git reset -q --hard "$one"; : >"$FAKE_LOG"
 if COMPOSE_FILE=docker-compose.yml:deploy/truenas-bluegreen.yml PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/bg.out" 2>&1; then echo "FAIL: deploy.sh ran on a blue/green install"; exit 1; fi
 grep -q "blue/green" "$t/bg.out" || { echo "FAIL: blue/green guard message"; exit 1; }
 [[ ! -s $FAKE_LOG ]] || { echo "FAIL: blue/green guard ran docker"; exit 1; }
+# BOS-562: a root shell with umask 077 must not leave the checkout unreadable for the server (user node).
+git reset -q --hard "$one"; : >"$FAKE_LOG"; rm -f "$t"/backups/bossman-*.sql.gz
+(umask 077; PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null)
+[[ $(stat -c %a f) == 644 ]] || { echo "FAIL: umask 077 left f as mode $(stat -c %a f), not 644"; exit 1; }
+# A tracked file others can't read: stop before the backup and build, change nothing, name the file and the fix.
+git reset -q --hard "$one"; : >"$FAKE_LOG"; rm -f "$t"/backups/bossman-*.sql.gz; chmod 600 f; chmod 700 scripts
+if PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/unread.out" 2>&1; then echo "FAIL: deployed with unreadable files"; exit 1; fi
+grep -q "^  f$" "$t/unread.out" && grep -q "^  scripts$" "$t/unread.out" || { echo "FAIL: unreadable files not listed"; cat "$t/unread.out"; exit 1; }
+grep -q "chmod go+r" "$t/unread.out" || { echo "FAIL: no fix printed"; exit 1; }
+[[ ! -s $FAKE_LOG ]] || { echo "FAIL: ran docker despite unreadable files"; exit 1; }
+[[ $(git rev-parse HEAD) == "$one" ]] || { echo "FAIL: moved the checkout despite unreadable files"; exit 1; }
+ls "$t"/backups/bossman-*.sql.gz >/dev/null 2>&1 && { echo "FAIL: made a backup despite unreadable files"; exit 1; }
+# The printed fix works, and the deploy then goes through.
+eval "$(sed -n 's/^  cd /cd /p' "$t/unread.out")"
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null || { echo "FAIL: deploy after the fix"; exit 1; }
+# The readable-check is one text in the three scripts.
+for s in rebuild-live host-deployer; do
+  [[ "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/$s.sh")" == "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/deploy.sh")" ]] || { echo "FAIL: readable-check in $s.sh differs from deploy.sh"; exit 1; }
+done
 echo "deploy.test.sh: ok"
