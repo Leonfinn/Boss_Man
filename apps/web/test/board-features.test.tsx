@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import type { Company } from "../src/api";
 import { Board } from "../src/pages/Board";
 import { Features } from "../src/pages/Features";
@@ -279,6 +280,20 @@ describe("add feature or task", () => {
     fireEvent.click(screen.getByRole("button", { name: "Let the CEO question me first" }));
     await waitFor(() => expect(go).toHaveBeenCalledWith("chat/c1/a1"));
     expect(posts).toEqual([{ url: "/api/companies/c1/chat/grill", body: { kind: "task", title: "Add SSO", description: "Acme needs it", projectId: "p1" } }]);
+  });
+
+  it("takes a 200,000-character description whole, instead of cutting the paste (BOS-502)", async () => {
+    const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Add task" }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Big paste" } });
+    const box = screen.getByLabelText("Description") as HTMLTextAreaElement;
+    expect(box.getAttribute("maxLength")).toBeNull();
+    const big = "x".repeat(OWNER_MESSAGE_MAX);
+    fireEvent.change(box, { target: { value: big } });
+    expect(box.value).toHaveLength(OWNER_MESSAGE_MAX);
+    fireEvent.click(screen.getByRole("button", { name: "Add to backlog" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]!.body.body).toHaveLength(OWNER_MESSAGE_MAX);
   });
 
   it("opens New task with the feature preselected from a feature card", async () => {

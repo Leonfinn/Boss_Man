@@ -891,7 +891,9 @@ export class SessionManager {
       // Messages that arrived during the turn continue the same session (R37).
       while (state.queued.length && this.runs.has(cmd.runId)) {
         const text = state.queued.splice(0).join("\n\n");
-        emit({ type: "run.update", runId: cmd.runId, update: { kind: "message_delivered", text: text.slice(0, 2000) } });
+        // The step shown on the ticket's feed is short (the full text is in the conversation anyway),
+        // but a long owner message should still be recognisable rather than cut after a couple of lines.
+        emit({ type: "run.update", runId: cmd.runId, update: { kind: "message_delivered", text: text.slice(0, 4000), fullLength: text.length } });
         result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text }] });
         countTokens(result);
         await checkpoint("after a turn");

@@ -654,10 +654,24 @@
       "breakpoints": true
     },
     {
-      "idx": 93,
+      "idx": 103,
       "version": "7",
-      "when": 1793889000000,
-      "tag": "0100_check_jobs",
+      "when": 1793937277960,
+      "tag": "0103_run_query_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1793941639218,
+      "tag": "0104_standing_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1793955467076,
+      "tag": "0105_check_jobs",
       "breakpoints": true
     }
   ]

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { gitAuthEnv } from "../src/workspace.js";
-import { addGitConfig, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, probeLandlock, repoGrant, runnerFence, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
+import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, probeLandlock, repoGrant, runnerFence, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
 
 const { abi } = probeLandlock();
 const live = levelFor(abi).level !== "unavailable";
@@ -252,5 +252,26 @@ describe.skipIf(!live)("fence, live", () => {
     expect(report.landlockAbi).toBe(abi);
     expect(report.probe).toBe(true);
     expect(report.level).toBe(levelFor(abi).level);
+  });
+});
+
+describe("applyCheckSlots (BOSSMAN_CHECK_SLOTS)", () => {
+  const proofOf = (d: string) => path.join(d, "gate", "check-pair-passed");
+  it("writes a slot count for 2 or more and removes it again for 1; unset keeps a hand-made note but drops its own number", () => {
+    const d = mkdtempSync(path.join(tmpdir(), "slots-"));
+    expect(applyCheckSlots(d, "2")).toBe(2);
+    expect(readFileSync(proofOf(d), "utf8").trim()).toBe("2");
+    expect(applyCheckSlots(d, "1")).toBe(1);
+    expect(existsSync(proofOf(d))).toBe(false);
+    expect(applyCheckSlots(d, "lots")).toBe(1);
+    expect(applyCheckSlots(d, "99")).toBe(1);
+    expect(existsSync(proofOf(d))).toBe(false);
+    applyCheckSlots(d, "3");
+    expect(applyCheckSlots(d, undefined)).toBe(0);
+    expect(existsSync(proofOf(d))).toBe(false);
+    mkdirSync(path.join(d, "gate"), { recursive: true });
+    writeFileSync(proofOf(d), "A=600s B=640s no OOM");
+    expect(applyCheckSlots(d, "")).toBe(0);
+    expect(existsSync(proofOf(d))).toBe(true);
   });
 });

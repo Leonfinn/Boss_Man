@@ -76,8 +76,11 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/restart?t=30`);
       if (r.status !== 204) fail(r, "Restarting the runner failed");
     },
-    /** Stops (30 s for the runner to finish its journal write) and removes it. Volumes and binds stay. */
-    async remove(id: string) {
+    /**
+     * Stops (30 s for the runner to finish its journal write) and removes it. Volumes and binds stay.
+     * Another removal finishing it ("already in progress") is not a failure: waits for it to be gone, then returns.
+     */
+    async remove(id: string): Promise<void> {
       const stop = await call("POST", `/containers/${encodeURIComponent(id)}/stop?t=30`);
       if (stop.status !== 204 && stop.status !== 304 && stop.status !== 404) fail(stop, "Stopping the runner failed");
       const r = await call("DELETE", `/containers/${encodeURIComponent(id)}?force=1`);

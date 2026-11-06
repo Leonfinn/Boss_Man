@@ -64,6 +64,11 @@ export const companies = pgTable("companies", {
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
+  /** Company-wide rules every agent reads at the start of every run (BOS-353); set by the owner or the CEO, capped in code. */
+  standingRules: text("standing_rules"),
+  /** Who last changed the standing rules ("owner" or the CEO's name), and when. */
+  standingRulesBy: text("standing_rules_by"),
+  standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
@@ -372,7 +377,14 @@ export const tickets = pgTable(
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number), check("tickets_size_scale", sql`${t.size} is null or ${t.size} in (1, 2, 3, 5, 8)`)],
+  (t) => [
+    index("tickets_company_state").on(t.companyId, t.systemState),
+    uniqueIndex("tickets_company_number").on(t.companyId, t.number),
+    check("tickets_size_scale", sql`${t.size} is null or ${t.size} in (1, 2, 3, 5, 8)`),
+    // Read on every scheduler pass (watchDue and monitorDue, every 5 s). BOS-407.
+    index("tickets_watcher").on(t.watcherAgentId).where(sql`${t.watcherAgentId} is not null`),
+    index("tickets_monitor_at").on(t.monitorAt).where(sql`${t.monitorAt} is not null`),
+  ],
 );
 
 // ---------- Decisions and engagements ----------
@@ -404,7 +416,10 @@ export const decisions = pgTable("decisions", {
   /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
   staleAt: timestamp("stale_at", { withTimezone: true }),
   staleReason: text("stale_reason"),
-});
+},
+  // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
+  (t) => [index("decisions_status").on(t.status)],
+);
 
 export const engagementStatus = pgEnum("engagement_status", [
   "requested",
@@ -462,6 +477,8 @@ export const ticketDependencies = pgTable(
       "ticket_dependencies_one_blocker",
       sql`num_nonnulls(${t.blockerTicketId}, ${t.blockerEngagementId}, ${t.blockerDecisionId}) = 1`,
     ),
+    index("ticket_dependencies_blocked").on(t.blockedTicketId),
+    index("ticket_dependencies_blocker").on(t.blockerTicketId),
   ],
 );
 
@@ -560,7 +577,15 @@ export const runs = pgTable("runs", {
   lastPostAt: timestamp("last_post_at", { withTimezone: true }),
   /** When Boss Man asked the silent run for a status, so it is asked once (BOS-314). */
   silentSteeredAt: timestamp("silent_steered_at", { withTimezone: true }),
-}, (t) => [index("runs_ticket_open").on(t.ticketId, t.endedAt)]);
+}, (t) => [
+    index("runs_ticket_open").on(t.ticketId, t.endedAt),
+    // The hot reads (BOS-407): who is working now, a ticket's runs, each agent's latest run and the recent list.
+    index("runs_live").on(t.companyId).where(sql`${t.endedAt} is null`),
+    index("runs_ticket_started").on(t.ticketId, t.startedAt),
+    index("runs_agent_started").on(t.agentId, t.startedAt.desc()),
+    index("runs_ended").on(t.endedAt.desc()).where(sql`${t.endedAt} is not null`),
+  ],
+);
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
 export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
@@ -992,7 +1017,8 @@ export const nudges = pgTable(
     dropped: boolean("dropped").notNull().default(false),
     createdAt: createdAt(),
   },
-  (t) => [index("nudges_pair").on(t.fromAgentId, t.toAgentId, t.createdAt)],
+  // A run's origin asks which nudge delivered its wake (BOS-407).
+  (t) => [index("nudges_pair").on(t.fromAgentId, t.toAgentId, t.createdAt), index("nudges_wake").on(t.wakeId)],
 );
 
 // ---------- Notifications (R44) ----------
@@ -1021,7 +1047,12 @@ export const notifications = pgTable(
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
-  (t) => [index("notifications_agent_time").on(t.agentId, t.createdAt), index("notifications_time").on(t.createdAt)],
+  (t) => [
+    index("notifications_agent_time").on(t.agentId, t.createdAt),
+    index("notifications_time").on(t.createdAt),
+    // Every /api/notifications GET marks the unread ones for settled decisions (BOS-407).
+    index("notifications_unread_decision").on(t.decisionId).where(sql`${t.readAt} is null`),
+  ],
 );
 
 /**
