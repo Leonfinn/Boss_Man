@@ -137,15 +137,21 @@ export function parseCheckSlots(v: string | undefined): number {
   return Number(v);
 }
 
+/** The only writable volume a runner keeps between restarts, where the shared pnpm store must live. */
+const WORKSPACES_MOUNT = MOUNTS.find(([sub]) => sub === "workspaces")![1];
+
 /**
  * The shared pnpm store's path inside the runner (BOS-568). Empty means the workspaces volume's .pnpm-store,
- * which every host has; a set value must be absolute, since it is what every install writes its packages to.
+ * which every host has. A set value must be absolute and under the workspaces volume, since a runner has no
+ * other writable volume there and a path elsewhere would land the store on the root disk, the failure this fixes.
  */
 export function parsePnpmStoreDir(v: string | undefined): string | undefined {
   const p = (v ?? "").trim();
   if (!p) return undefined;
-  if (!p.startsWith("/") || p.includes("\0") || p.split("/").includes("..")) throw new Error(`PNPM_STORE_DIR should be an absolute path inside the runner, like /home/node/workspaces/.pnpm-store, not ${v}`);
-  return p.length > 1 ? p.replace(/\/+$/, "") : p;
+  if (!p.startsWith("/") || p.includes("\0") || p.split("/").includes("..")) throw new Error(`PNPM_STORE_DIR should be an absolute path inside the runner, like ${WORKSPACES_MOUNT}/.pnpm-store, not ${v}`);
+  const resolved = p.length > 1 ? p.replace(/\/+$/, "") : p;
+  if (resolved !== WORKSPACES_MOUNT && !resolved.startsWith(`${WORKSPACES_MOUNT}/`)) throw new Error(`PNPM_STORE_DIR must be under ${WORKSPACES_MOUNT} (the runner's only writable volume), not ${v}`);
+  return resolved;
 }
 
 /** A CPU weight from 2 to 262144, as in compose's cpu_shares. */

@@ -25,6 +25,8 @@ const reach = {
   wroteStore: attempt(() => writeFileSync(path.join(env.BOSSMAN_CHECK_STORE, "forged.json"), '{"status":"pass"}')),
   wroteProof: attempt(() => writeFileSync(env.CHECK_ALL_PAIR_PROOF, "forged")),
   // The shared pnpm store (BOS-568) is writable, so an agent's install can add a package to it.
+  // The merge gate's own store (BOS-568 review) is outside the fence: an agent must not be able to plant a package there.
+  wroteGateStore: attempt(() => writeFileSync(env.REACH_GATE_STORE, "planted")),
   wroteSharedStore: (() => {
     const store = env.npm_config_store_dir;
     if (!store) return false;

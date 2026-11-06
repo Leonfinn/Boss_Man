@@ -8,7 +8,7 @@ import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
-import { movedLogFile, moveStore, oldStoreInHome, storeEnv } from "./store.js";
+import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
@@ -48,12 +48,14 @@ if (checkSlots > 1) {
 // the old ones are left behind.
 const storeDir = pnpmStoreDir(workspacesRoot, env.PNPM_STORE_DIR);
 mkdirSync(storeDir, { recursive: true });
-// The runner's own installs use the same store too, so the runner's ~1.3 GB isn't in a second store on the root
-// disk; a store pnpm left in HOME before this is moved into the shared one once.
+// The merge gate runs unfenced, so it installs from a store of its own that the fence never grants (BOS-568 review):
+// a poisoned package in the shared store must not run in the gate, as the runner's own user.
+const gateStore = gateStoreDir(storeDir);
+assertSeparateStore(storeDir, gateStore);
+mkdirSync(gateStore, { recursive: true });
+// The runner's own installs use the shared store too, so the runner's ~1.3 GB isn't in a second store on the root disk.
 Object.assign(env, storeEnv(storeDir));
-const oldStore = oldStoreInHome(env.HOME ?? "/home/node");
-if (path.resolve(oldStore) !== path.resolve(storeDir)) moveStore(oldStore, storeDir, movedLogFile(workspacesRoot), log);
-const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, storeDir);
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, gateStore);
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
 const sandbox = sandboxSelfTest();

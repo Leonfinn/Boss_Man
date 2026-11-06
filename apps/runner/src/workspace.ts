@@ -105,7 +105,7 @@ export class Workspaces {
     private readonly baseEnv: NodeJS.ProcessEnv = process.env,
     /** check-all.sh's shared queue folder (checkQueueEnv), so the merge check takes turns with agents' checks. */
     private readonly coordDir?: string,
-    /** The shared pnpm store a check's install uses (BOS-568), so its packages aren't copied into the root disk's HOME. */
+    /** The pnpm store a check's install uses (BOS-568), so its packages aren't copied into the root disk's HOME; the gate gets its own, outside the fence's grant. */
     private readonly pnpmStore?: string,
   ) {}
 

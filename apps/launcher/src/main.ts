@@ -6,7 +6,7 @@
 //   BOSSMAN_RUNNER_PIDS    process and thread limit per runner (default 4096)
 //   BOSSMAN_RUNNER_CPU_SHARES  CPU weight per runner against 1024 for the server and database (default 512)
 //   BOSSMAN_CHECK_SLOTS         full checks a runner may run at once (default 1; each extra one needs about 3 GB of runner memory)
-//   PNPM_STORE_DIR         shared pnpm store for every agent install (default: the workspaces volume's .pnpm-store)
+//   PNPM_STORE_DIR         shared pnpm store for every agent install, under the workspaces volume (default: its .pnpm-store)
 //   BOSSMAN_RUNNER_CPUS    optional hard CPU cap per runner, e.g. 4 (default none)
 //   BOSSMAN_NETGUARD       auto (default), enforce or off: the network guard that keeps runners off private networks
 //   BOSSMAN_NETGUARD_ALLOW extra host:port entries (space separated) every runner may reach on the private networks

@@ -123,13 +123,18 @@ describe("the runner launcher (R55)", () => {
     expect(containerSpec(config(), "app-co").HostConfig).not.toHaveProperty("NanoCpus");
     expect(containerSpec({ ...config(), checkSlots: 2 }, "app-co").Env).toContain("BOSSMAN_CHECK_SLOTS=2");
     expect(containerSpec({ ...config(), checkSlots: 1 }, "app-co").Env.join()).not.toContain("BOSSMAN_CHECK_SLOTS");
-    // BOS-568: the shared pnpm store is only set when the operator asks for another place.
-    expect(containerSpec({ ...config(), pnpmStoreDir: "/big/pnpm" }, "app-co").Env).toContain("PNPM_STORE_DIR=/big/pnpm");
+    // BOS-568: the shared pnpm store is only set when the operator asks for another place, and it must stay
+    // under the workspaces volume (the runner's only writable one), or it would land on the root disk.
+    expect(containerSpec({ ...config(), pnpmStoreDir: "/home/node/workspaces/big/pnpm" }, "app-co").Env).toContain("PNPM_STORE_DIR=/home/node/workspaces/big/pnpm");
     expect(containerSpec(config(), "app-co").Env.join()).not.toContain("PNPM_STORE_DIR");
-    expect([parsePnpmStoreDir(undefined), parsePnpmStoreDir("  "), parsePnpmStoreDir("/big/pnpm/")]).toEqual([undefined, undefined, "/big/pnpm"]);
+    expect([parsePnpmStoreDir(undefined), parsePnpmStoreDir("  "), parsePnpmStoreDir("/home/node/workspaces/big/pnpm/")]).toEqual([undefined, undefined, "/home/node/workspaces/big/pnpm"]);
+    expect(parsePnpmStoreDir("/home/node/workspaces")).toBe("/home/node/workspaces");
     expect(() => parsePnpmStoreDir("pnpm-store")).toThrow();
     expect(() => parsePnpmStoreDir("relative/pnpm")).toThrow();
     expect(() => parsePnpmStoreDir("/big/../etc")).toThrow();
+    expect(() => parsePnpmStoreDir("/big/pnpm")).toThrow(/under/);
+    expect(() => parsePnpmStoreDir("/home/node/workspaces-other")).toThrow(/under/);
+    expect(() => parsePnpmStoreDir("/tmp/pnpm-store")).toThrow(/under/);
     expect([parseCheckSlots(undefined), parseCheckSlots(""), parseCheckSlots("2")]).toEqual([1, 1, 2]);
     expect(() => parseCheckSlots("0")).toThrow();
     expect(() => parseCheckSlots("lots")).toThrow();
