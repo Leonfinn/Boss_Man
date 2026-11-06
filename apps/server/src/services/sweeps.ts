@@ -9,7 +9,7 @@ import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max
 import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
@@ -44,6 +44,8 @@ export type SweepLimits = {
   busyStallAfterMs: number;
   /** A quiet run whose runner is connected and still answering pings is probably inside a long command: wait this long too (BOS-217). */
   busyRunnerAfterMs: number;
+  /** A run inside scripts/check-quick.sh or check-all.sh may sit silent in the shared check queue; its alert waits this long (BOS-518). */
+  checkQueueAfterMs: number;
   /** A run that has said nothing this long after launch, on a connected and settled runner, never began: it is started again (BOS-480). */
   neverStartedAfterMs: number;
   /** How many times a never-started run's wake is queued again before the CEO is told (BOS-480). */
@@ -61,6 +63,7 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   ticketlessAfterMs: 10 * 60_000,
   busyStallAfterMs: 15 * 60_000,
   busyRunnerAfterMs: 15 * 60_000,
+  checkQueueAfterMs: 2 * 3_600_000,
   neverStartedAfterMs: 3 * 60_000,
   neverStartedRetries: 2,
 };
@@ -74,15 +77,20 @@ const MISSED_NUDGES_PER_DAY = 2;
 
 /** A clock time in plain words, e.g. "14:05" (UTC, like the rest of the server's notes). */
 const hhmm = (d: Date) => d.toISOString().slice(11, 16);
+/** A command that is the repo check script, which waits silently for the one-slot check lock (BOS-518). */
+const CHECK_SCRIPT = /(?:^|[\s/"';&|(])scripts\/check-(?:quick|all)\.sh(?![\w.-])/;
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; /** Closes every card whose conditions have cleared (DR-016, BOS-470). */ clearAlerts?: () => Promise<number>; isConnected: (runnerId: string) => boolean; /** The runner connected only just now, so its queued runs are still starting (BOS-331). */ runnerSettling?: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; /** Queues a wake as given, never merged into another or steered into a live run (BOS-480). */ requeue?: (input: WakeInput) => Promise<unknown>; /** Tells the runner to drop a run it may still be setting up. */ cancelOnRunner?: (runnerId: string, runId: string) => unknown; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; /** Closes every card whose conditions have cleared (DR-016, BOS-470). */ clearAlerts?: () => Promise<number>; isConnected: (runnerId: string) => boolean; /** The runner connected only just now, so its queued runs are still starting (BOS-331). */ runnerSettling?: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; /** Queues a wake as given, never merged into another or steered into a live run (BOS-480). */ requeue?: (input: WakeInput) => Promise<unknown>; /** Tells the runner to drop a run it may still be setting up. */ cancelOnRunner?: (runnerId: string, runId: string) => unknown; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null>; /** The owner's unanswered ticket messages (BOS-425): the 5-minute re-wake and the 10-minute stand-in. */ ownerReplies?: (t: Date) => Promise<{ rewoken: number; standIns: number }> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
   async function withdraw(ids: string[]) {
-    if (ids.length) await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(inArray(decisions.id, ids));
+    if (!ids.length) return;
+    await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(inArray(decisions.id, ids));
+    // Withdrawn without an answer: their notifications are read now (BOS-413).
+    await db.update(notifications).set({ readAt: now() }).where(and(inArray(notifications.decisionId, ids), isNull(notifications.readAt)));
   }
 
   async function openOfKind(kind: "stale_blocker" | "stalled_run") {
@@ -299,9 +307,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .orderBy(desc(runnerEvents.seq))
       .limit(1);
     if (!last) return null;
-    const update = (last.payload as { update?: { kind?: unknown; title?: unknown; status?: unknown } } | null)?.update;
+    const update = (last.payload as { update?: { kind?: unknown; title?: unknown; status?: unknown; rawInput?: unknown } } | null)?.update;
     if (!update || ((update.kind !== "tool_call" && update.kind !== "tool_call_update") || update.status !== "in_progress")) return null;
-    return typeof update.title === "string" && update.title ? update.title.slice(0, 120) : "a command";
+    const raw = (update as { rawInput?: { command?: unknown } }).rawInput?.command;
+    const title = typeof update.title === "string" && update.title ? update.title.slice(0, 120) : "a command";
+    return { title, checkScript: CHECK_SCRIPT.test(typeof raw === "string" ? raw : "") || CHECK_SCRIPT.test(typeof update.title === "string" ? update.title : "") };
   }
 
   /**
@@ -334,8 +344,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (!withBusyChecks) return { idle, stalled: true };
       const command = await busyInCommand(run.run.id);
       if (command) {
-        busy.set(run.run.id, command);
-        return { idle, stalled: idle >= limits.busyStallAfterMs };
+        busy.set(run.run.id, command.title);
+        // A check script waits silently for the shared check slot; the queue can be long, so it gets the longer limit (BOS-518).
+        return { idle, stalled: idle >= (command.checkScript ? limits.checkQueueAfterMs : limits.busyStallAfterMs) };
       }
       // The runner answers Boss Man's pings every 15 seconds even mid-command. Events only arrive at
       // tool-call and turn boundaries, so a runner seen well after the last event is inside a long step.
@@ -740,12 +751,15 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const urgentIdleResult = held ? { woken: 0 } : await urgentIdle(t);
       const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
       // Silent runs, reviews that end without a verdict, and causes left unproven (BOS-314): these run whether or not the watchdog is on.
-      const progress = held ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 } : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert });
+      const progress = held ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 } : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert, inCheckQueue: async (runId, silentMs) => silentMs < limits.checkQueueAfterMs && !!(await busyInCommand(runId))?.checkScript });
       const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);
       const unmerged = held ? 0 : await unmergedApprovals(t);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
       const ticketless = held ? { raised: 0 } : await longTicketlessRuns(t);
-      return { goalChecks, closedCards, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, progress };
+      // The owner's messages that nobody has answered (BOS-425). A hold stops new runs, so both
+      // steps wait, like the other sweeps: an ask to the CEO would start a run too.
+      const unanswered = held ? { rewoken: 0, standIns: 0 } : opts.ownerReplies ? await opts.ownerReplies(t).catch(() => ({ rewoken: 0, standIns: 0 })) : { rewoken: 0, standIns: 0 };
+      return { goalChecks, closedCards, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress };
     },
   };
 }
