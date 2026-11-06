@@ -272,8 +272,8 @@ describe("free run slots offer idle agents their next ticket (BOS-615)", () => {
   it("an agent whose work is all in review is started on its assigned ready ticket within one sweep", async () => {
     const c = (ctx = await setup());
     const { ann } = await team(c);
-    // Assigned and ready just now: missed work would wait half an hour for it.
-    const next = await c.working("Ann's next up", ann.id, 0, { systemState: "ready" });
+    // Assigned and ready, quiet for 15 minutes: missed work would wait half an hour for it.
+    const next = await c.working("Ann's next up", ann.id, 15 * MIN, { systemState: "ready" });
     // An unassigned ticket the CEO could hand out, so the CEO would be asked if Ann were left out.
     await c.working("Unassigned", ann.id, 0, { systemState: "backlog", assigneeAgentId: null });
     expect(await c.sweeps.run()).toMatchObject({ idleSlots: { woken: 0, ready: 1, asked: 0 }, missedWork: { woken: 0 } });
@@ -327,7 +327,7 @@ describe("free run slots offer idle agents their next ticket (BOS-615)", () => {
       await c.run(a.id, await c.working(n, a.id, 0), { lastEventAgoMs: MIN });
     }
     const { ann } = await team(c);
-    await c.working("Ann's next up", ann.id, 0, { systemState: "ready" });
+    await c.working("Ann's next up", ann.id, 15 * MIN, { systemState: "ready" });
     await c.working("Unassigned", ann.id, 0, { systemState: "backlog", assigneeAgentId: null });
     expect(await c.scheduler.freeSlots(c.company.id)).toBe(0);
     expect((await c.sweeps.run()).idleSlots).toMatchObject({ woken: 0, ready: 0, asked: 0 });

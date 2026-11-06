@@ -916,8 +916,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * Tier 2 of the idle-slot sweep (BOS-615): an idle agent's assigned `ready` ticket is its next up (the CEO
    * or PM puts the plan's next ticket there), so a free slot starts it at once rather than after missed
    * work's half hour. Agents with in-progress work that isn't waiting on a booked check are left to tier 1
-   * and missed work, so a ready ticket never pulls an agent off what it was doing. Same order and the same
-   * per-ticket limits as tier 1; plan-first tickets whose plan waits for approval, and blocked ones, are skipped.
+   * and missed work, so a ready ticket never pulls an agent off what it was doing. Same order, quiet time and
+   * per-ticket limits as tier 1; blocked tickets and plan-first ones awaiting approval are skipped, and so is a
+   * ticket missed work has already nudged today (its own ladder ends in the "looks stuck" card).
    */
   async function readySlots(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>, take: (companyId: string) => void) {
     const msObjective = alias(objectives, "ms_objective");
@@ -936,8 +937,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           eq(agents.paused, false),
           isNull(agents.retiredAt),
           eq(companies.paused, false),
-          // A plan-first ticket with no plan yet is started in plan mode; one whose plan is written waits for its approval.
-          or(eq(tickets.planFirst, false), isNotNull(tickets.planApprovedAt), isNull(tickets.plan)),
+          // Plan-first tickets wait for their plan's approval, as in missed work.
+          or(eq(tickets.planFirst, false), isNotNull(tickets.planApprovedAt)),
+          // Quiet as long as tier 1 asks, so a ticket just assigned (its "assigned" wake) or just handed back isn't doubled.
+          lte(tickets.lastActivityAt, new Date(t.getTime() - limits.idleFillAfterMs)),
           isNull(tickets.monitorAt),
           sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
           sql`not exists (select 1 from tickets doing where doing.assignee_agent_id = ${tickets.assigneeAgentId} and doing.system_state = 'in_progress' and doing.monitor_at is null)`,
@@ -953,13 +956,17 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (busy.has(agentId)) continue;
       if ((await roomIn(ticket.companyId)) <= 0) continue;
       if (await isBlocked(ticket.id)) continue;
-      const [live] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.ticketId, ticket.id), isNull(runs.endedAt))).limit(1);
-      if (live) continue;
+      const ticketRuns = await db.select({ lastEventAt: runs.lastEventAt, endedAt: runs.endedAt }).from(runs).where(eq(runs.ticketId, ticket.id));
+      if (ticketRuns.some((r) => !r.endedAt)) continue;
+      const lastActive = ticketRuns.reduce<Date>((m, r) => later(later(m, r.lastEventAt), r.endedAt)!, ticket.lastActivityAt);
+      if (t.getTime() - lastActive.getTime() < limits.idleFillAfterMs) continue;
       const recent = await db
-        .select({ createdAt: wakes.createdAt })
+        .select({ createdAt: wakes.createdAt, reason: wakes.reason })
         .from(wakes)
-        .where(and(eq(wakes.ticketId, ticket.id), eq(wakes.reason, IDLE_SLOT_REASON), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
+        .where(and(eq(wakes.ticketId, ticket.id), inArray(wakes.reason, [IDLE_SLOT_REASON, MISSED_REASON]), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
         .orderBy(desc(wakes.createdAt));
+      // Once missed work has nudged this ticket, its ladder (two wakes, then "looks stuck") owns it; more wakes here would only hold that card back.
+      if (recent.some((w) => w.reason === MISSED_REASON)) continue;
       if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.idleFillEveryMs) continue;
       if (recent.length >= limits.idleFillsPerDay) continue;
       await opts.wake({
