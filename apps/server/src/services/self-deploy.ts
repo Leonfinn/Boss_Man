@@ -295,7 +295,21 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       ...(target === "server" ? { needsRunnerUpdate: !!a?.runnerChanged } : {}),
       risks,
     });
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}) };
+    // (BOS-551) A server update restarts Boss Man, which resets anything a reading on the owner's queue
+    // would measure. Point the update card at those open owner cards so they are done first.
+    const doAfter = target === "server"
+      ? (await db
+          .select({ id: decisions.id, question: decisions.question, context: decisions.context })
+          .from(decisions)
+          .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner"))))
+          .filter((r) => {
+            const c = r.context as DecisionContext;
+            return c.type === "owner_todo" || (c.type === "question" && !!c.steps?.length);
+          })
+          .slice(0, 10)
+          .map((r) => ({ decisionId: r.id, label: r.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80) }))
+      : [];
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     const question =
       target === "runner"

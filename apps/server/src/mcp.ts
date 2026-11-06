@@ -484,6 +484,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "raise_decision",
     {
       description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety and unfilled tokens. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again.",
+      // Ordering (BOS-551): when this card must come before or after another owner card, pass doAfter/doBefore
+      // (the other card's id and a short label) so the owner's queue numbers them and says which to do first.
       inputSchema: {
         question: z.string().min(1).max(1000),
         options: z.array(z.string().min(1).max(200)).min(2).max(6),
@@ -495,9 +497,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         stillNeeded: z.string().max(500).optional(),
         lintOverride: z.string().max(500).optional(),
         setsUp: z.enum(ADDONS).optional(),
+        // Ordering against other owner cards (BOS-551): the ids of the cards this one must be done after or before, each with a short label.
+        doAfter: z.array(z.object({ decisionId: z.string().uuid(), label: z.string().min(1).max(120) })).max(10).optional(),
+        doBefore: z.array(z.object({ decisionId: z.string().uuid(), label: z.string().min(1).max(120) })).max(10).optional(),
       },
     },
-    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp }) => {
+    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, doAfter, doBefore }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       const [me] = lintOverride !== undefined && scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
       const ask = checkAsk({ triedFirst, ownerMustDo, steps, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), addons: steps?.length ? await addons?.() : undefined, setsUp });
@@ -527,7 +532,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, doAfter, doBefore });
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
