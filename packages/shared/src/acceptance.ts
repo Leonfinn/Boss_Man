@@ -5,9 +5,30 @@
 // as missing. Shared so the server's review gate and the web's checklist agree exactly.
 import { z } from "zod";
 
-/** Same limits as engagements' Terms (app.ts, mcp.ts): up to 10 non-empty strings, capped length.
+/** A criterion as stored: a plain string, checked before merge (old rows stay strings), or the
+ * `{ text, after: "merge" }` form for a check only a real host can settle (DR-024 #5). */
+export type Criterion = string | { text: string; after: "merge" };
+
+/** The criterion's own words, without its after-merge mark. */
+export const criterionText = (c: Criterion): string => (typeof c === "string" ? c : c.text);
+
+/** True when the criterion is checked after merge, so reviewers skip it. */
+export const isAfterMerge = (c: Criterion): boolean => typeof c !== "string" && c.after === "merge";
+
+/** The stored criteria as plain text, for the forms and tools that only take a list of strings. */
+export const criteriaText = (criteria: readonly Criterion[]): string[] => criteria.map(criterionText);
+
+const criterionSchema = z.union([z.string().trim().min(1).max(500), z.object({ text: z.string().trim().min(1).max(500), after: z.literal("merge") })]);
+
+/** Same limits as engagements' Terms (app.ts, mcp.ts): up to 10 non-empty criteria, capped length.
  * Only the max is enforced here: an empty list means "no criteria", which is allowed everywhere. */
-export const acceptanceCriteriaSchema = z.array(z.string().trim().min(1).max(500)).max(10);
+export const acceptanceCriteriaSchema = z.array(criterionSchema).max(10);
+
+/** Parses a value that may hold criteria (a stored jsonb column, an API body) and returns `fallback` when it doesn't. */
+export const readCriteria = (value: unknown, fallback: readonly Criterion[] = []): Criterion[] => {
+  const parsed = acceptanceCriteriaSchema.safeParse(value);
+  return parsed.success ? parsed.data : [...fallback];
+};
 
 export type Verdict = "pass" | "fail" | null;
 
@@ -47,12 +68,13 @@ function numberedVerdicts(count: number, note: string): Map<number, Exclude<Verd
  * or fail word is the verdict. Numbered verdicts ("1 pass; 2 fail: why", "C3 ok") in criteria order
  * also count when they start a segment; a fail from either reading wins. A criterion no sentence claims comes back as null: not reported.
  */
-export function readVerdicts(criteria: readonly string[], note: string | null | undefined): Array<{ criterion: string; verdict: Verdict }> {
+export function readVerdicts(criteria: readonly Criterion[], note: string | null | undefined): Array<{ criterion: string; verdict: Verdict }> {
+  const texts = criteria.map(criterionText);
   const segments = (note ?? "").split(/[.;\n]/).map((s) => s.trim()).filter(Boolean);
   const bag = segments.map((s) => new Set(tokens(s)));
   const raw = segments;
-  const numbered = numberedVerdicts(criteria.length, note ?? "");
-  return criteria.map((criterion, idx) => {
+  const numbered = numberedVerdicts(texts.length, note ?? "");
+  return texts.map((criterion, idx) => {
     const byNumber = numbered.get(idx + 1) ?? null;
     const want = tokens(criterion);
     let verdict: Verdict = null;
@@ -72,9 +94,32 @@ export function readVerdicts(criteria: readonly string[], note: string | null | 
   });
 }
 
-/** The criteria the author gave no pass or fail verdict for; empty means the note covers them all. */
-export function missingVerdicts(criteria: readonly string[], note: string | null | undefined): string[] {
+/**
+ * The criteria the author gave no pass or fail verdict for; empty means the note covers them all.
+ * `only` narrows it: "before" is the review gate (after-merge criteria never hold up a review), and
+ * "after" is the done gate once the work has merged.
+ */
+export function missingVerdicts(criteria: readonly Criterion[], note: string | null | undefined, only?: "before" | "after"): string[] {
+  const keep = (c: Criterion) => !only || (only === "after" ? isAfterMerge(c) : !isAfterMerge(c));
   return readVerdicts(criteria, note)
-    .filter((r) => r.verdict === null)
+    .filter((r, i) => keep(criteria[i]!) && r.verdict === null)
     .map((r) => r.criterion);
+}
+
+/** The after-merge criteria with no verdict yet: what keeps a merged ticket open. */
+export const unreportedAfterMerge = (criteria: readonly Criterion[], note: string | null | undefined): string[] => missingVerdicts(criteria, note, "after");
+
+/** Words that mean a check can only be settled once the work is live, not in a review. */
+const LIVE = /\b(after (the )?merg(?:e|ing)|once (it'?s |it is )?(merged|live|deployed|in production)|post-?merge|standby window|live deploy|on a real host|on the (real|production) host|on your (own )?(host|machine|server)|on the (owner'?s )?(host|machine|server))\b/i;
+
+/**
+ * The warning the author sees when a criterion reads like a live check but isn't marked after merge:
+ * it doesn't refuse anything, so an old ticket is never held up. Empty means nothing to warn about.
+ */
+export function afterMergeLint(criteria: readonly Criterion[]): string {
+  const loose = criteria.filter((c) => !isAfterMerge(c) && LIVE.test(criterionText(c)));
+  if (!loose.length) return "";
+  const names = loose.map((c) => `"${criterionText(c)}"`).join(", ");
+  const them = loose.length === 1 ? "it" : "them";
+  return `${names} can only be checked once the work is live: mark ${them} "on a real host" so reviewers don't fail the ticket on ${them}. This is a warning only.`;
 }

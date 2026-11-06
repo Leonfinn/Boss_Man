@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
-import { ticketRef } from "@boss-man/shared";
+import { ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
@@ -135,14 +135,14 @@ export function QuickAdd({ label, button, onAdd }: { label: string; button: stri
   );
 }
 
-type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean; featureId: string | null; acceptanceCriteria?: string[] };
+type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean; featureId: string | null; acceptanceCriteria?: Criterion[] };
 type NewFeatureInput = { title: string; description: string | null; planWithCeo: boolean } & GoalLink;
 /** What the add form was opened for: a feature, or a task (optionally inside one feature). */
 type Adding = { mode: "feature" | "task"; featureId: string };
 
 /** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
 function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onGrill, onClose }: { companyId: string; initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onGrill: (d: { kind: "task" | "feature"; title: string; description: string | null }) => Promise<unknown>; onClose: () => void }) {
-  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "" };
+  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "", after: new Set<number>() };
   const [mode, setMode] = useState(initial.mode);
   const [form, setForm] = useState(blank);
   const img = useImageAttach(companyId);
@@ -168,7 +168,11 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
           assigneeAgentId: form.assignee && form.assignee !== "owner" ? form.assignee : null,
           assignedToOwner: form.assignee === "owner",
           featureId: form.feature || null,
-          acceptanceCriteria: form.criteria.split("\n").map((l) => l.trim()).filter(Boolean),
+          acceptanceCriteria: form.criteria
+            .split("\n")
+            .map((l, i) => ({ line: l.trim(), on: form.after.has(i) }))
+            .filter((x) => x.line)
+            .map((x): Criterion => (x.on ? { text: x.line, after: "merge" } : x.line)),
         });
       onClose();
     } catch (err) {
@@ -254,7 +258,36 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
             onChange={(e) => setForm({ ...form, criteria: e.target.value })}
             style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
           />
-          <small className="muted">Optional, up to 10. The agent reports pass or fail against each when it asks for review.</small>
+          <small className="muted">Optional, up to 10. The agent reports pass or fail against each before merge when it asks for review.</small>
+          {form.criteria
+            .split("\n")
+            .some((l) => l.trim()) && (
+            <fieldset style={{ border: "1px solid var(--line-strong)", borderRadius: 8, padding: "6px 10px", margin: 0 }}>
+              <legend style={{ fontSize: 13 }} className="muted">
+                On a real host (checked after merge)
+              </legend>
+              {form.criteria.split("\n").map((l, i) =>
+                l.trim() ? (
+                  <label key={i} style={{ display: "block", fontSize: 14 }}>
+                    <input
+                      type="checkbox"
+                      checked={form.after.has(i)}
+                      onChange={(e) =>
+                        setForm((f) => {
+                          const n = new Set(f.after);
+                          if (e.target.checked) n.add(i);
+                          else n.delete(i);
+                          return { ...f, after: n };
+                        })
+                      }
+                    />{" "}
+                    {l.trim()}
+                  </label>
+                ) : null,
+              )}
+              <small className="muted">Tick the checks only the real host can settle: reviewers skip them, and the task stays open after the merge until they're reported.</small>
+            </fieldset>
+          )}
         </div>
       )}
       {isFeature ? (

@@ -1,6 +1,6 @@
 {
   "id": "92fb4a4b-261f-489c-bb8b-2aeaec293afa",
-  "prevId": "99cadf6e-fa67-4f6e-bf0a-377d998ba255",
+  "prevId": "25a902ea-629a-4c2c-b381-fe95a4183679",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -5480,6 +5480,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "boot_id": {
+          "name": "boot_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "boot_pulled_at": {
+          "name": "boot_pulled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "disk_used_bytes": {
           "name": "disk_used_bytes",
           "type": "bigint",
@@ -5516,12 +5528,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "boot_pulled_at": {
-          "name": "boot_pulled_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -7671,6 +7677,12 @@
           "notNull": true,
           "default": 5
         },
+        "monitor_restart_at": {
+          "name": "monitor_restart_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "custom_fields": {
           "name": "custom_fields",
           "type": "jsonb",
@@ -7762,12 +7774,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "monitor_restart_at": {
-          "name": "monitor_restart_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -9708,9 +9714,12 @@
   },
   "schemas": {},
   "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   }
 }
