@@ -173,11 +173,12 @@ describe("the indexes the BOS-407 migration adds", () => {
       const q = ix.query(c.db, world2);
       const { sql: text, params } = q.toSQL();
       const answer = (await c.client.query(text, params)).rows.map((r) => JSON.stringify(r)).sort();
-      // With sequential scans ruled out, PostgreSQL must reach for exactly this index...
-      await c.client.exec("set enable_seqscan = off");
+      // With sequential and bitmap scans ruled out, PostgreSQL must reach for exactly this index
+      // by a plain index scan; it cannot fall back to another index the same way.
+      await c.client.exec("set enable_seqscan = off; set enable_bitmapscan = off");
       const plan = (await c.client.query(`explain ${text}`, params)).rows.map((r) => String(Object.values(r as Record<string, unknown>)[0])).join("\n");
       const pinned = (await c.client.query(text, params)).rows.map((r) => JSON.stringify(r)).sort();
-      await c.client.exec("reset enable_seqscan");
+      await c.client.exec("reset enable_seqscan; reset enable_bitmapscan");
       expect(plan, ix.name).toMatch(new RegExp(ix.name));
       // ...and it must not change the answer.
       expect(pinned, ix.name).toEqual(answer);
