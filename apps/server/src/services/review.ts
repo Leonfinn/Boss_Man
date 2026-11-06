@@ -2,9 +2,9 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, readVerdicts, renderTemplate, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
+import { agents, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
@@ -445,12 +445,19 @@ export function reviewService(
    * the ticket goes back to its assignee to show those before it can close.
    */
   async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null) {
-    await db.update(tickets).set({ mergeCommit: commit, pullRequestNote: null }).where(eq(tickets.id, t.id));
+    // A criterion still at fail when the work lands was put off, not failed (BOS-575): it stays on this
+    // ticket, with its assignee, as an after-merge check, instead of the ticket closing on it.
+    const carry = carryFailedOver(readCriteria(t.acceptanceCriteria), t.stateNote);
+    await db
+      .update(tickets)
+      .set({ mergeCommit: commit, pullRequestNote: null, ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
+      .where(eq(tickets.id, t.id));
+    if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
     const left = afterMergeLeft(t);
     // With a live check still to show, the ticket isn't finished: go straight to the assignee without a
     // brief done state in between, so done hooks (worktree release, notifications) never fire for it.
     if (!left) await deps.work.updateTicket(t.id, { state: "done", outcome: "completed", overLimit: true });
-    return { outcome: "merged" as const, delivered: null, detail: { commit, ...(left ? { afterMerge: left } : {}) } };
+    return { outcome: "merged" as const, delivered: null, detail: { commit, ...(left ? { afterMerge: left } : {}), ...(carry ? { carried: carry.carried } : {}) } };
   }
 
   /** Checks the merged ticket now has to show: its after-merge criteria still without a pass or fail. */
@@ -472,13 +479,25 @@ export function reviewService(
       .innerJoin(projects, eq(projects.id, tickets.projectId))
       .where(eq(tickets.id, t.id));
     if (repoUrl?.repoUrl) await deps.work.updateTicket(t.id, { state: "in_progress", overLimit: true, internal: true, noCode: true });
+    const carried = r.detail.carried ?? [];
+    const quoted = (list: string[]) => list.map((c) => `"${c}"`).join(", ");
+    const carriedWhy = carried.length ? ` ${quoted(carried)} ${carried.length > 1 ? "were" : "was"} still at fail when it merged, so ${carried.length > 1 ? "they stay" : "it stays"} on this ticket as after-merge ${carried.length > 1 ? "checks" : "check"}, not a separate ticket.` : "";
     const delivered = await tellAgent(
       { ...t, systemState: "in_progress" },
-      `${merged}The work is live, so these checks can only be made now: ${r.detail.afterMerge!.map((c) => `"${c}"`).join(", ")}. Report pass or fail for each and move the ticket to done. If only the owner can check one, put a card in front of them (raise_decision with blocksTicketId): answering it records their answer as that check's pass or fail, so you can close the ticket once they have.`,
+      `${merged}The work is live, so these checks can only be made now: ${quoted(r.detail.afterMerge!)}.${carriedWhy} Report pass or fail for each and move the ticket to done. If only the owner can check one, put a card in front of them (raise_decision with blocksTicketId): answering it records their answer as that check's pass or fail, so you can close the ticket once they have. If a check fails on the live work, report it as fail and move the ticket to done: Boss Man opens the follow-up ticket for it, assigned to you, so don't make one by hand.`,
       "after merge",
       causedByRunId,
     ).catch(() => null);
+    // The CEO hears when a merge leaves a put-off check on its ticket (BOS-575): that is the moment BOS-542 was lost.
+    if (carried.length) await tellCeo(t, "after merge carried", `"${t.title}" merged with ${quoted(carried)} still at fail. Boss Man kept it open with its assignee as after-merge ${carried.length > 1 ? "checks" : "check"} until ${carried.length > 1 ? "they are" : "it is"} reported; no follow-up ticket is needed. Nothing to do unless it stalls.`).catch(() => undefined);
     return { outcome: "merged" as const, delivered, detail: { ...r.detail, commit } };
+  }
+
+  /** Wakes the company's CEO about a ticket, with a note; nothing when the company has no CEO. */
+  async function tellCeo(t: { id: string; companyId: string }, reason: string, note: string) {
+    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
+    if (ceo) await wake?.(ceo.id, { ticketId: t.id, reason, note });
+    return ceo?.id ?? null;
   }
 
   /** The ticket stays in review with the host's reason; the owner hears once per new reason. */
@@ -1368,6 +1387,63 @@ export function reviewService(
         const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
         if (ceo) await wake?.(ceo.id, { ticketId, reason: "ci passed", note: `The checks passed on the pull request for "${t.title}", but it hasn't merged: ${t.pullRequestNote ?? "the host hasn't said why"}. Move it forward.` });
       }
+    },
+
+    /**
+     * DR-009 #5 (BOS-575): a merged ticket closed with an after-merge check at fail, so the live work doesn't
+     * do what it should. Boss Man opens the follow-up itself, so it is never a bare title nobody owns (BOS-542):
+     * what failed and what was reported, the merged ticket's project, risk and feature, its assignee (the CEO
+     * when it has none), the failed checks as its criteria, and a link each way. The CEO is told. Returns the
+     * new ticket, or null when nothing failed.
+     */
+    async followUpFailedChecks(ticketId: string, failed: string[], reported: string, byAgentId: string | null) {
+      if (!failed.length) return null;
+      const [row] = await db.select({ t: tickets, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, ticketId));
+      if (!row) return null;
+      const { t, prefix } = row;
+      const ref = ticketRef(prefix, t.number) ?? `"${t.title}"`;
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
+      const assigneeAgentId = t.assigneeAgentId ?? ceo?.id ?? null;
+      // This path never makes an unowned ticket: with nobody to give it to, the caller says so instead.
+      if (!assigneeAgentId) return null;
+      const many = failed.length > 1;
+      const title = (many ? `Follow-up to ${ref}: ${failed.length} after-merge checks failed on the live work` : `Follow-up to ${ref}: ${failed[0]}`).slice(0, 200);
+      const body = [
+        `**Why:** ${ref} ("${t.title}") merged${t.mergeCommit ? ` as ${t.mergeCommit.slice(0, 12)}` : ""}, and ${many ? "these checks" : "this check"} failed once the work was live:`,
+        ...failed.map((c) => `- ${c}`),
+        "",
+        `**What was reported:** ${reported.replace(/\s+/g, " ").trim().slice(0, 1500) || "(nothing)"}`,
+        "",
+        `**Do:** find why ${many ? "they fail" : "it fails"} on the live work, fix it on this ticket's branch, and show ${many ? "them" : "it"} passing once merged. The merged ticket, with its description and conversation: [${ref}](#/tickets/${t.id}).`,
+        "",
+        "Opened by Boss Man when the merged ticket closed with this check at fail (DR-009 #5, BOS-575).",
+      ].join("\n");
+      const made = await deps.work.createTicket(t.projectId, {
+        title,
+        body,
+        risk: t.risk ?? "medium",
+        state: "ready",
+        overLimit: true,
+        assigneeAgentId,
+        featureId: t.featureId,
+        milestoneId: t.milestoneId,
+        urgent: t.urgent,
+        acceptanceCriteria: failed.map((text) => ({ text, after: "merge" as const })),
+        createdByAgentId: byAgentId,
+      });
+      // The number is set by a database trigger; read it back rather than trust the insert's row.
+      const [numbered] = await db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, made.id));
+      const newRef = ticketRef(prefix, numbered?.number) ?? `"${made.title}"`;
+      const link = `Follow-up: ${newRef} (#/tickets/${made.id}), for ${many ? "the failed after-merge checks" : "the failed after-merge check"}.`;
+      const [now] = await db.select({ note: tickets.stateNote }).from(tickets).where(eq(tickets.id, t.id));
+      await db
+        .update(tickets)
+        .set({ stateNote: `${(now?.note ?? "").trim()}${now?.note?.trim() ? " " : ""}${link}`.slice(0, 4000) })
+        .where(eq(tickets.id, t.id));
+      await record(db, { companyId: t.companyId, ticketId: t.id, agentId: byAgentId, kind: "follow_up", summary: link, detail: { followUpTicketId: made.id, failed } });
+      const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, assigneeAgentId));
+      await tellCeo(made, "follow-up created", `${ref} ("${t.title}") closed with ${many ? "after-merge checks" : "an after-merge check"} at fail, so Boss Man opened ${newRef} "${made.title}" for ${who?.name ?? "nobody"}, risk ${made.risk ?? "medium"}, with the failed ${many ? "checks" : "check"} as its criteria. Re-assign or re-rate it if that's wrong; otherwise nothing to do.`).catch(() => undefined);
+      return { id: made.id, ref: newRef, title: made.title, assignee: who?.name ?? null };
     },
 
     /** Checks every ticket waiting on a pull request: merged on the host, or mergeable now. */

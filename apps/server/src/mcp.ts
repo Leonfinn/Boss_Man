@@ -28,7 +28,7 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -2035,7 +2035,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       if (missing.length)
         return fail(
           state === "done"
-            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket): their answer records the check's pass or fail, so you can close it once they have.`
+            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket): their answer records the check's pass or fail, so you can close it once they have. A fail still closes this ticket: Boss Man opens the follow-up for it, assigned to this ticket's assignee.`
             : `This ticket has acceptance criteria to report before it merges, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".${withCriteria.criteria.some(isAfterMerge) ? " The after-merge criteria don't need a verdict at review." : ""}`,
         );
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
@@ -2074,6 +2074,16 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       }
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}${until ? ` (until ${until.toISOString().slice(0, 16).replace("T", " ")} UTC${blocked_reason?.trim() ? `: ${blocked_reason.trim()}` : ""})` : ""}`, at });
       await noteRunTicket(ticketId);
+      // A live check that failed doesn't hold the merged ticket open: Boss Man opens a filled-in, owned
+      // follow-up for it (DR-009 #5, BOS-575), so nobody files a bare title by hand. A cancel makes none.
+      const failedLive = state === "done" && !sameState && (outcome ?? "completed") === "completed" ? failedAfterMerge(withCriteria.criteria, reported) : [];
+      let followUp = "";
+      if (failedLive.length) {
+        const f = await review.followUpFailedChecks(ticketId, failedLive, reported ?? "", scope.agentId).catch(() => null);
+        followUp = f
+          ? `\n\nAn after-merge check failed, so Boss Man opened the follow-up ${f.ref} (#/tickets/${f.id}) "${f.title}", assigned to ${f.assignee ?? "the CEO"}, and told the CEO. Don't create another one.`
+          : `\n\nAn after-merge check failed, but Boss Man couldn't open its follow-up ticket. Create it with create_ticket: a description of what failed, a risk and an assignee, and this ticket's link.`;
+      }
       const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(moved?.featureId);
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
@@ -2086,7 +2096,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // have nothing for them to do, and the developer is the only one who knows.
       const [setupNow] = state === "review" && !sameState ? await db.select({ ownerSetup: tickets.ownerSetup }).from(tickets).where(eq(tickets.id, ticketId)) : [];
       const setupHint = state === "review" && !sameState && !setupNow?.ownerSetup?.trim() ? "\n\nIf the owner has to do anything once this is live (a setting, a secret, a button), add the steps in plain words by button path with set_ticket_state ownerSetup." : "";
-      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${warn}${setupHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
+      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${warn}${setupHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 
