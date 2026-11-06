@@ -152,6 +152,51 @@ describe("R6: where a command runs and as whom (BOS-427)", () => {
     expect(refuse([step("Keep it closed:", sh("chmod 700 /mnt/backups", { host: "nas01", as: "root" }))])).toEqual([]);
   });
 
+  it("recognises a private folder by its role, not its name (BOS-541: backups live in the install folder)", () => {
+    const ROLES = [
+      {
+        name: "nas01",
+        ownership: [
+          { path: "/mnt/bm", owner: "root", group: "root", mode: "700", role: "backups" as const },
+          { path: "/mnt/bm/deployer", owner: "root", group: "root", mode: "755", role: "deployer" as const },
+          { path: "/srv/boss-man/data", owner: "1000", group: "1000", mode: "700", role: "data" as const },
+        ],
+      },
+    ];
+    const f = (steps: string[]) => lintOwnerSteps(steps, ROLES).refuse.filter((x) => x.rule === "R6");
+    // The install folder, recorded as holding the backups, is refused however it is named.
+    expect(f([step("Open it up:", sh("chmod -R o+r /mnt/bm", { host: "nas01", as: "root" }))])).toHaveLength(1);
+    expect(f([step("Open it up:", sh("chmod 755 -R /mnt/bm", { host: "nas01", as: "root" }))])).toHaveLength(1);
+    expect(f([step("Copy in:", sh("install -m 644 /mnt/bm/deployer/x /mnt/bm/x", { host: "nas01", as: "root" }))])).toHaveLength(1);
+    // The database's files are private too.
+    expect(f([step("Open it up:", sh("chmod 755 /srv/boss-man/data", { host: "nas01", as: "root" }))])).toHaveLength(1);
+    // The deployer folder alone is not private by role: only the roles the owner wants shut are refused.
+    expect(f([step("List it:", sh("chmod 755 /mnt/bm/deployer", { host: "nas01", as: "root" }))])).toEqual([]);
+  });
+
+  it("refuses a copy of a private folder's file left open to everyone, even to an unrecorded destination (BOS-541)", () => {
+    const ROLES = [{ name: "nas01", ownership: [{ path: "/mnt/bm", owner: "root", group: "root", mode: "700", role: "backups" as const }] }];
+    const f = (steps: string[]) => lintOwnerSteps(steps, ROLES).refuse.filter((x) => x.rule === "R6");
+    // The review's case: a world-readable copy staged at the owner's home, which has no recorded ownership.
+    expect(f([step("Copy it home:", sh("sudo install -o leon -m 644 /mnt/bm/bossman-db.sql.gz /home/leon/", { host: "nas01", as: "root" }))])).toHaveLength(1);
+    // A copy by root with NO mode keeps the source's 700 (cp keeps the mode), so it is closed.
+    expect(f([step("Copy it:", sh("cp /mnt/bm/bossman-db.sql.gz /tmp/db.sql.gz", { host: "nas01", as: "root" }))])).toEqual([]);
+    // A login copy out of a 700 root folder can't read the source, so that is refused by the read check already.
+    expect(f([step("Copy it:", sh("cp /mnt/bm/bossman-db.sql.gz /tmp/db.sql.gz", { host: "nas01", as: "login" }))])).toHaveLength(1);
+    // A relative destination is still a copy of a backup: the source decides, not where it lands.
+    expect(f([step("Copy it:", sh("cp /mnt/bm/bossman-db.sql.gz ./db.sql.gz", { host: "nas01", as: "root" }))])).toEqual([]);
+    // A closed copy passes, at a recorded or unrecorded destination.
+    expect(f([step("Copy it home:", sh("sudo install -o leon -m 600 /mnt/bm/bossman-db.sql.gz /home/leon/", { host: "nas01", as: "root" }))])).toEqual([]);
+    // A copy the login runs with `install -m 600` can't read the 700 source, so the read check refuses it; a root
+    // copy with `install -m 600` is closed and passes.
+    expect(f([step("Copy it:", sh("sudo install -m 600 /mnt/bm/bossman-db.sql.gz /tmp/db.sql.gz", { host: "nas01", as: "root" }))])).toEqual([]);
+    // install with no -m applies the umask (022 default), so it is open and refused.
+    expect(f([step("Copy it:", sh("sudo install /mnt/bm/bossman-db.sql.gz /tmp/db.sql.gz", { host: "nas01", as: "root" }))])).toHaveLength(1);
+    // A copy out of an ordinary folder is untouched by this rule.
+    const ORDINARY = [{ name: "nas01", ownership: [{ path: "/mnt/bm", owner: "root", group: "root", mode: "700", role: "install" as const }] }];
+    expect(lintOwnerSteps([step("Copy it:", sh("sudo install -m 644 /mnt/bm/x /tmp/x", { host: "nas01", as: "root" }))], ORDINARY).refuse.filter((x) => x.rule === "R6")).toEqual([]);
+  });
+
   it("warns when a copy step touches a path with no recorded ownership", () => {
     const w = warn([step("Copy it:", sh("cp /mnt/bm/x /srv/somewhere/x", { host: "nas01", as: "root" }))]);
     expect(w.some((f) => f.rule === "warn" && /no recorded ownership/.test(f.problem))).toBe(true);
