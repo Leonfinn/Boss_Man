@@ -85,8 +85,10 @@ describe("R6: where a command runs and as whom (BOS-427)", () => {
   const refuse = (steps: string[]) => lintOwnerSteps(steps, HOSTS).refuse.filter((f) => f.rule === "R6");
   const warn = (steps: string[]) => lintOwnerSteps(steps, HOSTS).warn;
 
-  it("refuses a block that names neither host nor account (older cards), even without recorded facts", () => {
-    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm/src"))]).refuse.filter((x) => x.rule === "R6");
+  it("refuses a block that names neither host nor account (older cards), even when no host is recorded yet", () => {
+    // checkAsk always passes the recorded hosts (an empty array when none is recorded yet), so the presence
+    // check runs there; passing no facts at all is a caller that only wanted another rule, and skips R6.
+    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm/src"))], []).refuse.filter((x) => x.rule === "R6");
     expect(f).toHaveLength(1);
     expect(f[0]!.problem).toMatch(/doesn't say where it runs/);
     // The same card with a host and account passes.

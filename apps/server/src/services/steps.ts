@@ -7,6 +7,8 @@
 // ```sh host="nas01" as="login". That line is not part of what the owner pastes; the web app reads it and shows
 // "On nas01, as the logged-in account." above the command. A block with neither is refused (R6).
 
+import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
+
 export type Where = { host: string; as: "root" | "login" };
 export type Command = { sh: string; where?: Where };
 
@@ -83,7 +85,38 @@ export function parseStep(text: string): StepPiece[] {
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R9" | "warn"; problem: string };
+
+/**
+ * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
+ * is reviewable; matched on the whole step, sentences and commands alike.
+ */
+const ADDON_WORDS: Record<Addon, { label: string; re: RegExp }> = {
+  tailscale: { label: "Tailscale", re: /\btailscale\b|\bts\.net\b|\btailnet\b/i },
+  ntfy: { label: "ntfy", re: /\bntfy\b|\btest push(?:es)?\b|\btest notifications?\b|\bphone notifications?\b/i },
+  penpot: { label: "Penpot", re: /\bpenpot\b/i },
+};
+const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up", stopped: "stopped", needs_login: "waiting for a login", running: "running", unknown: "unknown" };
+/** What the lint can be given: add-on facts for R9 (and the add-on this card sets up, whose steps are exempt),
+ * and the host facts for R6 (BOS-427). Either may be absent, and then that rule only checks what it can without them. */
+export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[] };
+
+/** R9: a step that relies on an add-on that isn't running is refused; one Boss Man can't see is warned about. */
+function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: Addon | undefined, refuse: LintFinding[], warn: LintFinding[]) {
+  for (const addon of ADDONS) {
+    if (addon === setsUp) continue;
+    const m = ADDON_WORDS[addon].re.exec(text);
+    if (!m) continue;
+    const { label } = ADDON_WORDS[addon];
+    const f = addons[addon];
+    if (f.state === "running") continue;
+    if (f.state === "unknown") {
+      warn.push({ step, rule: "warn", problem: `relies on ${label} ("${m[0]}"), which Boss Man can't confirm is running (${f.source}). Don't tell the owner it carries over or is back up` });
+    } else {
+      refuse.push({ step, rule: "R9", problem: `relies on ${label} ("${m[0]}"), which is ${ADDON_STATE_WORDS[f.state]} (${f.source}${f.detail ? `: ${f.detail}` : ""}). Set ${label} up first with its own card (raise_decision with setsUp: "${addon}"), or leave it out of these steps` });
+    }
+  }
+}
 /** What a raised card keeps from the lint: warnings, and a CEO override with its reason and what it let through. */
 export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[] } };
 
@@ -144,8 +177,16 @@ function usesIn(code: string): string[] {
  * card stages a readable copy for it. Pass `hosts` (the host facts Boss Man recorded) to check the paths;
  * without them only the host/account presence is checked, so a caller that hasn't been taught the facts keeps
  * working. Backups are never made world-readable.
+ *
+ * R9 (DR-023), only when `addons` are given: a step that names an add-on (ADDON_WORDS) that is not set up,
+ * stopped or waiting for a login is refused, and one whose state is unknown is warned about; the add-on the
+ * card itself sets up (`setsUp`) is exempt.
+ *
+ * `facts` is either the host facts array (R6 alone, the older call shape) or a `LintFacts` object carrying
+ * `hosts`, `addons` and `setsUp`. Each rule runs only when its facts are there.
  */
-export function lintOwnerSteps(steps: string[], hosts?: HostFacts[]): { refuse: LintFinding[]; warn: LintFinding[] } {
+export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[]): { refuse: LintFinding[]; warn: LintFinding[] } {
+  const given: LintFacts = Array.isArray(facts) ? { hosts: facts } : facts ?? {};
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
   // not state: scratch for one call over one card; nothing is kept between calls.
@@ -178,9 +219,10 @@ export function lintOwnerSteps(steps: string[], hosts?: HostFacts[]): { refuse: 
     }
     for (const c of inline) if (PLACEHOLDER.test(c)) refuse.push({ step, rule: "R3", problem: `has a placeholder the owner would have to edit: ${c.slice(0, 120)}` });
     for (const m of text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) refuse.push({ step, rule: "R4", problem: `has {{${m[1]}}}, which Boss Man has no value for. Write the value itself` });
-    const host = lintHost(blockPieces, step, hosts, staged, step === 1);
+    const host = lintHost(blockPieces, step, given.hosts, staged, step === 1);
     refuse.push(...host.refuse);
     warn.push(...host.warn);
+    if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
     if (LINK.test(prose)) warn.push({ step, rule: "warn", problem: "links to a wiki page or ticket; fine as background, but the step itself must be complete" });
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
     const hedge = code.length ? HEDGES.exec(prose) : null;
@@ -407,6 +449,9 @@ function modeOpensUp(p: Prog): boolean {
 function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, step: number, hosts: HostFacts[] | undefined, staged: Map<string, Set<string>>, first: boolean): { refuse: LintFinding[]; warn: LintFinding[] } {
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
+  // R6 runs only when the caller has the host facts (BOS-427): `checkAsk` always passes them, so every card is
+  // checked there; a caller that only wanted another rule (R9) and passes none keeps working, as before.
+  if (hosts === undefined) return { refuse, warn };
   const stagedForLogin = (host: string, folder: string) => {
     const set = staged.get(host) ?? new Set<string>();
     set.add(folder);

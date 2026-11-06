@@ -581,6 +581,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     });
 
     it("skips nothing once a deploy has finished, and runs again the moment its result lands", async () => {
+      // Only the clock: the result lands well inside the minute, so the forced pass must not explain the run.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-20T12:05:00Z"));
       const c = (ctx = await setup());
       await c.available();
       await c.selfDeploy.sync();
@@ -592,7 +595,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       await c.selfDeploy.sync();
       expect(c.made.slice(start)).toEqual([]);
       // The result lands: the pass runs at once, well inside the minute, and tells the owner.
-      await c.status({ id: randomUUID(), result: "deployed", message: "Deployed.", to_commit: B, ended: "2026-10-20T12:03:30Z" });
+      await c.status({ id: randomUUID(), result: "deployed", message: "Deployed.", to_commit: B, ended: "2026-10-20T12:05:30Z" });
       await c.selfDeploy.sync();
       expect(c.made.length).toBeGreaterThan(start);
       expect((await c.db.select().from(notifications)).map((n) => n.title)).toContain("Boss Man updated to bbbbbbbb");

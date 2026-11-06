@@ -8,6 +8,7 @@ import { api, type Agent } from "../api";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
 import { ImagePreviews, useImageAttach, withAttachments } from "./ImageAttach";
+import { OwnerMessageBox, tooLongToSend } from "./OwnerMessageBox";
 import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
@@ -175,6 +176,21 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  // Too long for a message: send it as a .txt file on the ticket, which the agent opens whole.
+  const sendAsFile = async (long: string) => {
+    try {
+      const markdown = await img.uploadText(long, "message.txt");
+      const outgoing = withAttachments("I've sent the text as a file (below); please read it before answering.", [markdown]);
+      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: outgoing, ...(other ? { agentId: other.id } : {}) } });
+      setText("");
+      img.clear();
+      setNote({ ok: true, text: "Sent as a .txt file on the ticket." });
+      convo.reload();
+      runs.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
   const stop = async () => {
     if (!live) return;
     try {
@@ -266,24 +282,25 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
             </select>
           </div>
         )}
-        <label htmlFor="activity-text" className="sr-only">
-          Message to the agent
-        </label>
-        <textarea
+        <OwnerMessageBox
           id="activity-text"
+          label="Message to the agent"
           rows={2}
-          maxLength={4000}
           enterKeyHint={NEWLINE_KEY_HINT}
           placeholder={placeholder}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={setText}
           onKeyDown={onKey}
           onPaste={img.onPaste}
-        />
-        <ImagePreviews attached={img.attached} onRemove={img.remove} />
+          onSendAsFile={sendAsFile}
+          attaching={img.busy}
+          error={img.error}
+        >
+          {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+        </OwnerMessageBox>
         <div className="compose-actions">
           {img.button}
-          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy}>
+          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)}>
             Send
           </button>
           {live && (
@@ -298,11 +315,6 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           )}
         </div>
       </form>
-      {img.error && (
-        <p className="error" role="alert" style={{ padding: "0 18px 14px" }}>
-          {img.error}
-        </p>
-      )}
       {note && (
         <p className={note.ok ? "muted" : "error"} role={note.ok ? "status" : "alert"} style={{ padding: "0 18px 14px" }}>
           {note.text}
