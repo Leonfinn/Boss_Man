@@ -6,7 +6,7 @@ import type { Db } from "../db/client.js";
 import { agents, projects, settings, tickets, wikiPages, wikiRevisions } from "../db/schema.js";
 import type { gitHostService } from "./git-hosts.js";
 import type { workService } from "./work.js";
-import { LESSONS_CAP, LESSONS_HEADING, addLesson, lessonLine, lessonsFrom, removeLessonLine, splitSections } from "./wiki.js";
+import { LESSONS_CAP, LESSONS_HEADING, addLesson, lessonLine, lessonsFrom, removeLessonLine, serialiseWrite, splitSections } from "./wiki.js";
 
 // The lessons helpers and their decision answers live in wiki.ts beside the section parsing
 // (the brief-write guard needs them there); re-exported so callers find them at the brief.
@@ -29,22 +29,29 @@ export async function lessonsPageRow(db: Db, companyId: string, projectId: strin
  * Lessons section is capped by the caller; this only writes.
  */
 export async function writeLesson(db: Db, ctx: { companyId: string; projectId: string; projectName: string }, lesson: string, replaced?: string) {
-  const bodyOf = (body: string) => addLesson(replaced ? removeLessonLine(body, replaced) : body, lesson);
-  const page = await lessonsPageRow(db, ctx.companyId, ctx.projectId);
-  if (!page) {
-    const body = `${STUB_FIRST_LINE}\n\n## ${LESSONS_HEADING}\n\n${lessonLine(lesson)}\n`;
-    const [p] = await db
-      .insert(wikiPages)
-      .values({ companyId: ctx.companyId, slug: briefSlug(ctx.projectId), folder: briefFolder(ctx.projectName), title: briefTitle(ctx.projectName), body })
-      .returning();
-    await db.insert(wikiRevisions).values({ pageId: p!.id, title: p!.title, body });
-    return;
-  }
-  const body = bodyOf(page.body);
-  if (body !== page.body) {
-    await db.update(wikiPages).set({ body, updatedAt: new Date() }).where(eq(wikiPages.id, page.id));
-    await db.insert(wikiRevisions).values({ pageId: page.id, title: page.title, body });
-  }
+  // Queued with every wiki write, so the version saved below always matches what the page held
+  // before it (BOS-496).
+  await serialiseWrite(async () => {
+    const bodyOf = (body: string) => addLesson(replaced ? removeLessonLine(body, replaced) : body, lesson);
+    const page = await lessonsPageRow(db, ctx.companyId, ctx.projectId);
+    // The page change and its version are one transaction, so neither lands without the other (BOS-496).
+    await db.transaction(async (tx) => {
+      if (!page) {
+        const body = `${STUB_FIRST_LINE}\n\n## ${LESSONS_HEADING}\n\n${lessonLine(lesson)}\n`;
+        const [p] = await tx
+          .insert(wikiPages)
+          .values({ companyId: ctx.companyId, slug: briefSlug(ctx.projectId), folder: briefFolder(ctx.projectName), title: briefTitle(ctx.projectName), body })
+          .returning();
+        await tx.insert(wikiRevisions).values({ pageId: p!.id, title: p!.title, body });
+        return;
+      }
+      const body = bodyOf(page.body);
+      if (body !== page.body) {
+        await tx.update(wikiPages).set({ body, updatedAt: new Date() }).where(eq(wikiPages.id, page.id));
+        await tx.insert(wikiRevisions).values({ pageId: page.id, title: page.title, body });
+      }
+    });
+  });
 }
 
 /** Stable across renames: the page is found by project id, never by name. */

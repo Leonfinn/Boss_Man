@@ -1,5 +1,5 @@
 {
-  "id": "2cc22f02-bc34-4555-8640-ea8e367b59bc",
+  "id": "69543ccf-e748-428e-a4fa-a411d46905a4",
   "prevId": "98ef5aae-1123-451a-9a5d-cbf112c594bc",
   "version": "7",
   "dialect": "postgresql",
@@ -1293,24 +1293,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "standing_rules": {
-          "name": "standing_rules",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "standing_rules_by": {
-          "name": "standing_rules_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "standing_rules_at": {
-          "name": "standing_rules_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -1691,7 +1673,23 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "decisions_status": {
+          "name": "decisions_status",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "decisions_company_id_companies_id_fk": {
           "name": "decisions_company_id_companies_id_fk",
@@ -3875,6 +3873,22 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "notifications_unread_decision": {
+          "name": "notifications_unread_decision",
+          "columns": [
+            {
+              "expression": "decision_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"notifications\".\"read_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -4012,6 +4026,21 @@
             },
             {
               "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "nudges_wake": {
+          "name": "nudges_wake",
+          "columns": [
+            {
+              "expression": "wake_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -5983,6 +6012,80 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "runs_live": {
+          "name": "runs_live",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"runs\".\"ended_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "runs_ticket_started": {
+          "name": "runs_ticket_started",
+          "columns": [
+            {
+              "expression": "ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "runs_agent_started": {
+          "name": "runs_agent_started",
+          "columns": [
+            {
+              "expression": "agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "runs_ended": {
+          "name": "runs_ended",
+          "columns": [
+            {
+              "expression": "ended_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"runs\".\"ended_at\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -7175,7 +7278,38 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "ticket_dependencies_blocked": {
+          "name": "ticket_dependencies_blocked",
+          "columns": [
+            {
+              "expression": "blocked_ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "ticket_dependencies_blocker": {
+          "name": "ticket_dependencies_blocker",
+          "columns": [
+            {
+              "expression": "blocker_ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "ticket_dependencies_blocked_ticket_id_tickets_id_fk": {
           "name": "ticket_dependencies_blocked_ticket_id_tickets_id_fk",
@@ -8131,6 +8265,38 @@
             }
           ],
           "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "tickets_watcher": {
+          "name": "tickets_watcher",
+          "columns": [
+            {
+              "expression": "watcher_agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"tickets\".\"watcher_agent_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "tickets_monitor_at": {
+          "name": "tickets_monitor_at",
+          "columns": [
+            {
+              "expression": "monitor_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"tickets\".\"monitor_at\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}

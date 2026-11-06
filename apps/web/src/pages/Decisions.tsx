@@ -9,6 +9,22 @@ import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
 import { SkillProposal } from "../components/SkillProposal";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
+
+/** The answer sent when it is too long for the box: the text is in the .txt file the line links. */
+export const ANSWER_IN_FILE = "My answer is too long to type here, so it's in this file (open it to read it whole):";
+
+/** Attaches an owner's text as a .txt file, for an answer too long for the box; returns its Markdown. */
+async function uploadText(companyId: string, ticketId: string | undefined, text: string) {
+  const data = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(new Error("Couldn't read the text."));
+    r.readAsDataURL(new Blob([text], { type: "text/plain" }));
+  });
+  const r = await api<{ markdown: string }>(`/api/companies/${companyId}/images`, { method: "POST", body: { data, name: "answer.txt", ...(ticketId ? { ticketId } : {}) } });
+  return r.markdown;
+}
 
 const KIND: Record<string, { label: string; tone: string }> = {
   permission: { label: "Permission", tone: "" },
@@ -416,6 +432,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // A merge started from the ticket page (or a sweep) while its approval card is still open.
   const [landings, setLandings] = useState<Record<string, TicketLanding | null>>({});
   const [notices, setNotices] = useState<Record<string, string>>({});
+  // The answer being sent as a .txt file, for one too long to send as a message.
+  const [attaching, setAttaching] = useState<string | null>(null);
   const inFlight = useRef(new Set<string>());
   const landingIds = [...new Set(decisions.filter((d) => !answered[d.id] && d.context?.type === "risk_review" && d.context.ticketId).map((d) => d.context!.ticketId!))];
   const landingKey = landingIds.sort().join(",");
@@ -469,6 +487,29 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
+  // Too long for an answer: the text goes in a .txt file, and the agent is told where to read it whole.
+  const answerAsFile = async (d: Decision, long: string) => {
+    if (inFlight.current.has(d.id)) return;
+    inFlight.current.add(d.id);
+    setBusy(d.id);
+    setAttaching(d.id);
+    try {
+      // Attach it to the ticket the card is about, so it sits with the work; else the company, which agents still open.
+      const ticketId = d.context?.type === "risk_review" ? d.context.ticketId ?? undefined : d.context?.blockerTicketId ?? undefined;
+      const markdown = await uploadText(d.companyId, ticketId || undefined, long);
+      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: `${ANSWER_IN_FILE}\n\n${markdown}`, custom: true } });
+      setAnswered((a) => ({ ...a, [d.id]: ANSWER_IN_FILE }));
+      setOwnWords(({ [d.id]: _, ...rest }) => rest);
+      setErrors(({ [d.id]: _, ...rest }) => rest);
+      setNotices(({ [d.id]: _, ...rest }) => rest);
+      onAnswered();
+    } catch (err) {
+      setErrors((e) => ({ ...e, [d.id]: (err as Error).message }));
+    } finally {
+      setBusy(null);
+      setAttaching(null);
+    }
+  };
   const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
     // A second click can land before React re-renders the disabled button: refuse it here too.
     if (inFlight.current.has(d.id)) return;
@@ -991,22 +1032,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           >
                             <div className="field">
                               <label htmlFor={`own-${d.id}`}>Your answer, in your own words. It goes to {d.agentName ?? "the agent"} exactly as you write it.</label>
-                              <textarea
+                              <OwnerMessageBox
                                 id={`own-${d.id}`}
+                                label="Your answer, in your own words"
                                 className="own-answer"
                                 rows={5}
-                                maxLength={4000}
                                 autoFocus
                                 placeholder={d.recommendedOption ?? undefined}
-                                value={ownWords[d.id]}
-                                onChange={(e) => setOwnWords((w) => ({ ...w, [d.id]: e.target.value }))}
+                                value={ownWords[d.id] ?? ""}
+                                onChange={(text) => setOwnWords((w) => ({ ...w, [d.id]: text }))}
                                 onKeyDown={(e) => {
                                   if (e.key === "Tab" && !e.shiftKey && d.recommendedOption && !ownWords[d.id]) {
                                     e.preventDefault();
                                     setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }));
                                   }
                                 }}
-                                style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
+                                textareaStyle={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
+                                onSendAsFile={(long) => answerAsFile(d, long)}
+                                attaching={attaching === d.id}
                               />
                               {d.recommendedOption && !ownWords[d.id] && (
                                 <button type="button" className="use-suggestion" onClick={() => setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }))}>
@@ -1015,7 +1058,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               )}
                             </div>
                             <div className="actions">
-                              <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim()}>
+                              <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim() || tooLongToSend(ownWords[d.id] ?? "")}>
                                 Send my answer
                               </button>
                               <button type="button" className="btn" onClick={() => setOwnWords(({ [d.id]: _, ...rest }) => rest)}>
