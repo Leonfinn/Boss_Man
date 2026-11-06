@@ -67,6 +67,8 @@ export type AlertInput = {
   about?: Array<string | null | undefined>;
   /** The lowest rung allowed to settle it: "ceo" when the fix is beyond the Scrum Master (stopping work, a review outcome, host access). */
   from?: Rung;
+  /** Why it starts on that rung, said on the card's ladder (e.g. "the CEO is the target"). */
+  why?: string;
   /** The kind of alert (DR-017 A). Every raise names one; a raise without one is checked by alert-kinds.test.ts. */
   kind?: AlertKind;
   /** The account, run or agents the alert is about, for its cause key and closer (DR-017 B, DR-016). */
@@ -485,7 +487,7 @@ export function alertLadder(
         .onConflictDoNothing()
         .returning();
       if (!d) return null;
-      const rung = await place(d, ladder, ladder.rung, start === "ceo" ? "only the CEO or the owner can act on it" : start === "owner" ? "only the owner can act on it" : "raised by Boss Man");
+      const rung = await place(d, ladder, ladder.rung, input.why ?? (start === "ceo" ? "only the CEO or the owner can act on it" : start === "owner" ? "only the owner can act on it" : "raised by Boss Man"));
       return rung ? { id: d.id, rung } : null;
     },
 
