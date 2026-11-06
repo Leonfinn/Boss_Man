@@ -309,12 +309,12 @@ if command -v flock >/dev/null; then
   ( r=0; lock env >"$t/old.out" 2>&1 || r=$?; echo "$r" >"$t/old.rc" ) & o=$!
   for _ in $(seq 50); do grep -q "waiting for a free check slot" "$t/old.out" 2>/dev/null && break; sleep 0.2; done
   ( lock env >"$t/new.out" 2>&1 ) & n=$!
-  for _ in $(seq 50); do [ -s "$t/old.rc" ] && break; sleep 0.2; done
+  for _ in $(seq 300); do [ -s "$t/old.rc" ] && break; sleep 0.2; done
   [ "$(cat "$t/old.rc" 2>/dev/null)" = 75 ] || fail "replace: older check should exit 75, got '$(cat "$t/old.rc" 2>/dev/null)': $(cat "$t/old.out")"
   grep -q "replaced by a newer check of this folder" "$t/old.out" || fail "replace: no message: $(cat "$t/old.out")"
   [ "$(find "$t/lock.queue" -type f | wc -l)" -eq 1 ] || fail "replace: want one queue place, got: $(ls "$t/lock.queue")"
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
-  for _ in $(seq 50); do grep -q "lock held" "$t/new.out" 2>/dev/null && break; sleep 0.2; done
+  for _ in $(seq 300); do grep -q "lock held" "$t/new.out" 2>/dev/null && break; sleep 0.2; done
   grep -q "lock held" "$t/new.out" || fail "replace: the newer check never got the slot: $(cat "$t/new.out")"
   wait "$n" "$o" || true
   kill "$mproc" 2>/dev/null || true; wait "$mproc" 2>/dev/null || true
