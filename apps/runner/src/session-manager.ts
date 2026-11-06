@@ -462,7 +462,7 @@ export class SessionManager {
     // that only wants to write into it never has to, and reported as a warning when it can't be made.
     // Its own session marker, so a check script can tell a run from a shell a person is using (BOS-592).
     env.BOSSMAN_AGENT_SESSION = "1";
-    if (cmd.workspace && this.opts.workspaces) {
+    if (cmd.workspace && typeof this.opts.workspaces?.scratchDir === "function") {
       const dir = this.opts.workspaces.scratchDir(cmd.workspace.ticketId);
       try {
         mkdirSync(dir, { recursive: true });
