@@ -10,7 +10,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import type { AlertInput } from "./alert-ladder.js";
-import { activeRows, latestRows, REVIEW_REASON, reviewAskPattern, wakeReviewers, type Notify } from "./review-kinds.js";
+import { activeRows, endedNormallySql, latestRows, REVIEW_REASON, reviewAskPattern, roundStartedAt, wakeReviewers, type Notify } from "./review-kinds.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 
 /** The reason on the note Boss Man steers into a silent run. */
@@ -108,6 +108,10 @@ export async function progressSweep(db: Db, t: Date, deps: ProgressDeps) {
   const notify: Notify = (agentId, input) => deps.wake({ agentId, ...input });
   for (const { ticket } of pending) {
     if (!active(ticket.companyId)) continue;
+    // Only this round's unanswered runs count (BOS-433): a reviewer who answered earlier rounds isn't
+    // reported for this one, and a run cut off by a restart (interrupted, or lost by the server) never
+    // got to answer, so it is not a missed verdict (DR-017, decision F).
+    const roundStart = (await roundStartedAt(db, ticket.id)) ?? ticket.createdAt;
     for (const r of activeRows(await latestRows(db, ticket.id))) {
       if (!r.reviewerAgentId) continue;
       // Runs that ended after the review was asked for, on a wake that named this ticket.
@@ -115,7 +119,7 @@ export async function progressSweep(db: Db, t: Date, deps: ProgressDeps) {
         .select({ n: sql<number>`count(distinct ${runs.id})::int` })
         .from(runs)
         .innerJoin(wakes, eq(wakes.runId, runs.id))
-        .where(and(eq(runs.agentId, r.reviewerAgentId), isNotNull(runs.endedAt), sql`${runs.startedAt} >= ${r.createdAt}`, eq(wakes.reason, REVIEW_REASON), like(wakes.note, reviewAskPattern(ticket.id))));
+        .where(and(eq(runs.agentId, r.reviewerAgentId), isNotNull(runs.endedAt), endedNormallySql(runs.outcome), sql`${runs.startedAt} >= ${roundStart}`, eq(wakes.reason, REVIEW_REASON), like(wakes.note, reviewAskPattern(ticket.id))));
       if ((silent?.n ?? 0) < 2) continue;
       const [from] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, r.reviewerAgentId));
       const rule = ruleFor(await effectivePolicy(db, ticket), ticket.risk);

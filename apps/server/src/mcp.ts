@@ -280,9 +280,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         waitsOn: z.string().uuid().optional(),
         acceptanceCriteria: acceptanceCriteriaSchema.optional(),
         noCode: z.boolean().optional().describe("true for research, wiki, docs or deploy-only work that changes nothing in the repository; such a ticket can reach review and be closed with an empty diff. Leave it off for anything that changes code."),
+        ownerSetup: z.string().max(4000).optional().describe("What the owner has to do once this change is live (a setting, a secret, a button), in plain words by button path, one step per line, e.g. Settings → Funding → Add account. Boss Man raises their card with these steps only when the change goes live, not at merge. Leave it off when there is nothing for them to do."),
       },
     },
-    async ({ title, body, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, acceptanceCriteria, noCode, ...rest }) => {
+    async ({ title, body, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, acceptanceCriteria, noCode, ownerSetup, ...rest }) => {
       if (scope.agentId && !isTaskSize(size)) return fail(`${size === undefined ? "A ticket you create needs a size" : `${size} is not a size`}: ${SIZE_SCALE}, relative to the tickets your team has finished. Call sizing_guide to see finished tickets of each size, pick the one yours is most like, then call create_ticket again with size.`);
       const out = await outsideTree(parent);
       if (out) return fail(`${out} Pass parent (a ticket in the tree) to add a sub-task.`);
@@ -347,7 +348,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim() } : {}) })
         .returning({ id: tickets.id });
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id, scope.agentId);
       if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn }, scope.agentId);
@@ -1155,7 +1156,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           const checklist = rt.acceptanceCriteria.length
             ? `Acceptance criteria:\n${readVerdicts(rt.acceptanceCriteria, rt.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`).join("\n")}\nIf one fails, request changes and name it.\n\n`
             : "";
-          return text(`${checklist}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
+          // The owner's setup steps are judged like code (DR-011 point 2): seen next to the criteria, and
+          // sent back if they are wrong, missing, or not in plain words by button path.
+          const setup = rt.ownerSetup?.trim()
+            ? `The owner's steps once this is live:\n${rt.ownerSetup.trim().split(/\r?\n/).map((l) => `- ${l.trim()}`).join("\n")}\nCheck they are right and in plain words by button path; request changes if not.\n\n`
+            : "";
+          return text(`${checklist}${setup}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
         // A verdict on a ticket is touching it, like any other hook (BOS-268).
@@ -1202,7 +1208,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1321,6 +1327,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
                 ...readVerdicts(t.acceptanceCriteria, t.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`),
               ]
             : []),
+          ...(t.ownerSetup?.trim() ? ["", "## After it goes live, the owner will need to", ...t.ownerSetup.trim().split(/\r?\n/).map((l) => `- ${l.trim()}`)] : []),
           ...(t.plan && t.planApprovedAt ? ["", "## Approved plan", cut(t.plan, CAP, () => "the rest isn't shown here")] : []), // shortcut: plans over 40000 chars aren't paged; add an offset if one ever is
           "",
           "## What it produced",
@@ -1682,9 +1689,9 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "wiki",
     {
       description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output), append (slug, entry, optional heading and position), history (slug: every version of a page, newest first, with its size and who saved it) and restore (slug and version id: put an old version back as a new version), and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). write always sets the whole page: it takes no section or offset (those are for read). A write to an existing page that would remove more than about a quarter of its text, or any of its headings, is refused unless you pass replace: true; only the CEO or the owner may replace a page another agent created. For a running log (a release log, a cock-ups log, a status page) never re-send the whole body to write: add one entry with append, which inserts it under a heading (newest first by default, or position \"oldest\" at the end of that section) or at the top or the end of the page, and never shortens the page (one entry is a line or two, at most 20,000 characters). An append needs a real heading: \"intro\" (the text above the first heading) is refused, and an entry whose code fence (```) never closes is refused so it can't swallow the page after it. If a page was wiped, history shows the full version and restore puts it back; the CEO and the page's last writer may restore. Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
       inputSchema: {
-        action: z.enum(["list", "read", "write", "attach"]),
+        action: z.enum(["list", "read", "write", "append", "history", "restore", "attach"]),
         q: z.string().max(200).optional(),
         slug: z.string().max(500).optional(),
         folder: z.string().max(400).optional(),
@@ -1696,6 +1703,11 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         url: z.string().max(2000).optional(),
         section: z.string().max(300).optional(),
         offset: z.number().int().min(0).optional(),
+        replace: z.boolean().optional(),
+        entry: z.string().max(20_000).optional(),
+        position: z.enum(["top", "bottom", "oldest"]).optional(),
+        revisionId: z.string().uuid().optional(),
+        heading: z.string().max(300).optional(),
       },
     },
     async (input) => {
@@ -1740,13 +1752,40 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           }
           case "write": {
             if (!input.title || input.body === undefined) return fail("Give a title and a body.");
+            // section and offset are for read: write always sets the whole page, so ignore them at your peril (BOS-430).
+            if (input.section !== undefined) return fail("write has no section argument: it replaces the whole page. To add an entry under a heading, use append; to read one section, use read with section.");
+            if (input.offset !== undefined) return fail("write has no offset argument: it replaces the whole page. To read the page in parts, use read with offset.");
             if (input.ticketId) {
               const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, input.ticketId, scope.agentId);
               if (reviewWrite) return fail(reviewWrite);
             }
-            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, ...by });
+            const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, replace: input.replace, isCeo: me?.role === "ceo", ...by });
             const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
             return text(`${r.created ? "Created" : "Updated"} ${link}${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
+          }
+          case "append": {
+            if (!input.slug) return fail("Give the page's slug.");
+            if (input.entry === undefined) return fail("Give the entry to add.");
+            if (input.section !== undefined) return fail("append has no section argument: give the heading to add under as heading.");
+            if (input.replace !== undefined) return fail("append adds an entry and never replaces the page; to replace it, use write with the whole body.");
+            const r = await wiki.append(scope.companyId, { slug: input.slug, entry: input.entry, heading: input.heading, position: input.position, title: input.title, ticketId: input.ticketId ?? null, agentId: scope.agentId, runId: scope.runId });
+            const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
+            return text(`Added the entry${r.where} of ${link} (${r.size.toLocaleString("en-GB")} characters now)${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
+          }
+          case "history": {
+            if (!input.slug) return fail("Give the page's slug.");
+            const h = await wiki.history(scope.companyId, input.slug);
+            const rows = h.revisions.map((r) => `- ${r.id} · ${r.createdAt.toISOString()} · ${r.agent ?? "the owner"} · ${r.size.toLocaleString("en-GB")} chars${r.runId ? ` · run #/runs/${r.runId}` : ""}`);
+            return text([`# ${h.title} (${h.slug}): ${h.size.toLocaleString("en-GB")} characters now, ${h.revisions.length} version${h.revisions.length === 1 ? "" : "s"}, newest first.`, ...rows, "", "Put one back with restore (slug and version id). A restore is itself a new version, so it can be undone."].join("\n"));
+          }
+          case "restore": {
+            if (!input.slug) return fail("Give the page's slug.");
+            if (!input.revisionId) return fail("Give the version id (from history).");
+            const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+            const r = await wiki.restore(scope.companyId, { slug: input.slug, revisionId: input.revisionId, agentId: scope.agentId, runId: scope.runId, isCeo: me?.role === "ceo" });
+            const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
+            return text(`Restored ${link} to that version (${r.size.toLocaleString("en-GB")} characters), kept as a new version so it can be undone. Pass link "${link}" to notify_owner when you tell the owner about it.`);
           }
           case "attach": {
             if (!input.ticketId) return fail("Give the ticketId it belongs to.");
@@ -1799,7 +1838,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
     "update_ticket",
     {
       description:
-        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), fix its title or description, or set who it is assigned to (assignee: an agent's name, or null to leave it unassigned; the new assignee is woken), or mark it as not needing code (noCode true for research, wiki, docs or deploy-only work, so it can reach review with an empty diff; false to clear it), or mark it urgent (urgent true: it always passes the subscription quota hold; false to clear it), or change its size (1, 2, 3, 5 or 8; null to clear it; compare with sizing_guide first). Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
+        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), fix its title or description, or set who it is assigned to (assignee: an agent's name, or null to leave it unassigned; the new assignee is woken), or mark it as not needing code (noCode true for research, wiki, docs or deploy-only work, so it can reach review with an empty diff; false to clear it), or mark it urgent (urgent true: it always passes the subscription quota hold; false to clear it), or add or clear the owner's setup steps (ownerSetup: what they do once this is live, in plain words by button path; null to clear), or change its size (1, 2, 3, 5 or 8; null to clear it; compare with sizing_guide first). Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
       inputSchema: {
         ticketId: z.string().uuid(),
         project: z.string().min(1).optional(),
@@ -1809,20 +1848,21 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         body: z.string().max(10_000).optional(),
         assignee: z.string().min(1).nullable().optional(),
         noCode: z.boolean().optional(),
+        ownerSetup: z.string().max(4000).nullable().optional().describe("What the owner has to do once this change is live, in plain words by button path, one step per line. Null or an empty string clears it."),
         urgent: z.boolean().optional(),
         size: z.number().nullable().optional(),
         reason: z.string().trim().min(1).max(240),
         expected_version: z.number().int().optional(),
       },
     },
-    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, urgent, size, reason, expected_version }) => {
+    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, urgent, size, reason, expected_version }) => {
       if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
       if (size !== undefined && size !== null && !isTaskSize(size)) return fail(`${size} is not a size: ${SIZE_SCALE}, or null to clear it.`);
       const out = await outsideTree(ticketId);
       if (out) return fail(out);
       const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
       if (reviewWrite) return fail(reviewWrite);
-      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && urgent === undefined && size === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee, noCode, urgent or size.");
+      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && ownerSetup === undefined && urgent === undefined && size === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, urgent or size.");
       const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
       if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}; it is now ${t.version}). Read it again with tickets, then decide.`);
@@ -1837,7 +1877,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         assigneeId = a.id;
       } else if (assignee === null) assigneeId = null;
       try {
-        const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(urgent !== undefined ? { urgent } : {}), ...(size !== undefined ? { size } : {}) });
+        const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(ownerSetup !== undefined ? { ownerSetup } : {}), ...(urgent !== undefined ? { urgent } : {}), ...(size !== undefined ? { size } : {}) });
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${urgent === undefined ? "" : urgent ? " (marked urgent)" : " (no longer urgent)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}: ${reason}` });
         await noteRunTicket(ticketId);
@@ -1853,9 +1893,9 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
     "set_ticket_state",
     {
       description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished (a no-code ticket assigned to you can be closed by you); ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies.",
-      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional(), blocked_until: z.string().datetime({ offset: true }).optional(), blocked_reason: z.string().max(BLOCKED_UNTIL_REASON_MAX).optional() },
+      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional(), blocked_until: z.string().datetime({ offset: true }).optional(), blocked_reason: z.string().max(BLOCKED_UNTIL_REASON_MAX).optional(), ownerSetup: z.string().max(4000).optional().describe("The owner's steps, for a ticket whose change needs them to do something once it is live (a setting, a secret, a button): plain words by button path, one step per line, e.g. Settings → Funding → Add account. Boss Man raises their card with these steps when the change goes live, not at merge. Pass an empty string to clear it. Only the ticket's own assignee, CEO or a manager may set it.") },
     },
-    async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason }) => {
+    async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason, ownerSetup }) => {
       const no = await chatRefusal();
       if (no) return fail(no);
       // The state note is read by the reviewer as trusted text: on an open review ticket only the
@@ -1940,7 +1980,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       const rows = await db
         .update(tickets)
         // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, ...(sameState && state === "done" ? {} : { outcome: state === "done" ? (outcome ?? "completed") : null }), ...(state === "done" && !sameState ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}) })
+        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, ...(sameState && state === "done" ? {} : { outcome: state === "done" ? (outcome ?? "completed") : null }), ...(state === "done" && !sameState ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null } : {}) })
         // The version is checked in the same statement, so a change between read and write can't slip through (R81).
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
@@ -1965,7 +2005,11 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // The check that counts is at the merge, but telling the agent now saves it waiting hours to
       // find out its migration number is taken (BOS-219). It never holds the move up.
       const warn = state === "review" && !sameState ? await migrationWarning(review, ticketId, scope.companyId) : "";
-      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${warn}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
+      // A reminder, not a refusal (DR-011 point 2): a code ticket with nothing written for the owner may well
+      // have nothing for them to do, and the developer is the only one who knows.
+      const [setupNow] = state === "review" && !sameState ? await db.select({ ownerSetup: tickets.ownerSetup }).from(tickets).where(eq(tickets.id, ticketId)) : [];
+      const setupHint = state === "review" && !sameState && !setupNow?.ownerSetup?.trim() ? "\n\nIf the owner has to do anything once this is live (a setting, a secret, a button), add the steps in plain words by button path with set_ticket_state ownerSetup." : "";
+      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${warn}${setupHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 

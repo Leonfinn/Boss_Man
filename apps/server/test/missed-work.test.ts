@@ -209,7 +209,7 @@ describe("stalled review sweep", () => {
 describe("unmerged approvals sweep", () => {
   it("tries an interrupted merge once by itself, asks the owner once if that fails too, and leaves one waiting on sign-off", async () => {
     ctx = await setup();
-    const approve = (ticketId: string) => ctx.db.insert(reviewRequests).values({ ticketId, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", createdAt: new Date(Date.now() - 2 * HOUR), decidedAt: new Date(Date.now() - HOUR) });
+    const approve = (ticketId: string) => ctx.db.insert(reviewRequests).values({ ticketId, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", createdAt: new Date(Date.now() - 4 * HOUR), decidedAt: new Date(Date.now() - 3 * HOUR) });
     // No repo: trying again simply closes it.
     const plain = await ctx.forgotten("Ship it", { systemState: "review" });
     await approve(plain);
