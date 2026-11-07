@@ -182,7 +182,32 @@ describe("ranked decision queue (R20)", () => {
       expect(rows.find((r) => r.id === hands.id)!.step).toBe(1);
     });
 
-    it("orders a card that carries a do-after link even when it needs no hands-on work, but never numbers it", async () => {
+    it("never folds a hands-on card into the waiting group just because its ticket is in progress (BOS-551 follow-up)", async () => {
+      ctx = await setup();
+      // A memory reading the owner must take before a server update that resets it. Its ticket is in
+      // progress (an agent may hold it while the owner's card is open: starting a ticket ignores decision
+      // blockers), so a naive "in progress means waiting" rule would hide it behind the update.
+      const ticket = await ctx.ticket({ title: "Take the memory reading", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."], blocksTicketId: ticket.id });
+      ctx.advance(HOUR);
+      const update = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Update to ad845180", options: ["Done", "Skip"], recommended: "Done", steps: ["Apply the update."], doAfter: [{ decisionId: measure.id, label: "Read the memory figure" }] });
+      // A merge card for the same in-progress ticket, which genuinely is back with the agent.
+      const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: ticket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
+
+      const rows = await ordered();
+      const reading = rows.find((r) => r.id === measure.id)!;
+      const upd = rows.find((r) => r.id === update.id)!;
+      // The reading has answer buttons: it is not in the waiting group, and it is numbered before the update.
+      expect(reading.waiting).toBeNull();
+      expect(reading.step).toBe(1);
+      expect(upd.waiting).toBeNull();
+      expect(upd.doAfter).toEqual(["Read the memory figure"]);
+      expect(reading.step!).toBeLessThan(upd.step!);
+      // The merge card still waits: it is the only one folded, and it is last.
+      expect(rows.find((r) => r.id === sentBack!.id)!.waiting).toMatch(/merge check failed/i);
+      expect(rows[rows.length - 1]!.id).toBe(sentBack!.id);
+    });
+
       ctx = await setup();
       const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
       ctx.advance(HOUR);

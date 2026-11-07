@@ -1994,16 +1994,20 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // ticket is back with an agent (a merge check sent back, a review bounced). A card that is still the
       // owner's own call, or one that holds a live run, is not waiting.
       const AGENT_BACK_STATES = new Set(["in_progress"]);
+      // Only a merge/review card can be waiting on the agent because its ticket is back with one. A
+      // question, to-do or setup card is the owner's own live ask: it must keep its answer buttons even
+      // when its ticket reads "in progress" (an agent may hold the ticket while the owner's card is
+      // open, because starting a ticket ignores decision blockers; BOS-551 follow-up). Folding it here
+      // would hide a reading behind a server update that resets it. An agent re-checking such a card
+      // after the owner acted is already how `staleAt` folds it, so nothing is lost.
+      const aboutTicket = (c: DecisionContext) => c.type === "review_loop" || c.type === "risk_review" || c.type === "check_stuck" || c.type === "review_stall";
       const waitingOf = (r: (typeof sorted)[number]): { reason: string } | null => {
         if (r.staleAt) return { reason: `The agent is checking whether this is still needed, because you acted since it was written${r.staleReason ? ` (${r.staleReason})` : ""}.` };
         const c = contextOf(r);
-        // Only a card about a merge or review (or a hands-on ask tied to a ticket) can be waiting on an
-        // agent; a permission card holds the agent rather than waiting on it.
-        const aboutTicket = c.type === "review_loop" || c.type === "risk_review" || c.type === "check_stuck" || c.type === "review_stall" || c.type === "question" || c.type === "owner_todo" || c.type === "owner_setup";
         const t = cardTicket.get(r.id);
-        if (aboutTicket && t && t.state && AGENT_BACK_STATES.has(t.state)) {
+        if (aboutTicket(c) && t && t.state && AGENT_BACK_STATES.has(t.state)) {
           const who = t.agent ?? "an agent";
-          const why = c.type === "check_stuck" ? "the merge check failed, so the ticket is back with" : c.type === "review_loop" || c.type === "review_stall" ? "the ticket is back with" : "the ticket is waiting on";
+          const why = c.type === "check_stuck" ? "the merge check failed, so the ticket is back with" : "the ticket is back with";
           return { reason: `Nothing to do yet: ${why} ${who}.` };
         }
         return null;
