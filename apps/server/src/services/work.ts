@@ -1,12 +1,13 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState, type TaskSize } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
 import { REVIEW_REASON, reviewWaits } from "./review-kinds.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, WorkError } from "./ticket-links.js";
+import { derivedSignoff } from "./signoff.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
 export { WorkError };
@@ -47,10 +48,12 @@ type TicketPatch = {
   createdByAgentId?: string | null;
   /** Start in plan mode until a plan is approved (R40). */
   planFirst?: boolean;
-  /** Acceptance criteria (R?): 1 to 10 non-empty strings; empty means none. */
-  acceptanceCriteria?: string[];
+  /** Acceptance criteria: 1 to 10 non-empty ones; empty means none. A plain string is checked before merge, `{ text, after: "merge" }` after it. */
+  acceptanceCriteria?: Criterion[];
   /** Research, wiki, docs or deploy-only work: an empty diff is fine. */
   noCode?: boolean;
+  /** What the owner has to do once this is live, in plain words by button path (DR-011); null clears it. */
+  ownerSetup?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
   urgent?: boolean;
   /** Move past a full column anyway. */
@@ -235,8 +238,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const pendingAny = new Set(
         (inReview.length ? await db.select({ ticketId: reviewRequests.ticketId }).from(reviewRequests).where(and(inArray(reviewRequests.ticketId, inReview), inArray(reviewRequests.status, ["pending", "approved"]))) : []).map((r) => r.ticketId),
       );
+      // DR-021: the owner's lane follows the derived sign-off state, card or not. "Approved with no open card"
+      // used to read as landing, so a ticket whose card was lost vanished from Your review (BOS-494).
+      const signoffWaiting = new Map<string, string>();
+      for (const r of rows) {
+        if (r.t.systemState !== "review") continue;
+        const d = await derivedSignoff(db, r.t);
+        if (d.state === "waiting") signoffWaiting.set(r.t.id, d.reviewer);
+      }
       const withPr = new Set(rows.filter((r) => r.t.pullRequestUrl).map((r) => r.t.id));
-      for (const id of inReview) if (!pendingAny.has(id) && !withPr.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
+      for (const id of inReview) if (!pendingAny.has(id) && !withPr.has(id) && !signoffWaiting.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
       // Who is running on each ticket right now, so a card can show live work. A run counts for a
       // ticket when it is on it, was about it without being on it (a nudge that named it), or a
       // wake's note names it (a review wake can list several tickets in one run). Chat runs don't.
@@ -277,12 +288,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const askedId = t.systemState === "done" ? null : (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && (questions.has(d.blockerDecisionId) || (t.systemState !== "review" && signoffs.has(d.blockerDecisionId))))?.blockerDecisionId ?? null);
         return {
         ...t,
-        waitingOnOwner: !!waitingDecisionId || unreviewed.has(t.id) || !!askedId,
+        waitingOnOwner: !!waitingDecisionId || signoffWaiting.has(t.id) || unreviewed.has(t.id) || !!askedId,
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
         noReviewer: unreviewed.has(t.id),
         reviewWait: waits.get(t.id) ?? null,
         waitingDecisionId,
-        approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : null,
+        approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : (signoffWaiting.get(t.id) ?? null),
         featureTitle: t.featureId ? (featureTitle.get(t.featureId) ?? null) : null,
         parentTitle: rows.find((r) => r.t.id === t.parentTicketId)?.t.title ?? null,
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
@@ -344,6 +355,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           customFields: input.customFields ?? {},
           acceptanceCriteria: input.acceptanceCriteria ?? [],
           noCode: input.noCode ?? false,
+          ownerSetup: input.ownerSetup?.trim() || null,
           urgent: input.urgent ?? false,
           lastActivityAt: now(),
           risk: input.risk ?? null,
@@ -522,6 +534,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const refusal = startRefusal({ systemState: t.systemState, createdAt: t.createdAt, lastActivityAt: t.lastActivityAt }, deps, { agentId: patch.byAgentId, role: who?.role ?? null });
         if (refusal) throw new WorkError(409, refusal);
       }
+      // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
+      if (patch.ownerSetup !== undefined) fields.ownerSetup = patch.ownerSetup?.trim() || null;
       if (dest) Object.assign(fields, { projectId: dest.id });
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
       // starts and before a plan is approved turns it on for high and critical, off otherwise.

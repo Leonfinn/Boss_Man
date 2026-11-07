@@ -1,7 +1,5 @@
 # Installing Boss Man on TrueNAS SCALE
 
-> Moving to another host? The host-neutral guide is [docs/21-move-to-new-host.md](21-move-to-new-host.md). This page is the TrueNAS worked example; its `/mnt/NVME_Apps/...` paths are the owner's TrueNAS layout.
-
 This guide puts the whole stack on a TrueNAS SCALE box: Postgres, the server with the web UI, and one runner per company. Every image is built on the NAS itself. The runner image contains Claude Code, which must not be redistributed (see the licence note in `apps/runner/Dockerfile`). Building natively also avoids the arm64-to-x86_64 cross-build you'd need from an Apple Silicon Mac.
 
 Checked against TrueNAS SCALE 25.10 "Goldeye" on 16 Oct 2026. Where TrueNAS doesn't document something, the guide says so.
@@ -24,7 +22,7 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 - TrueNAS SCALE 24.10 or later, with an apps pool chosen under Apps > Configuration > Choose Pool. The Docker service only runs once a pool is chosen.
 - A root shell on the NAS: TrueNAS UI > System > Shell, or `su -` over SSH. Every command in this guide is typed there, so none has `sudo` in front.
 - A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
-- A GitHub account that can create a fine-grained token for the repos the agents will work on, and admin access to the private repo `Leonfinn/Boss_Man`, to add the NAS's read-only deploy key (step 2).
+- A GitHub account that can create a fine-grained token for the repos the agents will work on, and read access to the Boss Man repo from the NAS: a read-only deploy key if the repo is private, nothing if it is public (see [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host)).
 
 The commands below put Boss Man in `/mnt/NVME_Apps/Container_files/boss-man`, next to your other container apps on the mirrored NVMe pool. If you keep it somewhere else, change that path everywhere it appears. Replace `<nas-ip>` with the NAS's LAN address. Your router is at 192.168.68.1, so the NAS is most likely on 192.168.68.x. Check it in the TrueNAS UI under Network.
 
@@ -58,13 +56,18 @@ Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip
 cd /mnt/NVME_Apps/Container_files/boss-man
 ```
 
-The repo is private, so the NAS needs its own read-only deploy key. The key steps, the clone and the check are the same on every host: follow `docs/21-move-to-new-host.md` stage 1 ("Make the key" to "Check it reads the repository") with `BOSSMAN_HOME=/mnt/NVME_Apps/Container_files/boss-man`. Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` then use the same key through `core.sshCommand`.
+How the NAS reads the repo (a deploy key if it is private, https if it is public) is in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host). Use `$B` as `/mnt/NVME_Apps/Container_files/boss-man` there. For a public repo the clone is:
+
+```sh
+git clone <repo-https-url> src
+```
+
+Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up. Moving this install to another host later: see [docs/21](21-move-to-new-host.md).
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
-If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
+If the clone hangs, see the troubleshooting lines in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host).
 
-**Already installed with a deploy key?** Nothing to change. `src` keeps its `git@github.com:` address and the `core.sshCommand` setting, and updates keep working.
 
 
 ## 3. Folders and ownership
@@ -130,6 +133,8 @@ chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
 - `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://<nas-ip>:3101` on your LAN. Once the Tailscale sidecar of section 10b is running (it sets `BOSSMAN_TRUSTED_PROXIES`), Boss Man decides per request: Secure on HTTPS through the sidecar, off on plain LAN http, whatever this line says, so you can leave it or remove it. Without the sidecar, removing it makes the cookie always Secure and plain http login fails.
 - Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
   - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
+
+Memory limits for the server, database, runners and tool servers are set from this file too: see [docs/00, "Memory limits"](00-first-time-install.md#memory-limits-so-one-container-cant-take-the-whole-host). Nothing to add on TrueNAS; the defaults apply.
 
 ## 5. Build the images and start the server
 
@@ -269,7 +274,7 @@ On the Secrets page, choose **Claude setup-token** and paste the token. Agents g
 
 Choose **Generate Token** and copy it; Gitea shows it only once. The token can do what your Gitea user can, so a user with write access to the repo is enough. (Labels from Gitea 28.0.0's [`access_tokens.tmpl`](https://github.com/go-gitea/gitea/blob/v28.0.0/templates/shared/user/access_tokens.tmpl); see also Gitea's [scopes documentation](https://docs.gitea.com/development/oauth2-provider#scopes).)
 
-On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Agents get it as `GIT_TOKEN`, and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check on the Projects page, tells you whether it can push.
+On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Boss Man's runner holds it as `GIT_TOKEN` (agents' sessions never see it, so an agent can't push by itself), and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check on the Projects page, tells you whether it can push.
 
 **When work is approved** (the Projects page) is either **Merge into the default branch** (R46) or **Open a pull request** (R59). If the default branch is protected so that only pull requests can change it, choose the pull request option; a direct push would be refused and the ticket would go back to the agent with the error.
 
@@ -409,7 +414,7 @@ docker compose exec -T db psql -U bossman -d bossman -tA -c 'SELECT count(*) FRO
 
 If step 5's second command stops with an error, the new empty database is half filled: do not start the app. Repeat step 5 (it drops and recreates) with the same or an older backup.
 
-**Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps nothing GitHub-related to redo: the repo is cloned fresh over https (a deploy key from an older install, if you have one, stays in place). Check what's there first:
+**Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps nothing git-related to redo: the repo is cloned fresh (a deploy key, if you use one, stays in place). Check what's there first:
 
 ```sh
 ls -la /mnt/NVME_Apps/Container_files/boss-man
@@ -435,7 +440,7 @@ D=/mnt/NVME_Apps/Container_files/boss-man/deployer
 
 **Before you start**
 - `main` on GitHub should be branch-protected, so agents can only land reviewed PRs: Repo > Settings > Branches > add a rule for `main` that requires a pull request. The deployer treats the tip of `main` as approved code.
-- The `src` checkout must be on `main`, clean, and able to read GitHub over https (or the old deploy key, if you installed with one). Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
+- The `src` checkout must be on `main`, clean, and able to read the remote (https for a public repo, the deploy key for a private one). Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
 
   ```sh
   git -C /mnt/NVME_Apps/Container_files/boss-man/src ls-remote origin refs/heads/main
@@ -488,7 +493,7 @@ chown root:root $D/host.conf && chmod 600 $D/host.conf
 ```
 
 - `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
-- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`.
+- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`. The host publishes `SOAK_SECONDS` in `outbox/available.json` as `soakSeconds`, so Boss Man's runner-update trial uses the same length you set here (no second place to keep in step).
 - The script refuses to start if this file is not owned by the user running it with mode 600.
 - It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay or Home Assistant; that is untested.
 
@@ -721,14 +726,17 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
 - It refuses any change to infra files: `deploy/` (including the Caddyfile), the compose files, the deploy scripts (`scripts/deploy.sh`, `rebuild-live.sh`, `update-runner.sh`, `host-deployer.sh`; build-only scripts do not count, see docs/09 step 6) and any `Dockerfile`. `scripts/deploy.sh` refuses to run on this install too. Apply such a change by hand, after merging it on its own (see 9a step 3):
   - **Everything starts the same way:** bring the checkout up to `main` with `git fetch origin main && git merge --ff-only origin/main`.
   - **A `Dockerfile` or other server-image change:** rebuild the live colour in place, as in "Rebuild the live colour in place" below.
-  - **The Caddyfile:** `docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`.
+  - **The Caddyfile:** `docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`. The Caddyfile now has `encode zstd gzip` on both sites, so the proxy compresses API JSON on the way out. The runner websocket (`/api/runner/connect`) and other streaming responses are never compressed: Caddy leaves an upgrade or streaming response alone. Confirming on staging: `curl -sI -H 'Accept-Encoding: gzip' http://<host>:3100/api/ready` should answer `content-encoding: gzip` once a response is big enough to be worth compressing (Caddy leaves very small ones alone).
   - **The proxy's compose settings:** `docker compose up -d --no-deps proxy`, which leaves the UI down for a few seconds.
   - **The launcher** (`apps/launcher/` or its compose settings): it runs its own image built from this checkout, so rebuild it first, or the old code keeps running: `docker compose build launcher && docker compose up -d --no-deps launcher`. The UI stays up. Runners keep their old limits until they are recreated: at the next runner update, or now with `docker compose exec launcher node dist/main.js recreate-all`, which cuts off runs in progress (crash recovery restarts them).
   - **`scripts/host-deployer.sh`:** copy it to `$D` as in 9a step 3.
+- **Compression is not the Caddyfile's job alone.** The web build now writes a brotli and a gzip copy next to every built asset, and the server serves those straight from disk, so **every** install (including the plain `docker-compose.yml` one with no proxy) sends compressed JavaScript, CSS and fonts with no CPU cost per page. What the proxy adds is compression of the **API JSON** (the polled dashboard data); a plain install sends that JSON uncompressed. If you want the JSON compressed without the proxy too, that is a separate change (it spends CPU on the server's event loop) and not part of this install.
 - After a hand-applied change, the deployer may still show the alert about deployment files for a few minutes: press **Got it**.
 - Runner updates are unchanged (the drain); they never touch the proxy.
 
 **Rebuild the live colour in place.** This is for an image change the deployer refuses, or for a colour built from an older image. For ordinary app changes use Settings → Server and runner → Updates → **Deploy latest** instead: it swaps colours with no downtime. The UI is down for about 20 to 30 seconds.
+
+**Before you run anything here that updates the checkout (`git merge`, `git checkout`, `git pull`), type `umask 022` in your root shell.** A root shell with `umask 077` writes every file git changes as mode 600. The server runs as user `node` in its container and the image copies file permissions as they are on disk, so it crashes at start with `EACCES: permission denied, open '/app/...'`, and a rollback with the same umask fails the same way (6 Nov outage, BOS-562). `scripts/rebuild-live.sh`, `scripts/deploy.sh` and the host deployer now check this before the backup and build: if any git-tracked file is unreadable by others, or its folder can't be read and searched, they stop, change nothing, list up to 10 paths and print the fix (`git ls-files -z | xargs -0 chmod go+r`, then `chmod go+rx` on the folders). Only tracked files are touched: `.env`, `secrets/` and the data folder stay private. If the new colour never answers, the STOPPED message ends with the last 20 lines of its container log.
 
 `scripts/rebuild-live.sh` does all of the steps below in one go: it backs up, builds the colour the proxy points at, migrates, recreates it, sends SIGUSR2, and waits until `/api/ready` shows it leading at the new commit. It stops at the first failure and says which step. The steps by hand, for reference (the examples say blue):
 
@@ -757,6 +765,35 @@ docker compose exec -T server-blue cat /proc/1/cmdline | tr '\0' ' '; echo; curl
 - **The proxy keeps restarting** (`Restarting (255)`, and `docker logs boss-man-proxy-1` says `exec /usr/bin/caddy: operation not permitted`). The `caddy` program in the official image carries a file capability (bind to low ports). With every capability dropped and none added back, Linux refuses to run it at all. The compose file now gives back that one capability (`cap_add: [NET_BIND_SERVICE]`); a checkout from before 23 Oct 2026 lacks it. Bring the checkout up to `main`, then `docker compose up -d --no-deps proxy`.
 - **"Update failed: … blue did not step down. Switched back to blue automatically."** The live colour was built from an image that starts the server through the `tsx` command. That command runs the server as a child process and passes on only SIGINT and SIGTERM, so the hand-over signal (SIGUSR1) never arrives. Images from `5d983a16` on start `node --import tsx` directly. Rebuild the live colour in place (above) once; swaps work after that. The automatic switch-back left the live colour untouched. Any migration the attempt ran was expand-only, so the old code keeps working with it.
 - **Runner shows Offline after the cutover.** Its log (`docker logs -t --since 1h boss-man-runner-<company> 2>&1 | tail`) shows `getaddrinfo ENOTFOUND server` while the proxy is down. It reconnects by itself within 30 seconds of the proxy coming up.
+
+**The private "front" network (an install that is already running blue/green).** The compose file now gives the proxy and the two colours a private network, `front`, where the proxy has a fixed address (172.30.0.18). The proxy reaches the live colour there as `server-<colour>-front`, and the colours believe the forwarded client address only from that one address. Nothing else can use that network: not the runners, not Tailscale. Defaults: `BOSSMAN_FRONT_SUBNET=172.30.0.16/28`, `BOSSMAN_FRONT_PROXY_IP=172.30.0.18`, `BOSSMAN_FRONT_RANGE=172.30.0.24/29`. The deployer refuses this change (it edits `deploy/` and `scripts/`), so apply it by hand, on staging first:
+
+1. Check the subnet is free: `docker network ls -q | xargs docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'` must not list anything inside 172.30.0.16/28. If it does, set all three `BOSSMAN_FRONT_*` variables in `.env` to a free block (the range must sit inside the subnet and not contain the proxy address).
+2. Back up (`.env` and the database, as in step 2 above), then `git fetch origin main && git merge --ff-only origin/main`.
+3. Copy the new deployer: `cp scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh`. It works with the old and the new compose files: it only writes the new form of the include when the proxy can reach `server-<colour>-front`.
+4. Recreate the proxy and the live colour (a few seconds of downtime; the standby colour picks up the change at the next swap): `docker compose up -d --no-deps --force-recreate proxy server-blue` (use the live colour's name).
+5. Check that the network lists the proxy (172.30.0.18) and the colours, and nothing else: `docker network inspect boss-man_front --format '{{range .Containers}}{{.Name}} {{.IPv4Address}} {{end}}'`. Then put the live colour's include in the new form, by running a swap or by hand:
+
+~~~sh
+cat > $D/proxy/active.caddy.new <<'INC'
+# Written by host-deployer.sh. Do not edit. Live colour: blue
+(active) {
+	reverse_proxy server-blue-front:{args[0]} {
+		header_up X-Forwarded-For {client_ip}
+		health_uri {args[1]}
+		health_interval 2s
+		health_timeout 2s
+	}
+}
+INC
+chmod 644 $D/proxy/active.caddy.new && mv -fT $D/proxy/active.caddy.new $D/proxy/active.caddy
+docker compose exec -T proxy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && docker compose exec -T proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+curl -s http://192.168.68.67:3101/api/ready; echo
+~~~
+
+6. What changes for people: the server now sees each device's real address (before, every device looked like the proxy), so the login attempt limit counts per device.
+
+**Undo the front network.** Revert the commit (or check out the previous `deploy/truenas-bluegreen.yml` and `deploy/caddy/Caddyfile`), put back the previous deployer copy, rewrite the include in the old form (the snippet in step 3 above, with the live colour's name), then `docker compose up -d --no-deps --force-recreate proxy server-<live colour>`. An old deployer cannot read the new form of the include, so the rewrite is required.
 
 **Go back to the previous release after the 15 minutes** (the old colour has been stopped, its image is still there until the next swap). As root on the NAS, from the deployer folder:
 
@@ -835,9 +872,9 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    ```
    The last command prints the **publish token** (it starts with `tk_`). Copy it now.
 5. In Boss Man, open **Settings > Secrets** and save the publish token as a new secret.
-6. Open **Settings > Notifications** and fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (the secret from step 5). Set **Boss Man's address on your phone** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If "Send a test" fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
+6. Open **Notifications** in the side menu. In the **How you're told** box below the feed, tick **Send to my phone through my own ntfy server**, fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (paste the publish token from step 4), and choose **Save**. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If **Send a test to my phone** (it only appears after you Save) fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
 7. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
-8. In Boss Man, choose **Send a test to my phone**. It should arrive within seconds.
+8. On the **Notifications** page, choose **Send a test to my phone**. It should arrive within seconds.
 
 Check that it is locked down. Both commands must print `401` or `403` (the first tries to read, the second to publish, with no login):
 ```
@@ -856,7 +893,11 @@ ntfy action buttons make your phone call Boss Man directly, over Boss Man's http
 
 ### Moving off the Home Assistant webhook
 
-Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook in **Settings > Notifications**.
+Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook where you set it up.
+
+### Blue/green installs
+
+With blue/green the two Boss Man colours are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command (and in the rollback command). It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings in step 6 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
 
 ### Any Docker host
 

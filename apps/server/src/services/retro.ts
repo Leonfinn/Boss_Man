@@ -23,6 +23,7 @@ import {
   WatchdogSettings,
   leverApprover,
   readWatchdogSettings,
+  normaliseMarked,
   ticketRef,
   untrusted,
   type ReviewPolicy,
@@ -33,8 +34,9 @@ import {
 import type { Db } from "../db/client.js";
 import { activity, agentSkills, agents, companies, costEvents, decisions, projects, retros, reviewRequests, runs, settings, skillProposals, skills as skillsTable, ticketReviews, tickets, watchdogFlags, wikiPages, wikiRevisions, workflowChanges } from "../db/schema.js";
 import { record } from "./activity.js";
-import { checkPolicy } from "./review-policy.js";
+import { checkPolicy, legacyMarks } from "./review-policy.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, lessonsFrom, lessonsPageRow, normalizeLesson, removeLessonLine } from "./project-brief.js";
+import { serialiseWrite } from "./wiki.js";
 import { hashFiles } from "./skill-files.js";
 import { skillMarkdown, skillName, type skillsService } from "./skills.js";
 import type { skillProposalsService } from "./skill-proposals.js";
@@ -717,7 +719,8 @@ export function retroService(
         await deps.agents.update(c.targetAgentId!, after, retro?.agentId ?? null);
       } else if (c.lever === "review_policy") {
         const [co] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, c.companyId));
-        await db.update(companies).set({ reviewPolicy: { ...co!.policy, [after.tier]: after.rule } }).where(eq(companies.id, c.companyId));
+        // A rule stored before BOS-198 may still say "marked": write the agent it meant instead.
+        await db.update(companies).set({ reviewPolicy: { ...co!.policy, [after.tier]: normaliseMarked(after.rule, await legacyMarks(db, c.companyId)) } }).where(eq(companies.id, c.companyId));
       } else if (c.lever === "watchdog") {
         await deps.watchdog.update(c.companyId, after);
       } else if (c.lever === "playbook") {
@@ -882,7 +885,7 @@ export function retroService(
         await deps.agents.update(c.targetAgentId!, before, null);
       } else if (c.lever === "review_policy") {
         const [co] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, c.companyId));
-        await db.update(companies).set({ reviewPolicy: { ...co!.policy, [before.tier]: before.rule } }).where(eq(companies.id, c.companyId));
+        await db.update(companies).set({ reviewPolicy: { ...co!.policy, [before.tier]: normaliseMarked(before.rule, await legacyMarks(db, c.companyId)) } }).where(eq(companies.id, c.companyId));
       } else if (c.lever === "watchdog") {
         await deps.watchdog.update(c.companyId, before);
       } else if (c.lever === "playbook") {
@@ -896,11 +899,17 @@ export function retroService(
         for (const id of (after.assignedAgentIds ?? []) as string[]) await deps.skills.take(c.companyId, installed.skill?.name ?? after.name, id);
         if (before.skillId) await db.update(skillsTable).set({ description: before.description, files: before.files, sizeBytes: (before.files as Array<{ content: string }>).reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0), updatedAt: now() }).where(eq(skillsTable.id, before.skillId));
       } else if (c.lever === "lesson") {
-        const page = await lessonsPageRow(db, c.companyId, c.targetRole!.slice("project:".length));
-        if (!page) return;
-        const body = removeLessonLine(page.body, after.lesson);
-        await db.update(wikiPages).set({ body, updatedAt: now() }).where(eq(wikiPages.id, page.id));
-        await db.insert(wikiRevisions).values({ pageId: page.id, title: page.title, body });
+        // Queued with every wiki write, so the version saved below matches what the page held (BOS-496).
+        await serialiseWrite(async () => {
+          const page = await lessonsPageRow(db, c.companyId, c.targetRole!.slice("project:".length));
+          if (!page) return;
+          const body = removeLessonLine(page.body, after.lesson);
+          // The page change and its version are one transaction, so neither lands without the other (BOS-496).
+          await db.transaction(async (tx) => {
+            await tx.update(wikiPages).set({ body, updatedAt: now() }).where(eq(wikiPages.id, page.id));
+            await tx.insert(wikiRevisions).values({ pageId: page.id, title: page.title, body });
+          });
+        });
       }
     },
 

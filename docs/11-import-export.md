@@ -47,7 +47,7 @@ Never exported: secret values, owner login and sessions, runs and transcripts, c
    - no secret is created or granted: the secret store has no empty values, and the package must not be able to point an agent at an existing secret. The checklist names each secret, its variable and the agents to grant it to;
    - a checklist decision lists what's left: secrets, funding, unpausing, skills that ship scripts.
 
-As built (step 2): an import always creates a **new** company, so the only clash is the company name (the preview flags it and the owner picks another). Merging into an existing company is not supported. One funding source can be given to every agent at import; models are checked after import, once the new company's runner has started. Review policies that name an agent are pointed at the imported copy of that agent; an agent the package doesn't hold becomes the CEO.
+As built (step 2): an import always creates a **new** company, so the only clash is the company name (the preview flags it and the owner picks another). Merging into an existing company is not supported. One funding source can be given to every agent at import; models are checked after import, once the new company's runner has started. Review policies that name an agent are pointed at the imported copy of that agent; an agent the package doesn't hold becomes the CEO, and is dropped from a list of reviewers (the CEO when none is left). An older package's "marked" reviewer cells name the package's agents marked for that kind (BOS-198); exports no longer carry the mark.
 
 API: `POST /api/companies/import/preview` and `POST /api/companies/import`, body `{ zip: <base64>, name?, fundingSourceId? }`.
 

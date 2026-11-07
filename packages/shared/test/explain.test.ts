@@ -121,6 +121,27 @@ describe("explainCommand", () => {
 });
 
 describe("explainPermission", () => {
+  it("names the file in OpenCode's edit requests (BOS-318)", () => {
+    // OpenCode sends its permission metadata as rawInput: { filepath, diff } for an edit, { files: [...] } for a patch.
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { filepath: "/work/src/a.ts", diff: "@@" } }, "A").summary).toBe("Change the file /work/src/a.ts.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { files: [{ filePath: "/work/a.ts", relativePath: "a.ts" }] } }, "A").summary).toBe("Change the file a.ts.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { files: [{ filePath: "/w/a.ts" }, { filePath: "/w/b.ts" }] } }, "A").summary).toBe("Change 2 files: /w/a.ts, /w/b.ts.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: {} }, "A").summary).toBe("Change (no name given).");
+  });
+
+  it("keeps the tool name when an mcp tool is given a parentDir argument (BOS-318)", () => {
+    const e = explainPermission({ title: "mcp__github__delete_repository", kind: "other", rawInput: { owner: "o", repo: "r", parentDir: "/tmp/screens" } }, "A");
+    expect(e.summary).toContain("mcp__github__delete_repository");
+    expect(e.summary).not.toContain("folder outside");
+    expect(explainPermission({ title: "/etc", kind: "other", rawInput: { parentDir: "/tmp/x" } }, "A").summary).not.toContain("folder outside");
+  });
+
+  it("shows OpenCode's external_directory request as a folder outside the checkout (BOS-318)", () => {
+    expect(explainPermission({ title: "/tmp/opencode/shots", kind: "other", rawInput: { filepath: "/tmp/opencode/shots/a.png", parentDir: "/tmp/opencode/shots" } }, "A").summary).toBe("Access folder outside checkout: /tmp/opencode/shots.");
+    expect(explainPermission({ title: "/tmp/opencode/shots", kind: "other", rawInput: {} }, "A").summary).toBe("Access folder outside checkout: /tmp/opencode/shots.");
+    expect(explainPermission({ title: "/tmp/x", kind: "other", rawInput: {} }, "A").effect).toBe("unknown");
+  });
+
   it("titles commands and keeps only a short single-line reason", () => {
     const r = explainPermission({ title: "x", kind: "execute", rawInput: { command: "ls", description: `Look\naround ${"a".repeat(300)}` } }, "Wiki Maintainer");
     expect(r.title).toBe("Wiki Maintainer wants to run a command");
@@ -134,6 +155,9 @@ describe("explainPermission", () => {
     expect(explainPermission({ title: "Edit", kind: "edit", rawInput: { file_path: "a.md" } }, "A").summary).toBe("Change the file a.md.");
     expect(explainPermission({ title: "Fetch", kind: "fetch", rawInput: { url: "https://x.dev" } }, "A")).toMatchObject({ title: "A wants to fetch a web page", summary: "Fetch https://x.dev.", effect: "network" });
     expect(explainPermission({ title: "Mystery", kind: "other", rawInput: null }, "A").effect).toBe("unknown");
+    expect(explainPermission({ title: "Mystery", kind: "other", rawInput: null }, "A").summary).not.toMatch(/Warning/);
+    const copy = explainPermission({ title: "mcp__bossrnan__wiki", kind: "other", rawInput: null }, "A");
+    expect(copy.summary).toMatch(/doesn't recognise\. Warning: this name looks like one of Boss Man's own tools/);
   });
 });
 
@@ -180,9 +204,12 @@ describe("work only in a temporary folder", () => {
   const scratch = (c: string) => explainCommand(c).scratch;
 
   it("says so when every change and delete names an absolute path under /tmp", () => {
-    const s = scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut && touch /tmp/opencode/mut/x.js");
+    const s = scratch("rm -rf /tmp/mut && mkdir -p /tmp/mut");
     expect(s?.unchecked).toEqual([]);
     expect(s?.note).toMatch(/^Works only in a temporary folder \(\/tmp\)/);
+    // BOS-165: touch follows a link at its target, and a deeper path is never vouched for.
+    expect(scratch("rm -rf /tmp/mut && mkdir -p /tmp/mut && touch /tmp/mut/x.js"), "touch at a /tmp path").toBeUndefined();
+    expect(scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut"), "deeper path").toBeUndefined();
   });
 
   it("doesn't follow cd, so any cd, pushd or popd means not /tmp-only (BOS-111 security re-checks)", () => {
@@ -258,8 +285,9 @@ describe("round-5 regression pins (BOS-153)", () => {
     }
   });
 
-  it("keeps the /tmp note for find -delete, and gives none for shred (finding 4)", () => {
-    expect(explainCommand("find /tmp/x -delete").scratch?.note).toMatch(/^Works only in a temporary folder/);
+  it("gives no /tmp note to find -delete (BOS-165: its root or entries can be links) or shred (finding 4)", () => {
+    expect(explainCommand("find /tmp/x -delete").scratch).toBeUndefined();
     expect(explainCommand("shred /tmp/a").scratch).toBeUndefined();
+    expect(explainCommand("rm -rf /tmp/a").scratch?.note).toMatch(/^Works only in a temporary folder/);
   });
 });

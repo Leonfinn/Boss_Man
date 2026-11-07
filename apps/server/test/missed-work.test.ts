@@ -4,7 +4,7 @@ import { and, eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, companies, decisions, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
-import { MISSED_REASON, REVIEW_REASON } from "../src/services/scheduler.js";
+import { MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
 import type { Leader } from "../src/leader.js";
 
 const HOUR = 3_600_000;
@@ -209,7 +209,7 @@ describe("stalled review sweep", () => {
 describe("unmerged approvals sweep", () => {
   it("tries an interrupted merge once by itself, asks the owner once if that fails too, and leaves one waiting on sign-off", async () => {
     ctx = await setup();
-    const approve = (ticketId: string) => ctx.db.insert(reviewRequests).values({ ticketId, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", createdAt: new Date(Date.now() - 2 * HOUR), decidedAt: new Date(Date.now() - HOUR) });
+    const approve = (ticketId: string) => ctx.db.insert(reviewRequests).values({ ticketId, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", createdAt: new Date(Date.now() - 4 * HOUR), decidedAt: new Date(Date.now() - 3 * HOUR) });
     // No repo: trying again simply closes it.
     const plain = await ctx.forgotten("Ship it", { systemState: "review" });
     await approve(plain);
@@ -254,3 +254,26 @@ describe("unmerged approvals sweep", () => {
   });
 });
 
+
+describe("urgent-idle sweep (BOS-346)", () => {
+  it("wakes the idle assignee of an urgent in-progress ticket at once, once per ticket", async () => {
+    ctx = await setup();
+    const id = await ctx.forgotten("Fix prod", { systemState: "in_progress", urgent: true, lastActivityAt: new Date(Date.now() - 5 * 60_000) });
+    expect(await ctx.sweeps.run()).toMatchObject({ urgentIdle: { woken: 1 }, missedWork: { woken: 0 } });
+    const rows = await ctx.db.select().from(wakes).where(and(eq(wakes.reason, URGENT_IDLE_REASON), eq(wakes.ticketId, id)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ agentId: ctx.worker.id, status: "queued" });
+    await ctx.sweeps.run();
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.reason, URGENT_IDLE_REASON))).toHaveLength(1);
+  });
+
+  it("leaves alone non-urgent tickets, busy assignees and runs in progress", async () => {
+    ctx = await setup();
+    const old = new Date(Date.now() - 5 * 60_000);
+    await ctx.forgotten("Routine", { systemState: "in_progress", lastActivityAt: old });
+    const busy = await ctx.hire("Busy");
+    const t = await ctx.forgotten("Urgent but running", { systemState: "in_progress", urgent: true, lastActivityAt: old, assigneeAgentId: busy.id });
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: busy.id, ticketId: t });
+    expect(await ctx.sweeps.run()).toMatchObject({ urgentIdle: { woken: 0 } });
+  });
+});

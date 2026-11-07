@@ -1,6 +1,5 @@
 # Self-deploy: the host deployer (phase 1) and the runner drain (phase 2)
 
-> Not on TrueNAS? The files here named `truenas-*.yml` are generic (data bind mounts, deployer mounts, blue/green); see [docs/21-move-to-new-host.md](21-move-to-new-host.md) for host-neutral paths and the scheduler note. The `/mnt/NVME_Apps/...` paths below are the TrueNAS layout, and "cron job" means whatever one-minute scheduler your host has.
 Status: built (phases 1 and 2). Phase 0 (`scripts/deploy.sh`, run by hand) is the base. Phase 2's runner drain is described in its own section below. The leader lock and the separate migrate step (phase 3, part 1) are built, and so is the opt-in blue/green swap (phase 3, part 2). Blue/green was first run on a real TrueNAS NAS on 22 and 23 Oct 2026; what that run found is in "Lessons from the first real run" below. Install steps are in `docs/06-install-truenas.md` ("Install the host deployer"). Anything marked **UNVERIFIED** was not checked against a real TrueNAS box or the vendor's current docs.
 
 ## What it does
@@ -17,14 +16,23 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
       │                  server writes inbox/request.json (tmp + rename)
       └─ checks it, runs deploy.sh or update-runner.sh ─▶ outbox/status.json
                                        │
-            server poller (5 s) ◀──────┘  notification + Settings "last deploy" + webhook on failure
+            server poller (30 s) ◀──────┘  notification + Settings "last deploy" + webhook on failure
 ```
 
 ## Decisions made
 
 1. **Host script plus a one-minute TrueNAS cron job.** No container, no socket.
 2. **It reuses `scripts/deploy.sh`** (backup, build, restart, health) and `scripts/update-runner.sh`, so there is one deploy path. `deploy.sh` gained `--commit SHA` so it deploys exactly the commit that was checked, not whatever main is by then.
-3. **GitHub is the source of truth.** The repo is private: the `src` checkout pulls over SSH with the host's own read-only deploy key, set as `core.sshCommand` (`docs/21-move-to-new-host.md`, stage 1). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no credential.
+3. **The git remote is the source of truth.** The `src` checkout pulls from its `origin`: https for a public repo, or an SSH remote with a read-only deploy key set as `core.sshCommand` for a private one (`docs/00`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no extra credential. On a new host, the move guide (`docs/21-move-to-new-host.md`) sets up the same key.
+
+   Exact clone commands (full steps in `docs/00`, step 2), with `$B` as the install folder:
+
+   ```sh
+   # public repo
+   git clone <repo-https-url> $B/src
+   # private repo, read-only deploy key
+   git clone -c core.sshCommand="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" <repo-ssh-url> $B/src
+   ```
 4. **Server deploys and runner updates are separate approvals.** A runner update drains first (phase 2 below), so it no longer cuts off agent runs unless the owner says so.
 5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, the deploy scripts and the like (the exact list is in step 6 below) only deploy when the owner runs `scripts/deploy.sh` by hand on the host that runs Boss Man.
 6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at a Home Assistant webhook automation; ntfy works too.
@@ -123,11 +131,12 @@ Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that c
 
 - A decision of kind `approval` with context type `self_deploy` (no migration: no new enum value), tier `owner`, so only the owner's session can answer it; the CEO tool only answers `ceo`-tier decisions. Decisions belong to a company, so it is raised under the oldest one.
 - **Server:** raised by the poller when `available.json` shows `tip` differs from `deployed`, one per tip (`dedupeKey`); an older open one is withdrawn when main moves again, or when the owner hand-deploys. `available.json` lags `main`: the host rewrites it at most every 5 minutes and only in a minute with no request waiting. So the poller does not offer a commit the latest `status.json` already settled (refused, deployed or nothing new) until `checkedAt` is later than that status. After a not-the-tip refusal the host also deletes `available.json`, so the next minute writes a fresh one. Without both, two merges a few minutes apart made a loop: the stale offer was approved, refused and raised again. The migrations count in the question counts `apps/server/drizzle/*.sql` only, not Drizzle's `meta/` files. Options `Deploy` / `Not now`. The text shows the commit range, subjects, file count, migrations, and whether runner code changed. If the range touches infra files it is only an alert (`Got it`) saying to run `scripts/deploy.sh` on the host. Settings > Server and runner > Updates > **Deploy latest** raises it again for the current tip even if it was put off.
-- **Runner:** after a server deploy of a range that changed runner paths succeeds, the poller raises a separate `Update runners` / `Not now` decision for the deployed commit, whose text explains the drain (phase 2).
+- **Runner:** after a server deploy of a range that changed runner paths succeeds, the poller raises a separate `Update runners` / `Not now` decision for the deployed commit, whose text explains the drain (phase 2). **It waits for the server update trial first (BOS-368).** A blue/green server update reports `deployed` when it switches in, but the host can still switch it back during its standby window (`SOAK_SECONDS` on the host, default 900). The host writes the window it really uses into `status.json` as `soak_seconds` (0 when the install is not blue/green), and the server takes the length from there, never from its own environment. If it is missing (an older host), the server uses the `soakSeconds` the host publishes in `available.json` (BOS-384), and failing that 900 (BOS-401). So the poller holds the runner offer in the `self_deploy_runner_due` setting until the window plus 120 seconds has passed, and raises it only if the last server result is still `deployed` for that commit and `available.json` reports it running. Otherwise it drops the offer and logs why. A `rolled_back` or `failed` server result clears the held offer and withdraws every open runner card, whichever way round the host names the two commits. Every server update that ends `deployed` sets the hold, including deploy latest, a hand-apply and a rollback that have no self-deploy decision; the hold only becomes a card if a runner change is known (the decision said so, or an earlier held update did). A newer server update inside the window keeps the older held range and offer, so the one card covers from the older `fromCommit` to the newer commit. During the window, Settings > Server and runner > Updates > **Build and update runners** and answering a runner card both refuse with a message naming the trial length ("The server update is still in its 15-minute trial…", or the host's length); the wording is built from the value, never hard-coded.
 - Approving checks that no deploy is running and no request is waiting, then writes the request. If the write fails the decision stays open.
 - **Notifications** (from the poller, once per result; the ladder): deployed = note, refused = flag, failed / partial / rolled back = page (phone through ntfy if configured). They link to Settings. The result is also stored on the decision and in the activity feed. `notifications.decision_id` is unique and already used by the "ask" notification, so the result notification is not linked to the decision row.
 - **Settings > Server and runner > Updates** shows the last deploy (result, commit, time, message), what is waiting, and the button.
 - The poller and the request writer are marked `// leader-only` in the code (`main.ts`, `self-deploy.ts`) for phase 3.
+- The poller runs every 30 s, and skips the pass when neither `available.json` nor `status.json` (nor a waiting request) has changed by mtime and size, and it is under a minute since the last pass that ran (BOS-414). The host replaces those files by rename, so their identity moves with their content; the minute-long forced pass covers anything that doesn't show in a file.
 
 ## Security: what a merged PR could and could not do
 
@@ -231,6 +240,8 @@ Built ahead of blue/green; on today's single server nothing changes. Nothing her
 |---|---|---|
 | `BOSSMAN_ROLE` | `auto` | `auto` contests the lock at boot. `standby` does not contest until `SIGUSR2`. |
 | `BOSSMAN_LEADER_LOCK` | on | `0` is the kill switch: no lock, always the leader, exactly as before. |
+| `BOSSMAN_LEADER_MISSES` | `2` | Heartbeats in a row with no reply (3 s each, counted only while the server is not frozen) before the leader steps down. A connection or query error still steps down at once. `1` is the old behaviour. Read at start, so a change needs a server restart. |
+| `BOSSMAN_STALL_PROFILE` | on | The server samples its own CPU profile every 10 ms, so each `STALL:` line (and server_status `stalls`) names the functions that ran during the freeze. `0` turns the sampler off; the stall line then has CPU and cgroup figures only. Read at start. |
 | `BOSSMAN_MIGRATE_ON_START` | on | `0` skips migrating at start (only checks the database is current). |
 | `BOSSMAN_MIGRATE_LOCK_TIMEOUT_MS` | `60000` | How long `migrate.js` waits for another migration. |
 
@@ -316,7 +327,7 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
 2. **To verify on the NAS:** the cron job survives a TrueNAS upgrade (stored in the TrueNAS configuration database, which carries across updates; UNVERIFIED for 25.10). Verified on the NAS in Oct 2026:
    - the bind mount ownership with the TrueNAS override;
    - `python3` and `flock` on root's cron PATH;
-   - `git ls-remote` over https (or the deploy key on older installs) from cron;
+   - `git ls-remote` from cron, over https or with the deploy key (whichever `origin` uses);
    - the cron schedule needs every field set to `*`, because the UI's Hourly preset runs once an hour.
 3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any Home Assistant restore.
 4. The first deploy of this phase is by hand: it adds `--commit` to `deploy.sh` and changes `scripts/` and `deploy/`.

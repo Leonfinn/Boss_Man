@@ -3,6 +3,7 @@
 // the runner's journal until the server acknowledges it, and is replayed after a
 // reconnect. The server stores events idempotently by (runner, seq).
 import { z } from "zod";
+import { RUN_MESSAGE_MAX } from "./owner-message.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -117,6 +118,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     prompt: z.string(),
     /** Per-session MCP bearer token for the Boss Man MCP server. */
     mcpToken: z.string(),
+    /**
+     * This run needs the Boss Man tools: a runner that can't reach them fails the run instead of
+     * starting it blind (BOS-552). An older runner strips it and behaves as before.
+     */
+    mcpRequired: z.boolean().optional(),
     /** Recovery (R42): try to reopen this ACP session; start a fresh one if it can't be loaded. */
     resumeSessionId: z.string().optional(),
     /** The prompt to send instead if resumeSessionId can't be reopened, so a fresh session still gets its full context. */
@@ -180,8 +186,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Check the runner's add-ons (docs/12); answered with AddonReport[]. Sent only to runners with the "addons" feature. */
   z.object({ type: z.literal("addons.check"), requestId: z.string() }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
-  /** Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current turn is stopped first. */
-  z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(20_000), interrupt: z.boolean() }),
+  /**
+   * Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current
+   * turn is stopped first. The max leaves room for the prefix the server adds to a longest-allowed owner message (BOS-502).
+   */
+  z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(RUN_MESSAGE_MAX), interrupt: z.boolean() }),
   z.object({ type: z.literal("permission.decide"), runId: Uuid, requestId: z.string(), verdict: z.enum(["allow", "deny"]) }),
 ]);
 export type RunnerCommand = z.infer<typeof RunnerCommand>;
@@ -207,6 +216,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     features: z.array(z.string().max(40)).max(50).optional(),
     /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
     bootId: z.string().max(100).optional(),
+    /** The ids of every run this runner really has (BOS-583); the server closes any other open run of this runner. Absent from an older runner: the server then closes nothing. */
+    liveRuns: z.array(Uuid).max(2000).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
   }),
   z.object({ type: z.literal("event"), entry: JournalEntry }),
@@ -254,10 +265,16 @@ export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boo
  * in scripts/check-all.sh's queue is given up to VERIFY_QUEUE_MAX_MS to reach the front first; the server waits for
  * the answer a minute longer than both.
  */
-export const VERIFY_TIMEOUT_MS = 30 * 60_000;
-export const VERIFY_QUEUE_MAX_MS = 3 * 60 * 60_000;
-export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_MAX_MS + VERIFY_TIMEOUT_MS + 60_000;
-/** What scripts/check-all.sh prints while it waits for a slot, and when it gets one; the runner starts the 30-minute clock at the second. */
+export const VERIFY_TIMEOUT_MS = 60 * 60_000;
+export const VERIFY_QUEUE_MAX_MS = 90 * 60_000;
+/**
+ * VERIFY_QUEUE_MAX_MS is a no-progress limit (BOS-370): the runner restarts it every time the check's place in the queue
+ * changes, so a long queue that keeps moving never trips it; scripts/check-all.sh gives up sooner (an hour) on its own.
+ * The server's wait is only a ceiling for a queue that moves for a very long time.
+ */
+export const VERIFY_QUEUE_CEILING_MS = 24 * 60 * 60_000;
+export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_CEILING_MS + VERIFY_TIMEOUT_MS + 60_000;
+/** What scripts/check-all.sh prints while it waits for a slot, and when it gets one; the runner starts the run clock (VERIFY_TIMEOUT_MS) at the second, never earlier. */
 export const CHECK_QUEUED_MARKER = "check-all: waiting for a free check slot";
 export const CHECK_STARTED_MARKER = "check-all: slot taken, running the checks";
 /**

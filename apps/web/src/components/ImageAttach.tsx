@@ -59,6 +59,19 @@ export function useImageAttach(companyId: string | undefined, ticketId?: string)
   };
   const remove = (markdown: string) => setAttached((all) => all.filter((m) => m !== markdown));
   const clear = () => setAttached([]);
+  /** Attaches text as a .txt file, for what is too long to send as a message. Returns the text file's Markdown. */
+  const uploadText = async (text: string, name = "message.txt"): Promise<string> => {
+    if (!companyId) throw new Error("Can't attach a file yet: the company isn't loaded.");
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await base64(new Blob([text], { type: "text/plain" }));
+      const r = await api<{ markdown: string }>(`/api/companies/${companyId}/images`, { method: "POST", body: { data, name, ...(ticketId ? { ticketId } : {}) } });
+      return r.markdown;
+    } finally {
+      setBusy(false);
+    }
+  };
   const button = (
     <>
       <button type="button" className="btn" disabled={busy || !companyId} onClick={() => input.current?.click()} title="Or paste a screenshot into the text">
@@ -77,7 +90,7 @@ export function useImageAttach(companyId: string | undefined, ticketId?: string)
       />
     </>
   );
-  return { onPaste, button, error, busy, attached, remove, clear, setAttached };
+  return { onPaste, button, error, busy, attached, remove, clear, setAttached, uploadText };
 }
 
 const ATTACHED = /(!?)\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)\n?/g;

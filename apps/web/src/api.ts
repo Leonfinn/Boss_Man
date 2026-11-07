@@ -1,4 +1,9 @@
 // The browser talks to the server's JSON API on the same origin, with the session cookie.
+import { sharedGet } from "./shared-get";
+import type { Criterion } from "@boss-man/shared";
+
+export type { Criterion };
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -16,7 +21,18 @@ export function plainStatus(status: number, error?: unknown): string {
   return typeof error === "string" && error ? error : `Something went wrong (code ${status}). Nothing needs doing from you; try again, and tell the CEO if it keeps happening.`;
 }
 
+function readOnly(init: { method?: string; body?: unknown }) {
+  return (init.method ?? "GET") === "GET" && init.body === undefined;
+}
+
 export async function api<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
+  // Two hooks polling the same read share one request and its result (BOS-408).
+  if (readOnly(init)) return sharedGet(path, (signal) => apiOnce<T>(path, { ...init, signal }));
+  return apiOnce<T>(path, init);
+}
+
+/** One request, no sharing: what `api` sends for a write, or a path nothing else should join. */
+export async function apiOnce<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -47,8 +63,8 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 
 // ---------- Shapes the screens use ----------
 
-export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; reviewKind?: ReviewKindName | null; template?: string | null; avatarAt?: string | null };
-export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; permissionJudge?: "off" | "watch" | "advise"; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
+export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; template?: string | null; avatarAt?: string | null };
+export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
   companyId: string;
@@ -68,7 +84,9 @@ export type Project = {
 };
 
 /** Review routing per risk tier (step 1): "ceo", "senior-dev" or an agent id; the plan column also takes "owner" and "none". */
-export type ReviewRule = { planApprover: string; reviewer: string; ownerSignoff: boolean; /** Extra reviews: a kind that is missing is off; "marked" is the agent marked as that kind's reviewer. */ kinds?: Partial<Record<ReviewKindName, string>> };
+/** A reviewer cell: "ceo", "senior-dev", one agent id, or several agent ids (each review goes to one of them). */
+export type ReviewerRef = string | string[];
+export type ReviewRule = { planApprover: string; reviewer: ReviewerRef; ownerSignoff: boolean; /** Extra reviews: a kind that is missing is off; "marked" is a legacy value the migration replaced. */ kinds?: Partial<Record<ReviewKindName, ReviewerRef>> };
 export type ReviewKindName = "security" | "infra" | "adversarial";
 export const REVIEW_KINDS: ReviewKindName[] = ["security", "infra", "adversarial"];
 export type ReviewPolicy = Record<Risk, ReviewRule>;
@@ -146,7 +164,8 @@ export type Decision = {
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];
   dueDate: string | null;
-  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string; /** The model second opinion (BOS-338); `reason` is the model's cleaned line, or why it failed. */ second?: { state: "pending" | "allow" | "deny" | "failed"; reason?: string } }; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the owner-step lint flagged (BOS-417), and a CEO override with its reason. */ lint?: { warn: Array<{ step: number; problem: string }>; override?: { reason: string; findings: Array<{ step: number; problem: string }> } }; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; /** A standing-rules change: the exact text that will be saved (already stripped and capped). */ text?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string; /** The model second opinion (BOS-338); `reason` is the model's cleaned line, or why it failed. */ second?: { state: "pending" | "allow" | "deny" | "failed"; reason?: string } }; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+
   /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
   evidence?: StallEvidence | null;
 };
@@ -210,20 +229,22 @@ export type Ticket = {
   ownerQuestion?: string | null;
   approvedBy?: string | null;
 };
-export type TicketDetail = Ticket & { ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: string[]; noCode: boolean; urgent: boolean; quotaHeldUntil?: string | null; quotaHeldReason?: string | null; stateNote: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
+export type TicketDetail = Ticket & { ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: Criterion[]; ownerSetup: string | null; noCode: boolean; urgent: boolean; quotaHeldUntil?: string | null; quotaHeldReason?: string | null; /** The account the ticket's agent is paid from, by name (BOS-471). */ quotaHeldSource?: string | null; /** When another ticket really holds the agent, which one (BOS-471). */ quotaHeldOther?: { ref: string; title: string } | null; /** The owner's sign-off card for this ticket is open (BOS-471). */ signoffWaiting?: boolean; /** Where it stands on the owner's sign-off (BOS-503): waiting (card open), missing (owed, card being raised again), signed_off, or null when not needed. */ signoff?: "waiting" | "missing" | "signed_off" | null; stateNote: string | null; /** When an agent last posted on it, a reply or a state note (BOS-314). */ lastPostAt?: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
 export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean; turn?: { number: number; at: string } };
 /** A run going now that no card on the board shows (BOS-155). */
 export type UnticketedRun = { id: string; agent: string | null; ticketId: string | null; ticket: string | null; purpose: string | null; origin: string | null; originFrom: string | null; originNote: string | null; wakeNote: string | null; runTicketId: string | null; startedAt: string };
 /** `workingAgents` is the number of agents with a run going, the Dashboard's figure. */
 export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
 
-export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null; cycleAnchor?: string | null; quotaHoldAt?: number; quotaOverage?: "pause" | "urgent" | "all"; quotaDisabledWindows?: string[] };
+export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null; cycleAnchor?: string | null; quotaHoldAt?: number; quotaOverage?: "pause" | "urgent" | "all"; quotaDisabledWindows?: string[]; secretId?: string | null; fallbackRank?: number | null };
 export type FundingStatus = {
   source: FundingSource;
   credit: { grantMicros: number; spentMicros: number; remainingMicros: number; fractionUsed: number; cycleStart: string; cycleEnd: string } | null;
   quota: Array<{ window: string; utilization: number; resetsAt: string | null; status: string | null; overageInUse: boolean }>;
   /** Every window name the adapter has reported for this source, for the hold switches. */
   windowsSeen: string[];
+  /** Whether new runs are going to this account right now (the owner's ranked Claude accounts, BOS-383). */
+  claudeActive?: boolean;
   /** Per window: when it runs out at the recent rate (R78); null with no readings. */
   forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
   /** Synthetic's own used/limit reading, cached on the server; null for other providers, null counts mean unknown. */

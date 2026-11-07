@@ -13,11 +13,17 @@ import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods,
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
+import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { gitAuthEnv, RepoLockTimeout, type Workspaces } from "./workspace.js";
+import { RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
+
+/** How long one preflight attempt may take before it counts as failed, and how many attempts a run makes. */
+const MCP_PREFLIGHT_TIMEOUT_MS = 10_000;
+const MCP_PREFLIGHT_ATTEMPTS = 3;
+const MCP_PREFLIGHT_DELAY_MS = 2_000;
 
 export type SessionManagerOptions = {
   emit: (event: RunnerEvent) => void;
@@ -25,6 +31,11 @@ export type SessionManagerOptions = {
   resolveEnv: (runId: string) => Promise<Record<string, string>>;
   /** Boss Man's MCP endpoint as agents reach it. */
   mcpUrl: string;
+  /**
+   * Confirms the Boss Man tools are reachable before an mcpRequired run starts (BOS-552). The default
+   * asks the live server for its tool list; tests override it to drive the success and failure paths.
+   */
+  checkBossManTools?: (url: string, token: string) => Promise<{ ok: boolean; tools?: string[]; reason?: string }>;
   /** Environment every agent inherits (PATH, HOME, proxy settings); secrets are added per run. */
   baseEnv?: NodeJS.ProcessEnv;
   /** How long a permission request waits for a verdict before it is refused. */
@@ -150,6 +161,18 @@ export const stderrTail = (stderr: string) =>
 // can't find Chromium or start it without its sandbox, and Playwright can't find WebKit.
 export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
 
+/**
+ * Secrets only the daemon may hold: git authentication, in any of the ways git reads it from the
+ * environment (a token or credentials, an askpass helper, an ssh command, or the config variables
+ * that build a header), plus the forge tokens Claude Code and other tools push with on their own.
+ */
+const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|GH_TOKEN|GITHUB_TOKEN|GITEA_TOKEN)$/;
+
+/** A run's granted secrets without the git credential, for the agent's own environment. */
+export function withoutGitCredentials(secrets: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(secrets).filter(([k]) => !GIT_CREDENTIAL_NAMES.test(k)));
+}
+
 const require = createRequire(import.meta.url);
 /** OpenCode is its own ACP agent: `opencode acp`, from the opencode-ai npm package (the Dockerfile puts it on PATH). */
 export const adapterArgs = (agentKind: string): string[] => (agentKind === "opencode" ? ["acp"] : []);
@@ -236,6 +259,11 @@ export class SessionManager {
   /** Permission requests still waiting for a verdict, for the server to answer again after a reconnect. */
   pendingPermissions(): Array<{ runId: string; requestId: string }> {
     return [...this.runs.entries()].flatMap(([runId, state]) => [...state.pendingPermissions.keys()].map((requestId) => ({ runId, requestId })));
+  }
+
+  /** Ids of the runs this runner is running now, told to the server in hello (BOS-583). */
+  liveRunIds(): string[] {
+    return [...this.runs.keys()];
   }
 
   get activeRuns() {
@@ -419,8 +447,9 @@ export class SessionManager {
     const base = this.opts.baseEnv ?? process.env;
     const env: NodeJS.ProcessEnv = {};
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
-    // A granted GIT_TOKEN reaches git through the environment only, for the agent's pushes too (R38).
-    Object.assign(env, secrets, gitAuthEnv(secrets), { DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
+    // The git credential stays with the daemon, which pushes and fetches itself (BOS-322): the session gets
+    // every other granted secret, and a push from inside it fails fast instead of prompting.
+    Object.assign(env, withoutGitCredentials(secrets), { GIT_TERMINAL_PROMPT: "0", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
     if (cmd.agentKind === "claude" && cmd.model && !CLAUDE_ALIASES.has(cmd.model)) {
       // ACP refuses unlisted models; pinning the alias at launch works (spike S2).
       env.ANTHROPIC_DEFAULT_OPUS_MODEL = cmd.model;
@@ -678,7 +707,9 @@ export class SessionManager {
             toolCalls.set(id, { rawInput: isEmpty(u.rawInput) ? prev.rawInput : u.rawInput, text: text || prev.text });
             if (toolCalls.size > 200) toolCalls.delete(toolCalls.keys().next().value!);
           }
-          emit({ type: "run.update", runId: cmd.runId, update: { kind: u.sessionUpdate, title: u.title ?? null, toolKind: u.kind ?? null, status: u.status ?? null } });
+          // A failed call whose output says the permission was refused: the server logs it with the run and ticket (BOS-306).
+          const refused = u.status === "failed" && /User refused permission/i.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : ""));
+          emit({ type: "run.update", runId: cmd.runId, update: { kind: u.sessionUpdate, title: u.title ?? null, toolKind: u.kind ?? null, status: u.status ?? null, ...(refused ? { refused: true } : {}) } });
           return;
         }
         case "agent_message_chunk": {
@@ -768,8 +799,33 @@ export class SessionManager {
       }
 
       const mcpServers: McpServer[] = [{ type: "http", name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
-      // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
       const supported = (init.agentCapabilities as { mcpCapabilities?: Record<string, boolean | undefined> } | undefined)?.mcpCapabilities;
+      // Boss Man tools are required (BOS-552): OpenCode accepts a session/new even when its MCP server
+      // is unreachable and then runs with no tools, so check the tools are really there first. Checking
+      // before session/new means a run that can't reach them never reaches run.started: it ends with a
+      // clear error, which the ticket feed shows as "Run ended: error: ...".
+      if (cmd.mcpRequired) {
+        if (!supported?.http) {
+          finish(null, `This run was stopped because ${cmd.agentKind} doesn't support HTTP MCP servers, so it would start without the Boss Man tools.`);
+          return;
+        }
+        // Wait out a brief stall first (BOS-403's helper), then require the tools to actually list.
+        // A test-provided check drives both steps itself, so it isn't run against the real URL.
+        const injected = this.opts.checkBossManTools;
+        let result: { ok: boolean; reason?: string };
+        if (injected) {
+          result = await injected(this.opts.mcpUrl, cmd.mcpToken);
+        } else {
+          const reach = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: MCP_PREFLIGHT_TIMEOUT_MS * MCP_PREFLIGHT_ATTEMPTS, attemptTimeoutMs: MCP_PREFLIGHT_TIMEOUT_MS, delayMs: MCP_PREFLIGHT_DELAY_MS });
+          if (!this.runs.has(cmd.runId)) return;
+          result = reach.ok ? await checkBossManTools(this.opts.mcpUrl, cmd.mcpToken) : { ok: false, reason: reach.lastError ?? "no answer" };
+        }
+        if (!result.ok) {
+          finish(null, `This run was stopped because it couldn't reach the Boss Man tools (${result.reason ?? "no answer"}), so it would have worked blind. It runs again when the server is reachable.`);
+          return;
+        }
+      }
+      // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
       for (const m of cmd.mcpServers ?? []) {
         const token = m.secretEnv ? secrets[m.secretEnv] : undefined;
         if (m.secretEnv && !token) continue;
@@ -865,7 +921,9 @@ export class SessionManager {
       // Messages that arrived during the turn continue the same session (R37).
       while (state.queued.length && this.runs.has(cmd.runId)) {
         const text = state.queued.splice(0).join("\n\n");
-        emit({ type: "run.update", runId: cmd.runId, update: { kind: "message_delivered", text: text.slice(0, 2000) } });
+        // The step shown on the ticket's feed is short (the full text is in the conversation anyway),
+        // but a long owner message should still be recognisable rather than cut after a couple of lines.
+        emit({ type: "run.update", runId: cmd.runId, update: { kind: "message_delivered", text: text.slice(0, 4000), fullLength: text.length } });
         result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text }] });
         countTokens(result);
         await checkpoint("after a turn");

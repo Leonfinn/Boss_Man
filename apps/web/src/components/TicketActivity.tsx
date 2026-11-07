@@ -3,16 +3,30 @@
 // happens; finished runs fold their steps away. The box at the bottom talks to the agent: into
 // its live run (after the current turn, or interrupting it), or as a new run.
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { systemAuthor } from "@boss-man/shared";
+import { systemAuthor, ticketRef } from "@boss-man/shared";
 import { api, type Agent } from "../api";
-import { usePoll } from "../hooks";
+import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
 import { ImagePreviews, useImageAttach, withAttachments } from "./ImageAttach";
+import { OwnerMessageBox, tooLongToSend } from "./OwnerMessageBox";
 import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
 
-type Message = { id: string; author: "owner" | "agent" | "system"; agent: string | null; runId: string | null; text: string; delivery: string | null; createdAt: string };
+type Message = {
+  id: string;
+  author: "owner" | "agent" | "system";
+  agent: string | null;
+  runId: string | null;
+  text: string;
+  delivery: string | null;
+  createdAt: string;
+  /** The waiting-for-an-answer state of an owner message (BOS-425); null for anything else. */
+  replyState?: "delivered" | "queued" | null;
+  replyReminders?: number | null;
+  replyClearedAt?: string | null;
+  replyClearedBy?: string | null;
+};
 type Conversation = { items: Message[]; live: { id: string; agent: string | null } | null };
 type RunRow = { id: string; agent: string | null; startedAt: string; endedAt: string | null; outcome: string | null };
 
@@ -29,6 +43,16 @@ export function splitDetails(text: string): { summary: string; details: string |
   if (!m) return { summary: text, details: null };
   const details = text.slice(m.index + m[0].length).trim();
   return { summary: text.slice(0, m.index).trim(), details: details || null };
+}
+
+/** Under an owner message: whether it reached the agent, is waiting its turn, or has gone unanswered (BOS-425). Nothing once it is answered. */
+export function replyState(m: Message): string | null {
+  if (m.author !== "owner" || m.delivery === "unassigned" || !m.replyState) return null;
+  if (m.replyClearedAt) return null;
+  if (m.replyState === "queued") return "waiting behind the agent's other work";
+  if ((m.replyReminders ?? 0) >= 2) return "not answered after 10 minutes, and the CEO has been asked";
+  if ((m.replyReminders ?? 0) >= 1) return "not answered yet; the agent has been asked again";
+  return m.delivery === "live" ? "delivered to the running agent" : "waiting: the agent will see it when it next starts a run";
 }
 
 function byline(m: Message) {
@@ -111,7 +135,9 @@ function reviewMarks(reviews: TicketReview[]) {
   return marks;
 }
 
-export function TicketActivity({ ticketId, companyId, assignee, assigneeId = null, agents = [], reviews = null }: { ticketId: string; companyId?: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[]; reviews?: TicketReview[] | null }) {
+export function TicketActivity({ ticketId, companyId, assignee, assigneeId = null, agents = [], reviews = null, ticketNumber = null, prefix = null }: { ticketId: string; companyId?: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[]; reviews?: TicketReview[] | null; ticketNumber?: number | null; prefix?: string | null }) {
+  // Ticket references in the feed link to their ticket; this ticket is BOS-n (BOS-358).
+  const refCtx = { prefix, selfId: ticketId, tickets: ticketNumber ? [{ id: ticketId, number: ticketNumber, prefix }] : [] };
   const [busy, setBusy] = useState(false);
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
@@ -150,6 +176,21 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  // Too long for a message: send it as a .txt file on the ticket, which the agent opens whole.
+  const sendAsFile = async (long: string) => {
+    try {
+      const markdown = await img.uploadText(long, "message.txt");
+      const outgoing = withAttachments("I've sent the text as a file (below); please read it before answering.", [markdown]);
+      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: outgoing, ...(other ? { agentId: other.id } : {}) } });
+      setText("");
+      img.clear();
+      setNote({ ok: true, text: "Sent as a .txt file on the ticket." });
+      convo.reload();
+      runs.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
   const stop = async () => {
     if (!live) return;
     try {
@@ -159,12 +200,30 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  // A phone keyboard has no Shift, so there Return adds a line and Send sends.
+  const coarse = useCoarsePointer();
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (coarse) return;
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       void send();
     }
   };
+  const placeholder = coarse
+    ? other
+      ? `Ask ${other.name} about this task.`
+      : live
+        ? `Message ${live.agent ?? "the agent"} while it works.`
+        : assignee
+          ? `Message ${assignee}`
+          : "Write a note. Assign the task to have an agent pick it up."
+    : other
+      ? `Ask ${other.name} about this task. ${working ? `${working} carries on undisturbed.` : ""}`.trim()
+      : live
+        ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.`
+        : assignee
+          ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.`
+          : "Write a note. Assign the task to have an agent pick it up.";
 
   return (
     <section className="card activity" aria-labelledby="activity-h">
@@ -184,11 +243,11 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
                 const { summary, details } = m!.author === "agent" ? splitDetails(m!.text) : { summary: m!.text, details: null };
                 return (
                   <>
-                    <p>{linked(summary, companyId)}</p>
+                    <p>{linked(summary, companyId, refCtx)}</p>
                     {details && (
                       <details>
                         <summary>Details</summary>
-                        <p>{linked(details, companyId)}</p>
+                        <p>{linked(details, companyId, refCtx)}</p>
                       </details>
                     )}
                   </>
@@ -197,6 +256,11 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
               <small>
                 {byline(m!)} · {when(m!.createdAt)}
               </small>
+              {replyState(m!) && (
+                <p className="muted reply-state" style={{ fontSize: 12, margin: "2px 0 0" }}>
+                  {replyState(m!)}
+                </p>
+              )}
             </div>
           ),
         )}
@@ -218,23 +282,25 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
             </select>
           </div>
         )}
-        <label htmlFor="activity-text" className="sr-only">
-          Message to the agent
-        </label>
-        <textarea
+        <OwnerMessageBox
           id="activity-text"
+          label="Message to the agent"
           rows={2}
-          maxLength={4000}
-          placeholder={other ? `Ask ${other.name} about this task. ${working ? `${working} carries on undisturbed.` : ""}`.trim() : live ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.` : assignee ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.` : "Write a note. Assign the task to have an agent pick it up."}
+          enterKeyHint={NEWLINE_KEY_HINT}
+          placeholder={placeholder}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={setText}
           onKeyDown={onKey}
           onPaste={img.onPaste}
-        />
-        <ImagePreviews attached={img.attached} onRemove={img.remove} />
+          onSendAsFile={sendAsFile}
+          attaching={img.busy}
+          error={img.error}
+        >
+          {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+        </OwnerMessageBox>
         <div className="compose-actions">
           {img.button}
-          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy}>
+          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)}>
             Send
           </button>
           {live && (
@@ -249,11 +315,6 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           )}
         </div>
       </form>
-      {img.error && (
-        <p className="error" role="alert" style={{ padding: "0 18px 14px" }}>
-          {img.error}
-        </p>
-      )}
       {note && (
         <p className={note.ok ? "muted" : "error"} role={note.ok ? "status" : "alert"} style={{ padding: "0 18px 14px" }}>
           {note.text}

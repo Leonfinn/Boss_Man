@@ -28,7 +28,7 @@ export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; 
  * Git credentials from the run's granted secrets, passed through the environment only.
  * Nothing is written to a URL or to git config on disk. GIT_TOKEN is sent as HTTP Basic
  * auth (GitHub, GitLab and Gitea accept a token this way); GIT_USERNAME defaults to
- * x-access-token.
+ * x-access-token. For the daemon's own git only: an agent's session never gets it (BOS-322).
  */
 export function gitAuthEnv(secrets: Record<string, string | undefined>): Record<string, string> {
   const env: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
@@ -505,7 +505,9 @@ export class Workspaces {
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
       // Own process group, so a timeout can take down pnpm, tsc, vitest and their workers, not just the shell.
-      const child = spawn("sh", ["-c", command], {
+      // The check starts with default HUP/INT/TERM handling: a server started with those ignored would pass that on, and a shell can't undo it
+      // (so check-all's own signal trap and its tests never fire). env --default-signal needs GNU coreutils; without it the command runs as before.
+      const child = spawn("sh", ["-c", 'if env --default-signal=HUP,INT,TERM true 2>/dev/null; then exec env --default-signal=HUP,INT,TERM sh -c "$0"; fi; exec sh -c "$0"', command], {
         cwd: dir,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
@@ -521,16 +523,20 @@ export class Workspaces {
       };
       let tail = "";
       // While check-all.sh waits in its queue the clock is the (long) queue limit; it restarts at the full timeout once the checks really begin.
+      // The queue limit is a no-progress limit (BOS-370): it restarts whenever the printed place changes.
       let queued = false;
       let slotTaken = false;
+      let lastPlace = "";
       const onData = (chunk: string) => {
         tail = (tail + chunk).slice(-8192);
         if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
           slotTaken = true;
           arm(timeoutMs);
-        } else if (!queued && !slotTaken && tail.includes(CHECK_QUEUED_MARKER)) {
+        } else if (!slotTaken && tail.includes(CHECK_QUEUED_MARKER)) {
+          const place = [...chunk.matchAll(/waiting for a free check slot \(place (\d+) of/g)].pop()?.[1] ?? "";
+          if (!queued || (place && place !== lastPlace)) arm(queueMaxMs);
           queued = true;
-          arm(queueMaxMs);
+          if (place) lastPlace = place;
         }
       };
       child.stdout.setEncoding("utf8");

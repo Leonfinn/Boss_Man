@@ -10,6 +10,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const defineExec = (impl: typeof document.execCommand) => {
+  const spy = vi.fn(impl);
+  Object.defineProperty(document, "execCommand", { configurable: true, writable: true, value: spy });
+  return spy;
+};
+
+const setSecure = (secure: boolean) => Object.defineProperty(window, "isSecureContext", { configurable: true, value: secure });
+
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
 const decision = (over: Partial<Decision> = {}): Decision => ({
   id: "d1",
@@ -75,8 +83,11 @@ describe("decision queue", () => {
     expect(screen.getByLabelText("Score 52")).toBeTruthy();
     expect(screen.getByRole("link", { name: "APP-3 Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
     expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
+    // The legend folds away behind one line (BOS-245), so it opens before it can be read.
+    fireEvent.click(screen.getByText("How the ranking works"));
     expect(screen.getByText(/what it holds up: tasks it blocks, or 5 when an agent is paused/)).toBeTruthy();
-    expect(screen.getByText(`1 decision waiting in ${company.name}, ranked by what they unblock.`, { exact: false })).toBeTruthy();
+    // The list really is newest first, so the subtitle says so rather than "ranked by what they unblock".
+    expect(screen.getByText(`1 decision waiting in ${company.name}, newest first.`, { exact: false })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Raise to $80" }));
     await waitFor(() => expect(screen.getByText("Answered: Raise to $80.")).toBeTruthy());
@@ -119,6 +130,7 @@ describe("decision queue", () => {
   });
 
   it("shows each hand-apply command in its own block with a Copy button that copies only the command (BOS-269)", async () => {
+    setSecure(true);
     const writeText = vi.fn(() => Promise.resolve());
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
     const fence = (c: string) => "```sh\n" + c + "\n```";
@@ -144,6 +156,61 @@ describe("decision queue", () => {
     fireEvent.click(buttons[1]!);
     await waitFor(() => expect(screen.getByText("Copied")).toBeTruthy());
     expect(writeText).toHaveBeenCalledWith("cd /srv/bm/src && scripts/rebuild-live.sh");
+  });
+
+  it("copies the exact command on a plain-http LAN address using the fallback (BOS-336)", async () => {
+    setSecure(false);
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    let copiedFromField = "";
+    const exec = defineExec((cmd) => {
+      if (cmd === "copy") copiedFromField = (document.querySelector("textarea") as HTMLTextAreaElement | null)?.value ?? "";
+      return true;
+    });
+    const fence = (c: string) => "```sh\n" + c + "\n```";
+    const d = decision({
+      kind: "approval",
+      question: "Main has moved.",
+      options: ["Approve", "Not now"],
+      recommendedOption: "Approve",
+      blocks: [],
+      context: {
+        type: "self_deploy",
+        handSteps: ["Pin the commit with this command:\n\n" + fence("cd /srv/bm/src && git merge --ff-only abc")],
+        rollback: "",
+      },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
+    await waitFor(() => expect(screen.getByText("Copied")).toBeTruthy());
+    expect(writeText).not.toHaveBeenCalled();
+    expect(exec).toHaveBeenCalledWith("copy");
+    expect(copiedFromField).toBe("cd /srv/bm/src && git merge --ff-only abc");
+  });
+
+  it("says it couldn't copy and selects the command when both ways fail (BOS-336)", async () => {
+    setSecure(false);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
+    defineExec(() => {
+      throw new Error("blocked");
+    });
+    const fence = (c: string) => "```sh\n" + c + "\n```";
+    const d = decision({
+      kind: "approval",
+      question: "Main has moved.",
+      options: ["Approve", "Not now"],
+      recommendedOption: "Approve",
+      blocks: [],
+      context: {
+        type: "self_deploy",
+        handSteps: ["Apply it:\n\n" + fence("cd /srv/bm/src && scripts/rebuild-live.sh")],
+        rollback: "",
+      },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
+    await waitFor(() => expect(screen.getByText("Couldn't copy, select the text instead")).toBeTruthy());
+    expect(window.getSelection()?.toString()).toBe("cd /srv/bm/src && scripts/rebuild-live.sh");
   });
 
   it("links the ticket it is about, the tickets it blocks, and known references in the text", () => {
@@ -411,6 +478,34 @@ describe("model change cards (BOS-128)", () => {
     await waitFor(() => expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(true));
     const call = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer")!;
     expect(JSON.parse(String((call[1] as { body: string }).body))).toEqual({ answer: "Edit", modelConfig: { harness: "opencode", provider: "ollama", model: "qwen3:14b", fundingSourceId: "f2" } });
+  });
+
+  it("refuses an edited model the account can't serve before sending it (BOS-477)", async () => {
+    const fetch = vi.fn(async (url: string) => {
+      if (String(url) === "/api/funding-sources") return new Response(JSON.stringify([
+        { id: "f1", name: "Claude Max", kind: "subscription", provider: "anthropic" },
+        { id: "f3", name: "Claude Max 2", kind: "subscription", provider: "anthropic" },
+      ]), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<Decisions decisions={[modelChange()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(screen.getByLabelText("Harness")).toBeTruthy());
+
+    // A DeepSeek model paid from a Claude account is the Brian case: named before saving, and Save is off.
+    fireEvent.change(screen.getByLabelText("Harness"), { target: { value: "opencode" } });
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" } });
+    fireEvent.change(screen.getByLabelText("Paid from"), { target: { value: "f3" } });
+    expect(screen.getByRole("alert").textContent).toContain("Anthropic serves Claude models only");
+    expect((screen.getByRole("button", { name: "Save and approve" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(screen.getByRole("button", { name: "Save and approve" }).closest("form")!);
+    expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(false);
+
+    // A Claude model on the same account is fine.
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "claude-opus-4-5" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByRole("button", { name: "Save and approve" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
 

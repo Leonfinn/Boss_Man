@@ -1,21 +1,24 @@
 // Runner daemon: one per company. Dials out to the Boss Man server, runs agents over ACP
 // on its commands, and journals every event until the server has it (R31).
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
-import { runnerFence, sandboxSelfTest } from "./fence.js";
+import { applyCheckSlots, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
+import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
 const env = process.env;
 const wsUrl = env.BOSSMAN_URL ?? "ws://server:3100/api/runner/connect";
 const httpBase = wsUrl.replace(/^ws/, "http").replace(/\/api\/runner\/connect$/, "");
-// The token comes from a file (a Docker secret) or the environment.
-const token = env.BOSSMAN_RUNNER_TOKEN_FILE ? readFileSync(env.BOSSMAN_RUNNER_TOKEN_FILE, "utf8").trim() : env.BOSSMAN_RUNNER_TOKEN?.trim();
-if (!token) throw new Error("Set BOSSMAN_RUNNER_TOKEN_FILE or BOSSMAN_RUNNER_TOKEN to the token from POST /api/companies/:id/runner.");
+// A token in the environment sits in /proc/<pid>/environ, which the kernel keeps for the life of the
+// process and a session's fence can't take away without also taking /proc away from its tools
+// (BOS-322). The file is the only route that stays out of a session's reach, so refuse rather than
+// run with a token any session can read.
+const token = safeRunnerToken(env);
 
 const dataDir = env.BOSSMAN_RUNNER_DATA ?? "/home/node/runner-data";
 mkdirSync(dataDir, { recursive: true });
@@ -27,6 +30,18 @@ const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
 // the merge check share, so checks still take turns (BOS-321).
 const coordDir = path.join(workspacesRoot, ".bossman-coord");
 mkdirSync(coordDir, { recursive: true });
+const checkSlots = applyCheckSlots(coordDir, env.BOSSMAN_CHECK_SLOTS);
+if (checkSlots > 1) console.log(`[runner] full checks: ${checkSlots} at a time (BOSSMAN_CHECK_SLOTS)`);
+if (checkSlots > 1) {
+  // Each extra full check peaks near 3 GB; warn when the container limit (cgroup v2 or v1) is lower than that.
+  for (const f of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
+    if (!existsSync(f)) continue;
+    const limit = Number(readFileSync(f, "utf8").trim());
+    if (Number.isFinite(limit) && limit < checkSlots * 3 * 1024 ** 3 + 2 * 1024 ** 3 && limit < 2 ** 50)
+      console.warn(`[runner] warning: memory limit is ${Math.round(limit / 1024 ** 3)} GB but ${checkSlots} full checks at once need about ${checkSlots * 3 + 2} GB; raise BOSSMAN_RUNNER_MEMORY or checks may be OOM-killed`);
+    break;
+  }
+}
 const workspaces = new Workspaces(workspacesRoot, process.env, coordDir);
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
@@ -66,6 +81,7 @@ connection = new RunnerConnection({
   log,
   onCommand: (command) => sessions.handle(command),
   pendingPermissions: () => sessions.pendingPermissions(),
+  liveRuns: () => sessions.liveRunIds(),
 });
 
 // Runs the previous process didn't finish go into the journal as interrupted before we connect (R42).

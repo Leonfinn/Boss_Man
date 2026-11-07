@@ -9,7 +9,7 @@ import { openPglite } from "../src/db/client.js";
 import { activity, agents, decisions, reviewRequests, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { resolveReviewer } from "../src/services/review-policy.js";
-import { MERGE_ACTIVITY_MS } from "../src/services/review.js";
+import { MERGE_ACTIVITY_MS, setInfraRetryBase } from "../src/services/review.js";
 import { raiseMergeStuck } from "../src/services/decisions.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -422,6 +422,7 @@ describe("the merge sweep for approved tickets (BOS-362)", () => {
   });
 
   it("raises a new card when the retry's check times out, even with an answered card holding the key", async () => {
+    setInfraRetryBase(1);
     const c = await setup();
     const t = await c.ticket();
     await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
