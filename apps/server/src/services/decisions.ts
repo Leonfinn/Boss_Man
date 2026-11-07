@@ -95,6 +95,24 @@ async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string;
   );
 }
 
+/**
+ * Do-this-next links (BOS-551) that point at a card the raiser may legitimately order against:
+ * an open decision in the caller's own company (BOS-625). A link to another company's card, or to
+ * an answered one, is dropped rather than stored, so one company can't nudge another's queue order.
+ * The queue already ignores ids it can't see; this keeps the bad link out of the card in the first place.
+ */
+async function keepOpenInCompany<T extends OrderLink>(db: Db, companyId: string, links: T[] | undefined): Promise<T[] | undefined> {
+  if (!links?.length) return undefined;
+  const ids = [...new Set(links.map((l) => l.decisionId))];
+  const rows = await db
+    .select({ id: decisions.id })
+    .from(decisions)
+    .where(and(inArray(decisions.id, ids), eq(decisions.companyId, companyId), eq(decisions.status, "open")));
+  const ok = new Set(rows.map((r) => r.id));
+  const kept = links.filter((l) => ok.has(l.decisionId));
+  return kept.length ? kept : undefined;
+}
+
 /** One ticket a Boss Man update brings, as the owner sees it on a deploy card (BOS-213). */
 export type DeployChange = { ticketId: string; ref: string; title: string };
 /**
@@ -1523,6 +1541,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; setsUp?: Addon; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+      // Ordering links may only point at open cards in the raiser's own company (BOS-625).
+      const doAfter = await keepOpenInCompany(db, input.companyId, input.doAfter);
+      const doBefore = await keepOpenInCompany(db, input.companyId, input.doBefore);
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -1535,7 +1556,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             raisedByAgentId: input.agentId,
             context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
-              ...(input.doAfter?.length ? { doAfter: input.doAfter } : {}), ...(input.doBefore?.length ? { doBefore: input.doBefore } : {}),
+              ...(doAfter?.length ? { doAfter } : {}), ...(doBefore?.length ? { doBefore } : {}),
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
               ...(input.resetsOnRestart ? { resetsOnRestart: true } : {}),
               // An add-on's setup card closes itself once the add-on is seen working (DR-023 D, BOS-522).

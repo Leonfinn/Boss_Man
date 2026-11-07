@@ -207,6 +207,30 @@ describe("ranked decision queue (R20)", () => {
       expect(rows).toHaveLength(2);
       expect(new Set(rows.map((r) => r.step))).toEqual(new Set([1, 2]));
     });
+
+    it("drops do after / do before links to another company's open card (BOS-625)", async () => {
+      ctx = await setup();
+      const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string }; ceo: { id: string } };
+      const foreign = await ctx.decisions.raise({ companyId: other.company.id, agentId: other.ceo.id, question: "Elsewhere's card", options: ["Yes", "No"], recommended: "Yes" });
+      const mine = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "My card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: foreign.id, label: "Elsewhere's card" }], doBefore: [{ decisionId: foreign.id, label: "Elsewhere's card" }] });
+      const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, mine.id));
+      const c = row!.context as { doAfter?: unknown[]; doBefore?: unknown[] };
+      expect(c.doAfter ?? []).toEqual([]);
+      expect(c.doBefore ?? []).toEqual([]);
+      // A clean card of my own is still stored and shown.
+      const keeps = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Second card", options: ["Done", "Skip"], recommended: "Done", steps: ["Do it."], doAfter: [{ decisionId: mine.id, label: "My card" }] });
+      const [kept] = await ctx.db.select().from(decisions).where(eq(decisions.id, keeps.id));
+      expect((kept!.context as { doAfter?: unknown[] }).doAfter).toEqual([{ decisionId: mine.id, label: "My card" }]);
+    });
+
+    it("drops do after / do before links to an answered card in the same company (BOS-625)", async () => {
+      ctx = await setup();
+      const done = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Answered", options: ["Yes", "No"], recommended: "Yes" });
+      await ctx.req("POST", `/api/decisions/${done.id}/answer`, { answer: "Yes" });
+      const mine = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Late card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: done.id, label: "Answered" }] });
+      const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, mine.id));
+      expect((row!.context as { doAfter?: unknown[] }).doAfter ?? []).toEqual([]);
+    });
   });
 
   it("links the tickets a card is about and the references in its text, in its own company only", async () => {
