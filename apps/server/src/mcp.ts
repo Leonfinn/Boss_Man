@@ -2242,11 +2242,17 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
 
 }
 
-/** A short note for the agent, when the ticket's new migrations take a number another branch already has (BOS-219). */
+/**
+ * A short note for the agent, when one of the ticket's new migration numbers is already on the
+ * default branch (BOS-219). Only a clash with the default branch is worth saying at review time:
+ * a clash with another open branch is not, because that branch hasn't merged and the agent can't
+ * know whether it ever will (DR-037). Telling agents to rename against open branches caused about
+ * 35 renumber commits and gaps on main, so that advice is gone.
+ */
 async function migrationWarning(review: Services["review"], ticketId: string, companyId: string): Promise<string> {
   const m = await review.migrations(ticketId, companyId).catch(() => null);
   if (!m?.needed) return "";
-  return `\n\nHeads up (BOS-219): a migration number is already taken: ${m.why.join("; ")}. Rename it to ${String(m.next).padStart(4, "0")} (and any others it moved) before this merges, set its journal entry's "when" later than the newest one already on the default branch, run the checks, and move the ticket back to review. The merge will send it back if it still clashes.${m.others.length ? ` Other numbers taken: ${m.others.join("; ")}.` : ""}`;
+  return `\n\nHeads up (BOS-219): a migration number is already taken on the default branch: ${m.why.join("; ")}. Rename it to ${String(m.next).padStart(4, "0")} (and any others it moved) before this merges, set its journal entry's "when" later than the newest one already on the default branch, run the checks, and move the ticket back to review. The merge will send it back if it still clashes.${m.others.length ? ` Other numbers taken: ${m.others.join("; ")}.` : ""}`;
 }
 
 /** True when something open holds the ticket: an unanswered decision, an unfinished blocker ticket or an engagement. */
