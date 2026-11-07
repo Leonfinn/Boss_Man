@@ -1,5 +1,5 @@
 {
-  "id": "32d5a684-02a9-4efe-a4c3-0354868831d5",
+  "id": "e95fdc0c-229b-4d19-954b-e8bc22ccb8b2",
   "prevId": "b1c0bb86-89d5-4413-8c93-1a76eebad4c4",
   "version": "7",
   "dialect": "postgresql",
@@ -1706,6 +1706,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "decisions_company_status": {
+          "name": "decisions_company_status",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -2279,27 +2300,6 @@
             },
             {
               "expression": "signature",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "failure_signatures_company_recent": {
-          "name": "failure_signatures_company_recent",
-          "columns": [
-            {
-              "expression": "company_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
