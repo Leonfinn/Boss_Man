@@ -29,17 +29,17 @@ describe("lintOwnerSteps", () => {
   });
 
   it("refuses a variable no step up to there sets (the $BOSSMAN_HOME card)", () => {
-    expect(rules([step("Go to the install folder:", sh("cd $BOSSMAN_HOME", H))])).toEqual(["1:R2"]);
-    expect(rules([step("Go there:", sh("cd ${BOSSMAN_HOME}/src", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go to the install folder. This prints nothing:", sh("cd $BOSSMAN_HOME", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go there. This prints nothing:", sh("cd ${BOSSMAN_HOME}/src", H))])).toEqual(["1:R2"]);
     // Unfenced, in a sentence, it is still a command the owner will paste.
     expect(rules(["Run sudo ls $BOSSMAN_HOME on the new host."])).toEqual(["1:R2"]);
     // Set later is set too late.
-    expect(rules([step("Go:", sh("cd $DIR", H)), step("Set it:", sh("DIR=/srv/bm", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go: this prints nothing.", sh("cd $DIR", H)), step("Set it: this prints nothing.", sh("DIR=/srv/bm", H))])).toEqual(["1:R2"]);
   });
 
   it("accepts variables the card sets, inline assignments, and shell text that isn't a variable", () => {
     const ok = [
-      step("Set the folder:", sh("export DIR=/srv/bm", H)),
+      step("Set the folder. This prints nothing:", sh("export DIR=/srv/bm", H)),
       step("Go there:", sh("cd $DIR/src && ls", H)),
       step("Build with a flag set just for this command:", sh("DOCKER_BUILDKIT=1 docker compose build", H)),
       step("Same command, inline:", sh("COMPOSE_FILE=a.yml docker compose ps && echo $COMPOSE_FILE", H)),
@@ -59,7 +59,7 @@ describe("lintOwnerSteps", () => {
     expect(rules([`Run this:\n\n${F}ssh root@<host-ip>\n\`\`\``])).toEqual(["1:R3"]);
     expect(rules(["Run `scp YOUR_KEY root@nas:/x` on the old host."])).toEqual(["1:R3"]);
     expect(rules([`Run this:\n\n${F}$ ls\n\`\`\``])).toEqual(["1:R3"]);
-    expect(rules([`Go there:\n\n${F}cd {{host.srcDir}}\n\`\`\``])).toEqual(["1:R4"]);
+    expect(rules([`Go there (this prints nothing):\n\n${F}cd {{host.srcDir}}\n\`\`\``])).toEqual(["1:R4"]);
   });
 
   it("only warns about links, several commands in one step, hedging and long cards", () => {

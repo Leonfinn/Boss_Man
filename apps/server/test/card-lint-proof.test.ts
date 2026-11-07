@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkAsk } from "../src/services/decisions.js";
-import { lintOwnerSteps, parseProof, sh, step } from "../src/services/steps.js";
+import { lintOwnerSteps, parseProof, sh, shellCommands, step } from "../src/services/steps.js";
 
 // Card lint R10 (no commands that wait for typed input) and R11 (cards with host commands say how they were
 // proven), DR-024 ticket 3 (BOS-528). The 5 Nov 22:40 card asked the owner to type a Tailscale key into a
@@ -50,11 +50,194 @@ describe("R10: commands that wait for typed input", () => {
   });
 });
 
+// BOS-543 (DR-024 amendment): on 6 Nov the owner was stuck at "(END)" and ":" after psql paged long output.
+describe("R10: pagers, typed-into prompts and commands that never return", () => {
+  const r10 = (cmd: string) => lintOwnerSteps([step("Run this. This prints nothing.", sh(cmd))]).refuse.filter((f) => f.rule === "R10");
+
+  it.each([
+    ["psql -U bossman -d bossman -c \"explain analyze select 1\"", /-P pager=off/],
+    ["docker compose exec db psql -U bossman -c \"select 1\"", /-P pager=off/],
+    ["git log -5", /--no-pager log/],
+    ["git -C /srv/app diff", /--no-pager diff/],
+    ["git show HEAD", /--no-pager show/],
+    ["systemctl status docker", /--no-pager/],
+    ["sudo systemctl status docker", /--no-pager/],
+    ["journalctl -u docker", /--no-pager/],
+    ["less /var/log/syslog", /pager \(less\)/],
+    ["cat big.log | less", /pager \(less\)/],
+    ["more notes.txt", /pager \(more\)/],
+    ["man docker", /--help/],
+    ["docker exec -it bossman-db psql -U bossman", /psql prompt.*-c/],
+    ["sudo -u postgres psql", /psql prompt/],
+    ["docker exec -it app bash", /shell inside the container/],
+    ["docker compose exec app sh", /shell inside the container/],
+    ["mysql -u root", /mysql prompt.*-e/],
+    ["docker stats", /--no-stream/],
+    ["docker logs -f app", /never returns.*--tail 50/],
+    ["docker logs --follow app", /never returns/],
+    ["docker logs -tf app", /never returns/],
+    ["docker compose logs -f", /never returns/],
+    ["docker compose -f docker-compose.yml logs --tail 20 -f app", /never returns/],
+    ["tail -f /var/log/syslog", /never returns.*tail -n 50/],
+    ["tail -n 50 -F app.log", /never returns/],
+    ["journalctl -fu docker", /never returns.*--no-pager -n 50/],
+    ["watch docker ps", /never returns.*once/],
+    ["top", /top -b -n 1/],
+    ["htop", /never returns/],
+    ["ping 192.0.2.1", /-c 3/],
+  ])("refuses %s and says what to use instead", (cmd, instead) => {
+    const found = r10(cmd);
+    expect(found.length, cmd).toBeGreaterThan(0);
+    expect(found.map((f) => f.problem).join("\n")).toMatch(instead);
+  });
+
+  it.each([
+    ["psql -P pager=off -U bossman -c \"explain analyze select 1\""],
+    ["psql --pset=pager=off -c \"select 1\""],
+    ["PAGER=cat psql -c \"select 1\""],
+    ["docker exec bossman-db psql -U bossman -c \"select 1\""],
+    ["docker exec -i bossman-db psql -U bossman < dump.sql"],
+    ["psql -c \"select 1\" | cat"],
+    ["D=$(psql -tAc \"select 1\")"],
+    ["git --no-pager log -5"],
+    ["git -P diff"],
+    ["git log -5 | cat"],
+    ["git -C /srv/app pull"],
+    ["git diff --quiet"],
+    ["systemctl --no-pager status docker"],
+    ["sudo systemctl restart docker"],
+    ["systemctl is-active docker"],
+    ["journalctl --no-pager -n 50 -u docker"],
+    ["journalctl -u docker | tail -n 50"],
+    ["docker stats --no-stream"],
+    ["docker logs --tail 50 app"],
+    ["docker compose -f docker-compose.yml logs --tail 50"],
+    ["tail -n 50 /var/log/syslog"],
+    ["top -b -n 1 | head -n 20"],
+    ["top -bn1"],
+    ["ping -c 3 192.0.2.1"],
+    ["docker exec app sh -c \"ls /data\""],
+    ["docker exec -it app bash -lc \"ls /data\""],
+    ["cat /var/log/more.log"],
+    ["docker compose ps"],
+  ])("lets %s through", (cmd) => {
+    expect(r10(cmd)).toEqual([]);
+  });
+
+  it("refuses the 6 Nov speed-measuring steps (psql opened, queries typed into it)", () => {
+    const steps = [step("Open the database. This prints nothing.", sh("docker exec -it bossman-db psql -U bossman")), "Paste `explain analyze select * from runs;` and press Enter."];
+    expect(rules(steps, "rehearsed speed @ 0123abcd")).toContain("1:R10");
+  });
+
+  it("refuses card 9c9e0c8e's steps 6 and 9 word for word, even with a lintOverride", () => {
+    // Exactly as the CEO raised them on 6 Nov (BOS-406): step 6 opens psql at a prompt, step 9 is typed into it
+    // and its explain output went to less, leaving the owner at "(END)".
+    const step6 =
+      "Open the database console, then paste the line after it. It only names a piece of the queries in the next steps.\n```sh\ndocker exec -it \"$(docker ps -q --filter label=com.docker.compose.service=db)\" psql -U bossman -d bossman\n```\n```sh\n\\set o1 '(select a2.name from agents a2 where a2.id = (select n2.from_agent_id from nudges n2 where n2.wake_id = (select w2.id from wakes w2 where w2.run_id = r.id limit 1) order by n2.created_at desc limit 1))'\n```";
+    const step9 =
+      "Time the Dashboard's query. It can take up to a minute.\n```sh\nexplain (analyze, buffers) select distinct on (r.agent_id) r.agent_id, r.id, t.title, :o1, :o2, :o3 from runs r left join tickets t on t.id = r.ticket_id where r.agent_id in (select id from agents where company_id = :co) order by r.agent_id, r.started_at desc \\g\n```";
+    const found = lintOwnerSteps([step6, step9]).refuse.filter((f) => f.rule === "R10");
+    expect(found.map((f) => f.step)).toContain(1);
+    expect(found.map((f) => f.problem).join("\n")).toMatch(/psql prompt.*-c/);
+    const r = checkAsk({ triedFirst: TRIED, steps: [step6, step9], lintOverride: "The owner knows to press q.", byCeo: true });
+    expect(r.error).toMatch(/can't let through.*pager or never returns/);
+  });
+
+  it("can't be overridden, even by the CEO", () => {
+    for (const cmd of ["git log -5", "tail -f app.log", "docker exec -it db psql -U bossman"]) {
+      const r = checkAsk({ triedFirst: TRIED, steps: [step("Look at it. This prints nothing.", sh(cmd))], lintOverride: "The owner knows to press q.", byCeo: true });
+      expect(r.error, cmd).toMatch(/can't let through.*pager or never returns/);
+    }
+  });
+
+  it("only accepts systemctl status as the look-only last step with --no-pager", () => {
+    const steps = (last: string) => [step("Restart it. This prints nothing.", sh("sudo systemctl restart docker")), step("Check it's running.", sh(last))];
+    expect(rules(steps("systemctl --no-pager status docker"), "not rehearsed: the owner's own host, first run there")).toEqual([]);
+    expect(rules(steps("systemctl status docker"), "not rehearsed: the owner's own host, first run there")).toEqual(["2:R10", "2:R11"]);
+  });
+});
+
+// The owner thought card 42cc7ccf's step 3 had failed because it printed nothing (6 Nov, BOS-550 answer).
+describe("R12: steps that print nothing say so", () => {
+  const at = { host: "bossman", as: "root" } as const;
+  // Steps 2, 3, 6, 7 and 8 of card 42cc7ccf, as the CEO raised it at 09:38 on 6 Nov.
+  const card = (say = "", echo = "") => [
+    step(`Go to the install folder:${say}`, sh("cd /srv/apps/boss-man/src", at)),
+    step(`Read the deployer folder's location from your settings file (the later steps use it):${say}`, sh(`D=$(sed -n 's/^BOSSMAN_DEPLOYER=//p' .env)${echo}`, at)),
+    step(`Keep a backup of the current deployer, so you can undo:${say}`, sh('cp "$D/host-deployer.sh" "$D/host-deployer.sh.before-bos494"', at)),
+    step(`Copy the new script next to it under a temporary name:${say}`, sh('install -o root -g root -m 750 scripts/host-deployer.sh "$D/host-deployer.sh.new"', at)),
+    step(`Swap it into place in one move:${say}`, sh('mv "$D/host-deployer.sh.new" "$D/host-deployer.sh"', at)),
+  ];
+  const PROOF = "rehearsed host-deployer @ 0123abcd";
+
+  it("refuses every step of card 42cc7ccf, and suggests echoing an assignment's value", () => {
+    const { refuse } = lintOwnerSteps(card(), undefined, parseProof(PROOF) as never);
+    expect(refuse.map((f) => `${f.step}:${f.rule}`)).toEqual(["1:R12", "2:R12", "3:R12", "4:R12", "5:R12"]);
+    expect(refuse[1]!.problem).toMatch(/D=\$\(…\); echo "\$D"/);
+    expect(refuse[0]!.problem).toMatch(/This prints nothing\./);
+  });
+
+  it("passes the same steps when they say so, or when the assignment echoes its value", () => {
+    expect(rules(card(" This prints nothing."), PROOF)).toEqual([]);
+    const echoed = card("", '; echo "$D"');
+    expect(rules([echoed[1]!], PROOF)).toEqual([]);
+    expect(rules(card(" It prints nothing."), PROOF)).toEqual([]);
+  });
+
+  it.each([
+    ["export PATH=$PATH:/opt/bin"],
+    ["mkdir -p /srv/app && chmod 750 /srv/app && chown root:root /srv/app"],
+    ["sudo ln -s /srv/app/current /srv/app/live"],
+    ["touch .env"],
+    ["rm -f old.tar"],
+    ["X=1 Y=2"],
+  ])("refuses %s on its own", (cmd) => {
+    expect(rules([step("Do it.", sh(cmd))], PROOF)).toEqual(["1:R12"]);
+  });
+
+  it.each([
+    ["cp -v a b"],
+    ["mkdir -pv /srv/app"],
+    ["cd /srv/app && ls"],
+    ["cd -"],
+    ["export"],
+    ["D=$(cat x); echo \"$D\""],
+    ["docker compose up -d"],
+    ["curl -fsS https://bossman.example.com/health"],
+  ])("lets %s through", (cmd) => {
+    expect(rules([step("Do it.", sh(cmd))], PROOF)).toEqual([]);
+  });
+
+  it("only judges command blocks, not inline code in a sentence", () => {
+    expect(rules(["Your files are in the folder you opened with `cd /srv/app`."])).toEqual([]);
+  });
+
+  it("lintOverride lets R12 through, but not R10 on the same card", () => {
+    const over = checkAsk({ triedFirst: TRIED, steps: card(), proof: PROOF, lintOverride: "Each step says what the next one checks.", byCeo: true });
+    expect(over.error).toBeNull();
+    expect(over.lint?.override?.findings.map((f) => f.rule)).toEqual(["R12", "R12", "R12", "R12", "R12"]);
+    const both = checkAsk({ triedFirst: TRIED, steps: [...card(), step("Look at the log.", sh("tail -f app.log"))], proof: PROOF, lintOverride: "Each step says what the next one checks.", byCeo: true });
+    expect(both.error).toMatch(/Step 6: .*never returns/);
+    expect(checkAsk({ triedFirst: TRIED, steps: card(), proof: PROOF }).error).toMatch(/prints nothing when it works/);
+  });
+});
+
+describe("shellCommands", () => {
+  it("doesn't split inside quotes or $(…), and marks pipes", () => {
+    expect(shellCommands("D=$(sed -n 's/^A=//p;s/b|c//' .env); echo \"$D; x\" | cat 2>&1 && ls").map((c) => [c.words.join(" "), c.pipedIn, c.pipedOut])).toEqual([
+      ["D=$(sed -n 's/^A=//p;s/b|c//' .env)", false, false],
+      ['echo "$D; x"', false, true],
+      ["cat 2>&1", true, false],
+      ["ls", false, false],
+    ]);
+  });
+});
+
 describe("R11: host commands need proof", () => {
   const host = [step("Restart Tailscale.", sh("docker compose -f docker-compose.tailscale.yml up -d")), step("Check it's up.", sh("docker compose ps"))];
 
   it.each([["docker ps"], ["docker-compose up -d"], ["sudo systemctl restart docker"], ["tailscale up"], ["chown -R 1000 /srv/bossman"], ["chmod 600 .env"], ["nano .env"], ["echo TS_AUTHKEY=abc >> /opt/bossman/.env"]])("refuses %s without proof", (cmd) => {
-    expect(rules([step("Do it.", sh(cmd))])).toEqual(["1:R11"]);
+    expect(rules([step("Do it. This may print nothing.", sh(cmd))])).toEqual(["1:R11"]);
   });
 
   it("names the first step with a host command, once", () => {
