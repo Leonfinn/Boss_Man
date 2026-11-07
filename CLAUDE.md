@@ -4,6 +4,8 @@ Inside an agent session `scripts/check-all.sh` refuses to run (exit 2): the full
 
 When the server-owned check queue is on (setting `check_queue_mode` = `server`, DR-003), you can have the quick check run for you instead: commit, then call the `request_check` tool (`scope: quick` by default; `full` only in the cases above). The runner runs it outside your session, so it survives the end of your run and no agent can stop it, and you are woken with the result. Do not poll or start your own background loop. The tool tells you if the queue is off; then run `scripts/check-quick.sh` yourself as above. The merge gate runs the one full check per merge attempt.
 
+In an agent session a whole-package or whole-suite vitest run (`pnpm test`, `pnpm --filter X test`, `vitest run` with no file, `vitest related` over app.ts, main.ts or mcp.ts) is refused by `scripts/vitest-guard.mjs`; `CHECK_ALL_FORCE=1` overrides. A run that names test files is queued behind the same check lock (`BOSSMAN_VITEST_NO_SLOT=1` skips the queue).
+
 The full check, `scripts/check-all.sh`, takes 30 to 50 minutes and runs everything CI's `check` job does that works without Docker: the script tests and lints, `pnpm typecheck`, `pnpm test`, `pnpm build`, ShellCheck (`scripts/check-shell.sh`, where info-level findings fail too) and the shell scripts' tests (`scripts/test-shell.sh`).
 
 Boss Man runs the full check before it merges approved work, so anything it reports blocks the merge.

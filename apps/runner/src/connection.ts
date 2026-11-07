@@ -23,6 +23,8 @@ export type ConnectionOptions = {
   runningChecks?: () => string[];
   /** Called after the server’s welcome: resend check results it may not have. */
   onWelcome?: () => void;
+  /** Ids of the runs the runner has now; the server closes any other open run (BOS-583). */
+  liveRuns?: () => string[];
 };
 
 export class RunnerConnection {
@@ -90,7 +92,8 @@ export class RunnerConnection {
     ws.on("open", () => {
       this.attempt = 0;
       const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}) });
+      const liveRuns = this.opts.liveRuns?.();
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");

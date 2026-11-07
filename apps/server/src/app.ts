@@ -51,6 +51,7 @@ import { recoveryService } from "./services/recovery.js";
 import { isSignoffPending, ReviewError, reviewService } from "./services/review.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
+import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { record } from "./services/activity.js";
 import { workService, WorkError } from "./services/work.js";
@@ -63,6 +64,8 @@ import { TicketImageError, ticketImagesService } from "./services/ticket-images.
 import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
+import { mergeQueueService } from "./services/merge-queue.js";
+import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
@@ -390,6 +393,7 @@ export async function buildApp(opts: AppOptions) {
   });
   const serverStatus = serverStatusService(db, {
     memory,
+    runLimits: (id) => scheduler.runLimits(id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -477,6 +481,15 @@ export async function buildApp(opts: AppOptions) {
     const ownerTz = (await notes.getSettings()).quietHours?.timeZone ?? OWNER_TZ;
     await funding.refreshSynthetic((n) => notes.notify({ companyId: null, agentId: null, ...n }), ownerTz);
   }
+  // A run the runner's hello left out was closed by the server: resume it like an interrupted one (BOS-583, BOS-574).
+  runners.onLost((runId) =>
+    deploysSvc
+      .onRunEnded(runId)
+      .then(() => chat.onRunEnded(runId, null, true))
+      .then(() => recovery.onInterrupted(runId))
+      .then(() => scheduler.tick())
+      .catch((err) => app.log.error({ err, runId }, "resuming a lost run failed")),
+  );
   runners.onEvent((runner, event) => {
     // CEO continuity: a chapter follows its runs' sessions and context use.
     if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter update failed"));
@@ -561,6 +574,7 @@ export async function buildApp(opts: AppOptions) {
     wake: (input) => scheduler.notify(input.agentId, input),
     isConnected: (runnerId) => runners.isConnected(runnerId),
     runnerSettling: (runnerId) => runners.isSettling(runnerId, (opts.now ?? (() => new Date()))()),
+    runnerRestartedAt: (runnerId) => runners.restartedAt(runnerId),
     endRun: (runId, outcome, at, how) => runners.endRun(runId, outcome, at, how),
     // Free run slots go to idle in-progress work (BOS-574, DR-029).
     freeSlots: (companyId) => scheduler.freeSlots(companyId),
@@ -656,6 +670,12 @@ export async function buildApp(opts: AppOptions) {
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
+  // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
+  const mergeQueue = mergeQueueService(db, {
+    runningMerges: () => review.runningMerges(),
+    limit: () => checkGate(db).limit(),
+    now: opts.now,
+  });
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
     // A stalled-review card's actions (BOS-404, BOS-426): take it, hand it to another reviewer, send it back, or leave it.
@@ -1618,8 +1638,11 @@ export async function buildApp(opts: AppOptions) {
           if (other) heldOther = { ref: ticketRef(other.prefix ?? row.prefix, other.number) ?? "", title: other.title };
         }
       }
-      const signoff = row.t.systemState === "review" ? await review.ownerSignoffOpen(id) : false;
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff };
+      // Where it stands on the owner's sign-off, in one word for the page (BOS-503), so nobody guesses from a state note.
+      const signoffNow = (await signoffState(db, row.t)).state;
+      // signoffWaiting keeps its BOS-471 meaning: a card is open for the button to settle.
+      const signoff = !!(await openSignoffCard(db, row.t.id));
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -1858,6 +1881,9 @@ export async function buildApp(opts: AppOptions) {
 
     // The home screen (R74).
     owner.get("/api/companies/:id/dashboard", async (req) => dashboard.get(IdParam.parse(req.params).id));
+
+    // The merge queue, read-only (BOS-587): what is running now, what waits and how the last ones ended.
+    owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
 
     // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
     owner.get("/api/companies/:id/workflow", async (req) => {

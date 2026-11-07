@@ -4,15 +4,16 @@
 // planner picks for each query it was added for.
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { desc, eq, inArray, isNull, lte, isNotNull, and, sql } from "drizzle-orm";
+import { desc, eq, gte, inArray, isNull, lte, isNotNull, and, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { PGlite } from "@electric-sql/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import * as schema from "../src/db/schema.js";
-import { agents, decisions, notifications, nudges, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, checkResults, decisions, notifications, nudges, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { migrationsFolder } from "../src/db/client.js";
 import { runOriginQuery } from "../src/services/runs.js";
+import { mergeQueueQueries } from "../src/services/merge-queue.js";
 
 type Db = ReturnType<typeof drizzle<typeof schema>>;
 let ctx: { db: Db; client: PGlite; close: () => Promise<void> } | undefined;
@@ -140,6 +141,8 @@ const INDEXES: Array<{ name: string; table: string; definition: string; query?: 
   { name: "tickets_watcher", table: "tickets", definition: 'ON public.tickets USING btree (watcher_agent_id) WHERE (watcher_agent_id IS NOT NULL)', query: (db) => db.select({ id: tickets.id }).from(tickets).where(sql`${tickets.watcherAgentId} is not null`) },
   { name: "tickets_monitor_at", table: "tickets", definition: 'ON public.tickets USING btree (monitor_at) WHERE (monitor_at IS NOT NULL)', query: (db) => db.select({ id: tickets.id }).from(tickets).where(lte(tickets.monitorAt, new Date())) },
   { name: "notifications_unread_decision", table: "notifications", definition: 'ON public.notifications USING btree (decision_id) WHERE (read_at IS NULL)', query: (db, w) => db.select({ id: notifications.id }).from(notifications).where(and(isNull(notifications.readAt), eq(notifications.decisionId, w.decisionId))) },
+  // The merge queue's recently-failed-checks read (BOS-587, migration 0105): its own query, by company and time.
+  { name: "check_results_company_at", table: "check_results", definition: 'ON public.check_results USING btree (company_id, at)', query: (db, w) => db.select({ id: checkResults.id }).from(checkResults).where(and(eq(checkResults.companyId, w.company.id), gte(checkResults.at, ts(7 * 24 * 60)))) },
 ];
 
 describe("the indexes the BOS-407 migration adds", () => {
@@ -185,3 +188,93 @@ describe("the indexes the BOS-407 migration adds", () => {
     }
   });
 });
+
+// The decisions table's per-poll reads (BOS-546). Every hot one names the company as well as the
+// status: the Dashboard's waiting count, the brief's "Needs you" list and the queue. `decisions_status`
+// alone served them until BOS-546, when decisions became the biggest full-scan source left after
+// BOS-407. More than one company is seeded, so a plan that ignored company_id would show up.
+describe("the indexes behind the decisions reads (BOS-546)", () => {
+  /** A company with a CEO, plus one other company with its own CEO. */
+  async function twoCompanies(c: NonNullable<typeof ctx>) {
+    const [main] = await c.db.insert(schema.companies).values({ name: "App Co" }).returning();
+    const [other] = await c.db.insert(schema.companies).values({ name: "Other Co" }).returning();
+    await c.db.insert(agents).values([
+      { companyId: main!.id, name: "CEO", role: "ceo", agentKind: "claude" },
+      { companyId: other!.id, name: "Other CEO", role: "ceo", agentKind: "claude" },
+    ]);
+    return { main: main!, other: other! };
+  }
+
+  it("is in the schema as built, and both open-status reads reach for it", async () => {
+    const c = await setup();
+    const { main, other } = await twoCompanies(c);
+    // Enough rows, and mostly settled ones, that a sequential scan is the wrong plan and a look at
+    // status alone would still have to filter away most of what it found.
+    const N = 600;
+    const ns = Array.from({ length: N }, (_, n) => n);
+    await c.db.insert(decisions).values(
+      ns.map((n) => ({
+        companyId: n % 7 === 0 ? other.id : main.id,
+        kind: "question" as const,
+        question: `Q${n}`,
+        recommendedOption: "A",
+        tier: n % 3 === 0 ? ("owner" as const) : ("ceo" as const),
+        status: n % 20 === 0 ? ("open" as const) : ("answered" as const),
+      })),
+    );
+    await c.client.exec("analyze");
+
+    const [{ indexdef } = { indexdef: "" }] = (await c.client.query("select indexdef from pg_indexes where indexname = $1", ["decisions_company_status"])).rows as Array<{ indexdef: string }>;
+    expect(indexdef).toContain("ON public.decisions USING btree (company_id, status)");
+
+    // The Dashboard's waiting count and the brief's "Needs you" list, as the services write them.
+    const waiting = c.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, main.id), eq(decisions.status, "open"), eq(decisions.tier, "owner")));
+    const needs = c.db.select().from(decisions).where(and(eq(decisions.companyId, main.id), eq(decisions.tier, "ceo"), eq(decisions.status, "open"))).orderBy(decisions.createdAt);
+    const queue = c.db.select().from(decisions).where(and(eq(decisions.companyId, main.id), eq(decisions.status, "open")));
+
+    for (const [label, q] of [["waiting", waiting], ["needs", needs], ["queue", queue]] as const) {
+      const { sql: text, params } = q.toSQL();
+      // With sequential scans ruled out as the reason (PGlite has no cost to weigh here) the plan
+      // must still name the composite index; the status-only `decisions_status` still exists in the
+      // schema, but the planner picks the composite because it also covers company_id.
+      const plan = (await c.client.query(`explain ${text}`, params)).rows.map((r) => String(Object.values(r as Record<string, unknown>)[0])).join("\n");
+      expect(plan, label).toMatch(/decisions_company_status/);
+      expect(plan, label).not.toMatch(/Seq Scan on decisions/);
+      // ...and the read still returns rows for the main company (the index changed the plan, not the answer).
+      expect((await c.client.query(text, params)).rows.length, label).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("the merge queue's reads (BOS-587)", () => {
+  it("are plain index scans, never a whole-table scan, on a busy company", async () => {
+    const c = await setup();
+    const w = await world(c);
+    // A busy company: many tickets in every state and thousands of check results, so a sequential
+    // scan would be the cheap plan if the indexes weren't there.
+    const N = 3000;
+    const n2 = Array.from({ length: N }, (_, n) => n);
+    await c.db.insert(tickets).values(n2.map((n) => ({ companyId: w.company.id, projectId: w.project.id, number: n + 2, title: `T${n}`, systemState: (["backlog", "ready", "in_progress", "review", "done"] as const)[n % 5]!, mergeCommit: n % 5 === 4 ? "abcdef1234" : null })));
+    const rows = await c.db.select({ id: tickets.id }).from(tickets);
+    await c.db.insert(checkResults).values(rows.map((r, n) => ({ companyId: w.company.id, ticketId: r.id, kind: "verify", passed: n % 4 === 0, at: ts(n) })));
+    await c.db.insert(reviewRequests).values(rows.map((r, n) => ({ ticketId: r.id, kind: "code", round: 1, seq: 0, status: n % 3 === 0 ? "pending" : "approved" })));
+    await c.client.exec("analyze");
+
+    // Every read the screen makes, exactly as the service builds it. The reviews read is keyed by the
+    // ticket ids the in-review read returns, so it is bounded by them and uses the ticket index.
+    const since = ts(7 * 24 * 60);
+    const someIds = rows.slice(0, 50).map((r) => r.id);
+    for (const q of [mergeQueueQueries.inReview(c.db, w.company.id), mergeQueueQueries.recentlyDone(c.db, w.company.id, since), mergeQueueQueries.recentFailedChecks(c.db, w.company.id, since), mergeQueueQueries.latestReviews(c.db, someIds)]) {
+      const { sql: text, params } = q.toSQL();
+      const plan = (await c.client.query(`explain ${text}`, params)).rows.map((r) => String(Object.values(r as Record<string, unknown>)[0])).join("\n");
+      // A whole-table scan on check_results, tickets or review_requests is the thing this ticket forbids.
+      expect(plan, text).not.toMatch(/Seq Scan on (public\.)?check_results/);
+      expect(plan, text).not.toMatch(/Seq Scan on (public\.)?tickets/);
+      expect(plan, text).not.toMatch(/Seq Scan on (public\.)?review_requests/);
+    }
+  });
+});
+

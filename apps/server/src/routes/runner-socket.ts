@@ -93,6 +93,8 @@ export async function runnerSocketRoutes(
               send({ type: "welcome", lastSeq: await runners.lastSeq(runner.id) });
               void runners.checkAddons(runner.id).catch((err) => app.log.warn({ err, runnerId: runner.id }, "add-on check failed"));
               // Verdicts that may have been lost in a dropped connection are sent again.
+              // The runs the runner really has: any other open run of this runner is closed after a short wait (BOS-583).
+              if (msg.liveRuns) runners.reconcileLater(runner, msg.liveRuns);
               if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "re-sending verdicts failed"));
               await opts.checks?.onHello(runner.id, msg.checkJobs).catch((err) => app.log.error({ err, runnerId: runner.id }, "check queue hello failed"));
             });

@@ -86,6 +86,7 @@ connection = new RunnerConnection({
   pendingPermissions: () => sessions.pendingPermissions(),
   runningChecks: () => checkJobs.running(),
   onWelcome: () => checkJobs.resend(),
+  liveRuns: () => sessions.liveRunIds(),
 });
 
 // Runs the previous process didn't finish go into the journal as interrupted before we connect (R42).
