@@ -62,7 +62,7 @@ const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed:
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -220,11 +220,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const changed = new Set([...(a?.infraPaths ?? []), ...(a?.paths ?? [])]);
     const hostDeployerChanged = changed.has("scripts/host-deployer.sh");
     const launcherChanged = [...changed].some((p) => p.startsWith("apps/launcher/"));
-    const src = folder(a?.srcDir);
-    const deployer = folder(a?.deployerDir);
+    // BOS-419: what the update file doesn't say comes from the settings record (the host's own report, kept with
+    // its source). The update file still wins, since it is written at the same moment as the update.
+    const rec = await deps.facts?.().catch(() => ({} as Record<string, string>)) ?? {};
+    const src = folder(a?.srcDir ?? rec["paths.src"]);
+    const deployer = folder(a?.deployerDir ?? rec["paths.deployer"]);
     const shaOk = isSha(commit) && isSha(fromCommit);
-    const bg = a?.bluegreen;
-    const colour = a?.liveColour === "blue" || a?.liveColour === "green" ? a.liveColour : null;
+    const bg = a?.bluegreen ?? (rec["compose.bluegreen"] === "true" ? true : rec["compose.bluegreen"] === "false" ? false : undefined);
+    const liveColour = a?.liveColour ?? rec["compose.liveColour"];
+    const colour = liveColour === "blue" || liveColour === "green" ? liveColour : null;
     // The machine's recorded name (BOS-427): every command's block says "on <host>, as root". Without it the
     // card can't say where a command runs, so no command is shown (never a guessed name).
     const host = (await deps.hosts?.())?.[0]?.name ?? null;
