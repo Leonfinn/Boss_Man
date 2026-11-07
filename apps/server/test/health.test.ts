@@ -7,7 +7,8 @@ let close: (() => Promise<void>) | undefined;
 afterEach(async () => void (await close?.()));
 
 async function setup() {
-  const { db, close: closeDb } = await openPglite();
+  // fresh: killDb must leave a really closed database, not one parked for reuse (BOS-657).
+  const { db, close: closeDb } = await openPglite(undefined, { fresh: true });
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false });
   let dbClosed = false;
   close = async () => {

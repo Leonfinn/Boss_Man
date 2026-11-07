@@ -117,7 +117,7 @@ export async function runnerSocketRoutes(
               });
             return;
           case "check.progress":
-            queue = queue.then(() => opts.checks?.onProgress(msg)).catch((err) => app.log.warn({ err, runnerId: runner.id }, "check progress failed"));
+            queue = queue.then(() => opts.checks?.onProgress(runner.id, msg)).catch((err) => app.log.warn({ err, runnerId: runner.id }, "check progress failed"));
             return;
           case "check.done":
             queue = queue.then(() => opts.checks?.onDone(runner.id, msg)).catch((err) => app.log.error({ err, runnerId: runner.id }, "check result failed"));
