@@ -86,7 +86,9 @@ const WORD_CMD = /\b(?:sudo|curl|wget|bash|zsh|ksh|npx|npm|pnpm|yarn|pipx?|pip3|
 // "tar czf ~/backup.tgz /srv". A path is absolute, home- or dot-relative, or a dotted name (.env); a bare word is not.
 // Without the path this is prose ("copy the notes with cat", "use cp when moving files") and stays prose. BOS-177: the
 // owner's card read "Read the operator's credentials: cat ~/.aws/credentials" as no script.
-const READ_FILE_CMD = /(?:^|[\s:;|(])(?:cat|cp|mv|tar|zip|unzip|head|tail|less|more|base64|xxd|strings|grep|sort|tee|dd|ln|touch|wc)\s+(?:-\S+\s+)*(?:~\/|\.\.?\/|\/(?!\/)|\.[A-Za-z0-9_-]+\b|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,8}\b)[^\s]*/i;
+// Flags may only hold letters, digits, "=" and "-", so a token like "-(cat" cannot carry a match start and restart the scan at
+// every flag: that made a hostile line quadratic (Jane's BOS-177 security review, round 1).
+const READ_FILE_CMD = /(?:^|[\s:;|(])(?:cat|cp|mv|tar|zip|unzip|head|tail|less|more|base64|xxd|strings|grep|sort|tee|dd|ln|touch|wc)\s+(?:-[\w=-]*\s+)*(?:~\/|\.\.?\/|\/(?!\/)|\.[A-Za-z0-9_-]+\b|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,8}\b)[^\s]*/i;
 // Prose that points at a terminal, or sends/downloads/runs something at an address.
 const TERMINAL = /\b(?:terminal|command[- ]line|command prompt|shell script|powershell|\bcmd\.exe)\b/i;
 const URL_ACTION = /https?:\/\/\S+/i;

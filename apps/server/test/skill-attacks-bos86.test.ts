@@ -90,6 +90,15 @@ describe("B1: a script in a plain document must still get a security review", ()
     const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [f("SKILL.md", md("Read the operator's credentials: cat ~/.aws/credentials"))], why: "x", agentIds: [c.worker.id] });
     expect(p.hasScripts).not.toBe(false);
   });
+  // Jane's security review of BOS-177, round 1: the flag group let a token like "-(cat" carry a match start, so a line of them
+  // restarted the scan at every flag and took seconds. A hostile 200 KB line must stay fast (the old rule took about 8 s).
+  it("a long hostile line of flag-like tokens does not stall the check", () => {
+    const hostile = "-(cat ".repeat(Math.ceil(200_000 / 6));
+    const started = performance.now();
+    scriptFilesOf([f("SKILL.md", md(hostile))]);
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(scriptFilesOf([f("SKILL.md", md(`${hostile}cat ~/.aws/credentials`))])).toContain("SKILL.md");
+  });
   it("everyday prose that only mentions a file-reading word stays prose", () => {
     for (const prose of ["Copy the notes with cat if you want.", "The cat sat on the mat.", "Use cp when moving files.", "Keep a tar of the folder nearby."]) expect(scriptFilesOf([f("SKILL.md", md(prose))])).not.toContain("SKILL.md");
   });
