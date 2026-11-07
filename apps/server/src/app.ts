@@ -64,6 +64,8 @@ import { TicketImageError, ticketImagesService } from "./services/ticket-images.
 import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
+import { mergeQueueService } from "./services/merge-queue.js";
+import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
@@ -567,6 +569,7 @@ export async function buildApp(opts: AppOptions) {
     wake: (input) => scheduler.notify(input.agentId, input),
     isConnected: (runnerId) => runners.isConnected(runnerId),
     runnerSettling: (runnerId) => runners.isSettling(runnerId, (opts.now ?? (() => new Date()))()),
+    runnerRestartedAt: (runnerId) => runners.restartedAt(runnerId),
     endRun: (runId, outcome, at, how) => runners.endRun(runId, outcome, at, how),
     // Free run slots go to idle in-progress work (BOS-574, DR-029).
     freeSlots: (companyId) => scheduler.freeSlots(companyId),
@@ -661,6 +664,12 @@ export async function buildApp(opts: AppOptions) {
     isLeader: () => leader.isLeader(),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
+  // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
+  const mergeQueue = mergeQueueService(db, {
+    runningMerges: () => review.runningMerges(),
+    limit: () => checkGate(db).limit(),
+    now: opts.now,
+  });
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
     // A stalled-review card's actions (BOS-404, BOS-426): take it, hand it to another reviewer, send it back, or leave it.
@@ -1865,6 +1874,9 @@ export async function buildApp(opts: AppOptions) {
 
     // The home screen (R74).
     owner.get("/api/companies/:id/dashboard", async (req) => dashboard.get(IdParam.parse(req.params).id));
+
+    // The merge queue, read-only (BOS-587): what is running now, what waits and how the last ones ended.
+    owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
 
     // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
     owner.get("/api/companies/:id/workflow", async (req) => {

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, costEvents, fundingSources, quotaSamples, runnerEvents, runners, runs } from "../src/db/schema.js";
+import { activity, costEvents, fundingSources, quotaSamples, runnerEvents, runners, runs, runTokens } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -71,6 +71,16 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     // A resend of the same seq is a duplicate: not applied again, not stored twice.
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
+  });
+
+  // BOS-623: markEnded deleted the token on the outer handle, which on PGlite's one connection waits
+  // for the ingest transaction for ever. The short timeout makes that a quick failure, not a hang.
+  it("removes the ended run's token inside the ingest transaction, without hanging", { timeout: 10_000 }, async () => {
+    const c = (ctx = await setup());
+    await c.db.insert(runTokens).values({ tokenHash: "bos-623-token", runId: c.runId, companyId: c.company.id, agentId: c.ceo.id, expiresAt: new Date(Date.now() + 3_600_000) });
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.ended" as const, runId: c.runId, stopReason: "end_turn", error: null } };
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(runTokens).where(eq(runTokens.runId, c.runId))).toHaveLength(0);
   });
 
   it("rolls a cost event's storage and its cost row back together when the apply throws", async () => {
