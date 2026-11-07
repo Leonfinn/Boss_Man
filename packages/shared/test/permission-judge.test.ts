@@ -512,3 +512,49 @@ describe("rules judge: interpreter runs a file or stdin (BOS-377)", () => {
     "python3 -c 'print(1)'",
   ]);
 });
+
+describe("rules judge: git outside the agent's own checkout, and :: transports (BOS-378)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const mine = `${ws}/tickets/${own}`;
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  // A git command whose repository is outside the agent's own checkout runs that repo's hooks and config, so no Allow:
+  // the folder named by -C/--git-dir/--work-tree, or the current folder after a `cd`/`pushd` into one.
+  denies([
+    "git -C /tmp/p commit -m x",
+    "git -C /tmp/p status",
+    "git -C /tmp/p add -A",
+    "git --git-dir=/tmp/p/.git status",
+    "git --work-tree=/tmp/p status",
+    "cd /tmp/p && git status",
+    "cd /tmp/p && git commit -m x",
+    "pushd /tmp/p; git log",
+    "cd /tmp/p && git config --get core.fsmonitor",
+  ]);
+  // A `::` in a URL names a transport helper that runs a program, so no Allow for any command that talks to a remote.
+  deny([
+    "git fetch ext::sh -c id",
+    "git pull ext::sh -c id",
+    "git push ext::sh -c id",
+    "git ls-remote ext::sh -c id",
+    "git fetch fd::17",
+    "git push fd::1 main",
+    "git ls-remote ssh::http://example.com/r",
+  ]);
+  allows([
+    "git status",
+    "git log --oneline -5",
+    "git diff --stat",
+    "git config --get core.x",
+    "git --version",
+    `git -C ${mine} status`,
+    `cd ${mine} && git status`,
+    "git fetch origin",
+    "git pull --ff-only origin main",
+    "git push origin feature",
+    "git ls-remote origin",
+  ]);
+});

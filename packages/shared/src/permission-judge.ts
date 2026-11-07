@@ -111,7 +111,7 @@ export function judgePermission(question: string, command: string | null, ownFol
     if (/^\/tmp(\/|$)/.test(p)) return true;
     return inOwn(p);
   };
-  if (gitDenied(c, (d) => dirOk(d, inOwn), writeOk)) return result("outside");
+  if (gitDenied(c, inOwn, writeOk)) return result("outside");
   // Variables set in the same command are resolved; any other variable (and $(...)) can't be, so its target is denied.
   // $(git rev-parse --git-dir ...) is the asking agent's own git folder and $(mktemp ...) lands in /tmp, unless its
   // arguments (or a TMPDIR set anywhere) put the file somewhere else.
@@ -280,19 +280,27 @@ function shellWords(s: string): string[] {
   return out;
 }
 
-/** True when the arguments of one git command (words after `git`) are not on the allow-list. `dirOk` places a folder git is pointed at. */
-function gitArgsDenied(args: string[], dirOk: (p: string) => boolean, pathOk: (p: string) => boolean): boolean {
+/**
+ * True when the arguments of one git command (words after `git`) are not on the allow-list. `repoOk` places the repository
+ * git runs in: it must be inside the agent's own checkout, because that repo's hooks and config can run code. `cwdOutside`
+ * says a preceding `cd`/`pushd` moved somewhere outside that checkout, so a git with no `-C`/`--git-dir`/`--work-tree`
+ * would run there too.
+ */
+function gitArgsDenied(args: string[], repoOk: (p: string) => boolean, pathOk: (p: string) => boolean, cwdOutside: boolean): boolean {
   let i = 0;
-  // Where git runs: -C, --git-dir and --work-tree get the same own-folder test as `cd`.
+  // Where git runs: -C, --git-dir and --work-tree must point inside the agent's own checkout (not just any /tmp folder).
+  let explicit = false;
   for (; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "-C") { if (i + 1 >= args.length || !dirOk(args[++i]!)) return true; continue; }
-    if (/^--(?:git-dir|work-tree)$/.test(a)) { if (i + 1 >= args.length || !dirOk(args[++i]!)) return true; continue; }
+    if (a === "-C") { if (i + 1 >= args.length || !repoOk(args[++i]!)) return true; explicit = true; continue; }
+    if (/^--(?:git-dir|work-tree)$/.test(a)) { if (i + 1 >= args.length || !repoOk(args[++i]!)) return true; explicit = true; continue; }
     const eq = /^--(?:git-dir|work-tree)=(.*)$/.exec(a);
-    if (eq) { if (!dirOk(eq[1]!)) return true; continue; }
+    if (eq) { if (!repoOk(eq[1]!)) return true; explicit = true; continue; }
     if (a === "--no-pager" || a === "--no-optional-locks") continue;
     break;
   }
+  // No folder named: git runs in the current folder. It is the agent's own checkout unless a `cd`/`pushd` moved away.
+  if (!explicit && cwdOutside) return true;
   const sub = args[i++];
   const spec = sub === undefined ? undefined : Object.hasOwn(GIT_TABLE, sub) ? GIT_TABLE[sub] : undefined;
   if (!spec) return true;
@@ -322,7 +330,9 @@ function gitArgsDenied(args: string[], dirOk: (p: string) => boolean, pathOk: (p
   if (spec.none && plain.length > 0) return true;
   if (spec.first && !(plain[0] !== undefined && spec.first.test(plain[0]))) return true;
   for (const p of plain) {
-    if (/::/.test(p) && sub === "clone") return true;
+    // A `::` in a URL names a transport helper (`ext::sh -c ...`, `fd::`), which runs a program: no Allow for any command
+    // that copies from or talks to a remote.
+    if (/::/.test(p) && (sub === "clone" || sub === "fetch" || sub === "pull" || sub === "push" || sub === "ls-remote")) return true;
     if (/\{[^}]*(?:,|\.\.)[^}]*\}/.test(p)) return true; // brace expansion
     if (!spec.w) continue;
     if (/(?:^|\/)\.\.(?:\/|$)/.test(p)) return true;
@@ -336,9 +346,19 @@ function gitArgsDenied(args: string[], dirOk: (p: string) => boolean, pathOk: (p
  * row of GIT_TABLE, every flag must be listed for it, and the folder git runs in must pass the same test as `cd`. A NAME=value,
  * env, export or other launcher in front of git, and any `$` or backtick in a git command, is Deny.
  */
-function gitDenied(c: string, dirOk: (p: string) => boolean, pathOk: (p: string) => boolean): boolean {
+function gitDenied(c: string, inOwn: (p: string) => boolean, pathOk: (p: string) => boolean): boolean {
   // Environment that makes git run a program or move it (GIT_DIR, GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, GIT_PAGER, ...), set anywhere on a line that uses git.
   if (/\bgit\b/.test(c) && /(?:^|[\s;&|(])(?:export\s+|env\s+|declare\s+(?:-x\s+)?)?(?:GIT_\w+|PAGER|EDITOR|VISUAL|SSH_ASKPASS|LESSOPEN|LD_\w+)\+?=/.test(c)) return true;
+  // A `cd`/`pushd` outside the agent's own checkout (any /tmp repo, say) makes a git with no folder named run there, and
+  // that repo's hooks and config can run code.
+  let cwdOutside = false;
+  for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) {
+    const d = m[1] ?? "";
+    const own = inOwn(d);
+    const relInside = /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(d) && !d.includes("..");
+    if (!own && !relInside) cwdOutside = true;
+  }
+  const repoOk = (p: string): boolean => inOwn(p);
   for (const seg of c.split(/[;&|\n]/)) {
     const parts = seg.split(/\$\(|[()\x60]/);
     for (let i = 0; i < parts.length; i++) {
@@ -355,10 +375,15 @@ function gitDenied(c: string, dirOk: (p: string) => boolean, pathOk: (p: string)
       // `find ... -exec git ...` runs git with arguments from elsewhere.
       if (words.some((w, n) => /^-(?:exec|execdir|ok|okdir)$/.test(w) && /(?:^|[\s/])git(?:\s|$)/.test(words[n + 1] ?? ""))) return true;
       if (!/^(?:[\w./-]*\/)?git(?:[$\x60{].*)?$/.test(head)) continue;
-      if (GIT_READ.test(raw)) continue;
+      if (GIT_READ.test(raw)) {
+        // `git --version` touches no repo. A config read does: in a folder outside the agent's own checkout its config may
+        // pull in another file, so no Allow there.
+        if (/\bconfig\b/.test(raw) && cwdOutside) return true;
+        continue;
+      }
       // No substitution, variable or backtick anywhere in a git command, quoted or not: it can't be read.
       if (/[$\x60]/.test(i === 0 ? seg : raw)) return true;
-      if (gitArgsDenied(words.slice(k + 1), dirOk, pathOk)) return true;
+      if (gitArgsDenied(words.slice(k + 1), repoOk, pathOk, cwdOutside)) return true;
     }
   }
   return false;
