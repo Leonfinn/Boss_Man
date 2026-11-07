@@ -1341,6 +1341,9 @@ function criteriaChecklist(criteria: readonly Criterion[], note: string | null):
   return `Acceptance criteria:\n${lines.join("\n")}\nIf a before-merge one fails, request changes and name it.${after ? " The after-merge ones are checked once the work is live; review can approve with those still unreported, and an answer on the ticket's owner card closes them." : ""}\n\n`;
 }
 
+/** The state note after update_ticket replaces the criteria: the old note's verdicts belong to the old list, so none carries over. */
+const CRITERIA_REPLACED_NOTE = "The CEO replaced this ticket's acceptance criteria. Report each one again.";
+
 /** The plain-words warning for a live-looking criterion that isn't marked after merge; a trailing blank line for the reply. */
 const criteriaWarning = (criteria: readonly Criterion[] | undefined) => {
   const w = criteria?.length ? afterMergeLint(criteria) : "";
@@ -1998,19 +2001,20 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         ownerSetup: z.string().max(4000).nullable().optional().describe("What the owner has to do once this change is live, in plain words by button path, one step per line. Null or an empty string clears it."),
         urgent: z.boolean().optional(),
         size: z.number().nullable().optional(),
+        acceptanceCriteria: acceptanceCriteriaSchema.optional().describe("Replaces the ticket's tracked acceptance criteria, in the shape create_ticket takes (a string, or {text, after: \"merge\"}); up to 10, empty clears them. Every criterion goes back to not reported (the old pass/fail verdicts in the state note are dropped), and the change and your reason are kept in the ticket history. If the ticket is in review, reviews are not re-requested: tell the assignee and reviewers."),
         reason: z.string().trim().min(1).max(240),
         expected_version: z.number().int().optional(),
       },
     },
-    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, urgent, size, reason, expected_version }) => {
+    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, urgent, size, acceptanceCriteria, reason, expected_version }) => {
       if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
       if (size !== undefined && size !== null && !isTaskSize(size)) return fail(`${size} is not a size: ${SIZE_SCALE}, or null to clear it.`);
       const out = await outsideTree(ticketId);
       if (out) return fail(out);
       const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
       if (reviewWrite) return fail(reviewWrite);
-      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && ownerSetup === undefined && urgent === undefined && size === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, urgent or size.");
-      const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && ownerSetup === undefined && urgent === undefined && size === undefined && acceptanceCriteria === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, urgent, size or acceptanceCriteria.");
+      const [t] = await db.select({ version: tickets.version, state: tickets.systemState }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
       if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}; it is now ${t.version}). Read it again with tickets, then decide.`);
       const p = project !== undefined ? await resolveProject(project) : null;
@@ -2024,11 +2028,11 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         assigneeId = a.id;
       } else if (assignee === null) assigneeId = null;
       try {
-        const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(ownerSetup !== undefined ? { ownerSetup } : {}), ...(urgent !== undefined ? { urgent } : {}), ...(size !== undefined ? { size } : {}) });
+        const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(ownerSetup !== undefined ? { ownerSetup } : {}), ...(urgent !== undefined ? { urgent } : {}), ...(size !== undefined ? { size } : {}), ...(acceptanceCriteria !== undefined ? { acceptanceCriteria, stateNote: CRITERIA_REPLACED_NOTE } : {}) });
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${urgent === undefined ? "" : urgent ? " (marked urgent)" : " (no longer urgent)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}: ${reason}` });
+        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${urgent === undefined ? "" : urgent ? " (marked urgent)" : " (no longer urgent)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}${acceptanceCriteria === undefined ? "" : ` (acceptance criteria replaced: ${acceptanceCriteria.length ? acceptanceCriteria.map((c, i) => `${i + 1}. ${criteriaText([c])}`).join(" ") : "none now"})`}: ${reason}` });
         await noteRunTicket(ticketId);
-        return text(`Ticket ${ticketId} updated (version ${u.version}).`);
+        return text(`Ticket ${ticketId} updated (version ${u.version}).${acceptanceCriteria !== undefined ? ` Its acceptance criteria are replaced and none is reported yet.${t.state === "review" ? " It is in review: reviews were NOT re-requested, so tell the assignee and reviewers the criteria changed." : ""}${criteriaWarning(acceptanceCriteria)}` : ""}`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
