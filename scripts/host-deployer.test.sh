@@ -592,6 +592,11 @@ bg; all_pass; [[ ! -e $D/state/last-health-alert ]] || fail "alert marker kept a
 swap; echo leader >"$W/role.blue"; bg
 failed_only other leader
 has "$D/outbox/health.json" "2 leaders"; live_is green; hasnt "$DL" "signal"
+# 31c2. Two leaders at the deadline: stopping the old colour fixes it, so the end check passes and nothing is paged.
+swap; echo leader >"$W/role.blue"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
+[[ $(hget phase) == end && $(hget stack) == healthy ]] || fail "two leaders at the deadline: $(cat "$D/outbox/health.json")"
+[[ $(status result) != partial ]] || fail "empty page after a healthy end check: $(cat "$D/outbox/status.json")"
+[[ ! -s $T/hook.out ]] || ! grep -q '"result": "partial"' "$T/hook.out" || fail "paged on a healthy end check"
 # 31d. No leader at all: the live check fails first, so it is switched back; the record still says why.
 swap; echo standby >"$W/role.green"; bg
 [[ $(status result) == rolled_back ]] || fail "no leader: $(cat "$D/outbox/status.json")"

@@ -666,7 +666,8 @@ soak_tick() {
   # still ends on time (a failed item the person has to look at must not keep a second server running for ever).
   if [[ $HC_live == pass ]]; then
     # (health_degraded records and exits, so the end of the window comes first: its own end check pages if the problem remains.)
-    if (($(date +%s) >= deadline)); then soak_end "$old" "$commit" "$prev" "$f"; fi
+    # If control comes back from soak_end its end check passed (stopping the old colour fixed it): nothing to page.
+    if (($(date +%s) >= deadline)); then soak_end "$old" "$commit" "$prev" "$f"; return 0; fi
     health_degraded "$commit" "$prev"; return 0
   fi
   BG_LIVE="$old" BG_IDLE="$new" BG_PREV="$prev"
