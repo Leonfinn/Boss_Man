@@ -41,6 +41,44 @@ describe("an agent session's environment", () => {
     expect(out).toEqual({ KEEP: "1" });
   });
 
+  it("withholds a push or package token granted under a forge's own name (BOS-396)", () => {
+    // Each of these is a credential git or a package tool pushes with; a granted secret by that name used to reach the session.
+    const named = {
+      GITLAB_TOKEN: "glpat-1",
+      GL_TOKEN: "glpat-2",
+      CI_JOB_TOKEN: "ci-3",
+      BITBUCKET_TOKEN: "bb-4",
+      ATLASSIAN_API_TOKEN: "atl-5",
+      NPM_TOKEN: "npm-6",
+      NODE_AUTH_TOKEN: "npm-7",
+      YARN_NPM_AUTH_TOKEN: "npm-8",
+      VERCEL_TOKEN: "vc-9",
+      GITHUB_PAT: "ghp-10",
+      GH_PAT: "ghp-11",
+      // The prefixed forms: a suffix would say which repo or registry, so the whole family is withheld.
+      GITHUB_TOKEN_WORK: "ghp-12",
+      GITLAB_TOKEN_WORK: "glpat-13",
+      NPM_TOKEN_LEGACY: "npm-14",
+      KEEP: "kept",
+    };
+    const out = withoutGitCredentials(named);
+    expect(out).toEqual({ KEEP: "kept" });
+  });
+
+  it("withholds those names from an agent session's environment too (BOS-396)", () => {
+    const env = launchEnv({ GITLAB_TOKEN: "glpat-session", NPM_TOKEN: "npm-session", BITBUCKET_TOKEN: "bb-session", GL_TOKEN: "gl-session", PENPOT_TOKEN: "pp-2" });
+    expect(JSON.stringify(env)).not.toContain("glpat-session");
+    expect(JSON.stringify(env)).not.toContain("npm-session");
+    expect(JSON.stringify(env)).not.toContain("bb-session");
+    expect(JSON.stringify(env)).not.toContain("gl-session");
+    expect(env.PENPOT_TOKEN).toBe("pp-2");
+  });
+
+  it("keeps credentials that only look like a token name, so an ordinary secret still arrives (BOS-396)", () => {
+    const env = launchEnv({ TOKEN_LIMIT: "100", MY_TOKEN: "mine", NPM_REGISTRY: "https://registry.example", GIT_AUTHOR_NAME: "Kit" });
+    expect(Object.keys(env).filter((k) => ["TOKEN_LIMIT", "MY_TOKEN", "NPM_REGISTRY", "GIT_AUTHOR_NAME"].includes(k))).toHaveLength(4);
+  });
+
   it("leaves the daemon's own git authentication intact", () => {
     expect(gitAuthEnv(secrets).GIT_CONFIG_VALUE_0).toContain(Buffer.from("bot:ghp_secret_token").toString("base64"));
   });
