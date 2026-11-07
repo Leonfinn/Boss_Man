@@ -37,7 +37,7 @@ import { record } from "./activity.js";
 import { checkPolicy, legacyMarks } from "./review-policy.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, lessonsFrom, lessonsPageRow, normalizeLesson, removeLessonLine } from "./project-brief.js";
 import { serialiseWrite } from "./wiki.js";
-import { hashFiles } from "./skill-files.js";
+import { hashFiles, skillChangeEntry, skillSide } from "./skill-files.js";
 import { skillMarkdown, skillName, type skillsService } from "./skills.js";
 import type { skillProposalsService } from "./skill-proposals.js";
 import type { agentsService } from "./agents.js";
@@ -897,7 +897,15 @@ export function retroService(
         }
         // Boss Man has no archive for skills: the playbook stays in the library (source "retro") with nobody using it. Only the agents Apply gave it to lose it.
         for (const id of (after.assignedAgentIds ?? []) as string[]) await deps.skills.take(c.companyId, installed.skill?.name ?? after.name, id);
-        if (before.skillId) await db.update(skillsTable).set({ description: before.description, files: before.files, sizeBytes: (before.files as Array<{ content: string }>).reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0), updatedAt: now() }).where(eq(skillsTable.id, before.skillId));
+        if (before.skillId) {
+          const [was] = await db.select().from(skillsTable).where(eq(skillsTable.id, before.skillId));
+          await db.update(skillsTable).set({ description: before.description, files: before.files, sizeBytes: (before.files as Array<{ content: string }>).reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0), updatedAt: now() }).where(eq(skillsTable.id, before.skillId));
+          // Every change to a skill's bytes leaves an old/new trace (BOS-181), Revert included.
+          if (was) {
+            const entry = skillChangeEntry(before.skillId, skillSide(was), skillSide({ name: was.name, description: before.description, files: before.files }), (from, to) => `Workflow Revert put the playbook ${was.name} back from ${from} to ${to}`, " The earlier version, as before Apply; full text in detail.");
+            await record(db, { companyId: c.companyId, kind: "skill.reverted_by_retro", ...entry, at: now() });
+          }
+        }
       } else if (c.lever === "lesson") {
         // Queued with every wiki write, so the version saved below matches what the page held (BOS-496).
         await serialiseWrite(async () => {

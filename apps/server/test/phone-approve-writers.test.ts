@@ -47,6 +47,8 @@ describe("rule 1: every writer of a decision card is classified", () => {
   it("raise_decision: eligible only as a plain question with a summary", async () => {
     const c = await setup();
     const base = { companyId: c.company.id, agentId: c.worker.id, options: ["Yes", "No"], recommended: "Yes", triedFirst: "Tried it myself first." };
+    // raise() keeps ordering links only to open cards in the same company (BOS-625), so link to a real one.
+    const other = await c.decisions.raise({ ...base, question: "The card to do first" });
     const cases: Array<[string, Partial<Parameters<typeof c.decisions.raise>[0]>, boolean]> = [
       ["plain with summary", { approveSummary: "Do it" }, true],
       ["plain without summary", {}, false],
@@ -58,8 +60,8 @@ describe("rule 1: every writer of a decision card is classified", () => {
       ["a plan (BOS-531 submit_plan)", { approveSummary: "Do it", plan: "Step 1" }, false],
       // BOS-551 ordering: "do after" another card must not be skipped by a lock-screen tap; "do before"
       // and "resets on restart" only order other cards around this one.
-      ["do after another card (BOS-551)", { approveSummary: "Do it", doAfter: [{ decisionId: randomUUID(), label: "Update first" }] }, false],
-      ["do before another card (BOS-551)", { approveSummary: "Do it", doBefore: [{ decisionId: randomUUID(), label: "Then this" }] }, true],
+      ["do after another card (BOS-551)", { approveSummary: "Do it", doAfter: [{ decisionId: other.id, label: "Update first" }] }, false],
+      ["do before another card (BOS-551)", { approveSummary: "Do it", doBefore: [{ decisionId: other.id, label: "Then this" }] }, true],
       ["resets on restart (BOS-551)", { approveSummary: "Do it", resetsOnRestart: true }, true],
       ["no agent (Boss Man's own notices in app.ts)", { approveSummary: "Do it", agentId: null }, false],
     ];
@@ -113,7 +115,8 @@ describe("rule 1: every writer of a decision card is classified", () => {
  * Beyond the reason given, none of them stores an approveSummary (checked below), which rule 1 needs.
  */
 const WRITERS: Record<string, { counts: Record<string, number>; why: string }> = {
-  "src/app.ts": { counts: { raise: 9 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425, and the watchdog's alertCeo hook) and decisionsSvc.raise with agentId null (import checklist; the sign-off merge-failed card moved to startLanding)" },
+  "src/app.ts": { counts: { raise: 10 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425, the watchdog's alertCeo hook and the server-health hook) and decisionsSvc.raise with agentId null (import checklist; the sign-off merge-failed card moved to startLanding)" },
+  "src/services/server-health.ts": { counts: { raise: 1 }, why: "deps.raise is app.ts's alerts.raise: alert kinds server_memory / server_freezes, ladder key, no raising agent" },
   "src/mcp.ts": { counts: { raise: 2 }, why: "raise_decision: the one eligible path, when plain and with an approveSummary; submit_plan (BOS-531: blocksTicketId and plan, never eligible)" },
   "src/services/watchdog.ts": { counts: { raise: 1 }, why: "the Scrum Master's raise_decision always blocks its ticket (ticketId, blocker)" },
   "src/services/agents.ts": { counts: { insert: 6 }, why: "kind approval: hire, model_change, instructions, team_plan, rename, standing_rules (CEO rules change)" },
