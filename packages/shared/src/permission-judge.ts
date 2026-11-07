@@ -578,11 +578,17 @@ function toolTargets(c: string): string[] {
  * Every command span is read: split on `;`, `&`, `|`, newlines, and inside every `$(...)`, `(...)` and backtick.
  */
 const SHELL_NAME = /^(?:sh|bash|zsh|dash|ksh)$/;
-const INTERP_NAME = new RegExp(`^(?:${INTERP_NAMES})$`);
+const INTERP_NAME = new RegExp(`^(?:${INTERP_NAMES}|tsx|ts-node|esbuild-register|swc-node)$`);
+/** A runner's own subcommand before the file word: `deno run <file>`, `bun run <file>` — skip it. */
+const INTERP_VERB = /^(?:run|eval)$/;
+/** A build tool that reads a file named with `-f`/`--file`/`-C`; other `make` forms only run the local Makefile. */
+const MAKE = /^(?:make|gmake)$/;
 /** Words that only hand control to another program. None of them is on the allow-list. */
 const LAUNCHER = /^(?:nohup|time|timeout|sudo|doas|setsid|stdbuf|env|exec|command|builtin|xargs|nice|ionice|chrt|chroot|nsenter|unshare|script|flock|strace|ltrace|gdb|watch|parallel|busybox|su|then|do|else|if|elif|while|until|!|\{|\}|\(|\))$/;
 /** A plain literal word: a path or a value with no quoting, expansion, glob or shell operator. */
 const PLAIN_WORD = /^[A-Za-z0-9_.@%+=:,/?~-]+$/;
+/** A shell redirect token (`2>&1`, `>&2`, `&>`, `>/dev/null` handled elsewhere): it runs no code, so it does not block. */
+const REDIR = /^(?:\d*>&\d+|&>\d*|&>>?\S*|\d*>>?&?\d*)$/;
 /** The command word of a segment after its prefixes (`NAME=value`, `!`, `{`, `(`). */
 const NO_PREFIX = /^(?:\w+=[^\s]*|[({!]+)$/;
 
@@ -592,6 +598,22 @@ const NO_PREFIX = /^(?:\w+=[^\s]*|[({!]+)$/;
  */
 function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
   const base = (w: string): string => w.replace(/^.*\//, "");
+  // Output redirections (`> log`, `2>&1`, `>> out`, `&> f`) and their target file are data sinks: running a program is
+  // no less readable because its stdout goes to a file. Drop them so a plain script with `> log` still gets Allow. An
+  // input redirect (`< f`, `<<EOF`, a heredoc) still feeds the program and is left in place (a shell reading stdin runs it).
+  const OUT_REDIR = /^(?:\d*>>?|\d*>&\d+|&>>?)(.*)$/;
+  const noOutRedir = (ws: string[]): string[] => {
+    const out: string[] = [];
+    for (let k = 0; k < ws.length; k++) {
+      const w = ws[k]!;
+      const m = OUT_REDIR.exec(w);
+      if (m) { if (m[1] === "") k++; continue; } // `> log`: drop the token and its target
+      if (REDIR.test(w)) continue;
+      out.push(w);
+    }
+    return out;
+  };
+  const codeWord = (w: string): boolean => { const b = base(w); return INTERP_NAME.test(b) || SHELL_NAME.test(b) || LAUNCHER.test(b) || MAKE.test(b) || /^(?:pnpm|npm|yarn|bun|npx|pnpx|bunx)$/.test(b); };
   // A relative script file lands wherever the shell already is: only a `cd`/`pushd` that stays inside the checkout (or a
   // sub-folder of it) keeps it readable. A `cd /tmp` (or anywhere else) makes every relative script Deny.
   const cdOwn = (d: string): boolean => { const p = plainPath(d); return p !== null && (inOwn(p) || (/^[\w.@+-]+(\/[\w.@+-]+)*$/.test(p) && !climbsOut(p))); };
@@ -619,7 +641,11 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
     spans.push(s);
     for (const m of s.matchAll(/\$\(([^)]*)\)|\(([^()]*)\)|`([^`]*)`/g)) walk(m[1] ?? m[2] ?? m[3] ?? "");
   };
-  for (const seg of c.split(/&&|\|\||[;&|\n]+/)) walk(seg);
+  // A heredoc body (`cat > f <<'EOF' ... EOF`) is data handed to the writing program, not a set of commands. Take it out
+  // before splitting lines into spans, so a body line that happens to look like a command (`npm install`) is not judged
+  // as one. The body is still unreadable, so the file it writes stays un-runnable (see `written`/`scriptOk`).
+  const bodyless = c.replace(/<<-?\s*(['"]?)([A-Za-z_][\w]*)\1[^\n]*\n[\s\S]*?\n[^\n]*\b\2\b/g, "<<HEREDOC");
+  for (const seg of bodyless.split(/&&|\|\||[;&|\n]+/)) walk(seg);
   for (const span of spans) {
     // A command substitution or backtick whose content is not a plain path means a program name or argument the judge
     // cannot read (`$(which node) x`, `n\ode`): no Allow. The inner content is also judged as its own span above.
@@ -636,38 +662,136 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
     // `-exec`), is an unknown program: no Allow.
     if (unknownWord(words[i]!)) return true;
     if (LAUNCHER.test(head) && args.some((w) => unknownWord(w) && !/^\w+=/.test(w))) return true;
-    // pnpm/npm run <script>, pnpm/npm exec <tool>: plain words only (flags allowed, no quotes/operators/substitutions).
-    if ((head === "pnpm" || head === "npm") && (args[0] === "run" || args[0] === "exec")) {
-      if (args.length >= 2 && args.every((w) => PLAIN_WORD.test(w) || /^-{1,2}[\w-]+(=[^\s]*)?$/.test(w))) continue;
-      return true;
+    // pnpm/npm/pnpx/yarn/bunx exec|run (BOS-378 CEO round 15): `exec`, `dlx`, `x`, `npx`, `pnpx`, `bunx` run the program
+    // *after* the verb, so that program is judged as a new command head by the branches below (an interpreter or a /tmp
+    // script there is Deny). `run <script>` runs a package.json script: a plain script name, never a path outside.
+    const PM = /^(?:pnpm|npm|yarn|bun)$/;
+    const PM_EXEC = /^(?:exec|dlx|x|create)$/;
+    const PM_TOOL = head === "npx" || head === "pnpx" || head === "bunx";
+    if (PM.test(head) || PM_TOOL) {
+      if (prefixed) return true;
+      let verb = args[0];
+      let rest = args.slice(1);
+      if (verb && verb.startsWith("-")) {
+        // A folder flag before the verb (`pnpm -C /tmp/p run x`, `npm --prefix /tmp/p run x`): the folder must stay in the
+        // checkout. Other pre-verb flags are fine; they don't change what runs.
+        if (/^(?:-C|--dir|--prefix|--cwd|--filter)(?:=|$)/.test(verb)) {
+          const d = verb.includes("=") ? verb.slice(verb.indexOf("=") + 1) : rest.shift();
+          if (d === undefined || !cdOwn(d)) return true;
+          verb = rest[0];
+          rest = rest.slice(1);
+        } else {
+          while (rest.length > 0 && rest[0]!.startsWith("-") && !/^(?:-C|--dir|--prefix|--cwd|--filter)(?:=|$)/.test(rest[0]!)) rest = rest.slice(1);
+          verb = rest[0];
+          rest = rest.slice(1);
+        }
+      }
+      if (verb === undefined || verb.startsWith("-")) continue; // `pnpm --version`, `npx --help`: nothing runs code
+      if (PM_EXEC.test(verb) || PM_TOOL) {
+        // `exec`/`dlx`/`x` run the program *after* the verb; a tool runner (`npx`, `pnpx`, `bunx`) runs the tool that *is*
+        // the first word. Rebuild the segment with that program first and judge it as the head below.
+        const prog = PM_TOOL ? [verb, ...rest] : rest;
+        if (prog.length === 0) continue; // `pnpm exec`/`npx` alone: nothing to run
+        if (!prog.every((w) => PLAIN_WORD.test(w) || REDIR.test(w) || /^-{1,2}[\w-]+(=[^\s]*)?$/.test(w))) return true;
+        words.splice(0, words.length, ...prog);
+        i = 0;
+      } else {
+        // `run <script>` or a bare `pnpm <script>`: the script name, never a path or an interpreter, and the cd stays in
+        // the checkout. A bare form (`pnpm vitest run ...`) has arguments the script reads as data; only its name matters.
+        const explicit = verb === "run" || verb === "r";
+        if (!explicit) rest = [verb, ...rest];
+        if (!cdSafe) return true;
+        for (let k = 0; k < rest.length; k++) {
+          const w = rest[k]!;
+          if (k === 0) {
+            // The script name itself: a plain name, never a path, a program, or a value that can't be read.
+            if (codeWord(w) || /^[/~]|\.\./.test(w) || w.startsWith("-")) return true;
+            if (!explicit) continue; // a bare script name; the rest are its arguments (data)
+            if (!PLAIN_WORD.test(w) || w.includes("/") || /^[.]/.test(w)) return true;
+            continue;
+          }
+          if (REDIR.test(w)) continue;
+          if (/^(?:-C|--dir|--prefix|--cwd|--filter)(?:=|$)/.test(w)) {
+            const d = w.includes("=") ? w.slice(w.indexOf("=") + 1) : null;
+            if (d !== null && !cdOwn(d)) return true;
+            if (d === null) return true; // the folder is the following word: a path, not a script name
+          } else if (w.startsWith("-")) {
+            if (!/^-{1,2}[\w-]+(=[^\s]*)?$/.test(w)) return true;
+          } else if (!explicit) {
+            continue; // a bare form's arguments are data
+          } else if (!PLAIN_WORD.test(w)) {
+            return true; // a quoted/expanded argument to an explicit `run` can't be read
+          }
+        }
+        continue;
+      }
+    }
+    // After a `pnpm exec <program>` splice, the program is now the head: recompute head/args and judge it as such.
+    {
+      let j = 0;
+      while (j < words.length && NO_PREFIX.test(words[j]!)) j++;
+      if (j !== i) i = j;
+    }
+    const chead = base(words[i]!);
+    const cargs = words.slice(i + 1);
+    // `make -f <file>` / `make -C <dir>` read a file or a folder; plain `make` runs the local Makefile. A named file or
+    // folder must be an in-checkout relative path (BOS-378 CEO round 15).
+    if (MAKE.test(chead)) {
+      if (i > 0) return true;
+      for (let k = 0; k < cargs.length; k++) {
+        const w = cargs[k]!;
+        const f = /^(?:-f|--file|-C|--directory)(?:=(.*))?$/.exec(w);
+        if (f) {
+          const p = f[1] !== undefined ? f[1] : cargs[++k];
+          if (p === undefined || !scriptOk(p)) return true;
+        }
+      }
+      continue;
     }
     // `source <file>` and `. <file>` run a file in the shell: judge the file like a script.
-    if (head === "source" || head === ".") {
-      if (args.length < 1 || !scriptOk(args[0]!)) return true;
+    if (chead === "source" || chead === ".") {
+      if (cargs.length < 1 || !scriptOk(cargs[0]!)) return true;
       continue;
     }
     // node|python3|bash|sh <file>: no prefix, no option before the file, no redirect/pipe, plain words, file in checkout.
-    if (INTERP_NAME.test(head) || SHELL_NAME.test(head)) {
-      if (prefixed || args.length === 0) return true; // an env prefix, or code on stdin
-      if (args.some((w) => /[<>|]/.test(w))) return true; // a redirect or pipe into the interpreter
-      if (args.some((w) => !PLAIN_WORD.test(w) && !/^-{1,2}[\w-]+(=[^\s]*)?$/.test(w))) return true;
-      if (args[0]!.startsWith("-")) return true; // a flag first: -c/-e/-p/-m/-r/-s, or a skipped flag — all Deny
-      if (!scriptOk(args[0]!)) return true;
+    if (INTERP_NAME.test(chead) || SHELL_NAME.test(chead)) {
+      if (i > 0 || cargs.length === 0) return true; // an env prefix, or code on stdin
+      const va = noOutRedir(cargs);
+      if (va.some((w) => /[<>|]/.test(w))) return true; // an input redirect or pipe into the interpreter
+      if (va.some((w) => !PLAIN_WORD.test(w) && !/^-{1,2}[\w-]+(=[^\s]*)?$/.test(w))) return true;
+      // The runner subcommands (`deno run <file>`, `bun run <file>`, `ts-node <file>`, `tsx <file>`) name a file after the
+      // verb. Skip a leading verb, then require a script file in the checkout; a flag first (`-c`, `-e`, `-m`, `-r`) is
+      // Deny. Any later word that is a path must also be an in-checkout script (a runner's `--config /tmp/x` can load code).
+      const verb = INTERP_VERB.test(va[0] ?? "") ? 1 : 0;
+      const file = va[verb];
+      if (file === undefined || file.startsWith("-")) return true;
+      if (!scriptOk(file)) return true;
+      // A code-loading flag after the file can pull in a /tmp module even when the script is in the checkout (node's
+      // `--require`/`--loader`/`--import`, a runner's `--config`). Its outside path is Deny; a plain output path is data.
+      if (va.slice(verb + 1).some((w, n, a) => /^(?:-r|--require|-l|--loader|--import|--experimental-loader|--config|-c)$/.test(a[n - 1] ?? "") && w.includes("/") && !scriptOk(w))) return true;
       continue;
     }
-    // A shebang script run by its plain path (`./x.sh`, `scripts/x.sh`) is likewise a script file.
-    if (/^(?:\.{1,2}\/|[\w.@%+-]+(?:\/[\w.@%+-]+)+$)/.test(head) && !head.startsWith("/")) {
-      if (prefixed || args.some((w) => !PLAIN_WORD.test(w) && !/^-{1,2}[\w-]+(=[^\s]*)?$/.test(w))) return true;
-      if (!scriptOk(head)) return true;
+    // A command word that is a path (`/tmp/x.sh`, `./x.sh`, `../x.sh`, `scripts/x.sh`) runs a file the judge can't read
+    // unless it is a plain script inside the agent's own checkout (BOS-378 CEO round 15). Test the whole word: `head` has
+    // already been base()'d, so an absolute `/tmp/x.sh` looked like a plain name and slipped through as Allow.
+    const cmdWord = words[i]!;
+    if (cmdWord.includes("/") && PLAIN_WORD.test(cmdWord)) {
+      if (i > 0 || /[<>|]/.test(cmdWord)) return true;
+      // An absolute path as the program gets no Allow, even one inside the agent's own checkout (CEO round 15): the judge
+      // can't tell what it is from a path alone. Only a plain relative path in the checkout is Allow.
+      if (cmdWord.startsWith("/")) return true;
+      const va = noOutRedir(cargs);
+      if (va.some((w) => /[<>|]/.test(w))) return true;
+      if (va.some((w) => !PLAIN_WORD.test(w) && !/^-{1,2}[\w-]+(=[^\s]*)?$/.test(w))) return true;
+      if (!scriptOk(cmdWord)) return true;
       continue;
     }
     // Anything else is Deny only when the command word is a shell/interpreter/launcher, or when one is the word after a
     // launcher that starts another program (`-exec`, `-execdir`, `-ok`, xargs, env, …). A plain program whose arguments
     // merely mention `node` (`grep -r node src/`) is left to the other checks.
-    const codeWord = (w: string): boolean => { const b = base(w); return INTERP_NAME.test(b) || SHELL_NAME.test(b) || LAUNCHER.test(b); };
-    if (codeWord(head)) return true;
-    for (let k = 0; k < args.length; k++) if (/^-(?:exec|execdir|ok|okdir)$/.test(args[k]!) && codeWord(args[k + 1] ?? "")) return true;
-    if ((head === "xargs" || head === "env") && args.some((w) => !w.startsWith("-") && codeWord(w))) return true;
+    if (codeWord(chead)) return true;
+    for (let k = 0; k < cargs.length; k++) if (/^-(?:exec|execdir|ok|okdir)$/.test(cargs[k]!) && codeWord(cargs[k + 1] ?? "")) return true;
+    if ((chead === "xargs" || chead === "env") && cargs.some((w) => !w.startsWith("-") && codeWord(w))) return true;
   }
   return false;
 }
