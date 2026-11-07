@@ -14,11 +14,14 @@ set -euo pipefail
 [ "$#" -gt 0 ] || { echo "usage: check-slot.sh <command> [args...]" >&2; exit 2; }
 
 LOCK=${CHECK_ALL_LOCK:-/tmp/bossman-check-all}
-PRIVATE="$LOCK.held.$$"  # the private lock folder for the command (see above)
+PRIVATE=""  # the private lock folder for the command (see above), made by run_command
 cmd_pid=""
 # run_command: run "$@" with the private lock and wait for it; a signal stops it and exits 143.
+# mktemp -d gives the folder a random name and mode 0700, so no other user of a shared /tmp can create it in advance
+# (a guessable "$LOCK.held.$$" could be pre-made with planted slot or queue files that the command would then trust).
 run_command() {
-  mkdir -p "$PRIVATE" 2>/dev/null || { echo "check-all: cannot create $PRIVATE (set CHECK_ALL_LOCK to a writable path)" >&2; exit 2; }
+  mkdir -p "$(dirname "$LOCK")" 2>/dev/null || true
+  PRIVATE=$(mktemp -d "$LOCK.held.XXXXXX" 2>/dev/null) || { echo "check-all: cannot create a private lock folder beside $LOCK (set CHECK_ALL_LOCK to a writable path)" >&2; exit 2; }
   CHECK_ALL_LOCK="$PRIVATE/check-all" BOSSMAN_CHECK_SLOT_HELD="$PRIVATE/check-all" "$@" &
   cmd_pid=$!
   trap 'kill -TERM "$cmd_pid" 2>/dev/null || true; wait "$cmd_pid" 2>/dev/null || true; exit 143' TERM INT HUP

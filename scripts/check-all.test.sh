@@ -429,6 +429,11 @@ OLD
   # check-slot.sh passes the command's exit status on.
   rc=0; slot env bash ./scripts/check-slot.sh sh -c 'exit 7' >/dev/null || rc=$?
   [ "$rc" = 7 ] || fail "BOS-614: check-slot.sh lost the command's exit status, got $rc"
+  # The private lock folder is made fresh by mktemp (random name, mode 0700), not a guessable pid-based name.
+  out=$(slot env bash ./scripts/check-slot.sh sh -c 'd=$(dirname "$CHECK_ALL_LOCK"); echo "$(stat -c %a "$d") ${d##*.held.}"') || fail "private folder probe failed: $out"
+  out=$(printf '%s\n' "$out" | tail -n 1)
+  case "$out" in "700 "??????) ;; *) fail "BOS-614: private lock folder should be mode 700 with a random name, got: $out" ;; esac
+  case "${out#700 }" in *[!0-9]*) ;; *) fail "BOS-614: private lock folder name looks pid-based: $out" ;; esac
   # A new check-all.sh hands its wait to the runner's copy (BOSSMAN_CHECK_SLOT) over the one beside it...
   printf 'echo shared >>"%s"; exec bash "%s" "$@"\n' "$t/shared.used" "$here/check-slot.sh" >"$t/shared-slot.sh"
   out=$(lock env BOSSMAN_CHECK_SLOT="$t/shared-slot.sh") || fail "shared slot: expected success, got: $out"
