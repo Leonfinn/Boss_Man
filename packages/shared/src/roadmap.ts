@@ -29,7 +29,6 @@ export function milestoneStatus(counts: MilestoneCounts, targetDate: string | nu
   return "on_track";
 }
 
-/** Today's date, YYYY-MM-DD, in the given time zone. */
 /** A timezone name Intl understands, such as "Europe/London"; otherwise the fallback. */
 export function timeZoneOr(tz: string | null | undefined, fallback = "Europe/London"): string {
   if (!tz) return fallback;
@@ -41,8 +40,19 @@ export function timeZoneOr(tz: string | null | undefined, fallback = "Europe/Lon
   }
 }
 
+// One formatter per zone: building an Intl.DateTimeFormat costs ~70 µs, formatting with one ~1 µs,
+// and per-row callers (funding's daily use) froze the server for seconds (BOS-643). Only zones
+// Intl accepts get here (an unknown one throws before it's cached), so the map stays small.
+const dayFormats = new Map<string, Intl.DateTimeFormat>();
+
+/** Today's date, YYYY-MM-DD, in the given time zone. */
 export function dateIn(now: Date, timeZone: string): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  let f = dayFormats.get(timeZone);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+    dayFormats.set(timeZone, f);
+  }
+  return f.format(now);
 }
 
 /**

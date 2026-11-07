@@ -363,17 +363,20 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .where(and(gte(runs.startedAt, since), sql`(${runs.id} in (select ${costEvents.runId} from ${costEvents} where ${costEvents.fundingSourceId} = ${id} and ${costEvents.runId} is not null) or ${agents.fundingSourceId} = ${id})`));
       const money = await db.select({ occurredAt: costEvents.occurredAt, costMicros: costEvents.costMicros }).from(costEvents).where(and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since)));
-      const day = (at: Date) => dateIn(at, timeZone);
-      return dates.map((d) => {
-        const on = runsHere.filter((r) => day(r.startedAt) === d);
-        return {
-          day: d,
-          runs: on.length,
-          inputTokens: on.reduce((n, r) => n + (r.input ?? 0), 0),
-          outputTokens: on.reduce((n, r) => n + (r.output ?? 0), 0),
-          costMicros: money.filter((m) => day(m.occurredAt) === d).reduce((n, m) => n + m.costMicros, 0),
-        };
-      });
+      // One pass per row, not one per row per day (BOS-643: a week of runs froze the server).
+      const byDay = new Map(dates.map((d) => [d, { day: d, runs: 0, inputTokens: 0, outputTokens: 0, costMicros: 0 }]));
+      for (const r of runsHere) {
+        const b = byDay.get(dateIn(r.startedAt, timeZone));
+        if (!b) continue;
+        b.runs++;
+        b.inputTokens += r.input ?? 0;
+        b.outputTokens += r.output ?? 0;
+      }
+      for (const m of money) {
+        const b = byDay.get(dateIn(m.occurredAt, timeZone));
+        if (b) b.costMicros += m.costMicros;
+      }
+      return [...byDay.values()];
     },
 
     /**
