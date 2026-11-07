@@ -148,6 +148,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>AdviceTimeout": "Reviews and CEO",
   "pages/Settings.tsx>StandingRules": "Reviews and CEO",
   "pages/Settings.tsx>PermissionJudgeSetting": "Reviews and CEO",
+  "pages/Settings.tsx>FenceSetting": "Reviews and CEO",
   "pages/Settings.tsx>SecondOpinionSetting": "Reviews and CEO",
   "pages/Settings.tsx>Watchdog": "Reviews and CEO",
   "pages/Settings.tsx>WorkflowRetros": "Reviews and CEO",
