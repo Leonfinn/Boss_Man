@@ -4,6 +4,7 @@ import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, decisions, fundingSources, notifications, runs, tickets } from "../db/schema.js";
 import { liveRuns, runOriginQuery } from "./runs.js";
+import { passedReviewTickets } from "./review-kinds.js";
 
 export const DAYS = 14;
 
@@ -62,6 +63,9 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
         .where(eq(tickets.companyId, companyId))
         .groupBy(tickets.systemState);
       const count = (s: string) => states.find((x) => x.state === s)?.n ?? 0;
+      // Of the tickets in review, those every reviewer has approved: only the merge (or the owner's sign-off) is left (BOS-667).
+      const inReviewIds = count("review") ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")))).map((r) => r.id) : [];
+      const approved = (await passedReviewTickets(db, inReviewIds)).size;
       const [waiting] = await db
         .select({ n: sql<number>`count(*)::int` })
         .from(decisions)
@@ -127,6 +131,9 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
           paused: team.filter((a) => a.paused).length,
           inProgress: count("in_progress"),
           inReview: count("review"),
+          // inReview split in two, so the owner sees whether reviewers or the merge line hold work up.
+          awaitingReview: count("review") - approved,
+          approvedToMerge: approved,
           open: states.reduce((n, s) => n + (s.state === "done" ? 0 : s.n), 0),
           blocked: count("blocked"),
           decisionsWaiting: waiting?.n ?? 0,
