@@ -250,6 +250,11 @@ export class SessionManager {
     return [...this.runs.entries()].flatMap(([runId, state]) => [...state.pendingPermissions.keys()].map((requestId) => ({ runId, requestId })));
   }
 
+  /** Ids of the runs this runner is running now, told to the server in hello (BOS-583). */
+  liveRunIds(): string[] {
+    return [...this.runs.keys()];
+  }
+
   get activeRuns() {
     return this.runs.size;
   }

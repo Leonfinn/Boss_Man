@@ -2,9 +2,9 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, readCriteria, readVerdicts, renderTemplate, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
+import { agents, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
@@ -13,7 +13,8 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { APPROVE_MERGE, CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard } from "./signoff.js";
 import { checkGate, checkPriority } from "./check-gate.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
@@ -166,37 +167,11 @@ export function isSignoffPending(err: unknown): boolean {
 export type GitTemplates = { commit: string; pr: string };
 type NotifyHook = (agentId: string, input: { reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
 
-type SignedOff = { head: string; risk: string | null; at: string };
-
 /** "4 Nov 07:35 UTC", for a sign-off named on a card or event. */
 const when = (iso: string) => {
   const d = new Date(iso);
   return `${d.getUTCDate()} ${d.toLocaleString("en-GB", { month: "short", timeZone: "UTC" })} ${iso.slice(11, 16)} UTC`;
 };
-
-/**
- * The owner's last sign-off on this ticket, and whether it covers `head` (DR-013). It is reused only when the newest
- * answered sign-off card is an "Approve and merge" for the same commit, nobody sent the ticket back since (the card's
- * "Send it back" makes a newer answered card; the review page and reviewers leave a changes-requested ticket_reviews
- * row), and the risk is no higher than what the owner saw. `earlier` names the last signed-off commit for a new card.
- */
-async function priorSignoff(db: Db, t: { id: string; risk: RiskTier | null }, head: string | null): Promise<{ reuse: SignedOff | null; earlier: SignedOff | null }> {
-  const cards = await db
-    .select({ answer: decisions.answer, context: decisions.context })
-    .from(decisions)
-    .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${t.id}`))
-    .orderBy(desc(decisions.answeredAt));
-  const signed = cards.find((c) => c.answer === APPROVE_MERGE && (c.context as { signedOff?: SignedOff }).signedOff);
-  const earlier = signed ? (signed.context as { signedOff: SignedOff }).signedOff : null;
-  if (!earlier || !head || cards[0] !== signed || earlier.head !== head) return { reuse: null, earlier };
-  if (!earlier.risk || RISK_TIERS.indexOf(riskOf(t.risk)) > RISK_TIERS.indexOf(earlier.risk as RiskTier)) return { reuse: null, earlier };
-  const [sentBack] = await db
-    .select({ id: ticketReviews.id })
-    .from(ticketReviews)
-    .where(and(eq(ticketReviews.ticketId, t.id), eq(ticketReviews.verdict, "changes_requested"), gt(ticketReviews.createdAt, new Date(earlier.at))))
-    .limit(1);
-  return { reuse: sentBack ? null : earlier, earlier };
-}
 
 /** The owner decides what to do with a check that couldn't finish; the ticket stays in review and the loop detector never hears of it. */
 async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title: string }, command: string, reason: string, output: string) {
@@ -344,8 +319,11 @@ export function reviewService(
    * land it too. Anything less (still in review rounds, sent back, awaiting the owner) stays a refusal.
    */
   async function approvedAndWaiting(ticketId: string): Promise<boolean> {
-    const [c] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+    const [c] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
     if (!c || c.systemState !== "review") return false;
+    // Owed the owner's sign-off, card or not: not approved yet (BOS-503, DR-021). A missing card never means "not needed".
+    const so = (await derivedSignoff(db, c)).state;
+    if (so !== "not_needed" && so !== "signed_off") return false;
     const rows = await latestRows(db, ticketId);
     if (!rows.length || evaluate(rows) !== "passed") return false;
     const [signoff] = await db
@@ -449,12 +427,19 @@ export function reviewService(
    * the ticket goes back to its assignee to show those before it can close.
    */
   async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null) {
-    await db.update(tickets).set({ mergeCommit: commit, pullRequestNote: null }).where(eq(tickets.id, t.id));
+    // A criterion still at fail when the work lands was put off, not failed (BOS-575): it stays on this
+    // ticket, with its assignee, as an after-merge check, instead of the ticket closing on it.
+    const carry = carryFailedOver(readCriteria(t.acceptanceCriteria), t.stateNote);
+    await db
+      .update(tickets)
+      .set({ mergeCommit: commit, pullRequestNote: null, ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
+      .where(eq(tickets.id, t.id));
+    if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
     const left = afterMergeLeft(t);
     // With a live check still to show, the ticket isn't finished: go straight to the assignee without a
     // brief done state in between, so done hooks (worktree release, notifications) never fire for it.
     if (!left) await deps.work.updateTicket(t.id, { state: "done", outcome: "completed", overLimit: true });
-    return { outcome: "merged" as const, delivered: null, detail: { commit, ...(left ? { afterMerge: left } : {}) } };
+    return { outcome: "merged" as const, delivered: null, detail: { commit, ...(left ? { afterMerge: left } : {}), ...(carry ? { carried: carry.carried } : {}) } };
   }
 
   /** Checks the merged ticket now has to show: its after-merge criteria still without a pass or fail. */
@@ -476,13 +461,25 @@ export function reviewService(
       .innerJoin(projects, eq(projects.id, tickets.projectId))
       .where(eq(tickets.id, t.id));
     if (repoUrl?.repoUrl) await deps.work.updateTicket(t.id, { state: "in_progress", overLimit: true, internal: true, noCode: true });
+    const carried = r.detail.carried ?? [];
+    const quoted = (list: string[]) => list.map((c) => `"${c}"`).join(", ");
+    const carriedWhy = carried.length ? ` ${quoted(carried)} ${carried.length > 1 ? "were" : "was"} still at fail when it merged, so ${carried.length > 1 ? "they stay" : "it stays"} on this ticket as after-merge ${carried.length > 1 ? "checks" : "check"}, not a separate ticket.` : "";
     const delivered = await tellAgent(
       { ...t, systemState: "in_progress" },
-      `${merged}The work is live, so these checks can only be made now: ${r.detail.afterMerge!.map((c) => `"${c}"`).join(", ")}. Report pass or fail for each and move the ticket to done. If only the owner can check one, put a card in front of them (raise_decision with blocksTicketId): answering it records their answer as that check's pass or fail, so you can close the ticket once they have.`,
+      `${merged}The work is live, so these checks can only be made now: ${quoted(r.detail.afterMerge!)}.${carriedWhy} Report pass or fail for each and move the ticket to done. If only the owner can check one, put a card in front of them (raise_decision with blocksTicketId): answering it records their answer as that check's pass or fail, so you can close the ticket once they have. If a check fails on the live work, report it as fail and move the ticket to done: Boss Man opens the follow-up ticket for it, assigned to you, so don't make one by hand.`,
       "after merge",
       causedByRunId,
     ).catch(() => null);
+    // The CEO hears when a merge leaves a put-off check on its ticket (BOS-575): that is the moment BOS-542 was lost.
+    if (carried.length) await tellCeo(t, "after merge carried", `"${t.title}" merged with ${quoted(carried)} still at fail. Boss Man kept it open with its assignee as after-merge ${carried.length > 1 ? "checks" : "check"} until ${carried.length > 1 ? "they are" : "it is"} reported; no follow-up ticket is needed. Nothing to do unless it stalls.`).catch(() => undefined);
     return { outcome: "merged" as const, delivered, detail: { ...r.detail, commit } };
+  }
+
+  /** Wakes the company's CEO about a ticket, with a note; nothing when the company has no CEO. */
+  async function tellCeo(t: { id: string; companyId: string }, reason: string, note: string) {
+    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
+    if (ceo) await wake?.(ceo.id, { ticketId: t.id, reason, note });
+    return ceo?.id ?? null;
   }
 
   /** The ticket stays in review with the host's reason; the owner hears once per new reason. */
@@ -521,12 +518,7 @@ export function reviewService(
 
   /** True while the owner's "Merge it, or send it back?" sign-off card for this ticket is open (BOS-471). */
   async function ownerSignoffOpen(ticketId: string): Promise<boolean> {
-    const [signoff] = await db
-      .select({ id: decisions.id })
-      .from(decisions)
-      .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`))
-      .limit(1);
-    return !!signoff;
+    return !!(await openSignoffCard(db, ticketId));
   }
 
   return {
@@ -669,7 +661,7 @@ export function reviewService(
           .from(ticketDependencies)
           .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
           .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
-        if (signoff) throw new ReviewError(409, "Every review is in; the ticket is waiting on the owner's decision before it merges.");
+        if (signoff || (await derivedSignoff(db, t)).state === "waiting") throw new ReviewError(409, "Every review is in; the ticket is waiting on the owner's decision before it merges.");
         if (landings.get(ticketId)?.state === "running" && !(await landingStale(ticketId))) throw new ReviewError(409, "Every review is in and the merge is running now.");
         await record(db, { companyId: t.companyId, agentId: input.reviewerAgentId ?? null, ticketId, kind: "merge_restarted", summary: `All reviews were in but the merge had not run; ${input.reviewer} confirmed the approval, so Boss Man started it.` });
         return this.approve(t, { reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId, background: input.background, causedByRunId: input.causedByRunId });
@@ -717,7 +709,6 @@ export function reviewService(
       // Where the review policy says the owner signs off, an agent's approval asks them (R48).
       if (o.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
         // One open sign-off card per ticket: this round replaces any older one (BOS-446).
-        await supersedeSignoffs(db, ticketId, { by: "system", note: "Replaced by a newer sign-off card after a new review round.", at: new Date().toISOString() });
         // The owner signs off a commit, not a ticket (DR-013). A runner that can't say the head never reuses a sign-off.
         const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
         const prior = await priorSignoff(db, t, head);
@@ -726,23 +717,8 @@ export function reviewService(
           if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
           return { verdict: "approved" as const, ...(await this.landVisible(ticketId, o.reviewer, o.causedByRunId)) };
         }
-        const earlier = prior.earlier ? `\n\nYou approved an earlier version (${prior.earlier.head.slice(0, 8)}) on ${when(prior.earlier.at)}; the code has changed since.` : "";
-        const [d] = await db
-          .insert(decisions)
-          .values({
-            companyId: t.companyId,
-            kind: "approval",
-            question: `${o.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?${earlier}`,
-            options: ["Approve and merge", "Send it back"],
-            recommendedOption: "Approve and merge",
-            raisedByAgentId: o.reviewerAgentId,
-            tier: "owner",
-            dedupeKey: `risk-review:${ticketId}:${Date.now()}`,
-            context: { type: "risk_review", ticketId, reviewer: o.reviewer, ...(head ? { head, risk: riskOf(t.risk) } : {}) },
-          })
-          .returning({ id: decisions.id });
-        await addTicketDependency(db, { companyId: t.companyId, blockedTicketId: ticketId, blockerDecisionId: d!.id, actor: { type: "system" } });
-        return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${d!.id}` };
+        const id = await raiseSignoffCard(db, t, { reviewer: o.reviewer, reviewerAgentId: o.reviewerAgentId, head, earlier: prior.earlier });
+        return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${id}` };
       }
       if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
       return { verdict: "approved" as const, ...(await this.landVisible(ticketId, o.reviewer, o.causedByRunId)) };
@@ -1103,6 +1079,34 @@ export function reviewService(
       }
     },
 
+    /**
+     * Refuses a merge the owner hasn't signed off when the policy needs it (BOS-503, DR-021). `head` null: any
+     * recorded sign-off for this round will do (the early check); a string: the sign-off must cover that commit,
+     * and "" (the runner couldn't say) passes only an owner's own approval, which covers what is there now.
+     */
+    async requireSignoff(t: typeof tickets.$inferSelect, head: string | null) {
+      const d = await derivedSignoff(db, t, head || null);
+      if (d.state === "not_needed") return;
+      if (d.state === "signed_off" && (head === null || d.head === null || d.head === head)) {
+        if (head === "" && d.head !== null) throw new ReviewError(409, "The owner's sign-off couldn't be matched to the commit: the runner didn't say which commit would merge, so nothing was merged. Try again once the runner answers.");
+        return;
+      }
+      if (d.state === "waiting" && head) {
+        // Signed off for another commit, with no new review since: the code changed under the sign-off, and nobody
+        // reviewed what would merge now. Refuse in plain sight (the merge card that follows lets the owner send it back).
+        const was = await derivedSignoff(db, t, null);
+        if (was.state === "signed_off" && was.head && was.head !== head) throw new ReviewError(409, `The owner signed off commit ${was.head.slice(0, 8)}, but the branch is now at ${head.slice(0, 8)}, so nothing was merged. Send it back for a new review and sign-off.`);
+      }
+      if (d.state === "waiting") {
+        // Raise its card if it went missing; either way the owner's answer is what starts the merge.
+        await restoreSignoffCard(db, t, "a merge was about to start without it", head || null);
+        throw new SignoffPendingError();
+      }
+      if (d.state === "reviews_pending") throw new ReviewError(409, "This ticket needs the owner's sign-off and its reviews aren't all in, so it wasn't merged.");
+      // Signed off, but for another commit: the code changed after the owner approved it.
+      throw new ReviewError(409, `The owner signed off commit ${d.head!.slice(0, 8)}, but ${head!.slice(0, 8)} would merge, so nothing was merged. It needs a new review and sign-off.`);
+    },
+
     async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       // An answer to an older "merge stuck" ask can arrive after the ticket merged: nothing to do again.
@@ -1110,6 +1114,10 @@ export function reviewService(
       // A retry must not merge past the owner's sign-off (BOS-149): if a "Merge it, or send it back?"
       // card is still open, this ticket waits for the owner, whatever answered the merge card.
       if (await ownerSignoffOpen(ticketId)) throw new SignoffPendingError();
+      // Nor past a sign-off that isn't recorded (BOS-503, DR-021): a lost card used to let the unmerged-approvals
+      // retry and carried-work landing merge a high-risk ticket the owner never saw. Every path into a merge comes
+      // through here, so this one check fails them all closed. A card that went missing is raised again.
+      await this.requireSignoff(t, null);
       // A merge under way is activity: the unmerged-approvals sweep waits for it rather than asking again.
       const touch = () => beatNow(ticketId);
       await touch();
@@ -1159,6 +1167,9 @@ export function reviewService(
       // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
       // merge, and running the check anyway could send the ticket back for a failure it can't fix.
       const changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+      // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
+      // A ticket with no branch has nothing to merge, so only the early check above applies to it.
+      await this.requireSignoff(t, changed ? changed.head : t.branch ? "" : null);
       if ((changed && !changed.commits.length && !changed.files.length) || (!changed && !t.branch)) {
         // Only a ticket marked "no code" closes on an empty diff; any other is sent back, not closed.
         if (!t.noCode) {
@@ -1405,6 +1416,63 @@ export function reviewService(
         const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
         if (ceo) await wake?.(ceo.id, { ticketId, reason: "ci passed", note: `The checks passed on the pull request for "${t.title}", but it hasn't merged: ${t.pullRequestNote ?? "the host hasn't said why"}. Move it forward.` });
       }
+    },
+
+    /**
+     * DR-009 #5 (BOS-575): a merged ticket closed with an after-merge check at fail, so the live work doesn't
+     * do what it should. Boss Man opens the follow-up itself, so it is never a bare title nobody owns (BOS-542):
+     * what failed and what was reported, the merged ticket's project, risk and feature, its assignee (the CEO
+     * when it has none), the failed checks as its criteria, and a link each way. The CEO is told. Returns the
+     * new ticket, or null when nothing failed.
+     */
+    async followUpFailedChecks(ticketId: string, failed: string[], reported: string, byAgentId: string | null) {
+      if (!failed.length) return null;
+      const [row] = await db.select({ t: tickets, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, ticketId));
+      if (!row) return null;
+      const { t, prefix } = row;
+      const ref = ticketRef(prefix, t.number) ?? `"${t.title}"`;
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
+      const assigneeAgentId = t.assigneeAgentId ?? ceo?.id ?? null;
+      // This path never makes an unowned ticket: with nobody to give it to, the caller says so instead.
+      if (!assigneeAgentId) return null;
+      const many = failed.length > 1;
+      const title = (many ? `Follow-up to ${ref}: ${failed.length} after-merge checks failed on the live work` : `Follow-up to ${ref}: ${failed[0]}`).slice(0, 200);
+      const body = [
+        `**Why:** ${ref} ("${t.title}") merged${t.mergeCommit ? ` as ${t.mergeCommit.slice(0, 12)}` : ""}, and ${many ? "these checks" : "this check"} failed once the work was live:`,
+        ...failed.map((c) => `- ${c}`),
+        "",
+        `**What was reported:** ${reported.replace(/\s+/g, " ").trim().slice(0, 1500) || "(nothing)"}`,
+        "",
+        `**Do:** find why ${many ? "they fail" : "it fails"} on the live work, fix it on this ticket's branch, and show ${many ? "them" : "it"} passing once merged. The merged ticket, with its description and conversation: [${ref}](#/tickets/${t.id}).`,
+        "",
+        "Opened by Boss Man when the merged ticket closed with this check at fail (DR-009 #5, BOS-575).",
+      ].join("\n");
+      const made = await deps.work.createTicket(t.projectId, {
+        title,
+        body,
+        risk: t.risk ?? "medium",
+        state: "ready",
+        overLimit: true,
+        assigneeAgentId,
+        featureId: t.featureId,
+        milestoneId: t.milestoneId,
+        urgent: t.urgent,
+        acceptanceCriteria: failed.map((text) => ({ text, after: "merge" as const })),
+        createdByAgentId: byAgentId,
+      });
+      // The number is set by a database trigger; read it back rather than trust the insert's row.
+      const [numbered] = await db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, made.id));
+      const newRef = ticketRef(prefix, numbered?.number) ?? `"${made.title}"`;
+      const link = `Follow-up: ${newRef} (#/tickets/${made.id}), for ${many ? "the failed after-merge checks" : "the failed after-merge check"}.`;
+      const [now] = await db.select({ note: tickets.stateNote }).from(tickets).where(eq(tickets.id, t.id));
+      await db
+        .update(tickets)
+        .set({ stateNote: `${(now?.note ?? "").trim()}${now?.note?.trim() ? " " : ""}${link}`.slice(0, 4000) })
+        .where(eq(tickets.id, t.id));
+      await record(db, { companyId: t.companyId, ticketId: t.id, agentId: byAgentId, kind: "follow_up", summary: link, detail: { followUpTicketId: made.id, failed } });
+      const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, assigneeAgentId));
+      await tellCeo(made, "follow-up created", `${ref} ("${t.title}") closed with ${many ? "after-merge checks" : "an after-merge check"} at fail, so Boss Man opened ${newRef} "${made.title}" for ${who?.name ?? "nobody"}, risk ${made.risk ?? "medium"}, with the failed ${many ? "checks" : "check"} as its criteria. Re-assign or re-rate it if that's wrong; otherwise nothing to do.`).catch(() => undefined);
+      return { id: made.id, ref: newRef, title: made.title, assignee: who?.name ?? null };
     },
 
     /** Checks every ticket waiting on a pull request: merged on the host, or mergeable now. */
