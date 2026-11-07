@@ -86,7 +86,20 @@ if command -v flock >/dev/null; then
         CHECK_ALL_SLOT_COMMAND='sleep 2; [ -z "${CHECK_ALL_STARTED_FILE:-}" ] || date +%s >"$CHECK_ALL_STARTED_FILE"' ./scripts/check-all.sh >"$t/out" 2>&1 ) || fail "duration run failed: $(cat "$t/out")"
     d=$(sed -n 's/.*"duration_seconds":\([0-9]*\).*/\1/p' "$store"/*.json | head -1)
     [ "${d:-0}" -ge 2 ] || fail "duration_seconds is ${d:-missing}, want the whole run (>= 2): $(cat "$t/out")"
+    # BOS-674: without scripts/check-threads.mjs beside it (this copy) the budget falls back to 2 instead of failing the run.
+    grep -q "CPU budget 2 threads" "$t/out" || fail "no fallback CPU budget: $(cat "$t/out")"
   fi
+  # BOS-674: one CPU budget reaches what runs in the slot (check-quick's heavy phase, queued vitest runs): set, or this
+  # slot's share as scripts/check-threads.mjs works it out from the slot count in the proof file.
+  budget() { (cd "$here/.." && env -u BOSSMAN_CHECK_THREADS -u GOMAXPROCS -u RAYON_NUM_THREADS -u TOKIO_WORKER_THREADS -u BOSSMAN_CHECK_SLOTS \
+      CHECK_ALL_LOCK="$t/tlock" CHECK_ALL_PAIR_PROOF="$t/tproof" "$@" \
+      CHECK_ALL_SLOT_COMMAND='echo "got $BOSSMAN_CHECK_THREADS $GOMAXPROCS $RAYON_NUM_THREADS $TOKIO_WORKER_THREADS"' ./scripts/check-all.sh 2>&1); }
+  budget BOSSMAN_CHECK_THREADS=3 | grep -qx "got 3 3 3 3" || fail "set budget not passed on: $(budget BOSSMAN_CHECK_THREADS=3)"
+  budget BOSSMAN_CHECK_THREADS=3 GOMAXPROCS=1 | grep -qx "got 3 1 3 3" || fail "a caller's GOMAXPROCS is not kept"
+  echo 3 >"$t/tproof"
+  want=$(env -u BOSSMAN_CHECK_THREADS BOSSMAN_CHECK_SLOTS=3 node "$here/check-threads.mjs")
+  budget | grep -qx "got $want $want $want $want" || fail "3-slot budget is not $want: $(budget)"
+  rm -f "$t/tproof"
   mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
   lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" "$@" ./scripts/check-all.sh 2>&1); }
   # A hold starts counting its seconds only once a waiter has queued behind it (a queue entry newer than the hold),

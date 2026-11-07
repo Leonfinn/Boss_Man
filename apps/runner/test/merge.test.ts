@@ -142,6 +142,20 @@ describe("verify before done (R47)", () => {
     expect(res.output).toContain(`lock=${path.join(root, ".bossman-coord", "queue", "check-all")} store=${path.join(root, ".bossman-coord", "gate", "check-results")}`);
   });
 
+  it("runs a check's installs against the shared pnpm store, not a new one in HOME (BOS-568)", async () => {
+    const o = origin();
+    const { spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const store = path.join(root, "store");
+    const ws = new Workspaces(root, process.env, undefined, store);
+    await ws.ensure(spec);
+    expect((await ws.verify(spec, 'echo "store=${npm_config_store_dir:-unset}"')).output).toContain(`store=${store}`);
+    // A runner without one gives pnpm nothing, as before.
+    const plain = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    await plain.ensure(spec);
+    expect((await plain.verify(spec, 'echo "store=${npm_config_store_dir:-unset}"')).output).toContain("store=unset");
+  });
+
   it("waits for the slot through the runner's own check-slot.sh, not the branch's queue rules, when the tree takes part in the check line (BOS-614)", async () => {
     const o = origin();
     const { spec } = await ticketWithCommit(o, "feature.txt", "new\n");

@@ -32,9 +32,6 @@ const KNOWN_SLOW_CEILING_MS = 1000;
 
 /** Items that fail the budget today: name -> follow-up ticket. Held to KNOWN_SLOW_CEILING_MS instead of LIMIT_MS. */
 const KNOWN_SLOW: Record<string, string> = {
-  // funding.ts spendFor reads every cost event of the source and sums in JS (~265 ms); the run.quota forecast runs the same read (~88 ms, borderline).
-  "route: funding status": "BOS-671",
-  "event: run.quota": "BOS-671",
   // Three heavy reads (tickets by created_at 66 ms, latest run per agent 38 ms, token sums 34 ms): 100-115 ms.
   "route: dashboard": "BOS-672",
 };
