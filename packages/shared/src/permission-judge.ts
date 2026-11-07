@@ -33,6 +33,80 @@ const WORKSPACE = /(?:^|[\s"'=:(])(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|revie
 const WORKSPACE_PATH = /^(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\//;
 const LEADING_CD = /^\s*(?:cd|git\s+-C)\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/;
 
+/**
+ * Characters the shell quotes, escapes, expands or substitutes. A path word that holds one can be written in a way the
+ * judge can't read (`\/tmp`, `.'/.'/…`, `{,}`, `*`, `<(...)`, `$X`), so it never earns Allow (BOS-378, Jane's round 11).
+ */
+const PATH_DISGUISE = /[\\'"{}*?[\]$`()]/;
+/** A `cd`/`pushd`/`chdir` (or `env -C`/`--chdir`) target, captured whole so the check sees any quotes or escapes in it. */
+const CD_TARGET = /\b(?:cd|pushd|chdir)\b(?=[\s;&|)]|$)(?:\s+(?:--\s+)?("[^"]*"|'[^']*'|[^\s;&|)]*))?|\benv\b\s+(?:-\S+\s+)*?(?:-C|--chdir)(?:\s+|)(?:"([^"]*)"|'([^']*)'|([^\s;&|)]*))/g;
+/** The interpreter names the judge reads; a word that is one of these is a program, not a launcher. */
+const INTERP_NAMES = "python[\\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh|g?awk|mawk|sh|bash|zsh|dash|ksh";
+const INTERP_WORD = new RegExp(`^(?:${INTERP_NAMES})$`);
+/** An interpreter named anywhere inside a `-c`/`-e` string a launcher runs. */
+const INTERP_ANYWHERE = new RegExp(`(?:^|\\s)(?:[\\w./-]*/)?(?:${INTERP_NAMES})(?=\\s|$)`);
+/** Command words the judge already unwraps: the real program follows, so they are not "unknown launchers". */
+const KNOWN_WRAPPER = /^(?:then|do|else|exec|env|nohup|time|sudo|doas|xargs|command|nice|setsid|stdbuf|timeout|if|elif|while|until|!|builtin)$/;
+/** Common programs whose later words are data, not a hidden command: never treated as an unknown launcher. */
+const SAFE_COMMAND = /^(?:echo|printf|ls|cat|grep|egrep|rg|head|tail|wc|sort|uniq|cut|tr|diff|file|test|\[|true|false|pwd|whoami|date|uname|stat|du|df|ps|free|which|type|export|local|declare|readonly|set|unset|shift|return|exit|read|trap|break|continue|sleep|mkdir|touch|cp|mv|rm|rmdir|unlink|ln|chmod|chown|tee|find|git|pnpm|npm|yarn|make|docker|cd|pushd|popd|basename|dirname|realpath|readlink|jq|sed|awk|curl|wget|tar|gzip|gunzip|unzip|mistake)$/;
+
+/**
+ * A path word resolved to what the shell would run: null when it holds a quote, escape, brace, glob, `$`, backtick or
+ * bracket (the judge can't read those), otherwise a normalised path (`..`, `.` and `//` worked out). A relative word keeps
+ * its leading `..` parts so the caller can reject it.
+ */
+function plainPath(raw: string): string | null {
+  if (raw === "") return raw;
+  if (PATH_DISGUISE.test(raw)) return null;
+  const abs = raw.startsWith("/");
+  const out: string[] = [];
+  for (const seg of raw.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (out.length && out[out.length - 1] !== "..") out.pop();
+      else if (!abs) out.push("..");
+      continue;
+    }
+    out.push(seg);
+  }
+  return (abs ? "/" : "") + out.join("/");
+}
+
+/** True when a plain path word climbs out (starts with `..`) as a relative path. */
+const climbsOut = (p: string): boolean => p === ".." || p.startsWith("../");
+
+/** The target words of every `cd`/`pushd`/`chdir` and `env -C` in the command, quotes and escapes kept so they can be judged. */
+function cdWords(c: string): string[] {
+  return [...c.matchAll(CD_TARGET)].map((m) => (m[1] ?? m[2] ?? m[3] ?? m[4] ?? "").trim());
+}
+
+/**
+ * True when a word that starts a command is an unknown launcher (not an interpreter, a wrapper the judge unwraps, or a
+ * common safe program) and an interpreter follows it in the same segment; the interpreter may run a file that the judge
+ * never reads that way (`flock /tmp/l node /tmp/x.js`, `busybox sh x.sh`).
+ */
+function unknownLauncherBeforeInterpreter(c: string): boolean {
+  for (const seg of c.split(/&&|\|\||[;&|\n]+/)) {
+    const words = shellWords(seg).filter((w) => w !== "");
+    let i = 0;
+    while (i < words.length && (/^\w+=/.test(words[i]!) || /^[({!]+$/.test(words[i]!))) i++;
+    if (i >= words.length) continue;
+    const base = (w: string): string => w.replace(/^.*\//, "");
+    if (INTERP_WORD.test(base(words[i]!)) || SAFE_COMMAND.test(base(words[i]!))) continue;
+    // Unwrap the known launchers (`nice -n 5 node`, `timeout 5 node`, `sudo -u x node`) to reach the command word.
+    while (i < words.length && KNOWN_WRAPPER.test(base(words[i]!))) {
+      i++;
+      while (i < words.length && /^-\S*$|^\d+[a-z]*$|^\w+=\S*$/.test(words[i]!)) i++;
+    }
+    if (i >= words.length) continue;
+    const head = base(words[i]!);
+    if (INTERP_WORD.test(head) || SAFE_COMMAND.test(head)) continue;
+    // The interpreter may be a whole word, or inside a `-c`/`-e` string the launcher runs (`su -c 'node /tmp/x.js'`).
+    if (words.slice(i + 1).some((w) => INTERP_WORD.test(base(w)) || INTERP_ANYWHERE.test(w))) return true;
+  }
+  return false;
+}
+
 /** Longest command the judge reads; longer ones are not judged. */
 export const MAX_JUDGED_COMMAND = 10_000;
 export const isJudgeable = (command: string | null): boolean => !command || command.length <= MAX_JUDGED_COMMAND;
@@ -173,11 +247,11 @@ export function judgePermission(question: string, command: string | null, ownFol
   // tar and unzip, must be placed too.
   for (const t of toolTargets(forTargets)) addTarget(t);
   // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
-  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn)) return result("outside");
+  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || unknownLauncherBeforeInterpreter(c)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
-  if (hasRedirect) for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
+  if (hasRedirect) for (const d of cdWords(c)) if (!dirOk(d, inOwn)) return result("outside");
   const writes = /^(changes|deletes|unknown)$/.test(explainCommand(c).effect) || /rmSync|unlinkSync|writeFileSync|shutil\.rmtree|os\.remove|reset\s+--hard/.test(c) || new RegExp(DESTRUCTIVE, "i").test(c);
   if (writes) {
     for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
@@ -186,7 +260,7 @@ export function judgePermission(question: string, command: string | null, ownFol
     for (const t of targets) if (!/^\/tmp\//.test(t) && !inOwn(t) && t !== "/dev/null") return result("outside");
     // A relative target can climb out of the folder (`rm -rf ..`), and a `cd` somewhere else makes every relative target land there.
     for (const m of c.matchAll(/\brm\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
-    for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
+    for (const d of cdWords(c)) if (!dirOk(d, inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
     for (const m of c.matchAll(/\bfind\s+((?:-[HLP]\s+)*)([^\s-][^\s]*|)[^\n;&|]*?(-delete\b|-exec\s+rm\b)/g)) {
       const start = m[2]!;
@@ -352,13 +426,13 @@ function gitDenied(c: string, inOwn: (p: string) => boolean, pathOk: (p: string)
   // A `cd`/`pushd` outside the agent's own checkout (any /tmp repo, say) makes a git with no folder named run there, and
   // that repo's hooks and config can run code.
   let cwdOutside = false;
-  for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) {
-    const d = m[1] ?? "";
-    const own = inOwn(d);
-    const relInside = /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(d) && !d.includes("..");
-    if (!own && !relInside) cwdOutside = true;
+  for (const d of cdWords(c)) {
+    const p = plainPath(d);
+    if (p !== null && (inOwn(p) || (/^[\w.@+-]+(\/[\w.@+-]+)*$/.test(p) && !climbsOut(p)))) continue; // own folder or a sub-folder
+    cwdOutside = true;
   }
-  const repoOk = (p: string): boolean => inOwn(p);
+  // Only a plain literal folder counts; a disguised one (`.'/…`) is unread, so not the agent's own repo (BOS-378).
+  const repoOk = (p: string): boolean => { const n = plainPath(p); return n !== null && !climbsOut(n) && inOwn(n); };
   for (const seg of c.split(/[;&|\n]/)) {
     const parts = seg.split(/\$\(|[()\x60]/);
     for (let i = 0; i < parts.length; i++) {
@@ -389,12 +463,17 @@ function gitDenied(c: string, inOwn: (p: string) => boolean, pathOk: (p: string)
   return false;
 }
 
-/** Where a `cd` / `pushd` may go: /tmp, the own folder, or a sub-folder of where it already is. */
+/**
+ * Where a `cd` / `pushd` (or `env -C`) may go: /tmp, the own folder, or a sub-folder of where it already is. Only a plain
+ * path word counts; a quoted, escaped, braced or globbed one (`.'.'/tmp/p`) is unread and so not ok (BOS-378).
+ */
 function dirOk(dir: string, inOwn: (p: string) => boolean): boolean {
   if (dir === "" || dir === "-") return false; // a bare `cd` goes to $HOME, `cd -` to OLDPWD: both unknown
-  if (/^\/tmp(\/|$)/.test(dir) && !dir.includes("..")) return true;
-  if (inOwn(dir)) return true;
-  return /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(dir) && !dir.includes(".."); // a sub-folder of where it already is
+  const p = plainPath(dir);
+  if (p === null) return false;
+  if (/^\/tmp(\/|$)/.test(p)) return true;
+  if (inOwn(p)) return true;
+  return /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(p) && !climbsOut(p); // a sub-folder of where it already is
 }
 
 /**
@@ -552,22 +631,24 @@ function variableCommandWord(c: string, inner = false): boolean {
 function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
   const interp = "python[\\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh|g?awk|mawk|sh|bash|zsh|dash|ksh";
   // Only where a command word stands: at the start, after a separator, `then`/`do`, or a wrapper (env, nohup, timeout N, ...).
-  const wrap = "(?:\\b(?:then|do|else|exec|env|nohup|time|sudo|xargs|command|nice|setsid|stdbuf)\\s+|\\btimeout\\s+)";
+  const wrap = "(?:\\b(?:then|do|else|exec|env|nohup|time|sudo|doas|xargs|command|nice|setsid|stdbuf)\\s+|\\btimeout\\s+)";
   const re = new RegExp(`(?:^|[;&|(\\n{]\\s*|${wrap})(?:(?:-\\S+|\\d+\\w*|\\w+=\\S*)\\s+)*(?:[\\w./-]*/)?(${interp})(?![\\w./-])((?:[^;&|\\n'"]|'[^']*'|"[^"]*")*)`, "g");
   const unq = (t: string): string => t.replace(/^['"]+|['"]+$/g, "");
-  const risky = (p: string, relOk: boolean): boolean => {
-    p = unq(p);
+  // A script word must be a plain literal path (BOS-378): any quote, escape, brace or glob is unread, so risky.
+  const risky = (raw: string, relOk: boolean): boolean => {
+    const p = plainPath(raw);
+    if (p === null) return raw !== "-"; // a disguised path word is never read as safe
     if (p === "" || p === "-") return false;
-    if (/\$|\x60|^~|\.\./.test(p) || /^\/tmp(\/|$)/.test(p)) return true;
+    if (/^~/.test(raw) || climbsOut(p) || /^\/tmp(\/|$)/.test(p)) return true;
     if (p.startsWith("/")) return !inOwn(p);
     return !relOk;
   };
   const writeOp = />|\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\bdd\b|\bcurl\b|\bwget\b|\btouch\b|\bsed\b|\bpatch\b|\bgit\s+(?:apply|checkout|restore|am)\b|\bunzip\b|\btar\b/;
-  // A relative path lands wherever the last `cd` went.
+  // A relative path lands wherever the last `cd`/`pushd`/`env -C` went.
   let relOk = true;
-  for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) {
-    const d = m[1] ?? "";
-    if (!dirOk(d, inOwn) || (/^[/~$]/.test(d) && !inOwn(d))) relOk = false;
+  for (const d of cdWords(c)) {
+    const p = plainPath(d);
+    if (p === null || !dirOk(d, inOwn) || (/^[/~$]/.test(p) && !inOwn(p))) relOk = false;
   }
   const writtenElsewhere = (p: string, at: number, len: number): boolean => {
     const rest = c.slice(0, at) + " " + c.slice(at + len);

@@ -562,3 +562,73 @@ describe("rules judge: git outside the agent's own checkout, and :: transports (
     "git ls-remote origin",
   ]);
 });
+
+// BOS-378, Jane's round 11: the plain forms above are closed, but the same file or folder written in disguise
+// (`\/tmp`, `.'/.'/…`, `{…,}`) still got Allow on da17a7e9. The whole class is closed now: a script-file or folder
+// target only counts as a plain literal path (no quote, escape, brace, glob, `$` or backtick), normalised and required to
+// land inside the agent's own checkout; an unknown launcher (flock, busybox, ionice, chrt, doas, …) in front of an
+// interpreter gets no Allow either. Every deny row here was Allow on da17a7e9 (shown by the base runs in my report).
+describe("rules judge: disguised paths and unknown launchers (BOS-378, Jane round 11)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+
+  describe("1. script files written in disguise", () => {
+    denies([
+      "node \\/tmp/x.js",
+      "sh \\/tmp/x.sh",
+      "python3 \\/tmp/x.py",
+      "node .'.'/.'.'/.'.'/.'.'/.'.'/tmp/x.js",
+      "node {/tmp/x.js,}",
+      "bash {/tmp/x.sh,}",
+      "node /tm'p'/x.js",
+      "node '/tmp'/x.js",
+      "node /tmp/{x,y}.js",
+      "node /t?p/x.js",
+      "node /tm[p]/x.js",
+      "node /tmp/x.j\"s\"",
+      "node /tmp/x.j\\s",
+      `S=/tmp/x.js; node $S`,
+      `node ~/x.js`,
+    ]);
+    // A plain checked-in script in the agent's own folder is still Allow (the Allow-list is unchanged).
+    allows(["node scripts/x.js", "node ./scripts/x.js", "bash scripts/check-quick.sh", "python3 scripts/check.py", "node apps/server/dist/index.js"]);
+  });
+
+  describe("2. folder changes in disguise (cd, pushd, env -C, git -C)", () => {
+    denies([
+      "cd .'.'/.'.'/.'.'/.'.'/.'.'/tmp/p && git status",
+      "cd '/tmp/p' && git status",
+      "pushd /tmp/p; git status",
+      "env -C /tmp node x.js",
+      "env -C /tmp/p git status",
+      "git -C .'.'/tmp/p status",
+      "git --git-dir=.'.'/tmp/p/.git status",
+      "cd /tmp/./p && git status",
+      "cd /tmp/p/../q && git status",
+    ]);
+    allows([`cd ${ws}/tickets/${own} && git status`, `pushd ${ws}/tickets/${own}; git status`]);
+  });
+
+  describe("3. unknown launchers in front of an interpreter", () => {
+    denies([
+      "flock /tmp/l node /tmp/x.js",
+      "flock -w 1 /tmp/l node /tmp/x.js",
+      "flock /tmp/l bash -c 'id'",
+      "busybox sh /tmp/x.sh",
+      "busybox sh -c 'id'",
+      "ionice -c3 node /tmp/x.js",
+      "chrt 1 sh x.sh",
+      "chrt -f 1 node /tmp/x.js",
+      "doas node /tmp/x.js",
+      "chroot / node /tmp/x.js",
+      "watch node /tmp/x.js",
+      "strace node /tmp/x.js",
+      "su -c 'node /tmp/x.js'",
+    ]);
+    // A known wrapper over a plain checked-in script, and an unknown launcher over a non-interpreter, stay Allow.
+    allows(["nice -n 10 bash scripts/check-all.sh", "timeout 600 bash scripts/check-all.sh", "setsid nohup bash scripts/check-all.sh", "flock /tmp/l pnpm test", "grep -r node src/"]);
+  });
+});
