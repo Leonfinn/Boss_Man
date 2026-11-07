@@ -657,6 +657,11 @@ export async function buildApp(opts: AppOptions) {
     // A trip means the Scrum Master is the problem: straight to the owner.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
     alertCeo: (input) => alerts.raise(input),
+    // The idle-capacity rules (BOS-659): how many of the company's run slots are busy, and its limit.
+    capacity: async (companyId) => {
+      const { company } = await scheduler.runLimits(companyId);
+      return { busy: company.running, limit: company.limit };
+    },
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
     localHour: (t) => Number(formatDate("en-GB", t, { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ })),
