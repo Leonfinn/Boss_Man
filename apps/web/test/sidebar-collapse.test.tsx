@@ -77,6 +77,13 @@ describe("collapsed icons still work", () => {
     // A dot is drawn for the strip too, but it is decorative, not read out.
     expect(feedback.querySelector(".count-dot")).not.toBeNull();
   });
+
+  it("keeps Log out reachable as a named button with an icon while collapsed", () => {
+    show({ collapsed: true });
+    const logout = screen.getByRole("button", { name: "Log out" });
+    expect(logout.getAttribute("title")).toBe("Log out");
+    expect(logout.querySelector(".logout-icon")).not.toBeNull();
+  });
 });
 
 describe("narrow screen overlay", () => {

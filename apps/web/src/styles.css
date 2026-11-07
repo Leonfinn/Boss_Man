@@ -877,9 +877,13 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
   /* The badge count stays visible as a small dot when the strip is too narrow for the number. */
   .side.collapsed .count-dot { display: block; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--badge); }
   .side.collapsed .foot { padding: 0; }
+  /* Log out stays reachable from the strip as an icon (BOS-290). */
+  .side.collapsed .foot .logout { display: inline-flex; align-items: center; justify-content: center; width: 100%; padding: 8px; }
+  .side.collapsed .logout-icon { display: block; }
 }
 .side .side-collapse { display: none; }
 .side .count-dot { display: none; }
+.side .logout-icon { display: none; }
 /* A narrow screen's expanded menu opens over the page instead of pushing it (BOS-290). */
 @media (min-width: 641px) and (max-width: 1180px) {
   .app:not(.side-collapsed) > nav.side { position: fixed; z-index: 30; left: 0; top: 0; bottom: 0; width: 232px; box-shadow: 8px 0 24px rgb(0 0 0 / 0.4); }
