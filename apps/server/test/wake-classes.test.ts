@@ -11,6 +11,7 @@ import { openPglite } from "../src/db/client.js";
 import { costEvents, decisions, runs, tickets, wakes } from "../src/db/schema.js";
 import { WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
 import type { Limits } from "../src/services/scheduler.js";
+import { HELD_COMPANY } from "../src/services/fair-share.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -178,7 +179,7 @@ describe("wake classes: a held agent wake gains rank until it gets a slot (BOS-5
     await ctx!.db.update(wakes).set({ createdAt: ago(1 * HOUR) }).where(eq(wakes.id, check.id));
     await ctx!.scheduler.tick();
     expect(ctx!.commands).toHaveLength(0);
-    expect((await ctx!.db.select().from(wakes).where(eq(wakes.id, engagement.id)))[0]!.statusReason).toBe("at a concurrency limit");
+    expect((await ctx!.db.select().from(wakes).where(eq(wakes.id, engagement.id)))[0]!.statusReason).toBe(HELD_COMPANY);
 
     // The slot frees: the engagement goes first, and the scheduled wakes wait their turn.
     await ctx!.db.update(runs).set({ endedAt: new Date(), outcome: "end_turn" }).where(eq(runs.id, live!.id));
