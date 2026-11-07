@@ -260,7 +260,34 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     expect(await ws.carried({ ...spec, ticketId: ffId }, "main", [hit])).toEqual({ carried: [{ ...hit, contained: true }] });
   });
 
-  it("does not count a branch stacked on this ticket's tip, then committed (BOS-629)", async () => {
+  it("does not count a branch created from this ticket's tip, then committed (BOS-629)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const tip = git(ws.repoDir(ids.project), "rev-parse", `bossman/${ids.t}`);
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId, baseRef: tip });
+    writeFileSync(path.join(b.path, "b.txt"), "own\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "stacked ticket's work");
+    expect(await ws.carried(spec, "main", [{ ticketId: bId, branch: `bossman/${bId}` }])).toEqual({ carried: [] });
+  });
+
+  it("still counts a stacked branch's own commit once this ticket takes it in (BOS-629)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const tip = git(ws.repoDir(ids.project), "rev-parse", `bossman/${ids.t}`);
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId, baseRef: tip });
+    writeFileSync(path.join(b.path, "b.txt"), "own\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "stacked ticket's work");
+    const w = await ws.ensure(spec);
+    git(w.path, "merge", "--no-edit", `bossman/${bId}`);
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
+  });
+
+  it("still counts a branch that fast-forwarded this ticket in, then committed: same shape as the reverse, so it can't be told apart (BOS-369)", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
     const ffId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -270,33 +297,10 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     git(ff.path, "add", ".");
     git(ff.path, "commit", "-qm", "ff ticket's work");
     const hit = { ticketId: ffId, branch: `bossman/${ffId}` };
-    expect(await ws.carried(spec, "main", [hit])).toEqual({ carried: [] });
+    expect(await ws.carried(spec, "main", [hit])).toEqual({ carried: [{ ...hit, contained: false }] });
   });
 
-  it("still counts the reverse stack: this ticket built on B's commit while B went on (BOS-629)", async () => {
-    const o = origin();
-    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
-    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-    const b = await ws.ensure({ ...spec, ticketId: bId });
-    writeFileSync(path.join(b.path, "b1.txt"), "b1\n");
-    git(b.path, "add", ".");
-    git(b.path, "commit", "-qm", "b1");
-    const w = await ws.ensure(spec);
-    git(w.path, "reset", "-q", "--hard", "main");
-    git(w.path, "merge", "--ff-only", `bossman/${bId}`);
-    writeFileSync(path.join(w.path, "a2.txt"), "a2\n");
-    git(w.path, "add", ".");
-    git(w.path, "commit", "-qm", "a2");
-    writeFileSync(path.join(b.path, "b2.txt"), "b2\n");
-    git(b.path, "add", ".");
-    git(b.path, "commit", "-qm", "b2");
-    const hit = { ticketId: bId, branch: `bossman/${bId}` };
-    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
-  });
-
-  // BOS-629: the next two have the same history as a branch stacked on this ticket (our tip is on B's first-parent
-  // line, B has more), which must not be refused; git can't tell them apart, so they are not reported either.
-  it("does not count a branch that fast-forwarded to this ticket's tip after taking its work, then committed (BOS-369, BOS-629)", async () => {
+  it("still counts a branch whose work this ticket fast-forwarded in, then committed, before the branch fast-forwarded this ticket (BOS-369)", async () => {
     const o = origin();
     const { ws } = await ticketWithCommit(o, "feature.txt", "new\n");
     const tId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -316,10 +320,10 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     git(b.path, "add", ".");
     git(b.path, "commit", "-qm", "b2");
     const hit = { ticketId: bId, branch: `bossman/${bId}` };
-    expect(await ws.carried(spec, "main", [hit])).toEqual({ carried: [] });
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
   });
 
-  it("does not count a branch that fast-forwarded to this ticket's tip after this ticket merged its work in (BOS-369, BOS-629)", async () => {
+  it("still counts a branch whose work this ticket merged in before the branch fast-forwarded this ticket (BOS-369)", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
     const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -335,7 +339,7 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     git(b.path, "add", ".");
     git(b.path, "commit", "-qm", "b2");
     const hit = { ticketId: bId, branch: `bossman/${bId}` };
-    expect(await ws.carried(spec, "main", [hit])).toEqual({ carried: [] });
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
   });
 
   it("counts a branch this ticket was fast-forwarded onto, even after the branch merged this ticket back in (BOS-340)", async () => {

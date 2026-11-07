@@ -754,11 +754,24 @@ export class Workspaces {
           // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
           // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
           const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
-          // B stacked on this ticket (BOS-629): this ticket's own tip sits on B's first-parent line, so every shared commit
-          // is this ticket's work that B was built on, not B's work that we picked up. When we picked up B's work and B
-          // then took ours, our tip arrives on B's second-parent side, so it is not on B's line and stays reported.
-          const myTip = await this.git(["rev-parse", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
-          if (!contained && bLine.includes(myTip)) continue;
+          // B stacked on this ticket (BOS-629): B was created from a commit this branch holds. The graph alone can't say who
+          // wrote a shared commit, but the base the runner recorded when it created B's branch can: a shared commit that is
+          // at or below that base was already there when B started, so it isn't B's work. Any shared commit above B's base
+          // (B's own, or one B has only because this ticket took it) is still reported (BOS-369), and so is a branch with no
+          // recorded base, since the gate has to fail safe.
+          if (!contained) {
+            const base = await this.git(["config", "--get", `bossman.ticket-${b.ticketId}.base`], { cwd: repo }).catch(() => "");
+            if (base) {
+              let allBelowBase = true;
+              for (const sha of bLine.filter((s) => mine.has(s))) {
+                if ((await this.gitCode(["merge-base", "--is-ancestor", sha, base], { cwd: repo })).code !== 0) {
+                  allBelowBase = false;
+                  break;
+                }
+              }
+              if (allBelowBase) continue;
+            }
+          }
           found.push({ ticketId: b.ticketId, branch: b.branch, contained });
         }
       }
