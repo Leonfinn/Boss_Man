@@ -190,6 +190,39 @@ describe("deploy wait (BOS-420)", () => {
     expect((await svc.get())?.phase).toBe("sent");
   });
 
+  it("a leaking live server: the card says the server itself is the shortage and recommends updating now (7 Nov)", async () => {
+    const { w, deps } = world();
+    // 7 Nov: the live server uses 17.5 GB, 9 GB is free; a fresh second server needs 4 GB (+ 3 GB build + 1 GB margin).
+    w.headroom = { version: 1, writtenAt: "", availableMb: 9216, needMb: 9500, newServerMb: 4096, liveServerMb: 17920 };
+    const svc = deployWaitService(db, deps);
+    const r = await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    expect(r.phase).toBe("waiting"); // still not sent by itself: only the owner decides to go short
+    expect(r.quiet?.serverIsShortage).toEqual({ liveMb: 17920, freshMb: 4096 });
+    expect(r.quiet?.why[0]).toMatch(/mostly because the running server itself uses 17\.5 GB where a freshly started one needs about 4\.0 GB/);
+    offset += 31 * MIN;
+    await svc.step();
+    const [card] = await cards();
+    expect(card?.options).toEqual([KEEP_WAITING_MORE(30), UPDATE_NOW_ANYWAY, CANCEL_UPDATE]);
+    expect(card?.recommendedOption).toBe(UPDATE_NOW_ANYWAY);
+    expect(card?.question).toMatch(/waiting won't free the memory; the update replaces it/);
+    expect(card?.question).toMatch(/update now \(recommended\)/);
+  });
+
+  it("short memory that a fresh server wouldn't fix keeps 'keep waiting' as the recommendation", async () => {
+    const { w, deps } = world();
+    // The live server is a little over a fresh one, but that alone wouldn't make room: something else uses the memory.
+    w.headroom = { version: 1, writtenAt: "", availableMb: 2048, needMb: 8192, newServerMb: 4096, liveServerMb: 5000 };
+    const svc = deployWaitService(db, deps);
+    const r = await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    expect(r.quiet?.serverIsShortage).toBeUndefined();
+    expect(r.quiet?.why[0]).not.toMatch(/running server itself/);
+    offset += 31 * MIN;
+    await svc.step();
+    const [card] = await cards();
+    expect(card?.recommendedOption).toBe(KEEP_WAITING_MORE(30));
+    expect(card?.question).not.toMatch(/recommended/);
+  });
+
   it("a request the host holds for memory is asked about after 30 minutes, and update now swaps it for an override", async () => {
     const { w, deps } = world();
     const svc = deployWaitService(db, deps);
@@ -387,5 +420,19 @@ describe("deploy wait (BOS-420)", () => {
     expect(await svc.get()).toBeNull();
     expect(w.sent).toEqual([]);
     expect(w.notes.at(-1)?.title).toBe("Stopped making room for the update");
+  });
+
+  it("a hand wait on a leaking server recommends stopping the wait and applying the update", async () => {
+    const { w, deps } = world();
+    w.headroom = { version: 1, writtenAt: "", availableMb: 9216, needMb: 9500, newServerMb: 4096, liveServerMb: 17920 };
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A, origin: "hand" });
+    offset = 31 * MIN;
+    await svc.step();
+    const [card] = await cards();
+    expect(card!.options).toEqual([KEEP_WAITING_MORE(30), CANCEL_UPDATE]);
+    expect(card!.recommendedOption).toBe(CANCEL_UPDATE);
+    expect(card!.question).toMatch(/stop waiting and apply the update by hand \(recommended\)/);
+    expect(w.sent).toEqual([]);
   });
 });

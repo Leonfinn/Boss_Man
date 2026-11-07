@@ -463,12 +463,17 @@ has "$DL" "stopped blue"
 live_is green
 has "$D/deployer.log" "Memory during the update to ${b1:0:8}: lowest free 29296 MB"
 [[ ! -e $D/state/mem-low ]] || fail "memory samples left after the window"
-# 16a. On blue/green an update also needs room for a second server: the cap when set, else what the live one uses
-# now, else 2048 MB; plus the build allowance and the margin.
-bg; has "$D/outbox/headroom.json" '"needMb": 6144, "needFrom": "default"'
-FAKE_STATS="10.5GiB / 31.3GiB" bg; has "$D/outbox/headroom.json" '"needMb": 14848, "needFrom": "live"'
-FAKE_STATS="900MiB / 31.3GiB" bg; has "$D/outbox/headroom.json" '"needMb": 4996, "needFrom": "live"'
-BOSSMAN_SERVER_MEMORY=12g FAKE_STATS="10.5GiB / 31.3GiB" bg; has "$D/outbox/headroom.json" '"needMb": 16384, "needFrom": "limit"'
+# 16a. On blue/green an update also needs room for a second server: a freshly started one (DEPLOY_NEW_SERVER_MB, 4096),
+# or the cap when that is smaller; plus the build allowance and the margin. What the live one uses is reported beside it
+# but never raises the need: a leaking live server must not hold back the update that replaces it.
+bg; has "$D/outbox/headroom.json" '"needMb": 8192, "needFrom": "fresh", "newServerMb": 4096'
+hasnt "$D/outbox/headroom.json" "liveServerMb" # Docker can't say: nothing reported
+FAKE_STATS="17.5GiB / 31.3GiB" bg; has "$D/outbox/headroom.json" '"needMb": 8192, "needFrom": "fresh", "newServerMb": 4096, "liveServerMb": 17920'
+FAKE_STATS="900MiB / 31.3GiB" bg; has "$D/outbox/headroom.json" '"needMb": 8192, "needFrom": "fresh", "newServerMb": 4096, "liveServerMb": 900'
+BOSSMAN_SERVER_MEMORY=12g FAKE_STATS="10.5GiB / 31.3GiB" bg; has "$D/outbox/headroom.json" '"needMb": 8192, "needFrom": "fresh"' # a cap above a fresh server changes nothing
+BOSSMAN_SERVER_MEMORY=2g bg; has "$D/outbox/headroom.json" '"needMb": 6144, "needFrom": "limit", "newServerMb": 2048'
+DEPLOY_NEW_SERVER_MB=3000 bg; has "$D/outbox/headroom.json" '"needMb": 7096, "needFrom": "fresh", "newServerMb": 3000'
+DEPLOY_NEW_SERVER_MB=lots bg; has "$D/outbox/headroom.json" '"needMb": 8192, "needFrom": "fresh"' # not a number: the default
 
 # 16b. A host whose compose files have no front network yet gets the old form.
 bx="$(push apps/server/bgfront)"

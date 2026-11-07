@@ -37,6 +37,12 @@ export type Quiet = {
   why: string[];
   /** The host doesn't report memory (an older deployer): only runs and checks are tested. */
   memoryUnknown?: boolean;
+  /**
+   * Memory is short mainly because the running server itself uses far more than a freshly started one (a leak, as on
+   * 7 Nov at 17.5 GB): with the live server at fresh size there would be room. The update is what fixes that, so the
+   * card says so and recommends updating now. Set only when memory is the shortage.
+   */
+  serverIsShortage?: { liveMb: number; freshMb: number };
   at: string;
 };
 export type DeployWait = {
@@ -122,6 +128,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
     let freeMb: number | null = null;
     let needMb: number | null = null;
     let memoryUnknown = false;
+    let serverIsShortage: Quiet["serverIsShortage"];
     if (!h) memoryUnknown = true; // an older deployer: memory isn't tested, runs and checks still are
     else {
       const age = t.getTime() - Date.parse(h.writtenAt);
@@ -130,12 +137,20 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
       else {
         freeMb = h.availableMb;
         needMb = h.needMb;
-        if (freeMb < needMb) why.push(`${gb(freeMb)} of memory is free and the update needs ${gb(needMb)}`);
+        if (freeMb < needMb) {
+          const live = h.liveServerMb;
+          const fresh = h.newServerMb;
+          // The running server's extra over a fresh one would cover the shortage: the server itself is what is short.
+          if (live !== undefined && fresh !== undefined && fresh > 0 && live > fresh && freeMb + (live - fresh) >= needMb) {
+            serverIsShortage = { liveMb: live, freshMb: fresh };
+            why.push(`${gb(freeMb)} of memory is free and the update needs ${gb(needMb)}, mostly because the running server itself uses ${gb(live)} where a freshly started one needs about ${gb(fresh)}`);
+          } else why.push(`${gb(freeMb)} of memory is free and the update needs ${gb(needMb)}`);
+        }
       }
     }
     if (checks > 0) why.push(`${checks} merge check${checks === 1 ? " is" : "s are"} running`);
     if (runs > quietRuns) why.push(`${runs} runs are going (the update waits for ${quietRuns} or fewer)`);
-    return { ready: why.length === 0, runs, checks, freeMb, needMb, why, ...(memoryUnknown ? { memoryUnknown } : {}), at: t.toISOString() };
+    return { ready: why.length === 0, runs, checks, freeMb, needMb, why, ...(memoryUnknown ? { memoryUnknown } : {}), ...(serverIsShortage ? { serverIsShortage } : {}), at: t.toISOString() };
   }
 
   /** A hand-applied update: the owner's to-do shows how quiet the machine is, so they know when to apply it. */
@@ -164,9 +179,17 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
       : `The update to ${short(w.commit)} has waited ${w.minutes} minutes for the machine to be quiet: ${busy}.`;
     // A hand-applied update is never sent by Boss Man, so there is nothing to "update now": the owner can apply it anyway from the to-do.
     const options = hand ? [KEEP_WAITING_MORE(w.minutes), CANCEL_UPDATE] : [KEEP_WAITING_MORE(w.minutes), UPDATE_NOW_ANYWAY, CANCEL_UPDATE];
-    const choice = hand
-      ? `Keep waiting, or stop waiting (this lifts the hold; you can still apply the update by hand, at the risk of running short of memory as on 3 Nov)?`
-      : `Keep waiting, update now anyway (it may run short of memory and be switched back, as on 3 Nov), or cancel the update?`;
+    // The running server itself is what uses the memory (a leak): waiting won't free it, the update will. Say so, and recommend it.
+    const leak = q.serverIsShortage;
+    const choice = leak
+      ? hand
+        ? `The running server uses ${gb(leak.liveMb)}, where a freshly started one needs about ${gb(leak.freshMb)}, so waiting won't free the memory; applying the update replaces it. Keep waiting, or stop waiting and apply the update by hand (recommended)?`
+        : `The running server uses ${gb(leak.liveMb)}, where a freshly started one needs about ${gb(leak.freshMb)}, so waiting won't free the memory; the update replaces it (the old copy stops when the standby window ends). Keep waiting, update now (recommended), or cancel the update?`
+      : hand
+        ? `Keep waiting, or stop waiting (this lifts the hold; you can still apply the update by hand, at the risk of running short of memory as on 3 Nov)?`
+        : `Keep waiting, update now anyway (it may run short of memory and be switched back, as on 3 Nov), or cancel the update?`;
+    // For a hand-applied update, "stop waiting" is the cancel option: it lifts the hold so the owner can apply it.
+    const recommended = leak ? (hand ? CANCEL_UPDATE : UPDATE_NOW_ANYWAY) : options[0]!;
     await db
       .insert(decisions)
       .values({
@@ -174,7 +197,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
         kind: "approval",
         question: `${where}${mem} ${choice} Until you answer, new merge checks wait and at most ${quietRuns} runs go at once.`,
         options,
-        recommendedOption: options[0]!,
+        recommendedOption: recommended,
         dedupeKey: `deploy-wait:${w.approvedAt}:${w.deadline}`,
         context: { type: "deploy_wait", approvedAt: w.approvedAt },
       })

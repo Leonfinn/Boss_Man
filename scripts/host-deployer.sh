@@ -25,9 +25,12 @@
 #                      published in available.json, so Boss Man's runner-update trial uses the same length
 #   SOAK_CHECK_SECONDS blue/green: how long a failing check during that window is retried before the automatic switch-back (60)
 #   DEPLOY_MIN_FREE_MB     memory (MB) that must be free before an update request is taken; empty = worked out (BOS-420):
-#                          the build allowance + 1024, and on blue/green also room for a second server (BOSSMAN_SERVER_MEMORY
-#                          when set, else what the live server uses now, else 2048). Published in outbox/headroom.json.
+#                          the build allowance + 1024, and on blue/green also room for a second server: a freshly started
+#                          one (DEPLOY_NEW_SERVER_MB), or BOSSMAN_SERVER_MEMORY when that cap is smaller. Never what the live
+#                          server uses now: a leaking server would hold back the update that replaces it. Published in
+#                          outbox/headroom.json, with the live server's own use (liveServerMb) beside it.
 #   DEPLOY_BUILD_MEMORY_MB what an image build needs (3072); the deployer logs the lowest free memory of each update to tune it
+#   DEPLOY_NEW_SERVER_MB   blue/green: what a freshly started server colour needs (4096)
 #
 # Blue/green (docs/09-self-deploy.md, "Phase 3, part 2"): when COMPOSE_FILE (environment or the checkout's .env)
 # names deploy/truenas-bluegreen.yml, target "server" does a zero-downtime colour swap instead of deploy.sh.
@@ -45,7 +48,7 @@ D="${BOSSMAN_DEPLOYER:-$(cd "$(dirname "$0")" && pwd)}"
 REPO="$D/../src"
 WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SECONDS=300
 BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}" SOAK_CHECK_SECONDS="${SOAK_CHECK_SECONDS:-60}"
-DEPLOY_MIN_FREE_MB="${DEPLOY_MIN_FREE_MB:-}" DEPLOY_BUILD_MEMORY_MB="${DEPLOY_BUILD_MEMORY_MB:-3072}"
+DEPLOY_MIN_FREE_MB="${DEPLOY_MIN_FREE_MB:-}" DEPLOY_BUILD_MEMORY_MB="${DEPLOY_BUILD_MEMORY_MB:-3072}" DEPLOY_NEW_SERVER_MB="${DEPLOY_NEW_SERVER_MB:-4096}"
 # Where memory is read from (the tests point these at files of their own).
 MEMINFO="${BOSSMAN_MEMINFO:-/proc/meminfo}" CGROUP_DIR="${BOSSMAN_CGROUP_DIR:-/sys/fs/cgroup}"
 CONF="$D/host.conf"
@@ -257,7 +260,7 @@ write_host_facts() {
 # lowest free memory and highest swap use are logged, so the allowance can be set from real numbers.
 # Works on any Linux host: /proc/meminfo, plus a container memory limit it doesn't show (an LXC without lxcfs).
 # ---------------------------------------------------------------------------------------------------
-MEM_TOTAL="" MEM_AVAIL="" SWAP_TOTAL="" SWAP_USED="" NEED_MB="" NEED_FROM="" HOLDING=""
+MEM_TOTAL="" MEM_AVAIL="" SWAP_TOTAL="" SWAP_USED="" NEED_MB="" NEED_FROM="" NEW_SERVER_MB="" LIVE_SERVER_MB="" HOLDING=""
 num_file() { local v; v="$(head -c 64 "$1" 2>/dev/null)" || return 0; v="${v//[[:space:]]/}"; if [[ $v =~ ^[0-9]{1,20}$ ]]; then printf '%s' "$v"; fi; }
 meminfo_kb() { local v; v="$(awk -v k="$1:" '$1 == k { print $2; exit }' "$MEMINFO" 2>/dev/null)" || return 0; if [[ $v =~ ^[0-9]{1,15}$ ]]; then printf '%s' "$v"; fi; }
 
@@ -312,9 +315,15 @@ live_server_mb() { # what the live server container uses now, in MB; nothing whe
          printf "%d\n", n }' <<<"$u"
 }
 
-need_memory() { # sets NEED_MB (free memory an update needs) and NEED_FROM (where the number came from)
-  local build=$DEPLOY_BUILD_MEMORY_MB server=0 lim=""
-  NEED_MB="" NEED_FROM=""
+need_memory() { # sets NEED_MB (free memory an update needs) and NEED_FROM (where the number came from); on blue/green also
+  # NEW_SERVER_MB (the room a second, freshly started colour gets) and LIVE_SERVER_MB (what the live colour uses now).
+  local build=$DEPLOY_BUILD_MEMORY_MB server=0 lim="" cap fresh=$DEPLOY_NEW_SERVER_MB
+  NEED_MB="" NEED_FROM="" NEW_SERVER_MB="" LIVE_SERVER_MB=""
+  if bluegreen_enabled; then
+    # Reported, never used for the need: a leaking live server (17.5 GB on 7 Nov) would hold back the update that replaces it.
+    LIVE_SERVER_MB="$(live_server_mb || true)"
+    [[ $LIVE_SERVER_MB =~ ^[0-9]{1,9}$ ]] || LIVE_SERVER_MB=""
+  fi
   if [[ -n $DEPLOY_MIN_FREE_MB ]]; then
     if [[ $DEPLOY_MIN_FREE_MB =~ ^[0-9]{1,7}$ ]]; then NEED_MB=$((10#$DEPLOY_MIN_FREE_MB)) NEED_FROM=setting; return 0; fi
     log "DEPLOY_MIN_FREE_MB is not a whole number of MB; working the need out instead."
@@ -322,13 +331,12 @@ need_memory() { # sets NEED_MB (free memory an update needs) and NEED_FROM (wher
   [[ $build =~ ^[0-9]{1,7}$ ]] || build=3072
   NEED_FROM=build
   if bluegreen_enabled; then # the new colour runs beside the live one until the window ends: room for a second server
+    [[ $fresh =~ ^[0-9]{1,7}$ ]] || fresh=4096
+    server=$((10#$fresh)) NEED_FROM=fresh
     lim="${BOSSMAN_SERVER_MEMORY:-$(grep -s '^BOSSMAN_SERVER_MEMORY=' "$REPO/.env" | tail -n 1 | cut -d= -f2- || true)}"
-    server="$(to_mb "$lim")"
-    if [[ -n $server ]] && ((server > 0)); then NEED_FROM=limit
-    else
-      server="$(live_server_mb || true)"
-      if [[ $server =~ ^[0-9]{1,9}$ ]]; then NEED_FROM=live; else server=2048 NEED_FROM=default; fi
-    fi
+    cap="$(to_mb "$lim")"
+    if [[ -n $cap ]] && ((cap > 0 && cap < server)); then server=$cap NEED_FROM=limit; fi # the cap is all it can ever take
+    NEW_SERVER_MB=$server
   fi
   NEED_MB=$((10#$build + server + 1024))
 }
@@ -355,6 +363,8 @@ write_headroom() {
   if [[ -n $MEM_TOTAL ]]; then out+=", \"totalMb\": $MEM_TOTAL, \"availableMb\": $MEM_AVAIL"; fi
   if [[ -n $SWAP_TOTAL ]]; then out+=", \"swapTotalMb\": $SWAP_TOTAL, \"swapUsedMb\": $SWAP_USED"; fi
   if [[ -n $NEED_MB ]]; then out+=", \"needMb\": $NEED_MB, \"needFrom\": $(jstr "$NEED_FROM")"; fi
+  if [[ -n $NEW_SERVER_MB ]]; then out+=", \"newServerMb\": $NEW_SERVER_MB"; fi
+  if [[ -n $LIVE_SERVER_MB ]]; then out+=", \"liveServerMb\": $LIVE_SERVER_MB"; fi
   if [[ -n $HOLDING ]]; then out+=", \"holding\": $(jstr "$HOLDING")"; fi
   if [[ -f $STATE/last-update ]]; then read -r c low step swap <"$STATE/last-update" || true; fi
   if [[ $c =~ ^[0-9a-f]{40}$ && $low =~ ^[0-9]{1,9}$ && $step =~ ^[a-z-]{1,32}$ && $swap =~ ^[0-9]{1,9}$ ]]; then

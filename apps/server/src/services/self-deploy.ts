@@ -61,6 +61,9 @@ const Headroom = z.object({
   swapUsedMb: z.number().int().nonnegative().optional(),
   needMb: z.number().int().nonnegative().optional(),
   needFrom: z.string().max(32).optional(),
+  /** Blue/green: the room the need gives a freshly started second server, and what the live server uses now (never part of the need). */
+  newServerMb: z.number().int().nonnegative().optional(),
+  liveServerMb: z.number().int().nonnegative().optional(),
   /** The host is leaving a request in its inbox (its memory floor). */
   holding: z.string().max(64).optional(),
   lastUpdate: z.object({ commit: z.string(), lowMb: z.number(), lowAt: z.string(), swapPeakMb: z.number() }).optional(),
