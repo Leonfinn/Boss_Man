@@ -143,12 +143,26 @@ if command -v flock >/dev/null; then
   FOLDER=${CHECK_ALL_FOLDER:-$(pwd -P)}; FOLDER=${FOLDER//[$'\n\r']/ }
   REPLACED="$LOCK.replaced.$$"; SLOTLOG=${CHECK_ALL_SLOT_LOG:-$LOCK.slotlog}; SLOT_K=0
   rm -f "$REPLACED" 2>/dev/null || true
+  # Line rules that can't jam (BOS-591). Every queue entry is three lines: the folder, "rules=<N>" and "boot=<id>".
+  # RULES is the serving-order version of this copy of the script: bump it whenever the queue rules change. A waiter that
+  # finds an entry with a newer version is an old copy of the script and leaves (exit 75, "merge origin/main"), so it can't
+  # sit at the head waiting on an order the newer copies don't follow. Entries from an older runner boot are dropped.
+  # A waiter that sees a free slot and no change in the line for CHECK_ALL_STALL_AFTER seconds (default 120) tries for the
+  # slot whatever its place; the flock itself keeps two from running in one slot. Old copies (no version lines) still queue.
+  RULES=${CHECK_ALL_QUEUE_RULES:-2}; [[ $RULES =~ ^[0-9]{1,6}$ ]] || RULES=2; RULES=$((10#$RULES))
+  STALL_AFTER=${CHECK_ALL_STALL_AFTER:-120}; [[ $STALL_AFTER =~ ^[0-9]{1,9}$ ]] || STALL_AFTER=120
+  boot_id() {  # kernel boot id plus when pid 1 started: the second part changes when the runner container restarts too
+    local b="" s=""; read -r b </proc/sys/kernel/random/boot_id 2>/dev/null || true
+    local f=(); s=$(</proc/1/stat) || s=""; s=${s##*) }; read -ra f <<<"$s"; echo "${b:-noboot}-${f[19]:-nopid1}"
+  }
+  BOOT=${CHECK_ALL_BOOT_ID:-$(boot_id)}; BOOT=${BOOT//[^A-Za-z0-9._-]/_}
+  write_entry() { printf '%s\nrules=%s\nboot=%s\n' "$FOLDER" "$RULES" "$BOOT" >"$qfile"; }
   # An unreachable lock folder (for example outside a fenced session's grant) fails at once with a clear message,
   # never a silent wait: a slot file that cannot be opened would otherwise read as "busy" forever.
   lock_unusable() { echo "check-all: cannot use the check lock folder: $1 (set CHECK_ALL_LOCK to a writable path)" >&2; exit 2; }
   mkdir -p "$QDIR" 2>/dev/null || lock_unusable "cannot create $QDIR"
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
-  { printf '%s\n' "$FOLDER" >"$qfile"; } 2>/dev/null || lock_unusable "cannot write $qfile"
+  { write_entry; } 2>/dev/null || lock_unusable "cannot write $qfile"
   trap 'rm -f "$qfile" "$AGEREF" "$REPLACED"' EXIT
   # One place per folder: a hand-run entry replaces older hand-run entries of the same folder (live ones get a marker to exit on).
   if [ "$prio" = 1 ]; then
@@ -187,7 +201,7 @@ if command -v flock >/dev/null; then
   # A waiter further back sees a place past the scan and keeps waiting.
   queue_place() {
     # Serving order: aged hand-run entries, then merge checks, then the other hand-run entries (each group oldest first).
-    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now stale=0 nA=0 nM=0 nH=0 myclass="" myidx=0; now=$(date +%s)
+    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now stale=0 nA=0 nM=0 nH=0 myclass="" myidx=0 newer=0 sig="" el2 el3; now=$(date +%s)
     # A live waiter touches its entry every report, so age is read from the file's modification time (a bash test,
     # no subprocess per entry), not from the name: a check that has waited more than 2 h in a long queue keeps its place.
     touch -d "@$((now - 7200))" "$AGEREF" 2>/dev/null && stale=1
@@ -201,6 +215,11 @@ if command -v flock >/dev/null; then
       if ! [[ $base =~ ^[01]-([0-9]{1,19})-([0-9]{1,9})$ ]]; then rm -f "$f"; continue; fi
       qts=$((10#${BASH_REMATCH[1]} / 1000000000)); qpid=$((10#${BASH_REMATCH[2]}))
       if [ ! -d "/proc/$qpid" ] || [ $((qts - now)) -gt 60 ] || { [ "$stale" = 1 ] && [ "$f" -ot "$AGEREF" ]; }; then rm -f "$f"; continue; fi
+      # Version lines (BOS-591): an entry from an older runner boot is dropped; one with newer rules than mine is noted.
+      el2=""; el3=""; { read -r _; read -r el2; read -r el3; } <"$f" 2>/dev/null || true
+      if [[ $el3 == boot=* ]] && [ "${el3#boot=}" != "$BOOT" ]; then rm -f "$f"; continue; fi
+      if [[ $el2 =~ ^rules=([0-9]{1,6})$ ]] && [ $((10#${BASH_REMATCH[1]})) -gt "$RULES" ] && [ "$f" != "$qfile" ]; then newer=$((10#${BASH_REMATCH[1]})); fi
+      sig="$sig $base"
       total=$((total + 1))
       if [ "${base:0:1}" = 0 ]; then nM=$((nM + 1)); [ "$f" != "$qfile" ] || { myclass=M; myidx=$nM; }
       elif [ $((now - qts)) -ge "$AGE_AFTER" ]; then nA=$((nA + 1)); [ "$f" != "$qfile" ] || { myclass=A; myidx=$nA; }
@@ -215,7 +234,18 @@ if command -v flock >/dev/null; then
     esac
     # An aged entry is a group of its own but sits among the hand-run names, so one past the scan may still hold earlier ones: count it behind the scan.
     [ "$mine" -gt 0 ] || mine=$((scan + 1))
-    echo "$mine $total"
+    echo "$mine $total $newer ${sig// /,}"
+  }
+  # True when some slot is free right now (probed on fd 8 and let go at once, so nothing is held).
+  slot_free() {
+    local k ok=1
+    for ((k = 1; k <= SLOTS; k++)); do
+      { exec 8>"$LOCK.slot.$k"; } 2>/dev/null || continue
+      if flock -n 8; then ok=0; fi
+      exec 8>&-
+      [ "$ok" = 1 ] || return 0
+    done
+    return 1
   }
   # Average length of the last passed runs, for the wait estimate (10 minutes when there are none).
   typical_run() {
@@ -229,13 +259,23 @@ if command -v flock >/dev/null; then
     fi
     if [ "$n" -gt 0 ]; then echo $((sum / n)); else echo 600; fi
   }
-  waited_from=$SECONDS; last_said=-1000; got=no; typical=""; stuck=no; seen=""; moved_at=$SECONDS
+  waited_from=$SECONDS; last_said=-1000; got=no; typical=""; stuck=no; seen=""; moved_at=$SECONDS; stall_sig=""; stall_since=$SECONDS
   while :; do
     if [ -e "$REPLACED" ]; then
       echo "check-all: replaced by a newer check of this folder ($FOLDER); leaving the line" >&2; exit 75
     fi
-    read -r place total < <(queue_place)
+    read -r place total newer linesig < <(queue_place)
+    if [ "${newer:-0}" -gt 0 ]; then
+      echo "check-all: this copy of check-all.sh uses queue rules v$RULES but the line is on v$newer: merge origin/main to get the current script; leaving the line" >&2; exit 75
+    fi
     if [ "$place" -le 1 ] && take_slot; then got=yes; break; fi
+    # A line that stands still with a free slot (an old copy at the head, waiting on an order the rest don't follow) must not
+    # jam: after STALL_AFTER seconds of a free slot and no change in the line, try for the slot whatever my place.
+    if slot_free && [ "$linesig" = "${stall_sig:-}" ]; then
+      if [ $((SECONDS - stall_since)) -ge "$STALL_AFTER" ] && take_slot; then
+        echo "check-all: the line stood still for $((SECONDS - stall_since)) s with a free slot (place $place of $total); taking it"; got=yes; break
+      fi
+    else stall_sig=$linesig; stall_since=$SECONDS; fi
     if [ "$WAIT" -gt 0 ] && [ $((SECONDS - waited_from)) -ge "$WAIT" ]; then break; fi
     # The queue moves when my place changes or a slot gets a new holder; one that stands still too long is stuck.
     if [ "$STUCK" -gt 0 ]; then
@@ -249,7 +289,7 @@ if command -v flock >/dev/null; then
       if [ $((SECONDS - moved_at)) -ge "$STUCK" ]; then stuck=yes; break; fi
     fi
     if [ $((SECONDS - last_said)) -ge "${CHECK_ALL_QUEUE_REPORT:-30}" ]; then
-      { printf '%s\n' "$FOLDER" >"$qfile"; } 2>/dev/null || true  # keep my queue entry fresh (and put it back if someone removed it)
+      { write_entry; } 2>/dev/null || true  # keep my queue entry fresh (and put it back if someone removed it)
       [ -n "$typical" ] || typical=$(typical_run)
       rounds=$(((place + SLOTS - 1) / SLOTS))
       echo "check-all: waiting for a free check slot (place $place of $total, $SLOTS run at once); about $(((rounds * typical + 59) / 60)) min to go"
