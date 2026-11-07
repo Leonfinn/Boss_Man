@@ -59,6 +59,19 @@ export function windowBounds(window: BudgetWindow, now: Date): Bounds {
 
 export type SpendEvent = { occurredAt: Date; costMicros: number };
 
+/**
+ * A window as SQL can compare it: a half-open `[after, before)` in epoch milliseconds, with a null
+ * end for "no upper bound". `after` is inclusive and `before` exclusive, exactly like `sumSpend`
+ * (`start <= t < end`), so a SQL sum and the JS one count the same rows (BOS-671).
+ */
+export function boundsAsEpoch(bounds: Bounds): { after: number | null; before: number | null } {
+  return { after: bounds.start ? bounds.start.getTime() : null, before: bounds.end ? bounds.end.getTime() : null };
+}
+
+/**
+ * The total spent inside `bounds`. Callers with many cost rows sum in SQL instead (BOS-671) and
+ * pass the total in; this walks the rows in JS for small sets and tests.
+ */
 export function sumSpend(events: Iterable<SpendEvent>, bounds: Bounds): number {
   let total = 0;
   for (const e of events) {
@@ -80,14 +93,19 @@ export type CreditStatus = {
   fractionUsed: number;
 };
 
-/** A monthly grant (e.g. the Max plan's $200 of API credit) against spend recorded in this cycle. */
+/**
+ * A monthly grant (e.g. the Max plan's $200 of API credit) against spend recorded in this cycle.
+ * `spent` is the cycle's total: a caller with many cost rows sums it in SQL over `billingCycle`
+ * instead of handing every row over (BOS-671). Without it, the given events are summed here.
+ */
 export function creditStatus(
   grant: { grantMicros: number; anchor: Date },
   events: Iterable<SpendEvent>,
   now: Date,
+  spent?: number,
 ): CreditStatus {
   const { start, end } = billingCycle(grant.anchor, now);
-  const spentMicros = sumSpend(events, { start, end });
+  const spentMicros = spent ?? sumSpend(events, { start, end });
   return {
     cycleStart: start,
     cycleEnd: end,
@@ -119,9 +137,14 @@ export type BudgetStatus = {
   bounds: Bounds;
 };
 
-export function budgetStatus(policy: BudgetPolicy, events: Iterable<SpendEvent>, now: Date): BudgetStatus {
+/**
+ * A policy's use against its window. `used` is the window's total: a caller with many cost rows
+ * sums it in SQL over `windowBounds` instead of handing every row over (BOS-671). Without it, the
+ * given events are summed here.
+ */
+export function budgetStatus(policy: BudgetPolicy, events: Iterable<SpendEvent>, now: Date, used?: number): BudgetStatus {
   const bounds = windowBounds(policy.window, now);
-  const usedMicros = sumSpend(events, bounds);
+  const usedMicros = used ?? sumSpend(events, bounds);
   const fractionUsed = policy.limitMicros > 0 ? usedMicros / policy.limitMicros : usedMicros > 0 ? Infinity : 0;
   const warnAt = policy.warnAt ?? 0.9;
   const state: BudgetState = fractionUsed >= 1 ? "exceeded" : fractionUsed >= warnAt ? "warning" : "ok";
