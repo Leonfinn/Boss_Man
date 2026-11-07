@@ -1,6 +1,6 @@
 {
-  "id": "f920ec96-00bd-4d75-aa2d-f406211f4458",
-  "prevId": "e95fdc0c-229b-4d19-954b-e8bc22ccb8b2",
+  "id": "2a3837fb-d28b-434b-9457-08b8f092b211",
+  "prevId": "d7462dda-c6f5-4053-83e3-9847dcd0cde0",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1274,6 +1274,27 @@
           "columns": [
             {
               "expression": "ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "check_results_company_at": {
+          "name": "check_results_company_at",
+          "columns": [
+            {
+              "expression": "company_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
