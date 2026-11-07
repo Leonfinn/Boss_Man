@@ -581,6 +581,7 @@ export async function buildApp(opts: AppOptions) {
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
     resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
     landingActive: (ticketId) => review.landingActive(ticketId),
+    branchClash: (ticketId) => review.branchClash(ticketId),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),

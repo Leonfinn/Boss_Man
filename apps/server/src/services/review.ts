@@ -829,6 +829,25 @@ export function reviewService(
       return Date.now() - (landingBeat.get(ticketId) ?? 0) <= MERGE_MISSED_AFTER_MS;
     },
 
+    /**
+     * The files this ticket's branch would clash with on the default branch, or null when that can't be
+     * told (no repo, no connected runner, an older runner, or a failed check). Null means "carry on as
+     * if it merges": a check that can't answer never holds a reviewer back (BOS-426).
+     */
+    async branchClash(ticketId: string): Promise<string[] | null> {
+      try {
+        const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
+        if (!repoUrl || !t.branch) return null;
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+        if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "clash-check")) return null;
+        const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 60_000);
+        if (typeof r?.clashes !== "boolean") return null;
+        return r.clashes ? (r.files ?? []) : [];
+      } catch {
+        return null;
+      }
+    },
+
     /** Claims the ticket's merge marker, so the page shows the merge from its first moment. */
     async claimLanding(ticketId: string, reviewer: string): Promise<string> {
       const existing = landings.get(ticketId);

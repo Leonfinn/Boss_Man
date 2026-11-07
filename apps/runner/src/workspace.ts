@@ -714,6 +714,21 @@ export class Workspaces {
   }
 
   /**
+   * Whether the ticket's branch still merges into the target (BOS-426): the same merge-tree try as a
+   * merge, but nothing is built or pushed. A branch that is gone here, or a failed git call, throws:
+   * the caller must not read "couldn't tell" as "clean".
+   */
+  async clash(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}): Promise<{ clashes: boolean; files: string[] }> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
+      return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
+    });
+  }
+
+  /**
    * Which other tickets' unmerged commits this ticket's branch carries (BOS-130): for another
    * ticket's branch B, its commits not yet on origin/target, and which of those this branch has.
    * A commit on this branch that only reached it by merging B means B was carried in; missing
