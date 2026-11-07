@@ -6,6 +6,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite, type Db } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
+import { HELD_AGENT } from "../src/services/fair-share.js";
 import { effectiveDueDate, rankDecision, ticketRef, type BlockedTicket } from "@boss-man/shared";
 import { activity, agents, companies, decisions, keyResults, milestones, notifications, objectives, runs, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
@@ -798,7 +799,7 @@ describe("the server ends runs it can't reach", () => {
     await ctx.runners.bootSeen(runner!, "boot-2");
     const held = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "engagement", note: "Engagement: the server is back." });
     await ctx.scheduler.tick();
-    expect((await ctx.db.select().from(wakes).where(eq(wakes.id, held.id)))[0]!.statusReason).toBe("at a concurrency limit");
+    expect((await ctx.db.select().from(wakes).where(eq(wakes.id, held.id)))[0]!.statusReason).toBe(HELD_AGENT);
     // Inside the replay window the runner's own "interrupted" reports get their chance first.
     expect((await ctx.sweep()).lostRuns).toBe(0);
     expect((await row(runId)).endedAt).toBeNull();
