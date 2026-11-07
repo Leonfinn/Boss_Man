@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Company, type Plan as PlanData, type PlanNode } from "../api";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 
 const MIN_W = 230;
 const MAX_W = 360;
@@ -196,7 +197,7 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
           <p className="sub">Open tasks that wait on something, and what they wait on. Red lines still hold work up. Tap a card to light up its chain.</p>
         </div>
       </header>
-      {plan.error && <p className="error">{plan.error.message}</p>}
+      {plan.error && !away(plan.error) && <p className="error">{plan.error.message}</p>}
       {!company ? (
         <p>Create a company on the Kanban first.</p>
       ) : p && !p.nodes.length ? (

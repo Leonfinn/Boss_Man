@@ -1,5 +1,6 @@
 import { api, type EngagementRow, type EngagementView } from "../api";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { when } from "./Runs";
 
 const STATUS: Record<string, { label: string; tone: string }> = {
@@ -66,7 +67,7 @@ export function Engagements() {
 export function Engagement({ id }: { id: string }) {
   const view = usePoll((signal) => api<EngagementView>(`/api/engagements/${id}`, { signal }), 15_000, id);
   const e = view.data;
-  if (view.error) return <p className="error" role="alert">{view.error.status === 404 ? "There's no such engagement." : view.error.message}</p>;
+  if (view.error && !away(view.error)) return <p className="error" role="alert">{view.error.status === 404 ? "There's no such engagement." : view.error.message}</p>;
   if (!e) return null;
   const reached = e.status === "countered" ? 0 : e.status === "rejected" ? -1 : STEPS.indexOf(e.status as (typeof STEPS)[number]);
   const capFraction = e.budgetCapUsd ? Math.min(1, e.spentUsd / e.budgetCapUsd) : 0;

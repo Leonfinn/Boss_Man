@@ -1,5 +1,6 @@
 import { api, usd, type Project } from "../api";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 
 type Tokens = { input: number; output: number };
 type Spend = { tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; topTickets: { id: string; title: string; micros: number }[] };
@@ -10,7 +11,7 @@ const n = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractio
 export function ProjectBudget({ project }: { project: Project }) {
   const spend = usePoll((signal) => api<Spend>(`/api/projects/${project.id}/spend`, { signal }), 30_000, `spend-${project.id}`);
   const s = spend.data;
-  if (spend.error) return <p className="error" role="alert">{spend.error.message}</p>;
+  if (spend.error && !away(spend.error)) return <p className="error" role="alert">{spend.error.message}</p>;
   if (!s) return <p className="muted">Loading…</p>;
   return (
     <>

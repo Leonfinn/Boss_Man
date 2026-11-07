@@ -4,6 +4,7 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { api, type Company } from "../api";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
+import { useDraft } from "../drafts";
 import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
@@ -77,7 +78,9 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
     busy ? 2000 : 5000,
     `${company?.id ?? "none"}/${current?.id ?? "none"}`,
   );
-  const [text, setText] = useState("");
+  // What is being typed survives a freeze, a reload or a return to this conversation (BOS-637): one draft per agent.
+  const draftKey = company && current ? `chat/${company.id}/${current.id}` : null;
+  const [text, setText, clearText] = useDraft(draftKey);
   const img = useImageAttach(company?.id);
   const [error, setError] = useState<string | null>(null);
   const [seen, setSeen] = useState(readSeen);
@@ -105,7 +108,8 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
     if (!company || !to || !outgoing.trim()) return;
     void api(`/api/companies/${company.id}/chat`, { method: "POST", body: { text: outgoing.trim(), agentId: to.id } }).then(
       () => {
-        setText("");
+        // Sent: the draft goes. A failed send keeps it, so Send can be pressed again (BOS-637).
+        if (fromBox) clearText();
         if (fromBox) img.clear();
         setError(null);
         setBusy(true);
@@ -122,7 +126,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
     try {
       const markdown = await img.uploadText(long, "message.txt");
       await api(`/api/companies/${company.id}/chat`, { method: "POST", body: { text: withAttachments("I've sent the text as a file (below); please read it before answering.", [markdown]).trim(), agentId: current.id } });
-      setText("");
+      clearText();
       img.clear();
       setError(null);
       setBusy(true);
