@@ -44,6 +44,12 @@ unset COMPOSE_FILE
 umask 022 # a default host umask: the deployer must tighten backups itself
 export BOSSMAN_DEPLOYER="$D" STUB_LOG="$T/stub.log" BOSSMAN_DEPLOY_STATUS="$T/deploy-status.json" BOSSMAN_BACKUP_DIR="$T/backups"
 : >"$STUB_LOG"
+# Memory as the deployer reads it (BOS-420): plenty free unless a test says otherwise, and no container limit.
+meminfo() { # [total kB] [available kB] [swap free kB of 2 GiB]
+  printf 'MemTotal:       %s kB\nMemFree:          100000 kB\nMemAvailable:   %s kB\nSwapTotal:      2097152 kB\nSwapFree:       %s kB\n' "${1:-33554432}" "${2:-30000000}" "${3:-2097152}" >"$T/meminfo"
+}
+meminfo; mkdir -p "$T/cgroup"
+export BOSSMAN_MEMINFO="$T/meminfo" BOSSMAN_CGROUP_DIR="$T/cgroup"
 # A webhook listener that appends each POST body to a file, on a free port.
 cat >"$T/hook.mjs" <<'JS'
 import http from "node:http";
@@ -250,6 +256,52 @@ exec 8>"$D/lock"; flock -n 8
 host; [[ -e $D/inbox/request.json ]] || fail "request taken while locked"
 flock -u 8; rm "$D/inbox/request.json"
 
+# 12b. Memory headroom (BOS-420): published every tick in its own file, mode 644, valid JSON.
+host
+has "$D/outbox/headroom.json" '"totalMb": 32768, "availableMb": 29296'
+has "$D/outbox/headroom.json" '"swapTotalMb": 2048, "swapUsedMb": 0'
+has "$D/outbox/headroom.json" '"needMb": 4096, "needFrom": "build"' # one server: the build allowance and the margin
+hasnt "$D/outbox/headroom.json" '"holding"'
+[[ $(stat -c %a "$D/outbox/headroom.json") == 644 ]] || fail "headroom.json is not mode 644"
+node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$D/outbox/headroom.json" || fail "headroom.json is not JSON: $(cat "$D/outbox/headroom.json")"
+DEPLOY_MIN_FREE_MB=1500 host
+has "$D/outbox/headroom.json" '"needMb": 1500, "needFrom": "setting"'
+# A container limit /proc/meminfo doesn't show (an LXC without lxcfs): 4 GiB allowed, 3.5 GiB used = 512 MB free.
+echo 4294967296 >"$T/cgroup/memory.max"; echo 3758096384 >"$T/cgroup/memory.current"; host
+has "$D/outbox/headroom.json" '"totalMb": 4096, "availableMb": 512'
+printf 'anon 1\ninactive_file 268435456\n' >"$T/cgroup/memory.stat"; host # 256 MB of that is cache the kernel can drop
+has "$D/outbox/headroom.json" '"totalMb": 4096, "availableMb": 768'
+rm -f "$T/cgroup/memory.stat"
+echo max >"$T/cgroup/memory.max"; host # cgroup v2 "max" = no limit
+has "$D/outbox/headroom.json" '"totalMb": 32768, "availableMb": 29296'
+rm -f "$T/cgroup/memory.max" "$T/cgroup/memory.current"
+# 12c. The floor: below it a request stays in the inbox (logged once, shown in headroom.json), a dry run says so,
+# and the owner's "Update now anyway" (quiet: override) is taken; the update's lowest free memory is then logged.
+rm -f "$D/state/last-server"; meminfo 33554432 2097152 1048576 # 2048 MB free, 1024 MB of swap in use
+req server "$c4"; before="$(calls)"; host; host
+[[ -e $D/inbox/request.json && $(calls) == "$before" ]] || fail "a request was taken below the memory floor"
+has "$D/outbox/headroom.json" '"holding": "low memory"'
+has "$D/outbox/headroom.json" '"swapUsedMb": 1024'
+[[ $(grep -c "Holding the update request: 2048 MB free, an update needs 4096 MB (build)" "$D/deployer.log") == 1 ]] || fail "the hold was not logged exactly once: $(grep Holding "$D/deployer.log")"
+host --dry-run; has "$T/out" "[dry-run] would hold the request"
+DEPLOY_MIN_FREE_MB=1000 host --dry-run; has "$T/out" "[dry-run] checks passed" # a lower floor set by the owner lets it through
+[[ -e $D/inbox/request.json ]] || fail "dry run took the request"
+printf '{"id":"%s","target":"server","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1","quiet":"override"}\n' "$(node -e 'console.log(crypto.randomUUID())')" "$c4" >"$D/inbox/request.json"
+host
+[[ $(status result) == deployed && $(status to_commit) == "$c4" ]] || fail "override request not deployed: $(cat "$D/outbox/status.json")"
+has "$D/deployer.log" "the owner chose to update now"
+has "$D/deployer.log" "Memory during the update to ${c4:0:8}: lowest free 2048 MB (at before-build), swap use peaked at 1024 MB."
+[[ ! -e $D/state/holding && ! -e $D/state/mem-low ]] || fail "hold or samples left behind"
+meminfo; host
+hasnt "$D/outbox/headroom.json" '"holding"'
+has "$D/outbox/headroom.json" "\"lastUpdate\": {\"commit\": \"$c4\", \"lowMb\": 2048, \"lowAt\": \"before-build\", \"swapPeakMb\": 1024}"
+node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$D/outbox/headroom.json" || fail "headroom.json is not JSON: $(cat "$D/outbox/headroom.json")"
+# A host that can't read its memory never holds, and still writes a record.
+rm -f "$D/state/last-server"; c4b="$(push apps/server/c4b)"; mv "$T/meminfo" "$T/meminfo.off"; req server "$c4b"; host
+[[ $(status to_commit) == "$c4b" ]] || fail "no memory numbers held a request: $(cat "$D/outbox/status.json")"
+hasnt "$D/outbox/headroom.json" '"availableMb"'
+mv "$T/meminfo.off" "$T/meminfo"
+
 # 13. The config file must be private; the runner-path rule matches deploy.sh.
 chmod 644 "$D/host.conf"
 if "$here/host-deployer.sh" >/dev/null 2>&1; then fail "world-readable config accepted"; fi
@@ -267,6 +319,10 @@ cat >"$T/bin/docker" <<'FAKE'
 # A tiny pretend Docker: a world of two colours, a proxy, and files for their state.
 if [[ $1 == image ]]; then # image inspect boss-man-server:<colour>
   [[ -z ${FAKE_NO_IMAGE:-} ]]; exit
+fi
+if [[ $1 == stats ]]; then # stats --no-stream --format {{.MemUsage}} <id>
+  [[ -n ${FAKE_STATS:-} ]] || exit 1
+  echo "$FAKE_STATS"; exit 0
 fi
 [[ $1 == compose ]] || exit 99
 shift; a="$*"; echo "docker $a" >>"$DL"
@@ -387,6 +443,9 @@ live_is green
 [[ $(stat -c %a "$D/proxy/active.caddy") == 644 ]] || fail "include mode"
 has "$D/state/soak" "old=blue new=green"
 [[ ! -s $T/hook.out ]] || fail "webhook posted for a good swap while success posts are off"
+# Memory (BOS-420): measuring goes on through the standby window, so nothing is reported yet.
+[[ -s $D/state/mem-low ]] || fail "no memory samples kept during the swap"
+hasnt "$D/deployer.log" "Memory during the update to ${b1:0:8}"
 
 # 15b. The include names the colour on the private front network and passes on one resolved client address;
 # a host whose compose files have no front network yet still gets the old form (and the old form stays readable).
@@ -402,6 +461,14 @@ bg
 [[ ! -e $W/running.blue && ! -e $D/state/soak && -e $W/running.green ]] || fail "old colour not stopped after the window"
 has "$DL" "stopped blue"
 live_is green
+has "$D/deployer.log" "Memory during the update to ${b1:0:8}: lowest free 29296 MB"
+[[ ! -e $D/state/mem-low ]] || fail "memory samples left after the window"
+# 16a. On blue/green an update also needs room for a second server: the cap when set, else what the live one uses
+# now, else 2048 MB; plus the build allowance and the margin.
+bg; has "$D/outbox/headroom.json" '"needMb": 6144, "needFrom": "default"'
+FAKE_STATS="10.5GiB / 31.3GiB" bg; has "$D/outbox/headroom.json" '"needMb": 14848, "needFrom": "live"'
+FAKE_STATS="900MiB / 31.3GiB" bg; has "$D/outbox/headroom.json" '"needMb": 4996, "needFrom": "live"'
+BOSSMAN_SERVER_MEMORY=12g FAKE_STATS="10.5GiB / 31.3GiB" bg; has "$D/outbox/headroom.json" '"needMb": 16384, "needFrom": "limit"'
 
 # 16b. A host whose compose files have no front network yet gets the old form.
 bx="$(push apps/server/bgfront)"

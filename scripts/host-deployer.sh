@@ -24,6 +24,10 @@
 #   SOAK_SECONDS       blue/green: how long the old colour stays up as a standby after a good swap (900); also
 #                      published in available.json, so Boss Man's runner-update trial uses the same length
 #   SOAK_CHECK_SECONDS blue/green: how long a failing check during that window is retried before the automatic switch-back (60)
+#   DEPLOY_MIN_FREE_MB     memory (MB) that must be free before an update request is taken; empty = worked out (BOS-420):
+#                          the build allowance + 1024, and on blue/green also room for a second server (BOSSMAN_SERVER_MEMORY
+#                          when set, else what the live server uses now, else 2048). Published in outbox/headroom.json.
+#   DEPLOY_BUILD_MEMORY_MB what an image build needs (3072); the deployer logs the lowest free memory of each update to tune it
 #
 # Blue/green (docs/09-self-deploy.md, "Phase 3, part 2"): when COMPOSE_FILE (environment or the checkout's .env)
 # names deploy/truenas-bluegreen.yml, target "server" does a zero-downtime colour swap instead of deploy.sh.
@@ -41,6 +45,9 @@ D="${BOSSMAN_DEPLOYER:-$(cd "$(dirname "$0")" && pwd)}"
 REPO="$D/../src"
 WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SECONDS=300
 BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}" SOAK_CHECK_SECONDS="${SOAK_CHECK_SECONDS:-60}"
+DEPLOY_MIN_FREE_MB="${DEPLOY_MIN_FREE_MB:-}" DEPLOY_BUILD_MEMORY_MB="${DEPLOY_BUILD_MEMORY_MB:-3072}"
+# Where memory is read from (the tests point these at files of their own).
+MEMINFO="${BOSSMAN_MEMINFO:-/proc/meminfo}" CGROUP_DIR="${BOSSMAN_CGROUP_DIR:-/sys/fs/cgroup}"
 CONF="$D/host.conf"
 if [[ -e $CONF ]]; then
   [[ ! -L $CONF && $(stat -c %u "$CONF") == "$(id -u)" && $(stat -c %a "$CONF") =~ ^[0-7]00$ ]] || { echo "ERROR: $CONF must be a plain file, owned by $(id -un), mode 600." >&2; exit 1; }
@@ -239,6 +246,146 @@ write_host_facts() {
   done < <(printf '%s\n' "${!roles[@]}" | LC_ALL=C sort)
   printf '{"version": 1, "name": %s, "writtenAt": %s, "ownership": [%s]}\n' "$(jstr "$name")" "$(jstr "$(now)")" "$rows" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
+}
+
+# ---------------------------------------------------------------------------------------------------
+# Memory headroom (BOS-420). On 3 Nov an update started on a full host, built an image and ran a second server
+# beside the live one, and the host ran out of memory. So: every tick the deployer publishes how much memory is
+# free and how much an update needs (outbox/headroom.json, its own file beside host.json), the server waits for
+# a quiet host before it sends a request, and a request that still arrives while memory is short stays in the
+# inbox (the floor) unless the owner chose "Update now anyway" ("quiet":"override" in the request). Each update's
+# lowest free memory and highest swap use are logged, so the allowance can be set from real numbers.
+# Works on any Linux host: /proc/meminfo, plus a container memory limit it doesn't show (an LXC without lxcfs).
+# ---------------------------------------------------------------------------------------------------
+MEM_TOTAL="" MEM_AVAIL="" SWAP_TOTAL="" SWAP_USED="" NEED_MB="" NEED_FROM="" HOLDING=""
+num_file() { local v; v="$(head -c 64 "$1" 2>/dev/null)" || return 0; v="${v//[[:space:]]/}"; if [[ $v =~ ^[0-9]{1,20}$ ]]; then printf '%s' "$v"; fi; }
+meminfo_kb() { local v; v="$(awk -v k="$1:" '$1 == k { print $2; exit }' "$MEMINFO" 2>/dev/null)" || return 0; if [[ $v =~ ^[0-9]{1,15}$ ]]; then printf '%s' "$v"; fi; }
+
+read_memory() { # sets MEM_TOTAL, MEM_AVAIL, SWAP_TOTAL, SWAP_USED in MB; left empty when this host can't say
+  local t a f b c max cur st sf
+  MEM_TOTAL="" MEM_AVAIL="" SWAP_TOTAL="" SWAP_USED=""
+  t="$(meminfo_kb MemTotal)"; a="$(meminfo_kb MemAvailable)"
+  [[ -n $t ]] || return 0
+  if [[ -z $a ]]; then # kernels before 3.14
+    f="$(meminfo_kb MemFree)" b="$(meminfo_kb Buffers)" c="$(meminfo_kb Cached)"
+    [[ -n $f ]] || return 0
+    a=$((f + ${b:-0} + ${c:-0}))
+  fi
+  MEM_TOTAL=$((t / 1024)) MEM_AVAIL=$((a / 1024))
+  # A limit on this machine's own cgroup that /proc/meminfo doesn't reflect: cgroup v2, else v1. A "limit" bigger
+  # than the RAM (v1 says unlimited with a huge number) is no limit.
+  # Use counts page cache the kernel can drop, so the inactive part of it is taken off (the working set, as
+  # Docker and Kubernetes count it).
+  local stat="$CGROUP_DIR/memory.stat" key=inactive_file inact
+  max="$(num_file "$CGROUP_DIR/memory.max")" cur="$(num_file "$CGROUP_DIR/memory.current")"
+  if [[ -z $max ]]; then
+    max="$(num_file "$CGROUP_DIR/memory/memory.limit_in_bytes")" cur="$(num_file "$CGROUP_DIR/memory/memory.usage_in_bytes")"
+    stat="$CGROUP_DIR/memory/memory.stat" key=total_inactive_file
+  fi
+  inact="$(awk -v k="$key" '$1 == k { print $2; exit }' "$stat" 2>/dev/null)" || inact=""
+  if [[ -n $cur && $inact =~ ^[0-9]{1,20}$ ]] && ((inact < cur)); then cur=$((cur - inact)); fi
+  if [[ -n $max && -n $cur ]] && ((max / 1048576 < MEM_TOTAL)); then
+    MEM_TOTAL=$((max / 1048576))
+    if ((max > cur)); then c=$(((max - cur) / 1048576)); else c=0; fi
+    ((c >= MEM_AVAIL)) || MEM_AVAIL=$c
+  fi
+  st="$(meminfo_kb SwapTotal)" sf="$(meminfo_kb SwapFree)"
+  if [[ -n $st && -n $sf ]]; then SWAP_TOTAL=$((st / 1024)) SWAP_USED=$(((st > sf ? st - sf : 0) / 1024)); fi
+}
+
+to_mb() { # a Compose memory size (bytes, or a number with b, k, m or g): prints MB; nothing when it isn't one
+  local v="${1,,}"
+  v="${v//[\"\' ]/}"
+  [[ $v =~ ^([0-9]{1,13})([bkmg]?)b?$ ]] || return 0
+  local n=$((10#${BASH_REMATCH[1]}))
+  case ${BASH_REMATCH[2]} in g) echo $((n * 1024)) ;; m) echo "$n" ;; k) echo $((n / 1024)) ;; *) echo $((n / 1048576)) ;; esac
+}
+
+live_server_mb() { # what the live server container uses now, in MB; nothing when Docker can't say
+  local colour id u
+  colour="$(live_colour 2>/dev/null)" || return 0
+  id="$(cd "$REPO" && BOSSMAN_DEPLOYER="$D" timeout 20 docker compose ps -q "server-$colour" 2>/dev/null | head -n 1)" || return 0
+  [[ $id =~ ^[0-9A-Za-z]{1,64}$ ]] || return 0
+  u="$(timeout 20 docker stats --no-stream --format '{{.MemUsage}}' "$id" 2>/dev/null | head -n 1)" || return 0
+  awk '{ v = $1; if (!match(v, /^[0-9]+(\.[0-9]+)?/)) exit; n = substr(v, 1, RLENGTH); u = substr(v, RLENGTH + 1)
+         if (u ~ /^[Gg]/) n *= 1024; else if (u ~ /^[Kk]/) n /= 1024; else if (u !~ /^[Mm]/) n /= 1048576
+         printf "%d\n", n }' <<<"$u"
+}
+
+need_memory() { # sets NEED_MB (free memory an update needs) and NEED_FROM (where the number came from)
+  local build=$DEPLOY_BUILD_MEMORY_MB server=0 lim=""
+  NEED_MB="" NEED_FROM=""
+  if [[ -n $DEPLOY_MIN_FREE_MB ]]; then
+    if [[ $DEPLOY_MIN_FREE_MB =~ ^[0-9]{1,7}$ ]]; then NEED_MB=$((10#$DEPLOY_MIN_FREE_MB)) NEED_FROM=setting; return 0; fi
+    log "DEPLOY_MIN_FREE_MB is not a whole number of MB; working the need out instead."
+  fi
+  [[ $build =~ ^[0-9]{1,7}$ ]] || build=3072
+  NEED_FROM=build
+  if bluegreen_enabled; then # the new colour runs beside the live one until the window ends: room for a second server
+    lim="${BOSSMAN_SERVER_MEMORY:-$(grep -s '^BOSSMAN_SERVER_MEMORY=' "$REPO/.env" | tail -n 1 | cut -d= -f2- || true)}"
+    server="$(to_mb "$lim")"
+    if [[ -n $server ]] && ((server > 0)); then NEED_FROM=limit
+    else
+      server="$(live_server_mb || true)"
+      if [[ $server =~ ^[0-9]{1,9}$ ]]; then NEED_FROM=live; else server=2048 NEED_FROM=default; fi
+    fi
+  fi
+  NEED_MB=$((10#$build + server + 1024))
+}
+
+# The floor: true when this request must stay in the inbox for now. Only a fixed string is looked for here; the
+# request is checked properly once it is taken. A host that can't read its memory never holds.
+held_for_memory() { # request file
+  [[ -f $1 && ! -L $1 && -n $MEM_AVAIL && -n $NEED_MB ]] || return 1
+  ((MEM_AVAIL < NEED_MB)) || return 1
+  if [[ $(head -c 4096 "$1" | LC_ALL=C tr -d ' \t\r\n') == *'"quiet":"override"'* ]]; then
+    log "Only $MEM_AVAIL MB free and an update needs $NEED_MB MB, but the owner chose to update now: taking the request."
+    return 1
+  fi
+  if ((DRY)); then log "[dry-run] would hold the request: $MEM_AVAIL MB free, an update needs $NEED_MB MB ($NEED_FROM)"; return 0; fi
+  # Logged once per hold, not every minute.
+  [[ -e $STATE/holding ]] || log "Holding the update request: $MEM_AVAIL MB free, an update needs $NEED_MB MB ($NEED_FROM). It is taken when memory frees up, or when the owner chooses Update now."
+  : >"$STATE/holding"
+  return 0
+}
+
+write_headroom() {
+  local f="$OUTBOX/headroom.json" out="" c="" low="" step="" swap=""
+  ((DRY)) && { log "[dry-run] would write $f"; return 0; }
+  if [[ -n $MEM_TOTAL ]]; then out+=", \"totalMb\": $MEM_TOTAL, \"availableMb\": $MEM_AVAIL"; fi
+  if [[ -n $SWAP_TOTAL ]]; then out+=", \"swapTotalMb\": $SWAP_TOTAL, \"swapUsedMb\": $SWAP_USED"; fi
+  if [[ -n $NEED_MB ]]; then out+=", \"needMb\": $NEED_MB, \"needFrom\": $(jstr "$NEED_FROM")"; fi
+  if [[ -n $HOLDING ]]; then out+=", \"holding\": $(jstr "$HOLDING")"; fi
+  if [[ -f $STATE/last-update ]]; then read -r c low step swap <"$STATE/last-update" || true; fi
+  if [[ $c =~ ^[0-9a-f]{40}$ && $low =~ ^[0-9]{1,9}$ && $step =~ ^[a-z-]{1,32}$ && $swap =~ ^[0-9]{1,9}$ ]]; then
+    out+=", \"lastUpdate\": {\"commit\": $(jstr "$c"), \"lowMb\": $low, \"lowAt\": $(jstr "$step"), \"swapPeakMb\": $swap}"
+  fi
+  printf '{"version": 1, "writtenAt": %s%s}\n' "$(jstr "$(now)")" "$out" >"$f.tmp"
+  chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
+}
+
+# During an update: keep the lowest free memory (and the step it was seen at) and the highest swap use.
+mem_sample() { # step
+  ((DRY)) && return 0
+  local f="$STATE/mem-low" low="" step="" swap="" c=""
+  read_memory
+  [[ -n $MEM_AVAIL ]] || return 0
+  if [[ -f $f ]]; then read -r low step swap c <"$f" || true; fi
+  [[ $low =~ ^[0-9]{1,9}$ ]] || low=""
+  [[ $swap =~ ^[0-9]{1,9}$ ]] || swap=0
+  if [[ -z $low ]] || ((MEM_AVAIL < low)); then low=$MEM_AVAIL step=$1; fi
+  if ((${SWAP_USED:-0} > swap)); then swap=$SWAP_USED; fi
+  printf '%s %s %s %s\n' "$low" "$step" "$swap" "${c:-$COMMIT}" >"$f"
+}
+mem_start() { ((DRY)) || rm -f "$STATE/mem-low"; mem_sample "$1"; }
+mem_report() { # once the update is over: one log line, kept for headroom.json's lastUpdate
+  local f="$STATE/mem-low" low="" step="" swap="" c=""
+  [[ -f $f ]] || return 0
+  read -r low step swap c <"$f" || true
+  rm -f "$f"
+  [[ $low =~ ^[0-9]{1,9}$ && $step =~ ^[a-z-]{1,32}$ && $swap =~ ^[0-9]{1,9}$ && $c =~ ^[0-9a-f]{40}$ ]] || return 0
+  log "Memory during the update to ${c:0:8}: lowest free $low MB (at $step), swap use peaked at $swap MB."
+  printf '%s %s %s %s\n' "$c" "$low" "$step" "$swap" >"$STATE/last-update"
 }
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
@@ -460,9 +607,11 @@ do_deploy_bluegreen() {
   rm -f "$STATE/soak" # a swap while the last one is soaking ends that soak: its standby is about to be rebuilt
 
   log "Blue/green: $BG_LIVE is live; building $BG_IDLE at ${COMMIT:0:8}."
+  mem_start before-build
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
   BOSSMAN_COMMIT="$COMMIT" compose build "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Building $BG_IDLE failed."; return 1; }
+  mem_sample after-build
   # Expand-only migrations: the live colour keeps working on the new schema.
   BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
   compose up -d --no-deps --force-recreate "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Starting $BG_IDLE failed."; return 1; }
@@ -470,6 +619,7 @@ do_deploy_bluegreen() {
   wait_ready "server-$BG_IDLE" standby "$COMMIT" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby at ${COMMIT:0:8} within ${BG_READY_SECONDS}s.$(colour_log_tail "$BG_IDLE")"; return 1; }
   # A login-free read straight from the idle colour (not through the proxy).
   [[ $(probe "server-$BG_IDLE" 3100 /api/setup 2>/dev/null | jfield needsSetup) == False ]] || { pre_fail "The smoke test on $BG_IDLE failed (GET /api/setup)."; return 1; }
+  mem_sample standby-up
 
   log "Smoke test passed. Handing over: demote $BG_LIVE, promote $BG_IDLE."
   compose kill -s USR1 "server-$BG_LIVE" >>"$LOG" 2>&1 || { pre_fail "Could not signal $BG_LIVE."; return 1; }
@@ -484,6 +634,7 @@ do_deploy_bluegreen() {
     else bg_fail failed "$why The switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
+  mem_sample after-handover
 
   printf 'old=%s new=%s deadline=%s commit=%s prev=%s\n' "$BG_LIVE" "$BG_IDLE" "$(($(date +%s) + SOAK_SECONDS))" "$COMMIT" "$BG_PREV" >"$STATE/soak"
   # Kept after the soak ends: the only release a manual --rollback may go back to (colour, commit).
@@ -503,15 +654,18 @@ soak_tick() {
   [[ -n $commit && $old != "$new" ]] || { log "Ignoring a malformed $f."; ((DRY)) || rm -f "$f"; return 0; }
   if ((DRY)); then log "[dry-run] a soak is running: $new live, $old standby until $deadline"; return 0; fi
   [[ $(live_colour || true) == "$new" ]] || { log "The proxy no longer points at $new; ending the soak."; rm -f "$f"; return 0; }
+  mem_sample window
   if verify_live "$commit" "$SOAK_CHECK_SECONDS"; then
     if (($(date +%s) >= deadline)); then
       log "Soak over: stopping the old colour ($old)."
       compose stop "server-$old" >>"$LOG" 2>&1 || log "Could not stop server-$old."
       rm -f "$f"
+      mem_report
     fi
     return 0
   fi
   log "Check failed on $new at ${commit:0:8}: $VERIFY_WHY"
+  mem_report
   BG_LIVE="$old" BG_IDLE="$new" BG_PREV="$prev"
   # The record names the commit that failed (to_commit), as a swap-time rollback does, and the one we are back on (from_commit).
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
@@ -606,6 +760,13 @@ main() {
   # What this host says about itself (BOS-427), refreshed every tick, so an owner card's steps can be
   # checked against the real folders before they reach the owner.
   write_host_facts || true  # never let a stat failure stop a deploy
+  # Free memory against what an update needs (BOS-420), and whether a waiting request is held for it. A failure
+  # here never stops a deploy: with no numbers, nothing is held.
+  if ((!ROLLBACK)); then
+    { read_memory && need_memory; } || true
+    if [[ -e $req || -L $req ]] && held_for_memory "$req"; then HOLDING="low memory"; else ((DRY)) || rm -f "$STATE/holding"; fi
+    write_headroom || true
+  fi
   if ((ROLLBACK)); then
     bluegreen_enabled || { echo "ERROR: this install does not use blue/green; use scripts/deploy.sh --rollback." >&2; exit 1; }
     local rrc=0
@@ -621,6 +782,8 @@ main() {
   recover_interrupted
   if bluegreen_enabled; then soak_tick; fi
   if [[ ! -e $req && ! -L $req ]]; then refresh_available; exit 0; fi
+  # The floor: left in the inbox, so the next minute looks again.
+  [[ -z $HOLDING ]] || exit 0
 
   # Take the file by renaming it: the server can then no longer change it, and a symlink is
   # moved as a symlink rather than followed.
@@ -691,10 +854,15 @@ main() {
   local rc=0 result msg
   if [[ $TARGET == server ]] && bluegreen_enabled; then
     do_deploy_bluegreen >>"$LOG" 2>&1 || rc=$?
-    [[ $BG_RESULT == deployed ]] || BG_MSG="${BG_MSG:-The blue/green swap stopped with an error (exit $rc).} See $LOG on the host."
+    # A good swap keeps measuring through the standby window (soak_tick); anything else ends here.
+    [[ $BG_RESULT == deployed ]] || { mem_report; BG_MSG="${BG_MSG:-The blue/green swap stopped with an error (exit $rc).} See $LOG on the host."; }
     finish "${BG_RESULT:-failed}" "$BG_MSG" "$BG_BACKUP"
   fi
-  if [[ $TARGET == server ]]; then do_deploy_server >>"$LOG" 2>&1 || rc=$?; else do_update_runner >>"$LOG" 2>&1 || rc=$?; fi
+  if [[ $TARGET == server ]]; then
+    mem_start before-build
+    do_deploy_server >>"$LOG" 2>&1 || rc=$?
+    mem_sample after-deploy; mem_report
+  else do_update_runner >>"$LOG" 2>&1 || rc=$?; fi
   if [[ $TARGET == server ]]; then
     result="$(deploy_status_field result)"; msg="$(deploy_status_field message)"
     [[ $(deploy_status_field to_commit) == "$COMMIT" ]] || { result=""; msg=""; }
