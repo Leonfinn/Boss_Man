@@ -686,6 +686,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </label>
 
           <DoneWhen t={t} patch={patch} busy={busy} />
+          {t.fixesLive?.trim() && (
+            // BOS-639: set by the CEO, the author or a reviewer. When it merges, the deploy card says it is urgent.
+            <p className="fixes-live" style={{ margin: 0 }}>
+              <strong>Fixes a live problem:</strong> {t.fixesLive.trim()}. When this merges, its update card is marked urgent.
+            </p>
+          )}
           <OwnerSetup t={t} patch={patch} busy={busy} />
 
           <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch && !t.noCode ? "code on its branch" : "nothing yet"}>

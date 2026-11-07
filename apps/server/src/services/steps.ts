@@ -7,7 +7,7 @@
 // ```sh host="nas01" as="login". That line is not part of what the owner pastes; the web app reads it and shows
 // "On nas01, as the logged-in account." above the command. A block with neither is refused (R6).
 
-import { HOST_NAME, parseStep, strayFence, type StepPiece, type Where } from "@boss-man/shared";
+import { HOST_NAME, OWNER_CONTROLS, parseStep, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
@@ -58,7 +58,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R9" | "R13" | "R14" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R9" | "R13" | "R14" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -72,7 +72,7 @@ const ADDON_WORDS: Record<Addon, { label: string; re: RegExp }> = {
 const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up", stopped: "stopped", needs_login: "waiting for a login", running: "running", unknown: "unknown" };
 /** What the lint can be given: add-on facts for R9 (and the add-on this card sets up, whose steps are exempt),
  * and the host facts for R6 (BOS-427). Either may be absent, and then that rule only checks what it can without them. */
-export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[] };
+export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; options?: readonly string[] };
 
 /** R9: a step that relies on an add-on that isn't running is refused; one Boss Man can't see is warned about. */
 function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: Addon | undefined, refuse: LintFinding[], warn: LintFinding[]) {
@@ -148,6 +148,86 @@ function usesIn(code: string): string[] {
   return out;
 }
 
+/** A label as compared: lower case, words only ("Saved ✓" is "saved", "Done: mark processed" is "done mark processed"). */
+const norm = (s: string) => s.toLowerCase().replace(/’/g, "'").replace(/[^\p{L}\p{N}']+/gu, " ").trim();
+/** Keys on the keyboard: "press Enter" is not a button. */
+const KEYS = new Set(["enter", "return", "esc", "escape", "tab", "space", "spacebar", "ctrl", "control", "cmd", "command", "shift", "alt", "option", "delete", "backspace", "f5", "y", "n", "q"]);
+/** Words that end a button's name in a sentence: "press Approve on the card", "click Save again". */
+const AFTER_LABEL = /^(?:on|in|at|to|for|from|under|next|below|above|beside|near|again|and|then|when|once|if|so|or|until|button|link|tab|there|here|now|first|twice)\b/;
+/**
+ * Every control, normalised; a label ending in "…" is kept as its start and matches anything after it. A label
+ * with a bracketed note ("Update runners (finish runs first)") also matches without it, as cards name it that way.
+ */
+const CONTROLS = (() => {
+  const exact = new Set<string>();
+  const prefix = new Set<string>();
+  for (const labels of Object.values(OWNER_CONTROLS) as ReadonlyArray<readonly string[]>) {
+    for (const l of labels) {
+      if (l.endsWith("…")) { prefix.add(norm(l)); continue; }
+      exact.add(norm(l));
+      const bare = l.replace(/\s*\([^)]*\)$/, "");
+      if (bare && bare !== l) exact.add(norm(bare));
+    }
+  }
+  return { exact, prefix };
+})();
+const SCREENS = (Object.keys(OWNER_CONTROLS) as OwnerScreen[]).filter((k) => k !== "Any screen");
+
+/**
+ * Whether `name` is a control: a key, an exact label or card option, the start of a "…" label, or, when it wasn't
+ * quoted (so the sentence may run on), a label followed by a word that ends it ("Approve on the card").
+ */
+function isControl(name: string, quoted: boolean, options: Set<string>): boolean {
+  const n = norm(name);
+  if (!n || KEYS.has(n.split(" ")[0]!) || CONTROLS.exact.has(n) || options.has(n)) return true;
+  for (const p of CONTROLS.prefix) if (n === p || n.startsWith(`${p} `)) return true;
+  if (quoted) return false;
+  for (const l of [...CONTROLS.exact, ...options]) if (n.startsWith(`${l} `) && AFTER_LABEL.test(n.slice(l.length + 1))) return true;
+  return false;
+}
+
+/**
+ * The controls a step tells the owner to press that the app doesn't have (R7). A name counts when it follows
+ * press/click/tap/hit and is quoted, bold or starts with a capital ("press Overrule and merge"), or when it is
+ * "the X button". Lower-case words after the verb ("click the link", "press it") aren't taken as names: refusing
+ * those would stop good cards, and a made-up button is written the way the screen would show it.
+ */
+function missingControls(prose: string, options: Set<string>): string[] {
+  const out: string[] = [];
+  const named = (raw: string, quoted: boolean) => {
+    const n = raw.replace(/\s+/g, " ").trim();
+    if (n && !isControl(n, quoted, options) && !out.includes(n)) out.push(n);
+  };
+  for (const m of prose.matchAll(/\b(?:press|click|tap|hit)\s+(?:on\s+)?(?:the\s+)?/gi)) {
+    const rest = prose.slice(m.index + m[0].length);
+    const q = /^(?:"([^"\n]+)"|“([^”\n]+)”|\*\*([^*\n]+)\*\*|`([^`\n]+)`|'([^'\n]+)'(?!\w))/.exec(rest);
+    if (q) named(q[1] ?? q[2] ?? q[3] ?? q[4] ?? q[5]!, true);
+    else if (/^\p{Lu}/u.test(rest)) {
+      // Widest reading first: an option can hold a comma ("Yes, move it") or a bracket that is part of the label
+      // ("Update runners (finish runs first)"). Only if none of those is a control, cut at a comma or bracket
+      // ("Save (top right)", "Approve, then close") and judge the shorter name.
+      const cut = (re: RegExp) => rest.split(re)[0]!;
+      const end = String.raw`\s+(?:button|link|tab)\b`;
+      const readings = [`[.;:!?\\n→>]|${end}`, `[.,;:!?\\n→>]|${end}`, `[.,;:!?()\\n→>]|${end}`].map((re) => cut(new RegExp(re)));
+      if (!readings.some((r) => isControl(r, false, options))) named(readings[2]!, false);
+    }
+  }
+  for (const m of prose.matchAll(/(?:"([^"\n]+)"|“([^”\n]+)”|\*\*([^*\n]+)\*\*)\s+button\b/g)) named(m[1] ?? m[2] ?? m[3]!, true);
+  for (const m of prose.matchAll(/\bthe\s+(\p{Lu}[^.,;:!?()\n"“”*]*?)\s+button\b/gu)) named(m[1]!, false);
+  return out;
+}
+
+/** The first screen a step names, for the list in a refusal; a ticket reference or the word "ticket" is Ticket. */
+function screenIn(prose: string): OwnerScreen | null {
+  let best: { at: number; s: OwnerScreen } | null = null;
+  const consider = (at: number, s: OwnerScreen) => {
+    if (at >= 0 && (!best || at < best.at)) best = { at, s };
+  };
+  for (const s of SCREENS) consider(prose.search(new RegExp(`\\b${s}\\b`)), s);
+  consider(prose.search(/\b[A-Z]{2,6}-\d+\b|\bticket\b/i), "Ticket");
+  return (best as { s: OwnerScreen } | null)?.s ?? null;
+}
+
 /** A `{{host.network.port.web}}`-style token: a recorded host fact (host-facts.ts) to fill in when a card is raised. */
 const HOST_TOKEN = /\{\{\s*host\.([A-Za-z0-9_.]{1,80})\s*\}\}/g;
 
@@ -178,6 +258,9 @@ export function fillHostTokens(steps: readonly string[], values: Readonly<Record
  * in inline code, or a ``` that isn't a complete block and would show as raw text (BOS-550); R4 a `{{…}}` token, which Boss Man can't fill in yet. Warnings: a wiki or ticket link, more
  * than one command in a step or more than 12 steps, and hedging next to a command.
  *
+ * R7 (BOS-421, DR-009 L6): a step that tells the owner to press a button the app doesn't have
+ * (`OWNER_CONTROLS`) is refused; `options` (the card's own buttons, which the owner can press too) count as real.
+ *
  * R6 (BOS-427) is the host and account check: every command block says where it runs and as whom, and a block
  * run by the owner's login may not read a recorded folder that login can't read unless an earlier block on the
  * card stages a readable copy for it. Pass `hosts` (the host facts Boss Man recorded) to check the paths;
@@ -201,6 +284,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
   const warn: LintFinding[] = [];
   // not state: scratch for one call over one card; nothing is kept between calls.
   const set = new Set<string>();
+  const own = new Set((given.options ?? []).map(norm));
   /** What earlier blocks on this card made readable for the login (BOS-427), per host and folder. */
   // not state: scratch for one call over one card; nothing is kept between calls.
   const staged = new Map<string, Set<string>>();
@@ -239,6 +323,11 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
     // A `{{host.…}}` token is filled in by `fillHostTokens` before this lint runs (checkAsk), so one left here had no
     // recorded fact behind it, or the caller has no host facts; any other token never has a value.
     for (const m of text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) refuse.push({ step, rule: "R4", problem: `has {{${m[1]}}}, which Boss Man has no value for. Write the value itself` });
+    for (const name of missingControls(prose, own)) {
+      const screen = screenIn(prose);
+      const there = screen ? ` The buttons on ${screen} are: ${OWNER_CONTROLS[screen].join(", ")}.` : "";
+      refuse.push({ step, rule: "R7", problem: `tells the owner to press "${name}", which isn't a button in the app.${there} Name a button exactly as the screen shows it, or one of this card's options` });
+    }
     const host = lintHost(blockPieces, step, given.hosts, staged, step === 1);
     refuse.push(...host.refuse);
     warn.push(...host.warn);
