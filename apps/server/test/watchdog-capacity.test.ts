@@ -76,6 +76,37 @@ describe("idle-capacity rules 3 and 4 (BOS-659)", () => {
     expect((await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "spare_capacity_alert")))).toHaveLength(1);
   });
 
+  it("rule 3: also fires when the only work is parked on a booked check, and lists it (BOS-667)", async () => {
+    await ctx.switchOn();
+    await ctx.busy(8); // 8 busy, 2 free, limit 10: fewer than 9 → rule 3.
+    // The agent's only ticket is in progress but parked on a check it booked: it could take other work.
+    await ctx.ticket({ title: "Waiting on a booked check", systemState: "in_progress", monitorAt: new Date(ctx.now().getTime() + 60 * 60_000) });
+    await ctx.watchdog.run();
+    const [card] = await ctx.cards();
+    expect(card).toBeTruthy();
+    expect(card!.question).toContain("only work left is waiting to merge or parked on a booked check");
+    expect(card!.question).toContain("Parked on a booked check");
+    expect(card!.question).toContain("Developer");
+    expect((await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "spare_capacity_alert")))).toHaveLength(1);
+  });
+
+  it("rule 3: also fires when the only work is parked on a blocked_until wait", async () => {
+    await ctx.switchOn();
+    await ctx.busy(8);
+    await ctx.ticket({ title: "Waiting on a deploy", systemState: "blocked", blockedUntil: new Date(ctx.now().getTime() + 60 * 60_000) });
+    await ctx.watchdog.run();
+    expect(await ctx.cards()).toHaveLength(1);
+  });
+
+  it("rule 3: does not fire when there is still open or unstarted work to hand out", async () => {
+    await ctx.switchOn();
+    await ctx.busy(8); // fewer than 9 → rule 3's count.
+    await ctx.ticket({ title: "Waiting on a booked check", systemState: "in_progress", monitorAt: new Date(ctx.now().getTime() + 60 * 60_000) });
+    await ctx.ticket({ title: "Ready but not running", stateChangedAt: ctx.ago(5) });
+    await ctx.watchdog.run();
+    expect(await ctx.cards()).toHaveLength(0);
+  });
+
   it("rule 4: under eight busy for twenty minutes while ready work waits wakes the CEO once, then not again until it clears", async () => {
     await ctx.switchOn();
     await ctx.busy(2); // 2 busy, 8 free: below 8 → rule 4's count, but not for 20 minutes yet.
