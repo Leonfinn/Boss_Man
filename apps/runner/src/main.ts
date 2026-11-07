@@ -3,8 +3,9 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
-import { applyCheckSlots, runnerFence, sandboxSelfTest } from "./fence.js";
+import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
+import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
@@ -30,6 +31,7 @@ const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
 // the merge check share, so checks still take turns (BOS-321).
 const coordDir = path.join(workspacesRoot, ".bossman-coord");
 mkdirSync(coordDir, { recursive: true });
+const sandbox = sandboxSelfTest();
 const checkSlots = applyCheckSlots(coordDir, env.BOSSMAN_CHECK_SLOTS);
 if (checkSlots > 1) console.log(`[runner] full checks: ${checkSlots} at a time (BOSSMAN_CHECK_SLOTS)`);
 if (checkSlots > 1) {
@@ -42,15 +44,20 @@ if (checkSlots > 1) {
     break;
   }
 }
-const workspaces = new Workspaces(workspacesRoot, process.env, coordDir);
+// The shared pnpm store (BOS-568), where PNPM_STORE_DIR moves it. Refused when it is the workspaces volume's root or
+// outside it (BOS-633): the fence grants everything beneath a rule, and the gate's store sits beside it.
+const storeDir = pnpmStoreDir(workspacesRoot, env.PNPM_STORE_DIR);
+mkdirSync(storeDir, { recursive: true });
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, { level: sandbox.level, pnpmStore: storeDir });
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
-const sandbox = sandboxSelfTest();
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
 
 let connection: RunnerConnection;
+const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log);
 const sessions = new SessionManager({
   mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
+  mcpPreflightMs: Number(env.BOSSMAN_MCP_PREFLIGHT_MS ?? 20_000),
   emit: (event) => connection.emit(event),
   resolveEnv: async (runId) => {
     const res = await fetch(`${httpBase}/api/runner/env?runId=${encodeURIComponent(runId)}`, { headers: { authorization: `Bearer ${token}` } });
@@ -62,7 +69,8 @@ const sessions = new SessionManager({
   reply: (requestId, result) => connection.reply(requestId, result),
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,
-  fence: runnerFence(sandbox.level, dataDir, workspacesRoot),
+  checkJobs,
+  fence: { ...runnerFence(sandbox.level, dataDir, workspacesRoot), pnpmStore: storeDir },
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -81,6 +89,8 @@ connection = new RunnerConnection({
   log,
   onCommand: (command) => sessions.handle(command),
   pendingPermissions: () => sessions.pendingPermissions(),
+  runningChecks: () => checkJobs.running(),
+  onWelcome: () => checkJobs.resend(),
   liveRuns: () => sessions.liveRunIds(),
 });
 
@@ -103,6 +113,13 @@ const housekeeping = async () => {
 };
 void housekeeping();
 const sweep = setInterval(() => void housekeeping(), 3_600_000);
+// The pnpm stores only grow as lockfiles change (BOS-633). Pruned once at start-up and then daily: pnpm's store lock
+// makes each prune safe beside a running install, and it only drops packages no install references any more. The
+// prune runs asynchronously, so start-up and the daily tick never wait on it, and a slow prune can't stall
+// the connection or live sessions; it never rejects.
+void pruneStores(storeDir, log);
+const prune = setInterval(() => void pruneStores(storeDir, log), 24 * 3_600_000);
+prune.unref();
 
 // The container healthcheck reads this file: it's touched while the server connection is live.
 const marker = path.join(dataDir, "connected");
@@ -118,6 +135,7 @@ const beat = setInterval(() => {
 const stop = () => {
   clearInterval(beat);
   clearInterval(sweep);
+  clearInterval(prune);
   rmSync(marker, { force: true });
   sessions.shutdown();
   connection.stop();

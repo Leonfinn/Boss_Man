@@ -60,7 +60,7 @@ const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed:
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -187,11 +187,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const changed = new Set([...(a?.infraPaths ?? []), ...(a?.paths ?? [])]);
     const hostDeployerChanged = changed.has("scripts/host-deployer.sh");
     const launcherChanged = [...changed].some((p) => p.startsWith("apps/launcher/"));
-    const src = folder(a?.srcDir);
-    const deployer = folder(a?.deployerDir);
+    // BOS-419: what the update file doesn't say comes from the settings record (the host's own report, kept with
+    // its source). The update file still wins, since it is written at the same moment as the update.
+    const rec = await deps.facts?.().catch(() => ({} as Record<string, string>)) ?? {};
+    const src = folder(a?.srcDir ?? rec["paths.src"]);
+    const deployer = folder(a?.deployerDir ?? rec["paths.deployer"]);
     const shaOk = isSha(commit) && isSha(fromCommit);
-    const bg = a?.bluegreen;
-    const colour = a?.liveColour === "blue" || a?.liveColour === "green" ? a.liveColour : null;
+    const bg = a?.bluegreen ?? (rec["compose.bluegreen"] === "true" ? true : rec["compose.bluegreen"] === "false" ? false : undefined);
+    const liveColour = a?.liveColour ?? rec["compose.liveColour"];
+    const colour = liveColour === "blue" || liveColour === "green" ? liveColour : null;
     // The machine's recorded name (BOS-427): every command's block says "on <host>, as root". Without it the
     // card can't say where a command runs, so no command is shown (never a guessed name).
     const host = (await deps.hosts?.())?.[0]?.name ?? null;
@@ -242,6 +246,18 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
             : "host-deployer.sh changed and has to be copied into the deployer folder, but Boss Man can't tell where the install or deployer folder is, so no command is shown. Ask us on this ticket."
           : "host-deployer.sh didn't change; no copy needed.",
       );
+      // A server apply never restarts the database (BOS-458). Changed database settings need their own step, with a backup first.
+      if (a!.infraPaths.some((p) => /^docker-compose[^/]*\.ya?ml$|^deploy\//.test(p)))
+        handSteps.push(
+          src && host
+            ? step(
+                "This update changes a compose file. The steps above never restart the database, so changed database settings (memory, limits) are not applied by them. Only if the database settings changed: take a backup, then restart just the database (the server is unreachable for a few seconds). Run the backup first:",
+                cmd(`(set -o pipefail && umask 077 && cd ${src} && docker compose exec -T db pg_dump -U bossman bossman | gzip > db-backup-before-restart.sql.gz) && gzip -t "${src}/db-backup-before-restart.sql.gz" && ls -l "${src}/db-backup-before-restart.sql.gz"`),
+                "Then restart only the database:",
+                cmd(`cd ${src} && docker compose up -d --no-deps db`),
+              )
+            : `If database settings changed they need a separate restart, but ${src ? noHost : noSrc}`,
+        );
       if (launcherChanged)
         handSteps.push(
           src
@@ -304,7 +320,26 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       ...(target === "server" ? { needsRunnerUpdate: !!a?.runnerChanged } : {}),
       risks,
     });
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}) };
+    // (BOS-551) A server update restarts Boss Man, which resets anything a reading on the owner's queue
+    // would measure. Point the update card at the open owner cards a restart would disturb: a card the
+    // raising agent marked `resetsOnRestart`, and a hand-apply to-do that isn't itself a server or runner
+    // update. Unrelated setup cards are left out so the "Do after" list is not noise.
+    const doAfter = target === "server"
+      ? (await db
+          .select({ id: decisions.id, question: decisions.question, context: decisions.context })
+          .from(decisions)
+          .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner"))))
+          .filter((r) => {
+            const c = r.context as DecisionContext;
+            if (c.type === "self_deploy" || c.type === "deploy") return false;
+            if (c.type === "question") return !!c.steps?.length && c.resetsOnRestart === true;
+            if (c.type === "owner_todo") return !c.target;
+            return false;
+          })
+          .slice(0, 10)
+          .map((r) => ({ decisionId: r.id, label: r.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80) }))
+      : [];
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     const question =
       target === "runner"

@@ -56,7 +56,9 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-3000}"  # Boss Man kills the merge check 60 min after its slot is taken (VERIFY_TIMEOUT_MS); stay well inside it
   pause="${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
   log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
-  trap 'rm -f "$log" "$began_file"' EXIT
+  # The child leaves per-file test times here (vitest JSON reports, shell test times); record() folds them into $STORE/<tree>.test-times (BOS-654).
+  times_dir="$(mktemp -d)"
+  trap 'rm -f "$log" "$began_file"; rm -rf "$times_dir"' EXIT
 
   # Only a clean checkout has a tree hash that says what was checked.
   key=""
@@ -98,17 +100,27 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     steps=$(sed -n 's/^check-all: step \([A-Za-z0-9:._-]*\) took \([0-9]*\)s.*/"\1":\2/p' "$log" | paste -sd, -)
     printf '{"status":"%s","exit":%s,"tree":"%s","commit":"%s","finished":"%s","duration_seconds":%s,"merge_check":%s,"steps":{%s}}\n' \
       "$1" "$2" "$key" "$(git rev-parse HEAD)" "$(date -u +%FT%TZ)" "$dur" "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo true || echo false)" "$steps" >"$STORE/$key.json" || return 0
+    # Per-file test times of this run (best effort): the slowest server test files and shell tests, in seconds, for the next speed-up.
+    if [ -n "$(ls -A "$times_dir" 2>/dev/null)" ]; then
+      if node "$(dirname "$self")/test-times.mjs" "$times_dir" >"$STORE/$key.test-times.tmp" 2>/dev/null; then
+        mv "$STORE/$key.test-times.tmp" "$STORE/$key.test-times"
+      else
+        rm -f "$STORE/$key.test-times.tmp"
+      fi
+    else
+      rm -f "$STORE/$key.test-times"
+    fi
     # keep the newest 50 results
     local old
-    while read -r old; do rm -f "$old" "${old%.json}.log"; done < <(find "$STORE" -maxdepth 1 -name '*.json' -printf '%T@ %p\n' | sort -rn | tail -n +51 | cut -d' ' -f2-)
+    while read -r old; do rm -f "$old" "${old%.json}.log" "${old%.json}.test-times"; done < <(find "$STORE" -maxdepth 1 -name '*.json' -printf '%T@ %p\n' | sort -rn | tail -n +51 | cut -d' ' -f2-)
   }
   [ -z "$key" ] || echo "check-all: the result and log of this run will be kept in $STORE/$key.{json,log}"
   for ((n = 1; n <= attempts; n++)); do
     # Test hook: a simulated queue wait, which the fixed budget ignores (check-all.test.sh retry-budget case).
     [ "$n" -gt 1 ] || [ -z "${CHECK_ALL_QUEUE_TEST_SLEEP:-}" ] || sleep "$CHECK_ALL_QUEUE_TEST_SLEEP"
-    rc=0; : >"$began_file"; attempt_start=$SECONDS
+    rc=0; : >"$began_file"; attempt_start=$SECONDS; rm -rf "${times_dir:?}"/* 2>/dev/null || true
     # The child runs in the background and we wait for it, so a signal reaches the trap at once instead of after the child.
-    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
+    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" BOSSMAN_CHECK_TIMES_DIR="$times_dir" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
     child=$!
     wait "$child" || rc=$?
     wait 2>/dev/null || true  # let tee finish writing the log
@@ -153,7 +165,11 @@ fi
 # The merge check queues like the rest but goes ahead of waiting hand-run checks; one already running is never interrupted.
 # fd 9 is inherited by pnpm/vitest: if a timed-out check leaves children behind they keep the slot until
 # they exit (tracked in the runner-cleanup ticket). Skipped where flock is missing (macOS).
-if command -v flock >/dev/null; then
+# BOSSMAN_CHECK_NO_LOCK=1 (set by the runner for a server-queued job, DR-003): the server holds the slots, so this script
+# touches no lock file and does not queue; it still keeps the result store.
+if [ -n "${BOSSMAN_CHECK_NO_LOCK:-}" ]; then
+  echo "check-all: slot taken, running the checks (the server holds the slots; no lock files)"
+elif command -v flock >/dev/null; then
   LOCK=${CHECK_ALL_LOCK:-/tmp/bossman-check-all}
   # One check at a time until a measured side-by-side pair has passed: that run writes the proof file below
   # (see the Build and test note). CHECK_ALL_PAIR_TRIAL=1 lets the two measuring runs use more slots.
@@ -373,7 +389,12 @@ if command -v flock >/dev/null; then
   rm -f "$qfile" "$AGEREF" "$REPLACED"; trap - EXIT
   # Slot log: one line when the slot is taken and one when it is let go (a killed holder leaves only the first), best effort.
   slot_kind=hand; [ "$prio" = 1 ] || slot_kind=merge
-  slot_log() { printf '%s %s pid=%s kind=%s slot=%s folder=%s\n' "$(date -u +%FT%TZ)" "$1" "$$" "$slot_kind" "$SLOT_K" "$FOLDER" >>"$SLOTLOG" 2>/dev/null || true; }
+  # check= is what runs in the slot (check-quick.sh sets CHECK_ALL_CHECK_KIND=quick) and tree= the git tree of the checked
+  # files, with "-dirty" when the folder has changes git has no tree for, so repeat checks of one tree can be counted (BOS-666).
+  slot_check=${CHECK_ALL_CHECK_KIND:-full}; [[ $slot_check =~ ^[a-z]{1,10}$ ]] || slot_check=full
+  slot_tree=$(git rev-parse 'HEAD^{tree}' 2>/dev/null) || slot_tree=none
+  [ "$slot_tree" = none ] || [ -z "$(git status --porcelain 2>/dev/null)" ] || slot_tree="$slot_tree-dirty"
+  slot_log() { printf '%s %s pid=%s kind=%s slot=%s check=%s tree=%s folder=%s\n' "$(date -u +%FT%TZ)" "$1" "$$" "$slot_kind" "$SLOT_K" "$slot_check" "$slot_tree" "$FOLDER" >>"$SLOTLOG" 2>/dev/null || true; }
   if [ -f "$SLOTLOG" ] && [ "$(wc -l <"$SLOTLOG" 2>/dev/null || echo 0)" -gt 5000 ]; then
     { tail -n 2000 "$SLOTLOG" >"$SLOTLOG.tmp.$$" && mv "$SLOTLOG.tmp.$$" "$SLOTLOG"; } 2>/dev/null || rm -f "$SLOTLOG.tmp.$$"
   fi
@@ -423,9 +444,10 @@ done
 unset NODE_OPTIONS  # the heap cap is for tsc only
 for d in "${pkg_dirs[@]}"; do
   grep -q '"test"' "$d/package.json" || continue
-  step "test:${d##*/}" pnpm --dir "$d" run test
+  # BOSSMAN_TEST_TIMES_FILE makes vitest also write a JSON report, which the parent folds into the result store (BOS-654).
+  step "test:${d##*/}" env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_TEST_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/vitest-${d##*/}.json"} pnpm --dir "$d" run test
 done
 step build pnpm build
 step shellcheck scripts/check-shell.sh
-step shell-tests scripts/test-shell.sh
+step shell-tests env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_SHELL_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/shell.tsv"} scripts/test-shell.sh
 echo "check-all: everything passed"

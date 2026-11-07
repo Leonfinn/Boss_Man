@@ -144,6 +144,8 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
   }
 
   return {
+    /** What the CPU reserve decided at start (cpu-layout.ts): on or off, which threads, and why. */
+    cpu: () => cfg.cpuPlan ?? { on: false, reserved: [] as number[], runnerThreads: [] as number[], hostThreads: 0, reason: "Not worked out." },
     /** Writes the token, then creates (or recreates) and starts the runner. Data folders are kept. */
     put: (slug: string, token: string, allow?: string[]) => locked(slug, async () => {
       mkdirSync(companyDir(cfg, slug), { recursive: true, mode: 0o700 });
@@ -295,6 +297,10 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
       if (!auth.startsWith("Bearer ") || !sameKey(auth.slice(7), key)) return send(401, { error: "unauthorized" });
       if (url.search) throw new LauncherError(400, "No query parameters.");
 
+      if (url.pathname === "/cpu") {
+        if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
+        return send(200, api.cpu());
+      }
       if (url.pathname === "/runners") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, await api.list());

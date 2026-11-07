@@ -122,6 +122,14 @@ if command -v flock >/dev/null; then
   hold() { local st="$t/stamp.$1.$RANDOM"; : >"$st"; ( exec 8>"$t/lock.slot.$1"; flock 8; for _ in $(seq 1500); do [ -n "$(find "$t/lock.queue" -type f -newer "$st" 2>/dev/null | head -1)" ] && break; sleep 0.1; done; exec sleep "$2" ) & }
   waitq() { for _ in $(seq 1500); do [ "$(find "$t/lock.queue" -type f 2>/dev/null | wc -l)" -ge "$1" ] && return 0; sleep 0.1; done; return 1; }
 
+  # Server-queued job (DR-003): no lock files are touched even while a slot is held, and it does not wait.
+  hold 1 3; holder=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_CHECK_NO_LOCK=1 BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1) || rc=$?
+  [ "$rc" = 0 ] || fail "no-lock mode: expected exit 0 with a busy slot, got $rc: $out"
+  grep -q "no lock files" <<<"$out" || fail "no-lock mode: not announced: $out"
+  [ ! -e "$t/lock.queue" ] || [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "no-lock mode: queue entry written"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
 
@@ -364,9 +372,17 @@ if command -v flock >/dev/null; then
   for _ in $(seq 300); do grep -q "lock held" "$t/aged.out" 2>/dev/null && break; sleep 0.2; done
   grep -q "lock held" "$t/aged.out" || fail "ageing: an aged hand-run check was not served ahead of a merge check: $(cat "$t/aged.out")"
   wait "$a" || true
-  # Slot log: the hold above left a start and an end line naming the folder.
-  grep -q " start pid=.*kind=hand slot=1 folder=" "$t/lock.slotlog" || fail "slot log: no start line: $(cat "$t/lock.slotlog" 2>&1)"
-  grep -q " end pid=.*kind=hand slot=1 folder=$(cd "$here/.." && pwd -P)\$" "$t/lock.slotlog" || fail "slot log: no end line: $(cat "$t/lock.slotlog" 2>&1)"
+  # Slot log: the hold above left a start and an end line naming the check kind, the checked tree (BOS-666) and the folder.
+  # The tree is this checkout's, with "-dirty" when it has uncommitted changes (as it may while the tests are written).
+  stree="$(git -C "$here/.." rev-parse 'HEAD^{tree}')"
+  grep -Eq " start pid=.*kind=hand slot=1 check=full tree=$stree(-dirty)? folder=" "$t/lock.slotlog" || fail "slot log: no start line: $(cat "$t/lock.slotlog" 2>&1)"
+  grep -Eq " end pid=.*kind=hand slot=1 check=full tree=$stree(-dirty)? folder=$(cd "$here/.." && pwd -P)\$" "$t/lock.slotlog" || fail "slot log: no end line: $(cat "$t/lock.slotlog" 2>&1)"
+  # check-quick.sh names its slot hold check=quick; an unknown kind falls back to full.
+  rm -rf "$t/lock.queue" "$t/lock.slotlog"; mkdir -p "$t/lock.queue"  # drop the stand-in merge entry, or these holds wait behind it
+  lock env CHECK_ALL_CHECK_KIND=quick >/dev/null || fail "quick-kind hold failed"
+  grep -Eq " start pid=.* check=quick tree=$stree(-dirty)? folder=" "$t/lock.slotlog" || fail "slot log: no check=quick line: $(cat "$t/lock.slotlog" 2>&1)"
+  rm -f "$t/lock.slotlog"; lock env 'CHECK_ALL_CHECK_KIND=x y' >/dev/null || fail "odd-kind hold failed"
+  grep -Eq " start pid=.* check=full tree=" "$t/lock.slotlog" || fail "slot log: odd kind not replaced by full: $(cat "$t/lock.slotlog" 2>&1)"
   # One place per folder: a newer check from the same folder replaces the older one, which leaves saying so.
   rm -rf "$t/lock.queue"; hold 1 3600; h1=$!; sleep 0.3
   ( r=0; lock env >"$t/old.out" 2>&1 || r=$?; echo "$r" >"$t/old.rc" ) & o=$!
@@ -386,7 +402,7 @@ if command -v flock >/dev/null; then
   for _ in $(seq 300); do ls "$t/lock.queue"/0-* >/dev/null 2>&1 && grep -q "waiting for a free check slot" "$t/mc.out" 2>/dev/null && break; sleep 0.2; done
   mqe=""; for mqf in "$t"/lock.queue/0-*; do [ -e "$mqf" ] && mqe=${mqf##*/} && break; done; [ -n "$mqe" ] || fail "merge marker: merge check never queued: $(cat "$t/mc.out")"
   : >"$t/lock.replaced.${mqe##*-}"
-  sleep 3
+  sleep 2
   kill -0 "$mc" 2>/dev/null || fail "merge marker: a merge check left the line on a replaced marker: $(cat "$t/mc.out")"
   ! grep -q "replaced by a newer check" "$t/mc.out" || fail "merge marker: merge check was replaced: $(cat "$t/mc.out")"
   pkill -P "$mc" 2>/dev/null || true; kill "$mc" 2>/dev/null || true; wait "$mc" 2>/dev/null || true
@@ -397,9 +413,9 @@ if command -v flock >/dev/null; then
   rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"; hold 1 3600; h1=$!; sleep 0.3
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
   ( lock env CHECK_ALL_AGE_AFTER=1 CHECK_ALL_LOCK_WAIT=8 >"$t/older.out" 2>&1 ) & a=$!
-  waitq 2; sleep 3
+  waitq 2; sleep 2
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
-  sleep 3
+  sleep 2
   ! grep -q "lock held" "$t/older.out" || fail "BOS-613 (a): an aged hand-run check went ahead of an older merge check: $(cat "$t/older.out")"
   wait "$a" || true
   # BOS-613 (b): two slots, a merge check waiting, one hand-run check running: a second hand-run check waits, even aged and
@@ -408,10 +424,10 @@ if command -v flock >/dev/null; then
   hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
   echo "$h1 $(date +%s) hand" >"$t/lock.holder.1"
   ( lock env CHECK_ALL_AGE_AFTER=1 >"$t/cap.out" 2>&1 ) & a=$!
-  waitq 1; sleep 3
+  waitq 1; sleep 2
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
   kill "$h2" 2>/dev/null || true; wait "$h2" 2>/dev/null || true
-  sleep 3
+  sleep 2
   ! grep -q "lock held" "$t/cap.out" || fail "BOS-613 (b): a second hand-run check took a slot while a merge check waited: $(cat "$t/cap.out")"
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   for _ in $(seq 300); do grep -q "lock held" "$t/cap.out" 2>/dev/null && break; sleep 0.2; done
@@ -424,7 +440,7 @@ if command -v flock >/dev/null; then
   # The retry budget counts from the slot-taken time, not from before the queue wait (P13 Q4). A check that waits
   # longer than the budget, then hits EAGAIN, is still retried; measured from before the wait it was never retried.
   : >"$t/count"; export COUNT="$t/count"
-  rc=0; ( cd "$here/.." && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BUDGET_SECONDS=15 CHECK_ALL_QUEUE_TEST_SLEEP=16 BOSSMAN_CHECK_BODY='echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3' ./scripts/check-all.sh >"$t/budget.out" 2>&1 ) || rc=$?
+  rc=0; ( cd "$here/.." && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BUDGET_SECONDS=8 CHECK_ALL_QUEUE_TEST_SLEEP=9 BOSSMAN_CHECK_BODY='echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3' ./scripts/check-all.sh >"$t/budget.out" 2>&1 ) || rc=$?
   [ "$rc" -eq 3 ] || fail "budget after queue wait: rc $rc, want 3: $(cat "$t/budget.out")"
   [ "$(runs)" -eq 3 ] || fail "budget after queue wait: ran $(runs) times, want 3 (a long wait must not use up the retry budget)"
   # A signal leaves a trace and frees the queue place: the output, the stored log and the result store get "killed by signal <name>",

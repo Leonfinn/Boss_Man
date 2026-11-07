@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, ApiError, type Agent, type Company, type FundingSource, type Project } from "../api";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
@@ -2010,6 +2010,74 @@ type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; c
 const ROLE_NOTE = { leader: "", standby: " (another copy is in charge; changes here are refused)", single: " (no leader lock)" };
 
 /** This copy of the server ("leader" runs the work, "standby" only serves reads; docs/09-self-deploy.md) and, when blue/green is on, both colours. */
+type HostFactsView = {
+  hostName: string | null;
+  reportedAt: string | null;
+  ownerFacts: string[];
+  facts: Record<string, { value: string; source: "host" | "owner"; at: string; conflict?: { confirmed: string; reported: string } }>;
+};
+const OWNER_FACT_LABELS: Record<string, string> = {
+  "network.publicAddress": "Address you reach Boss Man at from outside",
+  "repo.deployKeyAdded": "Deploy key added to the code host (yes or no)",
+};
+
+/** Settings → This host (BOS-419): what the host deployer reported, and the facts only the owner can confirm. */
+export function ThisHost() {
+  const facts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 30_000, "host-facts");
+  const act = useAction();
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const d = facts.data;
+  if (!d) return null;
+  const keys = Object.keys(d.facts).sort();
+  const save = (key: string) =>
+    act.run(async () => {
+      await api("/api/host-facts", { method: "PUT", body: { key, value: draft[key] ?? "" } });
+      facts.reload();
+      return "Saved.";
+    });
+  return (
+    <Section id="this-host-h" title="This host">
+      <p className="muted" style={{ fontSize: 14 }}>
+        {d.reportedAt
+          ? `What the host${d.hostName ? ` ${d.hostName}` : ""} last told Boss Man about itself, ${when(d.reportedAt)}. Agents' cards use these facts, so a card can't be raised while one it needs is missing.`
+          : "The host hasn't reported yet. Once its deployer runs, its facts show up here."}
+      </p>
+      {keys.length > 0 && (
+        <dl data-testid="host-facts" style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 16px", fontSize: 14 }}>
+          {keys.map((k) => {
+            const f = d.facts[k]!;
+            return (
+              <Fragment key={k}>
+                <dt className="mono">{k}</dt>
+                <dd>
+                  <span className="mono">{f.value}</span> <span className="muted">({f.source === "host" ? "reported by the host" : "confirmed by you"})</span>
+                  {f.conflict && (
+                    <span className="error" role="alert">
+                      {" "}
+                      You confirmed "{f.conflict.confirmed}" but the host reports "{f.conflict.reported}". The host's value is used.
+                    </span>
+                  )}
+                </dd>
+              </Fragment>
+            );
+          })}
+        </dl>
+      )}
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Facts only you can give</h3>
+      {d.ownerFacts.map((k) => (
+        <div key={k} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <label htmlFor={`hf-${k}`}>{OWNER_FACT_LABELS[k] ?? k}</label>
+          <input id={`hf-${k}`} className="mono" maxLength={500} placeholder={d.facts[k]?.value ?? ""} value={draft[k] ?? ""} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} />
+          <button type="button" className="btn" disabled={act.busy || !(draft[k] ?? "").trim() || d.facts[k]?.source === "host"} onClick={() => void save(k)}>
+            Confirm
+          </button>
+        </div>
+      ))}
+      {act.view}
+    </Section>
+  );
+}
+
 function ServerPanel() {
   const h = usePoll((signal) => api<Health>("/api/health", { signal }), 10_000, "server-role");
   const bg = usePoll((signal) => api<BlueGreen>("/api/bluegreen", { signal }), 10_000, "bluegreen");
@@ -2039,6 +2107,16 @@ function ServerPanel() {
             {b.colours.map((c) => (
               <ColourRow key={c.colour} c={c} />
             ))}
+            {b.colours.some((c) => !c.up) && (
+              <>
+                <dt>Note</dt>
+                <dd data-testid="colour-down-note">
+                  {b.colours.find((c) => c.colour === b.self)?.role === "leader"
+                    ? "One colour is not running, so there is nothing to switch back to. This is normal after a finished update (the old copy is stopped on purpose); if it is not, check the last update's result."
+                    : "This copy is not leading and the other colour is not running, so nothing is in charge. Start the live colour on the host and send it SIGUSR2; the update's alert lists the exact commands. If both colours are stopped this page cannot load at all, so use that alert."}
+                </dd>
+              </>
+            )}
           </>
         )}
       </dl>
@@ -2289,6 +2367,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
           <>
             <ServerPanel />
             <SelfDeploy go={go} />
+            <ThisHost />
             <RunLimits />
           </>
         )}
