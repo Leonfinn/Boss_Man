@@ -7,11 +7,13 @@
 # Safe to run twice; SWEEP_TMP_DRY_RUN=1 only lists what it would remove.
 #   SWEEP_TMP_DIR       folder to sweep (default /tmp)
 #   SWEEP_TMP_HOURS     minimum age in hours (default 6)
-#   SWEEP_TMP_PATTERNS  space-separated name globs (default: the migration/runner test scratch and pnpm stores)
+#   SWEEP_TMP_PATTERNS  space-separated name globs (default: the migration/runner test scratch, pnpm stores, and a
+#                       kept scratch's half-written log, bossman-scratch-*.tmp; a ticket's BOSSMAN_SCRATCH lives on
+#                       the workspaces disk and is never here)
 set -uo pipefail
 DIR=${SWEEP_TMP_DIR:-/tmp}
 HOURS=${SWEEP_TMP_HOURS:-6}
-PATTERNS=${SWEEP_TMP_PATTERNS:-"bm-* mig-old-* bossman-pglite-template-*.tar pnpm-store* .pnpm-store*"}
+PATTERNS=${SWEEP_TMP_PATTERNS:-"bm-* mig-old-* bossman-pglite-template-*.tar pnpm-store* .pnpm-store* bossman-scratch-*.tmp"}
 MIN_FREE=${SWEEP_TMP_MIN_FREE_PERCENT:-10}
 EMERGENCY_HOURS=${SWEEP_TMP_EMERGENCY_HOURS:-1}
 case "$HOURS" in '' | *[!0-9]*) echo "sweep-tmp: SWEEP_TMP_HOURS must be a whole number" >&2; exit 2 ;; esac
