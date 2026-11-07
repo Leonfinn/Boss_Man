@@ -706,9 +706,32 @@ export function retroService(
       try {
         await self.carryOut(claimed);
       } catch (err) {
+        // A change recorded as skipped must not ship: if propose() got as far as storing the proposal,
+        // close it before the change is marked skipped.
+        // `claimed` predates the proposalId carryOut wrote, so read the row again.
+        if (claimed.lever === "playbook") {
+          try {
+            const [fresh] = await db.select({ after: workflowChanges.after }).from(workflowChanges).where(eq(workflowChanges.id, changeId));
+            const proposalId = ((fresh?.after ?? {}) as Record<string, any>).proposalId as string | undefined;
+            if (proposalId) await deps.skillProposals.cancel(c.companyId, proposalId);
+          } catch {
+            /* no proposal was stored, nothing to close */
+          }
+        }
         await db.update(workflowChanges).set({ status: "skipped", appliedAt: null, checkDueAt: null, reason, reasonLink, decidedBy: info.decidedBy }).where(eq(workflowChanges.id, changeId));
         await record(db, { companyId: c.companyId, kind: "workflow_change", summary: `Workflow change not applied (${c.lever}): ${(err as Error).message}`, at: now() });
       }
+    },
+
+    /** The add-a-skill flow ended a nomination without installing it: the playbook change never reached anyone, so it is skipped, not applied. */
+    async proposalEnded(companyId: string, proposalId: string) {
+      const rows = await db
+        .update(workflowChanges)
+        .set({ status: "skipped", checkDueAt: null })
+        .where(and(eq(workflowChanges.companyId, companyId), eq(workflowChanges.lever, "playbook"), eq(workflowChanges.status, "applied"), sql`${workflowChanges.after}->>'proposalId' = ${proposalId}`))
+        .returning({ id: workflowChanges.id });
+      for (const r of rows) await record(db, { companyId, kind: "workflow_change", summary: `Workflow change not applied (playbook): the playbook never reached the agents.`, at: now() });
+      return rows.length;
     },
 
     async carryOut(c: typeof workflowChanges.$inferSelect) {
