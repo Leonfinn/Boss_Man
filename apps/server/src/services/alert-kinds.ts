@@ -150,6 +150,12 @@ export const ALERT_KINDS = {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
   },
+  // deploys.ts finishTag / runTag (DR-033): a deploy tag that couldn't be moved after a successful deploy,
+  // or a runner offline for 30 minutes with the move waiting. The deploy stands; the CEO fixes the host settings
+  // or tells the owner. One card per deploy.
+  deploy_tag: {
+    topRung: "ceo",
+  },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
     topRung: "ceo",

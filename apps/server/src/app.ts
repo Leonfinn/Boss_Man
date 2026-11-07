@@ -288,6 +288,10 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => decisionsSvc.drainSecondOpinions());
   const deploysSvc = deploysService(db, {
     now: opts.now,
+    // DR-033: the runner resolves a deploy's commit and moves its tag; a tag it can't move goes to the CEO (`alerts` is built below).
+    runners,
+    alert: (input) => alerts.raise(input),
+    log: (m) => app.log.warn(m),
     onShipped: async (ticketId) => {
       const [t] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(t?.featureId);
@@ -2564,12 +2568,21 @@ export async function buildApp(opts: AppOptions) {
       endpoint: z.string().trim().min(1).max(500),
       isProduction: z.boolean().optional(),
       requiresApproval: z.boolean().optional(),
+      /** DR-033: the tag to move after a successful deploy; null turns it off. Owner-only, like every target setting. */
+      liveTag: z.object({ projectId: Uuid, name: z.string().trim().min(1).max(100) }).nullable().optional(),
     });
     const deployErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
       if (err instanceof DeployError) return reply.code(err.status).send({ error: "deploy", message: err.message });
       throw err;
     };
-    owner.get("/api/companies/:id/deploy-targets", async (req) => deploysSvc.listTargets(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/deploy-targets", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const [targets, last] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id)]);
+      return targets.map((t) => {
+        const d = last.get(t.id);
+        return { ...t, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
+      });
+    });
     owner.post("/api/companies/:id/deploy-targets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       return deploysSvc

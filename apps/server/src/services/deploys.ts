@@ -2,10 +2,16 @@
 // Docker endpoint or a git repo) with its own secrets. An agent asks to deploy a ref to a
 // target; production targets wait for the owner. Only the run that carries out an approved
 // deploy receives the target's secrets, and only while the deploy is running.
-import { and, asc, eq } from "drizzle-orm";
-import { findCredential, riskOf, stagingFirst } from "@boss-man/shared";
+//
+// A target may name a deploy tag (DR-033, rules.liveTag): after a deploy to it reports success,
+// the runner's daemon moves that tag on the project's remote to the commit the deploy was asked
+// for, with the merge token. No agent ever names the tag, the refspec or the commit pushed.
+import { and, asc, desc, eq } from "drizzle-orm";
+import { DEPLOY_REF, deployTagNameProblem, findCredential, riskOf, stagingFirst, type ResolveResult, type RUNNER_FEATURES, type RunnerCommand, type TagResult } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, decisions, deploys, deployTargets, tickets } from "../db/schema.js";
+import { agents, decisions, deploys, deployTargets, projects, runners as runnersTable, tickets } from "../db/schema.js";
+import { record } from "./activity.js";
+import type { AlertInput } from "./alert-ladder.js";
 import { ownerActed } from "./stale-requests.js";
 
 export class DeployError extends Error {
@@ -19,10 +25,38 @@ export class DeployError extends Error {
 
 type Target = typeof deployTargets.$inferSelect;
 type Deploy = typeof deploys.$inferSelect;
-export type TargetInput = { name: string; kind: Target["kind"]; endpoint: string; isProduction?: boolean; requiresApproval?: boolean };
+/** The deploy tag a target moves after a successful deploy (DR-033): one tag in one project's repo. */
+export type LiveTag = { projectId: string; name: string };
+export type TargetRules = { requiresApproval?: boolean; liveTag?: LiveTag | null };
+export type TargetInput = { name: string; kind: Target["kind"]; endpoint: string; isProduction?: boolean; requiresApproval?: boolean; liveTag?: LiveTag | null };
 type WakeHook = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number; deployId?: string; causedByRunId?: string | null }) => Promise<unknown>;
 
+/** What the deploys service needs of the runner hub (services/runners.ts), for resolving refs and moving tags. */
+export type DeployRunners = {
+  isConnected(runnerId: string): boolean;
+  waitConnected(runnerId: string, maxMs: number): Promise<boolean>;
+  can(runnerId: string, feature: (typeof RUNNER_FEATURES)[number]): boolean;
+  request<T>(runnerId: string, build: (requestId: string) => RunnerCommand, timeoutMs?: number): Promise<T>;
+};
+
 const RAW_DOCKER_SOCKET = /(^|:\/\/)\/?(var\/)?run\/docker\.sock$/;
+/** How long resolving a ref may take at request time: a fetch, then two rev-parses. */
+const RESOLVE_TIMEOUT_MS = 2 * 60_000;
+/** How long a tag push may take once the runner has it. */
+const TAG_TIMEOUT_MS = 5 * 60_000;
+/** The runner is waited for this long before the CEO hears the tag hasn't moved yet (DR-033), as a merge waits. */
+export const TAG_RUNNER_ALERT_MS = 30 * 60_000;
+/** After the alert, the job waits this much longer before it records the tag as not moved. */
+const TAG_RUNNER_GIVE_UP_MS = 24 * 60 * 60_000;
+const UPDATE_RUNNER = "The company's runner needs an update before it can do this (Settings → Server and runner → Updates → Build and update runners).";
+
+export const short = (sha: string | null | undefined) => (sha ? sha.slice(0, 7) : "none");
+
+/** The target's deploy tag, when its rules name a well-formed one. */
+export function liveTagOf(t: Pick<Target, "rules">): LiveTag | null {
+  const lt = (t.rules as TargetRules | null)?.liveTag;
+  return lt && typeof lt.projectId === "string" && typeof lt.name === "string" && lt.name ? { projectId: lt.projectId, name: lt.name } : null;
+}
 
 /** Rejects endpoints that would hand an agent root on the host, or that carry a credential. */
 export function endpointProblem(kind: Target["kind"], endpoint: string): string | null {
@@ -44,11 +78,27 @@ export function endpointProblem(kind: Target["kind"], endpoint: string): string 
   return null;
 }
 
-export function deploysService(db: Db, deps: { now?: () => Date; /** A production deploy of this task succeeded: its feature may be released. */ onShipped?: (ticketId: string) => Promise<unknown> } = {}) {
+export function deploysService(
+  db: Db,
+  deps: {
+    now?: () => Date;
+    /** A production deploy of this task succeeded: its feature may be released. */
+    onShipped?: (ticketId: string) => Promise<unknown>;
+    /** The runner hub, to resolve a deploy's commit and move its tag (DR-033). Without it neither happens. */
+    runners?: DeployRunners;
+    /** Raises a Boss Man alert (the alert ladder). */
+    alert?: (input: AlertInput) => Promise<unknown>;
+    log?: (message: string) => void;
+    /** Test hooks: how long the tag job waits for an offline runner before the CEO alert, and before giving up. */
+    tagRunnerAlertMs?: number;
+    tagRunnerGiveUpMs?: number;
+  } = {},
+) {
   const now = deps.now ?? (() => new Date());
+  const log = deps.log ?? (() => {});
   let wake: WakeHook | null = null;
 
-  const needsApproval = (t: Target) => t.isProduction || (t.rules as { requiresApproval?: boolean }).requiresApproval === true;
+  const needsApproval = (t: Target) => t.isProduction || (t.rules as TargetRules).requiresApproval === true;
 
   async function load(id: string) {
     const [d] = await db.select().from(deploys).where(eq(deploys.id, id));
@@ -62,9 +112,85 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
     return t;
   }
 
+  async function companyRunner(companyId: string): Promise<string | null> {
+    const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
+    return r?.id ?? null;
+  }
+
+  /** A connected runner that can resolve refs and move tags, or why there isn't one. */
+  async function tagRunner(companyId: string): Promise<{ id: string } | { problem: string }> {
+    const id = await companyRunner(companyId);
+    if (!id || !deps.runners) return { problem: "The company has no runner." };
+    if (!deps.runners.isConnected(id)) return { problem: "The company's runner isn't connected." };
+    if (!deps.runners.can(id, "deploy-tag")) return { problem: UPDATE_RUNNER };
+    return { id };
+  }
+
+  /**
+   * Checks a deploy tag setting before it is saved (DR-033): a single, well-formed name, a project of this
+   * company with a repo, and not the name of any branch on that repo's remote (asked of the runner).
+   */
+  async function checkLiveTag(companyId: string, input: LiveTag): Promise<LiveTag> {
+    const name = input.name.trim();
+    const problem = deployTagNameProblem(name);
+    if (problem) throw new DeployError(422, problem);
+    const [p] = await db.select().from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, companyId)));
+    if (!p) throw new DeployError(422, "Pick one of this company's projects for the tag.");
+    if (!p.repoUrl) throw new DeployError(422, `The project ${p.name} has no git repo set.`);
+    if (name === p.defaultBranch) throw new DeployError(422, `${name} is the project's main branch, so it can't be the deploy tag.`);
+    const runner = await tagRunner(companyId);
+    if ("problem" in runner) throw new DeployError(409, `${runner.problem} It has to check the tag name against the repo's branches before the setting can be saved.`);
+    let r: ResolveResult;
+    try {
+      r = await deps.runners!.request<ResolveResult>(runner.id, (requestId) => ({ type: "workspace.resolve", requestId, projectId: p.id, repoUrl: p.repoUrl!, ref: p.defaultBranch, baseRef: p.defaultBranch }), RESOLVE_TIMEOUT_MS);
+    } catch (err) {
+      throw new DeployError(409, `The runner couldn't read the repo's branches: ${(err as Error).message}`);
+    }
+    if (r.branches.includes(name)) throw new DeployError(422, `${name} is also a branch in ${p.name}'s repo. Pick a tag name that isn't a branch.`);
+    return { projectId: p.id, name };
+  }
+
+  async function rulesWith(companyId: string, rules: TargetRules, patch: Pick<Partial<TargetInput>, "requiresApproval" | "liveTag">): Promise<TargetRules> {
+    const next: TargetRules = { ...rules };
+    if (patch.requiresApproval != null) next.requiresApproval = patch.requiresApproval;
+    if (patch.liveTag === null) delete next.liveTag;
+    else if (patch.liveTag) {
+      const same = rules.liveTag && rules.liveTag.projectId === patch.liveTag.projectId && rules.liveTag.name === patch.liveTag.name.trim();
+      next.liveTag = same ? rules.liveTag! : await checkLiveTag(companyId, patch.liveTag);
+    }
+    return next;
+  }
+
+  /**
+   * The commit a deploy's ref names (DR-033), read by the runner after a fetch. For a target with a deploy tag
+   * it also decides whether the tag will follow the deploy: only a commit on the project's base branch may.
+   * Never throws: a ref it can't resolve leaves the deploy as it was, with the reason on the tag result.
+   */
+  async function resolveFor(t: Target, ref: string, ticketProjectId: string | null): Promise<{ commit: string | null; tagName: string | null; tagResult: string | null }> {
+    const lt = liveTagOf(t);
+    const skip = (why: string) => (lt ? { tagName: lt.name, tagResult: `skipped: ${why}` } : { tagName: null, tagResult: null });
+    const projectId = lt?.projectId ?? ticketProjectId;
+    if (!projectId) return { commit: null, ...skip("the deploy names no project") };
+    if (!DEPLOY_REF.test(ref)) return { commit: null, ...skip(`${ref} isn't a git branch, tag or commit`) };
+    const [p] = await db.select().from(projects).where(and(eq(projects.id, projectId), eq(projects.companyId, t.companyId)));
+    if (!p?.repoUrl) return { commit: null, ...skip("the project has no git repo") };
+    const runner = await tagRunner(t.companyId);
+    if ("problem" in runner) return { commit: null, ...skip(`couldn't read the commit: ${runner.problem}`) };
+    try {
+      const r = await deps.runners!.request<ResolveResult>(runner.id, (requestId) => ({ type: "workspace.resolve", requestId, projectId: p.id, repoUrl: p.repoUrl!, ref, baseRef: p.defaultBranch }), RESOLVE_TIMEOUT_MS);
+      if (!r.commit) return { commit: null, ...skip(r.error ?? `${ref} doesn't name a commit`) };
+      if (!lt) return { commit: r.commit, tagName: null, tagResult: null };
+      if (!r.onBase) return { commit: r.commit, ...skip(`${short(r.commit)} isn't on ${p.defaultBranch}`) };
+      return { commit: r.commit, tagName: lt.name, tagResult: null };
+    } catch (err) {
+      return { commit: null, ...skip(`couldn't read the commit: ${(err as Error).message}`) };
+    }
+  }
+
   async function startWhenApproved(d: Deploy, t: Target, causedByRunId?: string | null) {
     const [row] = await db.update(deploys).set({ status: "approved" }).where(eq(deploys.id, d.id)).returning();
     if (d.agentId && wake) {
+      const tag = d.tagName && !d.tagResult ? ` Boss Man moves the tag ${d.tagName} to ${short(d.commit)} once you report success: don't push tags yourself.` : "";
       await wake({
         agentId: d.agentId,
         ticketId: d.ticketId,
@@ -72,11 +198,101 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
         priority: 3,
         deployId: d.id,
         causedByRunId,
-        note: `Deploy ${d.id} is approved: ship ${d.ref} to ${t.name} (${t.kind} ${t.endpoint}). This run has the target's secrets in its environment, and only this run. When you've finished, report the result with the deploy tool (action "report", outcome succeeded or failed).`,
+        note: `Deploy ${d.id} is approved: ship ${d.ref}${d.commit ? ` (commit ${d.commit})` : ""} to ${t.name} (${t.kind} ${t.endpoint}). This run has the target's secrets in its environment, and only this run. When you've finished, report the result with the deploy tool (action "report", outcome succeeded or failed).${tag}`,
       });
     }
     return row!;
   }
+
+  // ---------- The tag job (DR-033) ----------
+
+  /** One tag job at a time per target, in the order the reports came in. */
+  const chains = new Map<string, Promise<unknown>>();
+  const inFlight = new Set<string>();
+
+  async function finishTag(d: Deploy, t: Target, r: { result: string; from?: string | null; to?: string | null; error?: string }) {
+    const at = now();
+    const tagResult = r.result === "moved" || r.result === "unchanged" ? r.result : `${r.result === "skipped" ? "skipped" : "failed"}: ${(r.error ?? "unknown error").slice(0, 1000)}`;
+    await db
+      .update(deploys)
+      .set({ tagFrom: r.from ?? null, tagTo: r.result === "moved" || r.result === "unchanged" ? (r.to ?? d.commit) : null, tagAt: at, tagResult })
+      .where(eq(deploys.id, d.id));
+    const name = d.tagName ?? "the deploy tag";
+    const summary =
+      r.result === "moved"
+        ? `Moved ${name} ${short(r.from)} → ${short(r.to)} after deploy ${d.id}`
+        : r.result === "unchanged"
+          ? `${name} already pointed at ${short(r.to)} after deploy ${d.id}`
+          : `Tag ${name} not moved after deploy ${d.id} to ${t.name}: ${r.error ?? "unknown error"}`;
+    await record(db, { companyId: d.companyId, ticketId: d.ticketId, kind: "deploy_tag", summary, detail: { deployId: d.id, tag: d.tagName, from: r.from ?? null, to: r.to ?? null, result: tagResult }, at });
+    if (r.result !== "moved" && r.result !== "unchanged" && r.result !== "skipped") {
+      await deps
+        .alert?.({
+          companyId: d.companyId,
+          ticketId: d.ticketId,
+          kind: "deploy_tag",
+          from: "ceo",
+          why: "only the CEO or the owner can fix the git host's settings",
+          dedupeKey: `deploy-tag:${d.id}`,
+          question: `Deploy ${d.id} of ${d.ref} to ${t.name} succeeded and stays succeeded, but Boss Man couldn't move the tag ${name} to ${short(d.commit)}. The git host said: ${(r.error ?? "unknown error").slice(0, 1500)}. This is usually the git host's tag protection or the git token's permissions; see the per-host notes on the deploy target's tag setting.`,
+        })
+        .catch((err) => log(`Couldn't raise the deploy tag alert for ${d.id}: ${(err as Error).message}`));
+    }
+  }
+
+  async function runTag(deployId: string) {
+    const d = await load(deployId);
+    if (d.tagResult !== "pending" || !d.tagName || !d.commit) return;
+    const t = await target(d.targetId);
+    const lt = liveTagOf(t);
+    if (!lt || lt.name !== d.tagName) return finishTag(d, t, { result: "skipped", error: "the target's tag setting changed after the deploy was asked for" });
+    const [p] = await db.select().from(projects).where(eq(projects.id, lt.projectId));
+    if (!p?.repoUrl) return finishTag(d, t, { result: "failed", error: "the project has no git repo" });
+    const runnerId = await companyRunner(d.companyId);
+    if (!runnerId || !deps.runners) return finishTag(d, t, { result: "failed", error: "the company has no runner" });
+    const hub = deps.runners;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (!hub.isConnected(runnerId)) {
+        if (!(await hub.waitConnected(runnerId, deps.tagRunnerAlertMs ?? TAG_RUNNER_ALERT_MS))) {
+          await deps
+            .alert?.({
+              companyId: d.companyId,
+              ticketId: d.ticketId,
+              kind: "deploy_tag",
+              from: "ceo",
+              dedupeKey: `deploy-tag-offline:${d.id}`,
+              clearWhen: [{ kind: "runnerConnected", companyId: d.companyId }],
+              question: `The tag ${d.tagName} hasn't been moved to ${short(d.commit)} yet after deploy ${d.id} to ${t.name}: the company's runner has been offline for 30 minutes. The deploy itself stands; the tag moves once the runner is back.`,
+            })
+            .catch((err) => log(`Couldn't raise the deploy tag offline alert for ${d.id}: ${(err as Error).message}`));
+          if (!(await hub.waitConnected(runnerId, deps.tagRunnerGiveUpMs ?? TAG_RUNNER_GIVE_UP_MS))) return finishTag(d, t, { result: "failed", error: "the company's runner stayed offline" });
+        }
+      }
+      if (!hub.can(runnerId, "deploy-tag")) return finishTag(d, t, { result: "failed", error: UPDATE_RUNNER });
+      try {
+        const r = await hub.request<TagResult>(runnerId, (requestId) => ({ type: "workspace.tag", requestId, projectId: p.id, repoUrl: p.repoUrl!, name: d.tagName!, commit: d.commit!, baseRef: p.defaultBranch }), TAG_TIMEOUT_MS);
+        return finishTag(d, t, { result: r.result === "refused" ? "failed" : r.result, from: r.from, to: r.to, error: r.error });
+      } catch (err) {
+        // The runner went away mid-request: wait for it and ask again. Any other error is the answer.
+        if (hub.isConnected(runnerId) || attempt === 2) return finishTag(d, t, { result: "failed", error: (err as Error).message });
+      }
+    }
+  }
+
+  function queueTag(deployId: string, targetId: string): Promise<unknown> {
+    if (inFlight.has(deployId)) return chains.get(targetId) ?? Promise.resolve();
+    inFlight.add(deployId);
+    const next = (chains.get(targetId) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => runTag(deployId))
+      .catch((err) => log(`The deploy tag job for ${deployId} failed: ${(err as Error).message}`))
+      .finally(() => inFlight.delete(deployId));
+    chains.set(targetId, next);
+    return next;
+  }
+
+  /** A deploy that didn't succeed leaves the tag alone; say why on the record. */
+  const skipTagUpdate = (reason: string) => ({ tagResult: `skipped: ${reason}` });
 
   return {
     setWakeHook(hook: WakeHook) {
@@ -86,9 +302,10 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
     async createTarget(companyId: string, input: TargetInput) {
       const problem = endpointProblem(input.kind, input.endpoint);
       if (problem) throw new DeployError(422, problem);
+      const rules = await rulesWith(companyId, {}, { requiresApproval: input.requiresApproval ?? false, liveTag: input.liveTag });
       const [t] = await db
         .insert(deployTargets)
-        .values({ companyId, name: input.name, kind: input.kind, endpoint: input.endpoint.trim(), isProduction: input.isProduction ?? false, rules: { requiresApproval: input.requiresApproval ?? false } })
+        .values({ companyId, name: input.name, kind: input.kind, endpoint: input.endpoint.trim(), isProduction: input.isProduction ?? false, rules })
         .returning();
       return t!;
     },
@@ -99,6 +316,7 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
       const endpoint = patch.endpoint ?? t.endpoint;
       const problem = endpointProblem(kind, endpoint);
       if (problem) throw new DeployError(422, problem);
+      const rules = await rulesWith(t.companyId, t.rules as TargetRules, patch);
       const [row] = await db
         .update(deployTargets)
         .set({
@@ -106,7 +324,7 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
           kind,
           endpoint: endpoint.trim(),
           ...(patch.isProduction != null ? { isProduction: patch.isProduction } : {}),
-          ...(patch.requiresApproval != null ? { rules: { ...(t.rules as object), requiresApproval: patch.requiresApproval } } : {}),
+          rules,
         })
         .where(eq(deployTargets.id, id))
         .returning();
@@ -122,6 +340,18 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
       return db.select().from(deployTargets).where(eq(deployTargets.companyId, companyId)).orderBy(asc(deployTargets.name));
     },
 
+    /** Each target's last successful deploy (DR-033): what is live there, for agents and the owner's screen. */
+    async lastSucceeded(companyId: string): Promise<Map<string, Deploy>> {
+      const rows = await db
+        .select()
+        .from(deploys)
+        .where(and(eq(deploys.companyId, companyId), eq(deploys.status, "succeeded")))
+        .orderBy(desc(deploys.finishedAt));
+      const last = new Map<string, Deploy>();
+      for (const r of rows) if (!last.has(r.targetId)) last.set(r.targetId, r);
+      return last;
+    },
+
     /** An agent asks to ship a ref. Production (or a target that asks for it) waits for the owner (R15). */
     async request(actor: { companyId: string; agentId: string | null; runId?: string | null }, input: { target: string; ref: string; notes?: string; ticketId?: string }) {
       const all = await db.select().from(deployTargets).where(eq(deployTargets.companyId, actor.companyId));
@@ -129,9 +359,11 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
       if (!t) throw new DeployError(404, all.length ? `No deploy target called "${input.target}". Targets: ${all.map((x) => x.name).join(", ")}.` : "Your company has no deploy targets; ask the owner to add one.");
       const cred = findCredential(`${input.ref} ${input.notes ?? ""}`);
       if (cred) throw new DeployError(422, `That looks like it contains ${cred}. Deploy requests never carry credentials.`);
+      let ticketProjectId: string | null = null;
       if (input.ticketId) {
-        const [tk] = await db.select({ id: tickets.id, risk: tickets.risk }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, actor.companyId)));
+        const [tk] = await db.select({ id: tickets.id, risk: tickets.risk, projectId: tickets.projectId }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, actor.companyId)));
         if (!tk) throw new DeployError(422, "No ticket with that ID in your company.");
+        ticketProjectId = tk.projectId;
         // High and critical work goes to staging first (R48): the same ref must have deployed
         // successfully to a non-production target for this ticket.
         if (t.isProduction && stagingFirst(tk.risk)) {
@@ -149,24 +381,28 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
           }
         }
       }
+      // The commit is fixed now (DR-033): the tag goes to what was approved, never to the ref read again later.
+      const resolved = await resolveFor(t, input.ref, ticketProjectId);
       const [d] = await db
         .insert(deploys)
-        .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, createdAt: now() })
+        .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, createdAt: now(), ...resolved })
         .returning();
-      if (!needsApproval(t)) return { deploy: await startWhenApproved(d!, t, actor.runId), note: "Approved; you'll be woken in a run that holds the target's secrets." };
+      const tagNote = resolved.tagName ? (resolved.tagResult ? ` The tag ${resolved.tagName} won't move: ${resolved.tagResult.replace(/^skipped: /, "")}.` : ` After it succeeds, Boss Man moves the tag ${resolved.tagName} to ${short(resolved.commit)}.`) : "";
+      if (!needsApproval(t)) return { deploy: await startWhenApproved(d!, t, actor.runId), note: `Approved; you'll be woken in a run that holds the target's secrets.${tagNote}` };
 
       const [agent] = actor.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, actor.agentId)) : [];
+      const ships = resolved.commit ? ` (ships ${short(resolved.commit)})` : "";
       await db.insert(decisions).values({
         companyId: actor.companyId,
         kind: "approval",
-        question: `${agent?.name ?? "An agent"} wants to deploy ${input.ref} to ${t.name}${t.isProduction ? " (production)" : ""}.${input.notes ? ` Notes: ${input.notes}` : ""}`,
+        question: `${agent?.name ?? "An agent"} wants to deploy ${input.ref}${ships} to ${t.name}${t.isProduction ? " (production)" : ""}.${input.notes ? ` Notes: ${input.notes}` : ""}${tagNote}`,
         options: ["Approve", "Reject"],
         recommendedOption: "Approve",
         raisedByAgentId: actor.agentId,
         tier: "owner",
-        context: { type: "deploy", deployId: d!.id },
+        context: { type: "deploy", deployId: d!.id, ...(resolved.commit ? { commit: resolved.commit } : {}) },
       });
-      return { deploy: d!, note: "Waiting for the owner to approve. You'll be woken with the answer; don't wait in this turn." };
+      return { deploy: d!, note: `Waiting for the owner to approve. You'll be woken with the answer; don't wait in this turn.${tagNote}` };
     },
 
     /** The owner's answer to a deploy approval. */
@@ -179,7 +415,11 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
         if (d.ticketId) await ownerActed(db, { companyId: d.companyId, ticketIds: [d.ticketId], reason: `the owner approved deploying ${d.ref} to ${t.name}`, wake, now: now() });
         return row;
       }
-      const [row] = await db.update(deploys).set({ status: "rejected", finishedAt: now() }).where(eq(deploys.id, id)).returning();
+      const [row] = await db
+        .update(deploys)
+        .set({ status: "rejected", finishedAt: now(), ...(d.tagName && !d.tagResult ? skipTagUpdate("the deploy was rejected") : {}) })
+        .where(eq(deploys.id, id))
+        .returning();
       if (d.agentId && wake) await wake({ agentId: d.agentId, ticketId: d.ticketId, reason: "deploy rejected", note: `The owner rejected deploying ${d.ref} to ${t.name}. Don't deploy it; raise a decision if you need another way forward.` });
       if (d.ticketId) await ownerActed(db, { companyId: d.companyId, ticketIds: [d.ticketId], reason: `the owner rejected deploying ${d.ref} to ${t.name}`, wake, now: now() });
       return row!;
@@ -194,17 +434,23 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
       await db.update(deploys).set({ status: "approved", runId: null }).where(and(eq(deploys.id, deployId), eq(deploys.status, "running")));
     },
 
-    /** The run carrying out the deploy reports how it went; its secrets stop with it. */
+    /**
+     * The run carrying out the deploy reports how it went; its secrets stop with it. A success on a target
+     * with a deploy tag queues the tag move (DR-033), which never changes the deploy's own result.
+     */
     async report(actor: { companyId: string; runId?: string | null }, input: { deployId: string; outcome: "succeeded" | "failed"; notes?: string }) {
       const d = await load(input.deployId);
       if (d.companyId !== actor.companyId) throw new DeployError(404, "No such deploy.");
       if (d.status !== "running") throw new DeployError(409, `That deploy is ${d.status.replace("_", " ")}, not running.`);
       if (actor.runId && d.runId !== actor.runId) throw new DeployError(403, "Only the run carrying out the deploy can report it.");
+      const tagWaiting = !!d.tagName && !!d.commit && !d.tagResult;
+      const tag = d.tagName && !d.tagResult ? (input.outcome === "succeeded" && tagWaiting ? { tagResult: "pending" } : skipTagUpdate("the deploy failed")) : {};
       const [row] = await db
         .update(deploys)
-        .set({ status: input.outcome, outcome: input.notes ?? null, finishedAt: now() })
+        .set({ status: input.outcome, outcome: input.notes ?? null, finishedAt: now(), ...tag })
         .where(eq(deploys.id, d.id))
         .returning();
+      if (row!.tagResult === "pending") void queueTag(d.id, d.targetId);
       if (input.outcome === "succeeded" && d.ticketId) await deps.onShipped?.(d.ticketId);
       if (d.ticketId && input.outcome === "succeeded") await ownerActed(db, { companyId: d.companyId, ticketIds: [d.ticketId], reason: `the deploy of ${d.ref} went live`, wake, now: now() });
       return row!;
@@ -212,10 +458,31 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
 
     /** A run that ends without reporting leaves the deploy failed, which also ends its access to secrets. */
     async onRunEnded(runId: string) {
-      await db
+      const ended = await db
         .update(deploys)
         .set({ status: "failed", outcome: "The run ended without reporting a result.", finishedAt: now() })
-        .where(and(eq(deploys.runId, runId), eq(deploys.status, "running")));
+        .where(and(eq(deploys.runId, runId), eq(deploys.status, "running")))
+        .returning({ id: deploys.id, tagName: deploys.tagName, tagResult: deploys.tagResult });
+      for (const d of ended) if (d.tagName && !d.tagResult) await db.update(deploys).set(skipTagUpdate("the deploy failed")).where(eq(deploys.id, d.id));
+    },
+
+    /**
+     * Picks up tag moves a restart cut off (DR-033): every succeeded deploy still marked pending that this
+     * server isn't already working on. Safe to run often: the runner's lease makes a repeat push a no-op.
+     */
+    async resumeTags() {
+      const pending = await db
+        .select({ id: deploys.id, targetId: deploys.targetId })
+        .from(deploys)
+        .where(and(eq(deploys.status, "succeeded"), eq(deploys.tagResult, "pending")))
+        .orderBy(asc(deploys.finishedAt));
+      for (const p of pending) if (!inFlight.has(p.id)) void queueTag(p.id, p.targetId);
+      return pending.length;
+    },
+
+    /** The tag job for one deploy, awaited (tests and the resume sweep). */
+    waitForTag(deployId: string, targetId: string) {
+      return inFlight.has(deployId) ? (chains.get(targetId) ?? Promise.resolve()) : Promise.resolve();
     },
 
     async list(companyId?: string) {

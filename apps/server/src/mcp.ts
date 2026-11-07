@@ -21,7 +21,7 @@ import { type CardLint, lintLines } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
-import { DeployError, type deploysService } from "./services/deploys.js";
+import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
 import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
@@ -688,7 +688,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "deploy",
     {
       description:
-        "Ship work to one of your company's deploy targets. action: targets (list them), request (target, ref, optional notes and ticketId; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done).",
+        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success.",
       inputSchema: {
         action: z.enum(["targets", "request", "report"]),
         target: z.string().optional(),
@@ -702,8 +702,22 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     async (input) => {
       try {
         if (input.action === "targets") {
-          const ts = await deploys.listTargets(scope.companyId);
-          return text(JSON.stringify(ts.map((t) => ({ name: t.name, kind: t.kind, endpoint: t.endpoint, production: t.isProduction }))));
+          const [ts, last] = await Promise.all([deploys.listTargets(scope.companyId), deploys.lastSucceeded(scope.companyId)]);
+          return text(
+            JSON.stringify(
+              ts.map((t) => {
+                const d = last.get(t.id);
+                return {
+                  name: t.name,
+                  kind: t.kind,
+                  endpoint: t.endpoint,
+                  production: t.isProduction,
+                  deployTag: liveTagOf(t)?.name ?? null,
+                  lastSucceeded: d ? { deployId: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tag: d.tagName ? { name: d.tagName, result: d.tagResult, from: d.tagFrom, to: d.tagTo } : null } : null,
+                };
+              }),
+            ),
+          );
         }
         if (input.action === "request") {
           if (!input.target || !input.ref) return fail("Give the target and the ref to deploy.");
@@ -712,7 +726,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }
         if (!input.deployId || !input.outcome) return fail("Give the deployId and the outcome.");
         const d = await deploys.report({ companyId: scope.companyId, runId: scope.runId }, { deployId: input.deployId, outcome: input.outcome, notes: input.notes });
-        return text(`Deploy ${d.id} recorded as ${d.status}. The target's secrets are no longer available.`);
+        const tag = d.tagResult === "pending" ? ` Boss Man is moving the tag ${d.tagName} to ${d.commit?.slice(0, 7)}; the result goes on the ticket.` : "";
+        return text(`Deploy ${d.id} recorded as ${d.status}. The target's secrets are no longer available.${tag}`);
       } catch (err) {
         if (err instanceof DeployError) return fail(err.message);
         throw err;
