@@ -5,6 +5,7 @@
 # BASE (default origin/main) is the branch to compare with. Tests stub the commands through PATH.
 # Typecheck and vitest are heavy (1-1.5 GB, up to an hour), so they run only while holding the merge gate's one-slot check lock
 # (scripts/check-all.sh does the waiting and prints "waiting for a free check slot (place N ...)"); the gate keeps priority.
+# BOSSMAN_FULL_CHECK_NEXT (set by the merge gate when check-all.sh runs next): only the merge check, migration lint and script tests run.
 # Never skipped in a merge-gate run (BOSSMAN_MERGE_CHECK set). A broad related-test list (over CHECK_QUICK_BROAD_FILES files, default 15, or app.ts/main.ts/mcp.ts) is skipped unless CHECK_QUICK_FORCE_RELATED=1.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -62,6 +63,16 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     step "tests related to $name changes" pnpm --filter "$name" exec vitest related --run $files
   done
   exit "$failed"
+fi
+
+if [ -n "${BOSSMAN_FULL_CHECK_NEXT:-}" ]; then
+  # The merge gate runs the full check (check-all.sh) straight after this one on the same tree, for high and critical
+  # tickets (BOS-665). It repeats everything below (typecheck, tests, ShellCheck, web build), so only the cheap steps above
+  # run here, and a broken merge or migration still fails before the long check starts.
+  echo "SKIP  typecheck, related tests, ShellCheck, web build: the full check runs next (BOSSMAN_FULL_CHECK_NEXT)"
+  if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; exit 1; fi
+  echo "check-quick: cheap steps passed; the full check runs the rest"
+  exit 0
 fi
 
 need_slot=0
