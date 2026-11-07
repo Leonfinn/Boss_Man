@@ -223,5 +223,33 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   if (hits.some((h) => !/^rm\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");
   const pieces = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
-  return pieces.every((s) => !destructive.test(s) || WORKSPACE_DELETE.test(s)) ? "allow" : "deny";
+  // A throwaway file this same command copied or wrote into the folder may be removed again (BOS-328).
+  const made = new Set<string>();
+  return pieces.every((s) => {
+    if (!destructive.test(s) || WORKSPACE_DELETE.test(s)) {
+      noteMade(s, made);
+      return true;
+    }
+    return removesOnlyMade(s, made);
+  })
+    ? "allow"
+    : "deny";
+}
+
+/** A plain file name in the working folder: one component, no leading dot, no ~, $, glob or quote. */
+const PLAIN_NAME = /^[\w+@-][\w.+@-]*$/;
+
+/** Records the plain file names a command piece creates: the target of cp or mv, or of a > redirect. */
+function noteMade(piece: string, made: Set<string>): void {
+  const cp = /^(?:cp|mv)\s+(?:-[A-Za-z]+\s+)*\S+\s+(\S+)$/.exec(piece);
+  if (cp && PLAIN_NAME.test(cp[1]!)) made.add(cp[1]!);
+  for (const m of piece.matchAll(/(?:^|[^>&\d])>>?\s*(\S+)/g)) if (PLAIN_NAME.test(m[1]!)) made.add(m[1]!);
+}
+
+/** True for `rm [-f] NAME...` where every NAME is a plain file name made earlier in the same command. Anything else, including -r, is false. */
+function removesOnlyMade(piece: string, made: Set<string>): boolean {
+  const m = /^rm((?:\s+-f)*)((?:\s+\S+)+)$/.exec(piece);
+  if (!m) return false;
+  const names = m[2]!.trim().split(/\s+/);
+  return names.every((n) => made.has(n));
 }

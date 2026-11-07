@@ -81,6 +81,32 @@ describe("evaluatePermission defaults", () => {
   });
 });
 
+describe("a script run in the working folder (BOS-328)", () => {
+  it("recommends Allow for node on a file, and for removing the throwaway copy the command made", () => {
+    for (const c of [
+      "node bench.js",
+      "cp /tmp/bench.js bench-tmp.js && node bench-tmp.js; rm -f bench-tmp.js",
+      "cp /tmp/bench.js bench-tmp.js && node bench-tmp.js && rm -f bench-tmp.js",
+      "cat /tmp/b.js > copy.js; node copy.js; rm -f copy.js",
+    ]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
+  });
+  it("still recommends Deny when the rm is of something the command did not make, or reaches out", () => {
+    for (const c of [
+      "cp /tmp/b.js copy.js; node copy.js; rm -f other.js",
+      "node b.js; rm -f copy.js",
+      "cp /tmp/b.js copy.js; rm -rf copy.js",
+      "cp /tmp/b.js copy.js; rm -f copy.js ../x",
+      "cp /tmp/b.js copy.js; rm -f copy.js /etc/passwd",
+      "cp /tmp/b.js copy.js; rm -f *",
+      "cp /tmp/b.js copy.js; rm -f $HOME/copy.js",
+      "cp /tmp/b.js .env; rm -f .env",
+      "cp /tmp/b.js src/a.js; rm -f src/a.js",
+      "cp /tmp/b.js copy.js; cd .. && rm -f copy.js",
+      "cp /tmp/b.js copy.js; rm -f copy.js; shred x",
+    ]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+  });
+});
+
 describe("helpers", () => {
   it("reads commands as strings or argv arrays", () => {
     expect(commandOf({ command: "ls -la" })).toBe("ls -la");
