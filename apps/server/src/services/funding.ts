@@ -1,5 +1,7 @@
 import { and, count, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
 import {
+  billingCycle,
+  boundsAsEpoch,
   budgetStatus,
   creditStatus,
   dateIn,
@@ -7,6 +9,7 @@ import {
   parseClaudeRateLimit,
   parseCodexRateLimits,
   parseSyntheticQuota,
+  windowBounds,
   type BudgetWindow,
   type QuotaSample,
   type SyntheticQuota,
@@ -274,8 +277,31 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return sent;
   }
 
-  async function spendFor(where: SQL | undefined) {
-    return db.select({ occurredAt: costEvents.occurredAt, costMicros: costEvents.costMicros }).from(costEvents).where(where);
+  /**
+   * What a scope spent: all of it, and inside each `[after, before)` range (epoch milliseconds, null
+   * for no bound: `after` inclusive, `before` exclusive) asked for. One statement, so a source with
+   * 50k cost events costs a scan of the `(funding_source_id, occurred_at)` index, not 50k rows read
+   * into JS (BOS-671).
+   */
+  async function spendFor(where: SQL | undefined, ranges: Array<{ after: number | null; before: number | null }>) {
+    const inRange = (r: { after: number | null; before: number | null }) =>
+      and(
+        r.after !== null ? gte(costEvents.occurredAt, new Date(r.after)) : undefined,
+        r.before !== null ? lt(costEvents.occurredAt, new Date(r.before)) : undefined,
+      );
+    const sumExpr = sql`sum(${costEvents.costMicros})`;
+    const sums: Record<string, SQL> = { total: sql<string>`coalesce(${sumExpr}, 0)::text` };
+    ranges.forEach((r, i) => {
+      const range = inRange(r);
+      // An unbounded range is the all-time total; only a bounded one needs the filter. `filter` binds
+      // to the aggregate itself, so it sits inside `coalesce` (before the zero fallback).
+      sums[`r${i}`] = range
+        ? sql<string>`coalesce(${sumExpr} filter (where ${range}), 0)::text`
+        : sql<string>`coalesce(${sumExpr}, 0)::text`;
+    });
+    const [row] = await db.select(sums).from(costEvents).where(where);
+    const total = Number(row?.total ?? 0);
+    return { total, ranges: ranges.map((_, i) => Number(row?.[`r${i}`] ?? 0)) };
   }
 
   async function latestQuota(fundingSourceId: string) {
@@ -319,10 +345,12 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     async status(id: string, now = new Date(), timeZone = "Europe/London") {
       const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, id));
       if (!source) return null;
-      const events = await spendFor(eq(costEvents.fundingSourceId, id));
+      // The credit card reads this cycle's spend; the window is known before any row is read.
+      const cycle = source.kind === "api_credit" && source.monthlyGrantMicros != null && source.cycleAnchor ? billingCycle(source.cycleAnchor, now) : null;
+      const spend = await spendFor(eq(costEvents.fundingSourceId, id), [boundsAsEpoch(cycle ?? { start: null, end: null })]);
       const credit =
-        source.kind === "api_credit" && source.monthlyGrantMicros != null && source.cycleAnchor
-          ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, events, now)
+        cycle && source.cycleAnchor && source.monthlyGrantMicros != null
+          ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, [], now, spend.ranges[0])
           : null;
       const quota = source.kind === "subscription" ? await latestQuota(id) : [];
       // Every window name the adapter has reported, so the owner can switch each one on or off (BOS-227).
@@ -341,7 +369,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         providerQuota: await providerQuota(source),
         daily: await this.daily(id, now, timeZone),
         byCompany: await this.byCompany(id, now),
-        totalSpentMicros: events.reduce((s, e) => s + e.costMicros, 0),
+        totalSpentMicros: spend.total,
         // Boss Man only sees its own runs (spike S3: no Admin API on individual accounts).
         coverage: "boss_man_runs_only" as const,
       };
@@ -510,11 +538,12 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
               ? sql`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId}) = ${p.scopeId}`
               : eq(costEvents.agentId, p.scopeId);
         const where = p.fundingSourceId ? and(scope, eq(costEvents.fundingSourceId, p.fundingSourceId)) : scope;
-        const events = await spendFor(where);
         const source = p.fundingSourceId ? sources.get(p.fundingSourceId) : undefined;
+        const window = toWindow(p, source);
+        const spend = await spendFor(where, [boundsAsEpoch(windowBounds(window, now))]);
         out.push({
           policy: p,
-          status: budgetStatus({ limitMicros: p.limitMicros, window: toWindow(p, source), onLimit: p.onLimit, warnAt: p.warnAt }, events, now),
+          status: budgetStatus({ limitMicros: p.limitMicros, window, onLimit: p.onLimit, warnAt: p.warnAt }, [], now, spend.ranges[0]),
         });
       }
       return out;
