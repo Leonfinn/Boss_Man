@@ -62,7 +62,7 @@ How the NAS reads the repo (a deploy key if it is private, https if it is public
 git clone <repo-https-url> src
 ```
 
-Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up.
+Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up. Moving this install to another host later: see [docs/21](21-move-to-new-host.md).
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
