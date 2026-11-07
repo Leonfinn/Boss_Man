@@ -385,6 +385,8 @@ export type FeatureRoadmapCompany = { id: string; name: string; features: Roadma
 export type PlanNode = {
   id: string;
   kind: "ticket" | "engagement" | "decision";
+  /** The ticket's reference, e.g. BOS-458; null for engagements and decisions. */
+  ref: string | null;
   title: string;
   state: string;
   open: boolean;
