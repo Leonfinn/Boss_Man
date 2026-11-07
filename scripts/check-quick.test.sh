@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Checks check-quick.sh in a scratch repo with stub pnpm/node/shellcheck commands that log what they were asked to run.
 set -euo pipefail
+# The merge gate runs this with BOSSMAN_MERGE_CHECK set; the cases below set it themselves where they need it.
+unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED
 here="$(cd "$(dirname "$0")" && pwd)"
-t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
+t="$(mktemp -d)"; holder=""; trap '[ -z "$holder" ] || kill "$holder" 2>/dev/null; rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
@@ -81,19 +83,65 @@ grep -q boom "$t/out" || fail "failure output not shown"
 logged "build" "later steps still run after a failure"
 
 # The heavy steps wait for the check slot: hold it here, and check-quick must queue (and say so) instead of running.
+# No fixed sleeps: on a loaded runner check-quick can take many seconds to reach the heavy phase (BOS-607 review).
 if command -v flock >/dev/null; then
+  # hold_slot: take the check slot and keep it until release_slot. The subshell execs into the sleep, so $holder is the
+  # process that owns the lock; returns once the lock is really held.
+  hold_slot() {
+    (exec 8>"$t/lock.slot.1"; flock 8; exec sleep 600) & holder=$!
+    local _; for _ in $(seq 1 600); do flock -n "$t/lock.slot.1" true || return 0; sleep 0.1; done
+    fail "slot holder never took the lock"
+  }
+  release_slot() { kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true; holder=""; }
+  # wait_for_slot_wait: up to 60 s for the background check-quick ($cq) to say it is queued.
+  wait_for_slot_wait() {
+    local _; for _ in $(seq 1 600); do
+      grep -q "waiting for a free check slot (place" "$t/out" && return 0
+      kill -0 "$cq" 2>/dev/null || break; sleep 0.1
+    done
+    fail "$1: no 'waiting for a free check slot' line within 60 s: $(cat "$t/out")"
+  }
+
   g checkout -q -B slot origin/main; commit apps/web/src/s.ts
   : >"$LOG"
-  (exec 8>"$t/lock.slot.1"; flock 8; sleep 8) & holder=$!
-  sleep 1
+  hold_slot
   (cd "$repo" && ./scripts/check-quick.sh >"$t/out" 2>&1) & cq=$!
-  sleep 4
-  grep -q "waiting for a free check slot (place" "$t/out" || fail "no slot wait message: $(cat "$t/out")"
+  wait_for_slot_wait "queued run"
   ! grep -q typecheck "$LOG" || fail "typecheck ran without the slot: $(cat "$LOG")"
-  rc=0; wait "$cq" || rc=$?; wait "$holder" || true
+  release_slot
+  rc=0; wait "$cq" || rc=$?
   [ "$rc" -eq 0 ] || fail "queued run rc $rc: $(cat "$t/out")"
   logged "pnpm --filter @boss-man/web typecheck" "ran after the slot freed"
   grep -q "^PASS  typecheck @boss-man/web" "$t/out" || fail "queued PASS line: $(cat "$t/out")"
+
+  # A lost slot wait (check-all exit 75, nothing ran) is not a failure: check-quick says so and exits 75, which the
+  # merge gate retries, keeping check-all's "gave up waiting" line it matches on. A real failure elsewhere still wins (exit 1).
+  hold_slot
+  run 75 "lost slot wait" CHECK_ALL_LOCK_WAIT=2
+  grep -q "^SKIP  heavy phase (typecheck, related tests): gave up waiting for a check slot (nothing ran)" "$t/out" || fail "no SKIP line: $(cat "$t/out")"
+  grep -q "check-all: gave up waiting for the heavy-phase lock" "$t/out" || fail "gate wording lost: $(cat "$t/out")"
+  ! grep -q "check-quick: FAILED" "$t/out" || fail "lost wait reported as FAILED: $(cat "$t/out")"
+  notlogged "typecheck" "lost slot wait"
+  logged "pnpm --filter @boss-man/web build" "steps after a lost wait still run"
+  run 1 "lost slot wait plus a failed build" CHECK_ALL_LOCK_WAIT=2 FAIL_ON=build
+  grep -q "^SKIP  heavy phase" "$t/out" || fail "no SKIP line with a failure: $(cat "$t/out")"
+  grep -q "^FAIL  build web" "$t/out" || fail "build FAIL line: $(cat "$t/out")"
+  grep -q "check-quick: FAILED" "$t/out" || fail "no FAILED summary: $(cat "$t/out")"
+  release_slot
+
+  # check-all killed by a signal while it waits: a FAIL line names the signal (it used to be a bare "check-quick: FAILED").
+  hold_slot
+  : >"$LOG"
+  (cd "$repo" && ./scripts/check-quick.sh >"$t/out" 2>&1) & cq=$!
+  wait_for_slot_wait "signalled run"
+  mapfile -t pids < <(pgrep -f "$repo/scripts/check-all.sh" || true)
+  [ "${#pids[@]}" -gt 0 ] || fail "no check-all process to signal: $(cat "$t/out")"
+  kill -TERM "${pids[@]}"
+  rc=0; wait "$cq" || rc=$?
+  release_slot
+  [ "$rc" -eq 1 ] || fail "signalled run rc $rc: $(cat "$t/out")"
+  grep -q "^FAIL  heavy phase (typecheck, related tests): killed by signal TERM (exit 143)" "$t/out" || fail "no signal FAIL line: $(cat "$t/out")"
+  notlogged "typecheck" "signalled run"
 fi
 
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.

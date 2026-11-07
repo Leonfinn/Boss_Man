@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
@@ -754,6 +754,82 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     await ctx.db.update(wakes).set({ statusReason: "agent paused" }).where(eq(wakes.agentId, ctx.dev.id));
     await ctx.watchdog.run();
     expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["stale_in_progress"]);
+  });
+
+  describe("work held by the subscription usage limit (BOS-450)", () => {
+    const QUOTA = "subscription seven_day window nearly used up";
+    const held = async (ticketId: string, minutes: number, extra: Partial<typeof wakes.$inferInsert> = {}) =>
+      (await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId, reason: "message", status: "deferred", statusReason: QUOTA, priority: 2, causationDepth: 0, createdAt: ctx.ago(minutes), ...extra }).returning())[0]!;
+    const alerts = () => ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "quota-held:%"));
+
+    it("a quota-held wake is not a plan: the stall rule still flags the ticket", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ stateChangedAt: ctx.ago(600) });
+      await held(t.id, 5);
+      await ctx.watchdog.run();
+      expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["stale_in_progress"]);
+    });
+
+    it("one alert to the CEO once a wake has been held an hour, naming agent, ticket, window and held time; none before", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ stateChangedAt: ctx.ago(600) });
+      const w = await held(t.id, 59);
+      await ctx.watchdog.run();
+      expect(await alerts()).toHaveLength(0);
+      ctx.advance(2);
+      await ctx.watchdog.run();
+      const list = await alerts();
+      expect(list).toHaveLength(1);
+      expect(list[0]!.dedupeKey).toBe(`quota-held:${w.id}`);
+      expect(list[0]!.question).toContain("Developer");
+      expect(list[0]!.question).toContain("Add rate limiting");
+      expect(list[0]!.question).toContain("seven_day");
+      expect(list[0]!.question).toMatch(/held 1 h|held 61 min/);
+      expect(list[0]!.question).toContain("No other account is set up");
+      expect((await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "quota_held_alert")))).toHaveLength(1);
+    });
+
+    it("an urgent ticket's wake alerts after 30 minutes", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ urgent: true });
+      await held(t.id, 31);
+      await ctx.watchdog.run();
+      expect(await alerts()).toHaveLength(1);
+    });
+
+    it("a merge wake is not exempt", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ systemState: "review" });
+      await held(t.id, 90, { reason: "merge shepherd" });
+      await ctx.watchdog.run();
+      expect(await alerts()).toHaveLength(1);
+    });
+
+    it("a wake behind a paused agent raises no quota alert", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket();
+      await held(t.id, 120, { statusReason: "agent paused" });
+      await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.dev.id));
+      await ctx.watchdog.run();
+      expect(await alerts()).toHaveLength(0);
+    });
+
+    it("the next tick does not alert again, even after the card is answered", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket();
+      await held(t.id, 90);
+      await ctx.watchdog.run();
+      ctx.advance(10);
+      await ctx.watchdog.run();
+      ctx.advance(10);
+      await ctx.watchdog.run();
+      expect(await alerts()).toHaveLength(1);
+      await ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(like(decisions.dedupeKey, "quota-held:%"));
+      ctx.advance(10);
+      await ctx.watchdog.run();
+      expect(await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "quota_held_alert"))).toHaveLength(1);
+      expect(await ctx.db.select().from(decisions).where(like(decisions.question, "%usage limit%"))).toHaveLength(1);
+    });
   });
 
   it("F4: one action per problem, whichever kind: a snooze closes the nudge, and a nudge closes the snooze", async () => {

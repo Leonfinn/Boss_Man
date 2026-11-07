@@ -668,10 +668,17 @@
       "breakpoints": true
     },
     {
-      "idx": 105,
+      "idx": 106,
       "version": "7",
-      "when": 1793952863891,
-      "tag": "0105_phone_approve",
+      "when": 1793941639220,
+      "tag": "0106_decision_company_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1794013479558,
+      "tag": "0107_phone_approve",
       "breakpoints": true
     }
   ]

@@ -153,7 +153,7 @@ describe("rule 1: a fail-closed allowlist, checked at mint and at redeem", () =>
     const base = (await c.ask({ question: "Base" })) as typeof decisions.$inferSelect;
     expect(phoneApprovable(base, false)).toBe(true);
     expect(phoneApprovable(base, true)).toBe(false);
-    for (const k of ["steps", "ownerMustDo", "ticketId", "stillNeeded", "advice", "ladder", "setsUp", "clearWhen"]) {
+    for (const k of ["steps", "ownerMustDo", "ticketId", "stillNeeded", "advice", "ladder", "setsUp", "clearWhen", "plan"]) {
       // Present at all, even falsy, is enough.
       expect([k, phoneApprovable({ ...base, context: { ...(base.context as object), [k]: null } }, false)]).toEqual([k, false]);
     }

@@ -69,13 +69,14 @@ describe("activity log (R83)", () => {
     const c = await agent(ctx.dev.id);
     await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Limiter added; tests pass." } });
     await c.close();
-    expect(await log()).toEqual([expect.objectContaining({ companyId: cid(), agentId: ctx.dev.id, ticketId: t.id, kind: "state", summary: "-> review: Limiter added; tests pass." })]);
+    expect((await log()).filter((r) => r.kind !== "run_started")).toEqual([expect.objectContaining({ companyId: cid(), agentId: ctx.dev.id, ticketId: t.id, kind: "state", summary: "-> review: Limiter added; tests pass." })]);
 
     const [d] = await ctx.db.insert(decisions).values({ companyId: cid(), kind: "question", question: "Which provider?", options: ["Stripe", "Adyen"], recommendedOption: "Stripe", raisedByAgentId: ctx.dev.id }).returning();
     await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
     await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Adyen" });
     expect((await log()).find((r) => r.kind === "decision_answered")).toMatchObject({ ticketId: t.id, agentId: null, summary: 'Owner answered "Which provider?": Adyen' });
 
+    await ctx.db.delete(runs).where(eq(runs.agentId, ctx.dev.id)); // BOS-513: the test token's stand-in run is still open and would block the wake
     await ctx.scheduler.wake({ agentId: ctx.dev.id, reason: "assigned", ticketId: t.id });
     await ctx.scheduler.tick();
     await ctx.endRun(ctx.commands[0]!.runId);

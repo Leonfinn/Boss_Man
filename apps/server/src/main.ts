@@ -4,6 +4,7 @@ import { buildApp } from "./app.js";
 import { createLeader } from "./leader.js";
 import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
+import { pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
 
 const env = process.env;
@@ -23,7 +24,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, memory, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
+const { app, launcher, memory, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -53,6 +54,12 @@ const bg = createBackground(
     { name: "watch and monitor", everyMs: Number(env.BOSSMAN_SLOW_MS ?? 30_000), run: () => scheduler.slow() },
     // New decisions reach the owner's notifications (R44).
     { name: "notification sync", everyMs: Number(env.BOSSMAN_NOTIFY_MS ?? 5000), run: () => notes.syncDecisions() },
+    // After a server takes charge: restart approved, unmerged merges (DR-026). Gives up after 30 minutes; the 66-minute merge sweep is the net after that. // leader-only
+    { name: "resume merges", everyMs: Number(env.BOSSMAN_RESUME_MERGES_MS ?? 10_000), run: async () => {
+      if (!resumeMergesSince) return;
+      const r = await sweeps.resumeMergesOnPromotion(resumeMergesSince);
+      if (!r.waiting || Date.now() - resumeMergesSince.getTime() > 30 * 60_000) resumeMergesSince = null;
+    } },
     // Stale-blocker, stalled-run and missed-work sweeps.
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
@@ -76,11 +83,20 @@ const bg = createBackground(
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
     // Synthetic's quota, cached and read at most every 5 minutes; warns the owner once per period at 80% and 100% (BOS-239).
     { name: "synthetic quota", everyMs: Number(env.BOSSMAN_SYNTHETIC_QUOTA_MS ?? 5 * 60_000), run: () => refreshSyntheticQuota() },
+    // Housekeeping (BOS-416): deletes runner events older than BOSSMAN_RUNNER_EVENTS_DAYS (default 60), in small batches. // leader-only
+    // First pass 15 min after start (clear of the start-up memory burst), then daily: this server restarts several times a day.
+    { name: "runner events prune", everyMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => pruneRunnerEvents(db, { days: runnerEventsDays(env.BOSSMAN_RUNNER_EVENTS_DAYS), stop: () => leader.role() !== "leader" }) },
   ],
   (err, name) => app.log.error({ err }, `${name} failed`),
 );
 // Background work follows leadership; runner sockets are closed by buildApp on demotion.
-leader.onPromote(() => bg.startBackground());
+// A server that takes charge holds no merges: it restarts every approved, unmerged one (DR-026). The loop below keeps asking until the update hold is off and the runners are connected.
+let resumeMergesSince: Date | null = null;
+leader.onPromote(() => {
+  resumeMergesSince = new Date();
+  bg.startBackground();
+  void launcher.syncAll(); // once per promotion: runners that outlived a deploy get their allow list (git hosts) without a restart
+});
 leader.onDemote(() => bg.stopBackground());
 // Host signals only (no HTTP endpoint changes the role): SIGUSR1 = hand over, SIGUSR2 = take over.
 process.on("SIGUSR1", () => void leader.demote());

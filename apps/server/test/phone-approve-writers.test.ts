@@ -55,6 +55,7 @@ describe("rule 1: every writer of a decision card is classified", () => {
       ["ownerMustDo", { approveSummary: "Do it", ownerMustDo: true, steps: ["Click"] }, false],
       ["stillNeeded", { approveSummary: "Do it", stillNeeded: "The price changed." }, false],
       ["sets up an add-on (BOS-522, closes itself)", { approveSummary: "Do it", setsUp: "ntfy" }, false],
+      ["a plan (BOS-531 submit_plan)", { approveSummary: "Do it", plan: "Step 1" }, false],
       ["no agent (Boss Man's own notices in app.ts)", { approveSummary: "Do it", agentId: null }, false],
     ];
     for (const [name, extra, eligible] of cases) {

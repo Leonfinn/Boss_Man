@@ -51,6 +51,7 @@ import { recoveryService } from "./services/recovery.js";
 import { isSignoffPending, ReviewError, reviewService } from "./services/review.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
+import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { record } from "./services/activity.js";
 import { workService, WorkError } from "./services/work.js";
@@ -362,6 +363,8 @@ export async function buildApp(opts: AppOptions) {
         if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
       }
     },
+    // `sweeps` is built further down; this only runs when a hold lifts.
+    afterHold: (since) => sweeps.resumeAfterUpdate(since),
     dir: opts.deployerDir,
     drainMinutes: opts.drainMinutes,
     reconnectMs: opts.drainReconnectMs,
@@ -394,6 +397,7 @@ export async function buildApp(opts: AppOptions) {
   });
   const serverStatus = serverStatusService(db, {
     memory,
+    runLimits: (id) => scheduler.runLimits(id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -481,6 +485,15 @@ export async function buildApp(opts: AppOptions) {
     const ownerTz = (await notes.getSettings()).quietHours?.timeZone ?? OWNER_TZ;
     await funding.refreshSynthetic((n) => notes.notify({ companyId: null, agentId: null, ...n }), ownerTz);
   }
+  // A run the runner's hello left out was closed by the server: resume it like an interrupted one (BOS-583, BOS-574).
+  runners.onLost((runId) =>
+    deploysSvc
+      .onRunEnded(runId)
+      .then(() => chat.onRunEnded(runId, null, true))
+      .then(() => recovery.onInterrupted(runId))
+      .then(() => scheduler.tick())
+      .catch((err) => app.log.error({ err, runId }, "resuming a lost run failed")),
+  );
   runners.onEvent((runner, event) => {
     // CEO continuity: a chapter follows its runs' sessions and context use.
     if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter update failed"));
@@ -565,13 +578,16 @@ export async function buildApp(opts: AppOptions) {
     wake: (input) => scheduler.notify(input.agentId, input),
     isConnected: (runnerId) => runners.isConnected(runnerId),
     runnerSettling: (runnerId) => runners.isSettling(runnerId, (opts.now ?? (() => new Date()))()),
-    endRun: (runId, outcome, at) => runners.endRun(runId, outcome, at),
+    endRun: (runId, outcome, at, how) => runners.endRun(runId, outcome, at, how),
+    // Free run slots go to idle in-progress work (BOS-574, DR-029).
+    freeSlots: (companyId) => scheduler.freeSlots(companyId),
     // A never-started run's retry (BOS-480) is a wake of its own, not merged into a waiting one, so it keeps its resume and retry count.
     requeue: (input) => scheduler.wake(input),
     cancelOnRunner: (runnerId, runId) => runners.send(runnerId, { type: "run.cancel", runId }),
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
+    resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
     landingActive: (ticketId) => review.landingActive(ticketId),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
@@ -619,6 +635,7 @@ export async function buildApp(opts: AppOptions) {
     restoreState: (ticketId, state) => work.updateTicket(ticketId, { state, overLimit: true }),
     // A trip means the Scrum Master is the problem: straight to the owner.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
+    alertCeo: (input) => alerts.raise(input),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
     localHour: (t) => Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ }).format(t)),
@@ -1478,6 +1495,8 @@ export async function buildApp(opts: AppOptions) {
         .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
         .where(eq(projects.id, id))
         .returning();
+      // A new repo address (or archiving) changes which git host the company's runner may reach.
+      if (p && (fields.repoUrl !== undefined || archived !== undefined)) void launch.syncAllow(p.companyId);
       return p ?? reply.code(404).send({ error: "not_found" });
     });
 
@@ -1648,8 +1667,11 @@ export async function buildApp(opts: AppOptions) {
           if (other) heldOther = { ref: ticketRef(other.prefix ?? row.prefix, other.number) ?? "", title: other.title };
         }
       }
-      const signoff = row.t.systemState === "review" ? await review.ownerSignoffOpen(id) : false;
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff };
+      // Where it stands on the owner's sign-off, in one word for the page (BOS-503), so nobody guesses from a state note.
+      const signoffNow = (await signoffState(db, row.t)).state;
+      // signoffWaiting keeps its BOS-471 meaning: a card is open for the button to settle.
+      const signoff = !!(await openSignoffCard(db, row.t.id));
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -2722,5 +2744,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, memory, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
+  return { app, launcher: launch, memory, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
 }
