@@ -701,6 +701,7 @@ export async function buildApp(opts: AppOptions) {
     },
     send: (ctx, id, o) => selfDeploy.send(ctx, id, o),
     takeBack: (id) => selfDeploy.takeBack(id),
+    requestWaiting: (id) => selfDeploy.requestWaiting(id),
     status: () => selfDeploy.status(),
     available: () => selfDeploy.available(),
     trialUntil: () => selfDeploy.trialUntil(),

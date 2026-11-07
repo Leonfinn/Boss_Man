@@ -626,16 +626,19 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
      * Only our own request, by its id. False when there is none, or the host already took it.
      */
     async takeBack(decisionId: string): Promise<boolean> {
+      if (!(await this.requestWaiting(decisionId))) return false;
+      return rm(inboxFile!).then(() => true, () => false);
+    },
+
+    /** True when our own request (by its id) is still in the inbox, not yet picked up by the host. */
+    async requestWaiting(decisionId: string): Promise<boolean> {
       if (!inboxFile) return false;
       const raw = await readFile(inboxFile, "utf8").catch(() => "");
-      let id: unknown;
       try {
-        id = (JSON.parse(raw) as { id?: unknown }).id;
+        return (JSON.parse(raw) as { id?: unknown }).id === decisionId;
       } catch {
         return false;
       }
-      if (id !== decisionId) return false;
-      return rm(inboxFile).then(() => true, () => false);
     },
 
     /**

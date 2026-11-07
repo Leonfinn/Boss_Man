@@ -57,6 +57,7 @@ function world() {
       w.inbox = null;
       return true;
     },
+    requestWaiting: async (id) => w.inbox?.id === id,
     status: async () => w.status,
     available: async () => ({ checkedAt: "", deployed: w.deployed, tip: w.tip, commits: [], paths: [], infraPaths: [], runnerChanged: false }),
     trialUntil: async () => w.trialUntil,
@@ -420,6 +421,69 @@ describe("deploy wait (BOS-420)", () => {
     expect(await svc.get()).toBeNull();
     expect(w.sent).toEqual([]);
     expect(w.notes.at(-1)?.title).toBe("Stopped making room for the update");
+  });
+
+  it("a cancel that lands while a pass is measuring is not undone, and nothing is left in the inbox (Freddy)", async () => {
+    const { w, deps } = world();
+    w.checks = 1;
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    // The machine goes quiet, but the pass's memory read is slow: the owner presses Cancel meanwhile.
+    w.checks = 0;
+    let release!: () => void;
+    const slow = new Promise<void>((r) => (release = r));
+    const fast = deps.headroom;
+    deps.headroom = async () => (await slow, fast());
+    const pass = svc.step();
+    const cancel = svc.cancel();
+    release();
+    await pass;
+    const c = await cancel;
+    expect(c.cancelled).toBe(true);
+    expect(await svc.get()).toBeNull();
+    expect(w.inbox).toBeNull(); // whatever the pass sent was taken back by the cancel that ran after it
+  });
+
+  it("the 3-hour cap takes back a request the host is still holding for memory", async () => {
+    const { w, deps } = world();
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A }); // quiet: sent at once
+    w.headroom = { version: 1, writtenAt: "", availableMb: 1000, needMb: 4096, holding: "low memory" };
+    offset += 3 * 60 * MIN + MIN;
+    expect(await svc.step()).toBeNull();
+    expect(w.inbox).toBeNull();
+    expect(w.notes.at(-1)).toMatchObject({ level: "page", title: "Update wait stopped after 3 hours" });
+  });
+
+  it("'sent' is recorded before the request is written; a request that never reached the host goes back to waiting and is sent once more (Freddy)", async () => {
+    const { w, deps } = world();
+    const svc = deployWaitService(db, deps);
+    const phases: (string | undefined)[] = [];
+    const send = deps.send;
+    deps.send = async (ctx, id, o) => {
+      phases.push((await svc.get())?.phase);
+      return send(ctx, id, o);
+    };
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    expect(phases).toEqual(["sent"]);
+    // The server stopped between recording "sent" and writing the file: nothing in the inbox, the host never saw it.
+    w.inbox = null;
+    offset += 2 * MIN;
+    expect((await svc.step())?.phase).toBe("sent"); // too soon to call it lost
+    offset += 2 * MIN;
+    expect((await svc.step())?.phase).toBe("waiting");
+    expect((await svc.step())?.phase).toBe("sent");
+    expect(w.sent).toEqual([{ id: ID, override: false }, { id: ID, override: false }]);
+  });
+
+  it("a request the host has taken is never sent again, however long it runs", async () => {
+    const { w, deps, host } = world();
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    host("running");
+    offset += 20 * MIN;
+    expect((await svc.step())?.phase).toBe("sent");
+    expect(w.sent).toHaveLength(1);
   });
 
   it("a hand wait on a leaking server recommends stopping the wait and applying the update", async () => {

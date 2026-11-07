@@ -24,6 +24,12 @@ export const WAIT_MINUTES = 30;
 export const HEADROOM_STALE_MS = 3 * 60_000;
 /** How long the hold waits after the window for the runner update to start its own drain. */
 export const HANDOVER_MS = 30 * 60_000;
+/**
+ * A request recorded as sent that is neither in the inbox nor reported by the host after this long was never written
+ * (the server stopped between recording "sent" and writing it). The host ticks every minute and reports a request the
+ * moment it takes it, so three minutes is well past any real pick-up.
+ */
+export const LOST_SEND_MS = 3 * 60_000;
 
 export type WaitPhase = "waiting" | "sent" | "window" | "handover";
 /** What the machine looked like at the last pass: what the owner's card and Settings show. */
@@ -72,6 +78,8 @@ export type DeployWaitDeps = {
   openRuns: () => Promise<number>;
   send: (ctx: { target: "server"; commit: string }, decisionId: string, opts: { override?: boolean }) => Promise<unknown>;
   takeBack: (decisionId: string) => Promise<boolean>;
+  /** Our own request (by id) is still in the host's inbox. */
+  requestWaiting: (decisionId: string) => Promise<boolean>;
   status: () => Promise<DeployStatus | null>;
   available: () => Promise<Available | null>;
   /** When the update's standby window ends, if one is running (self-deploy's runner-due row). */
@@ -205,11 +213,19 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
   }
 
   async function sendNow(w: DeployWait, override: boolean): Promise<DeployWait> {
-    await deps.send({ target: "server", commit: w.commit }, w.decisionId, { override });
     const t = now();
     // The host may hold it for memory: the owner is asked again a full wait after it was sent, not at once.
     const next: DeployWait = { ...w, phase: "sent", sentAt: t.toISOString(), deadline: new Date(t.getTime() + w.minutes * 60_000).toISOString(), ...(override ? { override } : {}) };
+    // "sent" is recorded before the request is written (Freddy): a stop after the write must not leave "waiting"
+    // behind, or the next pass would send the same id again, and the host's "already handled" refusal would overwrite
+    // the real result. A stop before the write is found by the sent phase (LOST_SEND_MS) and goes back to waiting.
     await save(next);
+    try {
+      await deps.send({ target: "server", commit: w.commit }, w.decisionId, { override });
+    } catch (err) {
+      await save(w);
+      throw err;
+    }
     return next;
   }
 
@@ -265,7 +281,9 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
       if (!w) return null;
       const t = now();
       if (t.getTime() - Date.parse(w.approvedAt) > SOFT_HOLD_MAX_MS) {
-        const unsent = w.phase === "waiting" && w.origin === "approve";
+        // A request the host is still holding for memory is taken back too (Freddy): left in the inbox it would start
+        // later on a busy machine, with no hold and no warning. One the host has already taken goes ahead as reported.
+        const unsent = w.origin === "approve" && (w.phase === "waiting" || (w.phase === "sent" && (await deps.takeBack(w.decisionId))));
         await end("3-hour cap", {
           level: "page",
           title: "Update wait stopped after 3 hours",
@@ -310,6 +328,16 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
         if (ours && s.result !== "running") {
           await end(`the host reported ${s.result}`); // self-deploy tells the owner how it ended
           return null;
+        }
+        if (!ours && w.origin === "approve" && t.getTime() - Date.parse(w.sentAt ?? w.approvedAt) > LOST_SEND_MS && !(await deps.requestWaiting(w.decisionId))) {
+          // Recorded as sent, yet not in the inbox and never reported by the host: the request was never written.
+          // Back to waiting, so it goes out under the usual quiet test (or at once, if the owner chose Update now).
+          deps.log?.(`deploy wait: the request for ${short(w.commit)} never reached the host; sending it again`);
+          if (w.override) return sendNow(w, true);
+          const back: DeployWait = { ...w, phase: "waiting" };
+          delete back.sentAt;
+          await save(back);
+          return back;
         }
         if (!ours) {
           const h = await deps.headroom();
@@ -384,6 +412,17 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
       return w ? { on: true as const, ...w } : { on: false as const };
     },
   };
-  return self;
+  // One change at a time (Freddy): a pass reads the wait, measures, then writes it back, so a Cancel or "Keep waiting"
+  // landing in between would be undone, and a cancelled update could still be sent. Everything that changes the wait
+  // runs leader-only in this one process, so queueing them here is enough. Inside, answered calls the unqueued cancel.
+  let chain: Promise<unknown> = Promise.resolve();
+  const serial =
+    <A extends unknown[], R>(fn: (...a: A) => Promise<R>) =>
+    (...a: A): Promise<R> => {
+      const r = chain.then(() => fn(...a));
+      chain = r.catch(() => undefined);
+      return r;
+    };
+  return { ...self, begin: serial(self.begin), step: serial(self.step), answered: serial(self.answered), cancel: serial(self.cancel) };
 }
 export type DeployWaitService = ReturnType<typeof deployWaitService>;
