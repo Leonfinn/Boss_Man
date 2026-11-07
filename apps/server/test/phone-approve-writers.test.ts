@@ -108,8 +108,8 @@ describe("rule 1: every writer of a decision card is classified", () => {
  * Beyond the reason given, none of them stores an approveSummary (checked below), which rule 1 needs.
  */
 const WRITERS: Record<string, { counts: Record<string, number>; why: string }> = {
-  "src/app.ts": { counts: { raise: 9 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425) and decisionsSvc.raise with agentId null (merge failed, import checklist)" },
-  "src/mcp.ts": { counts: { raise: 1 }, why: "raise_decision: the one eligible path, when plain and with an approveSummary" },
+  "src/app.ts": { counts: { raise: 10 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425, and the watchdog's alertCeo hook) and decisionsSvc.raise with agentId null (merge failed, import checklist)" },
+  "src/mcp.ts": { counts: { raise: 2 }, why: "raise_decision: the one eligible path, when plain and with an approveSummary; submit_plan (BOS-531: blocksTicketId and plan, never eligible)" },
   "src/services/watchdog.ts": { counts: { raise: 1 }, why: "the Scrum Master's raise_decision always blocks its ticket (ticketId, blocker)" },
   "src/services/agents.ts": { counts: { insert: 6 }, why: "kind approval: hire, model_change, instructions, team_plan, rename, standing_rules (CEO rules change)" },
   "src/services/alert-ladder.ts": { counts: { insert: 1 }, why: "tier ceo with a ladder key" },
@@ -125,7 +125,8 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/maintenance.ts": { counts: { insert: 1 }, why: "kind approval: maintenance" },
   "src/services/policy-rules.ts": { counts: { insert: 1, question: 1 }, why: "type rule_proposal" },
   "src/services/retro.ts": { counts: { insert: 3, question: 1 }, why: "type lesson (and approvals: workflow_change, workflow_check)" },
-  "src/services/review.ts": { counts: { insert: 4, question: 3 }, why: "check_stuck (no agent), lesson (tier ceo), risk_review (kind approval), carried (type carried, ticketId, blocker, one option)" },
+  "src/services/review.ts": { counts: { insert: 3, question: 3 }, why: "check_stuck (no agent), lesson (tier ceo), carried (type carried, ticketId, blocker, one option)" },
+  "src/services/signoff.ts": { counts: { insert: 1 }, why: "kind approval: risk_review (moved here from review.ts)" },
   "src/services/runners.ts": { counts: { insert: 1 }, why: "kind budget" },
   "src/services/scheduler.ts": { counts: { insert: 3 }, why: "kind budget: budget_limit, project_cap, ticket_cap" },
   "src/services/self-deploy.ts": { counts: { insert: 1 }, why: "kind approval: self_deploy" },
