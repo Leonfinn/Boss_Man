@@ -13,7 +13,39 @@ base="${BASE:-origin/main}"
 changed="$(git diff --name-only "$base"...HEAD)" || { echo "FAIL  diff against $base"; exit 1; }
 if [ -z "$changed" ]; then echo "PASS  nothing changed against $base"; exit 0; fi
 
-failed=0 skipped=0
+failed=0 skipped=0 partial=0
+
+# Reuse (BOS-666): a pass is written to the slot log as a "quick-pass" line naming the git tree, the base commit and whether
+# every related test ran (coverage=all) or a broad list was skipped (coverage=partial). A later hand run on a clean folder with
+# the same tree and base reuses it instead of running again; any change to the files or to the base runs it again.
+# A FORCE_RELATED run reuses only a coverage=all pass. The merge gate (BOSSMAN_MERGE_CHECK) never reuses, and
+# CHECK_QUICK_RERUN=1 runs anyway. The slot log is shared and writable by every agent, so a reused pass is a convenience,
+# not evidence: the merge gate's own full check is what decides a merge.
+slotlog=${CHECK_ALL_SLOT_LOG:-${CHECK_ALL_LOCK:-/tmp/bossman-check-all}.slotlog}
+clean_tree() { [ -z "$(git status --porcelain 2>/dev/null)" ] && git rev-parse 'HEAD^{tree}' 2>/dev/null; }
+tree="" base_commit=""
+if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
+  tree=$(clean_tree) || tree=""
+  base_commit=$(git rev-parse --verify -q "$base^{commit}") || base_commit=""
+  [ -n "$base_commit" ] || tree=""
+fi
+quick_log() { # quick_log <event> <coverage>
+  [ -n "$tree" ] || return 0
+  printf '%s %s pid=%s kind=%s check=quick tree=%s base=%s coverage=%s folder=%s\n' "$(date -u +%FT%TZ)" "$1" "$$" \
+    "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo merge || echo hand)" "$tree" "$base_commit" "$2" "$PWD" >>"$slotlog" 2>/dev/null || true
+}
+if [ -n "$tree" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -z "${CHECK_QUICK_RERUN:-}" ] && [ -f "$slotlog" ]; then
+  want=" coverage=(all|partial) "; [ -z "${CHECK_QUICK_FORCE_RELATED:-}" ] || want=" coverage=all "
+  prev=$(grep -E "^[0-9TZ:-]+ quick-pass pid=[0-9]+ kind=[a-z]+ check=quick tree=$tree base=$base_commit$want" "$slotlog" 2>/dev/null | tail -n 1) || prev=""
+  if [ -n "$prev" ]; then
+    cov=${prev#* coverage=}; cov=${cov%% *}
+    echo "PASS  reused: this exact tree ($tree) already passed check-quick against $base at ${prev%% *} (coverage=$cov); not running it again (CHECK_QUICK_RERUN=1 runs it anyway)"
+    quick_log quick-reuse "$cov"
+    echo "check-quick: all steps passed (the merge gate still runs the full check)"
+    exit 0
+  fi
+fi
+
 step() { # step <label> <command...>
   local label=$1 out rc=0; shift
   out="$("$@" 2>&1)" || rc=$?
@@ -69,13 +101,13 @@ need_slot=0
 for d in "${pkgs[@]}" apps/site; do
   files="$(related_files "$d")"
   [ -n "$files" ] || continue
-  if broad "$files"; then echo "SKIP related tests: too broad for a hand run, the merge gate runs them ($d; CHECK_QUICK_FORCE_RELATED=1 runs them anyway)"
+  if broad "$files"; then echo "SKIP related tests: too broad for a hand run, the merge gate runs them ($d; CHECK_QUICK_FORCE_RELATED=1 runs them anyway)"; partial=1
   else need_slot=1; fi
 done
 if [ "$need_slot" -eq 1 ]; then
   # The slot wait streams through, so the agent sees "waiting for a free check slot (place N of M ...)".
   rc=0
-  BOSSMAN_CHECK_CHILD=1 CHECK_ALL_SLOT_COMMAND="CHECK_QUICK_PHASE=heavy '$PWD/scripts/check-quick.sh'" "$PWD/scripts/check-all.sh" || rc=$?
+  BOSSMAN_CHECK_CHILD=1 CHECK_ALL_CHECK_KIND=quick CHECK_ALL_SLOT_COMMAND="CHECK_QUICK_PHASE=heavy '$PWD/scripts/check-quick.sh'" "$PWD/scripts/check-all.sh" || rc=$?
   # The heavy phase prints its own PASS/FAIL lines; two outcomes print none, so name them here. Exit 75 means nothing ran
   # (check-all gave up waiting for a slot): check-quick exits 75 too unless another step failed, so the merge gate
   # retries instead of sending an approved ticket back. check-all's own "gave up waiting" line streams through above.
@@ -89,4 +121,6 @@ if has '^apps/web/|^packages/shared/'; then step "build web" pnpm --filter @boss
 if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; exit 1; fi
 if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; exit 75; fi
 echo "check-quick: all steps passed (the merge gate still runs the full check)"
+# Recorded only when the files are still exactly the tree the run started on (nothing edited while it ran).
+[ -z "$tree" ] || [ "$(clean_tree)" != "$tree" ] || quick_log quick-pass "$([ "$partial" = 1 ] && echo partial || echo all)"
 exit 0

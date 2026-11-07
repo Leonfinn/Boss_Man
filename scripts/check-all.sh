@@ -347,7 +347,12 @@ elif command -v flock >/dev/null; then
   rm -f "$qfile" "$AGEREF" "$REPLACED"; trap - EXIT
   # Slot log: one line when the slot is taken and one when it is let go (a killed holder leaves only the first), best effort.
   slot_kind=hand; [ "$prio" = 1 ] || slot_kind=merge
-  slot_log() { printf '%s %s pid=%s kind=%s slot=%s folder=%s\n' "$(date -u +%FT%TZ)" "$1" "$$" "$slot_kind" "$SLOT_K" "$FOLDER" >>"$SLOTLOG" 2>/dev/null || true; }
+  # check= is what runs in the slot (check-quick.sh sets CHECK_ALL_CHECK_KIND=quick) and tree= the git tree of the checked
+  # files, with "-dirty" when the folder has changes git has no tree for, so repeat checks of one tree can be counted (BOS-666).
+  slot_check=${CHECK_ALL_CHECK_KIND:-full}; [[ $slot_check =~ ^[a-z]{1,10}$ ]] || slot_check=full
+  slot_tree=$(git rev-parse 'HEAD^{tree}' 2>/dev/null) || slot_tree=none
+  [ "$slot_tree" = none ] || [ -z "$(git status --porcelain 2>/dev/null)" ] || slot_tree="$slot_tree-dirty"
+  slot_log() { printf '%s %s pid=%s kind=%s slot=%s check=%s tree=%s folder=%s\n' "$(date -u +%FT%TZ)" "$1" "$$" "$slot_kind" "$SLOT_K" "$slot_check" "$slot_tree" "$FOLDER" >>"$SLOTLOG" 2>/dev/null || true; }
   if [ -f "$SLOTLOG" ] && [ "$(wc -l <"$SLOTLOG" 2>/dev/null || echo 0)" -gt 5000 ]; then
     { tail -n 2000 "$SLOTLOG" >"$SLOTLOG.tmp.$$" && mv "$SLOTLOG.tmp.$$" "$SLOTLOG"; } 2>/dev/null || rm -f "$SLOTLOG.tmp.$$"
   fi
