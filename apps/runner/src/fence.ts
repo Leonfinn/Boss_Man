@@ -2,7 +2,8 @@
 // Landlock helper, so the adapter and everything it starts (Claude Code, shell commands, file
 // edits, browsers) can only write the session's own folders, and can't read other agents' files
 // and secrets, signal the runner, or reach other sessions' sockets. Proven in the BOS-315 spike.
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -169,10 +170,32 @@ export function addGitConfig(env: NodeJS.ProcessEnv, key: string, value: string)
 
 /**
  * The runner's fence setting for its SessionManager: its self-tested level, each agent's home in
- * the runner's data volume, and the pnpm store pnpm already uses at the workspaces volume's root.
+ * the runner's data volume, and the pnpm store under the workspaces volume's root.
+ * The store is always a folder under the volume, never the volume's root itself or `/`: the fence
+ * grants everything beneath a rule, so the root would hand agents the whole volume (other agents'
+ * copies, the merge gate's results), and the gate's own store (`<store>-gate`) would land on the
+ * runner's root disk (BOS-633).
  */
 export function runnerFence(level: FenceLevel, dataDir: string, workspacesRoot: string) {
   return { level, agentsRoot: path.join(dataDir, "agents"), pnpmStore: path.join(workspacesRoot, ".pnpm-store") };
+}
+
+/**
+ * The shared pnpm store the runner will actually use (BOS-568), where PNPM_STORE_DIR may move it (e.g. to a
+ * folder on a bigger volume). Empty means `<workspacesRoot>/.pnpm-store`. The value must be a folder strictly
+ * under the workspaces volume: `/`, the volume's root and anything above it are refused, since the fence would
+ * grant the whole volume and the gate store beside the store would leave the volume's own disk (BOS-633).
+ */
+export function pnpmStoreDir(workspacesRoot: string, raw: string | undefined): string {
+  const p = (raw ?? "").trim();
+  if (!p) return path.join(workspacesRoot, ".pnpm-store");
+  if (!p.startsWith("/") || p.includes("\0") || p.split("/").includes("..")) throw new Error(`PNPM_STORE_DIR should be an absolute path inside the runner, like ${path.join(workspacesRoot, ".pnpm-store")}, not ${raw}`);
+  const resolved = path.posix.normalize(p).replace(/\/+$/, "") || "/";
+  const root = path.resolve(workspacesRoot);
+  if (resolved === "/" || resolved === root || !resolved.startsWith(root + "/")) {
+    throw new Error(`PNPM_STORE_DIR must be a folder under ${root} (the runner's only writable volume), not ${raw}: the volume's root would grant agents the whole volume and put the gate's store on the root disk`);
+  }
+  return resolved;
 }
 
 /**
@@ -200,6 +223,52 @@ export function sandboxSelfTest(): SandboxReport {
     }
   }
   return { landlockAbi: abi, errno, level: probe === false ? "unavailable" : level, missing, userns, probe };
+}
+
+/**
+ * Prunes one pnpm store of packages no install references any more (BOS-633). Both stores only ever grow as
+ * lockfiles change, on the volume every agent's work lives on, so the runner does this daily. pnpm's store
+ * lock makes it safe beside a running install, and it never removes a package something still links to.
+ * Runs asynchronously (a large store can take minutes) so the runner's event loop, connection and live sessions
+ * keep going; the child is killed on the timeout. Never rejects: a missing store, a wrong pnpm or a busy lock is
+ * logged and skipped, and there is always the next run.
+ */
+export async function pruneStore(
+  storeDir: string,
+  log: (m: string) => void = () => {},
+  bin = "pnpm",
+): Promise<{ pruned: boolean; why?: string }> {
+  if (!existsSync(storeDir)) return { pruned: false, why: "no store yet" };
+  try {
+    const { stdout, stderr } = await promisify(execFile)(bin, ["store", "prune", "--store-dir", storeDir], {
+      encoding: "utf8",
+      timeout: 10 * 60_000,
+      killSignal: "SIGKILL",
+    });
+    log(`pnpm store prune of ${storeDir}: ${(stdout || "").trim().split("\n").pop() ?? "done"}`);
+    return { pruned: true };
+  } catch (err) {
+    const e = err as { stderr?: string; stdout?: string; message: string; killed?: boolean };
+    const why = e.killed
+      ? "timed out"
+      : (e.stderr || e.stdout || "").trim().split("\n").slice(-3).join(" ") || e.message;
+    log(`pnpm store prune of ${storeDir} failed: ${why}`);
+    return { pruned: false, why };
+  }
+}
+
+/**
+ * Prunes the shared store and the gate's store beside it, one after the other, one failing without stopping the
+ * other. The gate store is exactly `${shared}-gate`: validation keeps that path on the same volume as the shared
+ * store (pnpmStoreDir), so a prune can never reach the root disk. Nothing in this repo creates the gate store yet
+ * (the merge gate's installs use the ambient PNPM_STORE_DIR like every other run), so pruning it is a no-op until
+ * that exists; pruneStore skips the folder when it is absent, and there is no fence grant for it (sessions only
+ * get the shared store, and the gate is fenced separately).
+ */
+export async function pruneStores(shared: string, log: (m: string) => void = () => {}, bin = "pnpm") {
+  const sharedResult = await pruneStore(shared, log, bin);
+  const gateResult = await pruneStore(`${shared}-gate`, log, bin);
+  return { shared: sharedResult, gate: gateResult };
 }
 
 /**

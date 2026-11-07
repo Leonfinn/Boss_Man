@@ -180,6 +180,43 @@ describe("the alert ladder (BOS-64)", () => {
     expect(await ownerNotified(d.id)).toHaveLength(1);
   });
 
+  it("keeps the CEO's Recommend Allow/Deny tag and notes when an advised permission card is escalated to the owner (BOS-533)", async () => {
+    await ctx.switchOn();
+    // A permission card already on the CEO's rung, the owner having asked for advice on it.
+    const at = new Date().toISOString();
+    const [d] = await ctx.db
+      .insert(decisions)
+      .values({
+        companyId: ctx.companyId,
+        kind: "permission",
+        question: "Run dd?",
+        options: ["Allow once", "Deny"],
+        recommendedOption: "Deny",
+        tier: "ceo",
+        context: {
+          type: "permission",
+          runnerId: randomUUID(),
+          runId: randomUUID(),
+          requestId: randomUUID(),
+          explain: { title: "Engineer wants to run a command", summary: "Only reads information", effect: "reads", command: "dd if=/tmp/session.db count=40" },
+          advice: { state: "asking", askedAt: at },
+          ladder: { rung: "ceo", since: at, ticketId: null, about: [], topRung: "owner", hops: [{ to: "ceo", at, why: "the owner asked the CEO to decide" }] },
+        },
+      })
+      .returning();
+    const ceo = await client(ctx.ceo.id);
+    const advised = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, outcome: "advice", what: "Copies part of a database file into another file.", needed: "Yes, the ticket needs it to check the export.", recommendation: "allow", why: "It only reads a file in /tmp the agent made itself." } });
+    expect(textOf(advised)).toMatch(/Advice saved/);
+    // The CEO then passes the same card on to the owner.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d!.id, triedFirst: "Read the command and the ticket; only the owner can judge this one" } }))).toBe(false);
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, d!.id));
+    expect(after!.tier).toBe("owner");
+    // The recommendation, needed and why survive the hand-over, so the owner still sees the Recommend tag.
+    expect(after!.context).toMatchObject({
+      advice: { state: "advised", recommendation: "allow", needed: "Yes, the ticket needs it to check the export.", why: "It only reads a file in /tmp the agent made itself.", what: "Copies part of a database file into another file." },
+    });
+  });
+
   it("the CEO can settle an alert with a plain answer, with a reason the owner can read", async () => {
     const d = await wakeChain();
     const bare = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it" } });

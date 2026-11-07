@@ -159,6 +159,13 @@ export const ALERT_KINDS = {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
   },
+  // watchdog.ts spareCapacity (BOS-659): the company is under-used while work waits, and picking the
+  // next ticket is a judgement call. Stops at the CEO; one card per company folds the stretches together.
+  spare_capacity: {
+    topRung: "ceo",
+    groupBy: (c) => (c.companyId ? `spare-capacity:${c.companyId}` : null),
+    title: (_c, n) => `Spare capacity: ${n} checks found the company under-used while work waits`,
+  },
   // server-health.ts (BOS-640): the server's rss passed 60% of the memory it may use, or rose more than
   // 1 GiB an hour for two hours. The CEO can ask for the update or the restart; it never reaches the owner
   // by itself. Closes once memory has been under the level for 30 minutes (serverCalm).
