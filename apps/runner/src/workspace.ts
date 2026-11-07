@@ -885,10 +885,29 @@ export class Workspaces {
         if (!exists) continue;
         // B is carried when this branch holds a commit on B's own first-parent line (B's work).
         // Commits B has only by merging this ticket in are on this ticket's side, not B's line (BOS-365).
-        if ((await refs(b.branch, true)).some((sha) => mine.has(sha))) {
+        const bLine = await refs(b.branch, true);
+        if (bLine.some((sha) => mine.has(sha))) {
           // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
           // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
           const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
+          // B stacked on this ticket (BOS-629): B was created from a commit this branch holds. The graph alone can't say who
+          // wrote a shared commit, but the base the runner recorded when it created B's branch can: a shared commit that is
+          // at or below that base was already there when B started, so it isn't B's work. Any shared commit above B's base
+          // (B's own, or one B has only because this ticket took it) is still reported (BOS-369), and so is a branch with no
+          // recorded base, since the gate has to fail safe.
+          if (!contained) {
+            const base = await this.git(["config", "--get", `bossman.ticket-${b.ticketId}.base`], { cwd: repo }).catch(() => "");
+            if (base) {
+              let allBelowBase = true;
+              for (const sha of bLine.filter((s) => mine.has(s))) {
+                if ((await this.gitCode(["merge-base", "--is-ancestor", sha, base], { cwd: repo })).code !== 0) {
+                  allBelowBase = false;
+                  break;
+                }
+              }
+              if (allBelowBase) continue;
+            }
+          }
           found.push({ ticketId: b.ticketId, branch: b.branch, contained });
         }
       }
