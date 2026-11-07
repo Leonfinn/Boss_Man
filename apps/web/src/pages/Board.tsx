@@ -658,7 +658,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             ))}
           </div>
           {view !== "features" && (
-            <input type="search" aria-label="Search tasks" placeholder="Search: HOL-12, title, words…" value={query} onChange={(e) => setQuery(e.target.value)} style={{ minWidth: 220 }} />
+            <input type="search" aria-label="Search tasks" placeholder="Search: HOL-12, title, words…" value={query} onChange={(e) => setQuery(e.target.value)} />
           )}
           {view !== "features" && (
             <label>
