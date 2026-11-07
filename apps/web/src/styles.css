@@ -189,6 +189,14 @@ p { margin: 0; }
 .board-bar label, .board-bar p { font-size: 13px; color: var(--muted); }
 .board-bar p { display: inline-flex; align-items: center; gap: 6px; }
 .board-bar select { min-height: 36px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--card); font-size: 13px; }
+/* A select is as wide as its longest option, so one long feature title made the Feature filter
+   wider than a narrow window (a folding phone's inner screen, ~720-840px) and pushed the whole page
+   past the right edge, the board and side menu with it (BOS-567). Every box in the bar may shrink
+   to the window, and the select and search box cap at their row's width (the select cuts its
+   text instead). */
+.board-bar > div, .board-bar label { min-width: 0; max-width: 100%; }
+.board-bar select { max-width: 100%; text-overflow: ellipsis; }
+.board-bar input[type="search"] { width: 220px; max-width: 100%; }
 .segmented { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--lane); }
 .segmented .chip { min-height: 34px; padding: 0 14px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); }
 .segmented .chip[aria-pressed="true"] { background: var(--raise); color: var(--head); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); }
@@ -377,6 +385,8 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .pl-hit { position: absolute; inset: 0; border: 0; background: none; border-radius: 8px; }
 .pl-hit[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pl-top { display: flex; justify-content: space-between; gap: 8px; pointer-events: none; }
+.pl-kind { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; }
+.pl-ref { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
 .pl-state { font-size: 11.5px; color: var(--muted); }
 .pl-title { position: relative; font-weight: 600; color: inherit; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; line-height: 1.25; text-decoration: none; }
 .pl-title:hover { text-decoration: underline; }

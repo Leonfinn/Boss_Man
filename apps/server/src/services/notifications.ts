@@ -5,7 +5,7 @@
 // Boss Man only ever sends outbound requests and is never exposed at the router.
 import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
-import { effectiveLevel, inQuietHours, NOTIFY_LEVELS, type NotifyLevel } from "@boss-man/shared";
+import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, type NotifyLevel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, notifications, settings } from "../db/schema.js";
 import type { DecisionContext } from "./decisions.js";
@@ -15,14 +15,7 @@ export const NotifySettings = z.object({
     .object({
       start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:MM"),
       end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:MM"),
-      timeZone: z.string().refine((tz) => {
-        try {
-          new Intl.DateTimeFormat("en-GB", { timeZone: tz });
-          return true;
-        } catch {
-          return false;
-        }
-      }, "Use a time zone name such as Europe/London"),
+      timeZone: z.string().refine((tz) => isTimeZone(tz), "Use a time zone name such as Europe/London"),
     })
     .nullable(),
   /** Notifications per agent per hour before the rest become notes. */
