@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +7,9 @@ import * as schema from "./schema.js";
 
 export type Db = PgDatabase<PgQueryResultHKT, typeof schema>;
 
-export const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../drizzle");
+// apps/server/drizzle, from the source (src/db/client.ts) or from the image's bundle (dist/main.js, BOS-410 step 3).
+const here = path.dirname(fileURLToPath(import.meta.url));
+export const migrationsFolder = [path.resolve(here, "../../drizzle"), path.resolve(here, "../drizzle")].find((d) => existsSync(path.join(d, "meta"))) ?? path.resolve(here, "../../drizzle");
 
 /** Production: node-postgres. Migrated on start unless `migrate: false` (a separate migrate step ran), in which case the database must already be current. */
 export async function openPostgres(url: string, opts: { migrate?: boolean } = {}): Promise<{ db: Db; close: () => Promise<void> }> {
@@ -16,6 +19,11 @@ export async function openPostgres(url: string, opts: { migrate?: boolean } = {}
   if (opts.migrate === false) await assertMigrated(url, migrationsFolder);
   else await runMigrations(url, { folder: migrationsFolder });
   const pool = new Pool({ connectionString: url });
+  // A database restart drops idle connections; pg reports that as an error event, and with no listener Node exits.
+  // Log it and carry on: the pool discards the dead client and the next query connects again.
+  const onError = (err: Error) => console.error("[db] connection error (will reconnect on next query):", err.message);
+  pool.on("error", onError);
+  pool.on("connect", (client) => client.on("error", onError));
   const db = drizzle(pool, { schema });
   return { db: db as unknown as Db, close: () => pool.end() };
 }

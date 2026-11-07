@@ -482,7 +482,7 @@ describe("the alert ladder (BOS-64)", () => {
     // One card for all three agents; its cause key names the account and its top rung is the owner.
     expect(card.question).toMatch(/Claude Max/);
     expect(card.question).toMatch(/3 agents/);
-    expect((card.context as { ladder: Ladder }).ladder).toMatchObject({ groupBy: `account:${fs.id}:account_limit`, topRung: "owner" });
+    expect((card.context as { ladder: Ladder }).ladder).toMatchObject({ groupBy: `account:${ctx.companyId}:${fs.id}:account_limit`, topRung: "owner" });
     // Point 2: once the account has room again (a fresh sample under the hold threshold), the sweep closes the
     // card by itself, on its rung, with the reason. The card is with the Scrum Master, and it still closes.
     await ctx.db.delete(quotaSamples).where(eq(quotaSamples.fundingSourceId, fs.id));
@@ -491,6 +491,25 @@ describe("the alert ladder (BOS-64)", () => {
     const gone = (await ctx.db.select().from(decisions).where(eq(decisions.id, card.id)))[0]!;
     expect(gone.status).toBe("withdrawn");
     expect((gone.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/room again/);
+  });
+
+  it("two companies on one account get a card each: one company's open card doesn't swallow the other's raise (BOS-498)", async () => {
+    const fs = (await ctx.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    await ctx.db.update(agents).set({ fundingSourceId: fs.id });
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: fs.id, window: "five_hour", utilization: 1, resetsAt: new Date(ctx.now().getTime() + 3_600_000), observedAt: ctx.now() });
+    const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
+    const otherCompanyId = other.company.id;
+    const otherDev = (await ctx.req("POST", `/api/companies/${otherCompanyId}/agents`, { name: "Developer" })).json() as { id: string };
+    await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, otherDev.id));
+    for (const [companyId, agentId] of [[ctx.companyId, ctx.dev.id], [otherCompanyId, otherDev.id]] as const) {
+      for (let i = 0; i < 3; i++) await ctx.loops.failure({ companyId, ticketId: null, agentId, text: "Error: 429 weekly limit reached on Claude Max", what: "An agent run" });
+    }
+    // Each company's raise lands on its own card, on its own owner's desk: neither is silently dropped.
+    for (const companyId of [ctx.companyId, otherCompanyId]) {
+      const rows = await ctx.db.select().from(decisions).where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open")));
+      expect(rows).toHaveLength(1);
+      expect((rows[0]!.context as { ladder: Ladder }).ladder).toMatchObject({ groupBy: `account:${companyId}:${fs.id}:account_limit`, topRung: "owner" });
+    }
   });
 
   it("a repeated failure alert closes itself once the agent finishes a clean run, on any tier (BOS-469 point 2)", async () => {

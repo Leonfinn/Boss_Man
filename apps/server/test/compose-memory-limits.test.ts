@@ -44,6 +44,14 @@ describe("compose memory limits", () => {
     }
   });
 
+  it("every server process caps its JS heap from BOSSMAN_SERVER_HEAP_MB, default 1536 MiB (BOS-410)", () => {
+    const bg = services("deploy/truenas-bluegreen.yml");
+    const main = services("docker-compose.yml");
+    for (const [n, s] of [["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]]] as const) {
+      expect((s as { environment?: Record<string, string> }).environment?.NODE_OPTIONS, n).toBe("--max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}");
+    }
+  });
+
   it("server, database and proxy are protected from the OOM killer", () => {
     const main = services("docker-compose.yml");
     expect(main.db!.oom_score_adj).toBeLessThan(0);
