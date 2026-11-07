@@ -209,6 +209,7 @@ function realDirsUnder(base: string, rel: string): boolean {
 
 type RunState = {
   child: ChildProcess;
+  agentKind: string;
   sessionId: string | null;
   cancel: () => void;
   pendingPermissions: Map<string, (verdict: "allow" | "deny") => void>;
@@ -278,6 +279,37 @@ export class SessionManager {
 
   get activeRuns() {
     return this.runs.size;
+  }
+
+  private opencodeHeld: Promise<void> | null = null;
+
+  /**
+   * Runs fn while no OpenCode run is live, holding new OpenCode runs and model probes until it
+   * settles (the OpenCode database's one-off VACUUM, BOS-616). Resolves null, without running fn,
+   * when an OpenCode run is live or another hold is on. With maxHoldMs the hold is let go at that
+   * point even if fn hasn't settled (BOS-622: a backstop; the prune kills its VACUUM before then).
+   */
+  async whileOpencodeIdle<T>(fn: () => Promise<T>, maxHoldMs?: number): Promise<T | null> {
+    if (this.opencodeHeld || [...this.runs.values()].some((r) => r.agentKind === "opencode")) return null;
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    this.opencodeHeld = held;
+    const letGo = () => {
+      if (this.opencodeHeld === held) this.opencodeHeld = null;
+      release();
+    };
+    const backstop = maxHoldMs === undefined ? null : setTimeout(letGo, maxHoldMs);
+    try {
+      return await fn();
+    } finally {
+      if (backstop) clearTimeout(backstop);
+      letGo();
+    }
+  }
+
+  /** The agent session ids live runs are using (the OpenCode prune leaves these alone). */
+  activeSessionIds(): string[] {
+    return [...this.runs.values()].flatMap((r) => (r.sessionId ? [r.sessionId] : []));
   }
 
   /** Process group ids of active runs, one per adapter. */
@@ -451,6 +483,10 @@ export class SessionManager {
       case "models.probe": {
         const reply = this.opts.reply ?? (() => {});
         (this.opts.resolveCompanyEnv?.("check") ?? Promise.resolve({} as Record<string, string>))
+          .then(async (env) => {
+            while (command.agentKind === "opencode" && this.opencodeHeld) await this.opencodeHeld; // BOS-616
+            return env;
+          })
           .then((env) => probeModels(command.agentKind, env, { baseEnv: this.opts.baseEnv, adapterBin: this.opts.adapterBins?.[command.agentKind] }))
           .then(
             (models) => {
@@ -676,6 +712,17 @@ export class SessionManager {
       }
     }
     const dropTmp = () => runTmp && rmSync(runTmp, { recursive: true, force: true });
+    // OpenCode's database is being vacuumed (BOS-616): wait, since OpenCode gives up on its lock after 5 s.
+    if (cmd.agentKind === "opencode" && this.opencodeHeld) {
+      emit({ type: "runner.log", level: "info", message: `Run ${cmd.runId} waits a few minutes while OpenCode's database is compacted.` });
+      while (this.opencodeHeld) await this.opencodeHeld;
+      if (this.cancelledEarly.delete(cmd.runId)) {
+        dropSkills();
+        dropTmp();
+        emit({ type: "run.ended", runId: cmd.runId, stopReason: "cancelled", error: null });
+        return;
+      }
+    }
     // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
     // Claude Code carries on headless with every permission denied (spike S4). Ending the run
     // kills the whole group.
@@ -685,7 +732,7 @@ export class SessionManager {
       stderr = (stderr + String(d)).slice(-4000);
     });
 
-    const state: RunState = { child, sessionId: null, cancel: () => {}, pendingPermissions: new Map(), queued: [] };
+    const state: RunState = { child, agentKind: cmd.agentKind, sessionId: null, cancel: () => {}, pendingPermissions: new Map(), queued: [] };
     const toolCalls = new Map<string, { rawInput: unknown; text: string }>();
     this.runs.set(cmd.runId, state);
     this.saveState();

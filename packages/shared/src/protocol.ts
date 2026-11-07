@@ -90,6 +90,13 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     /** Ticket folders git no longer knew about, removed in this pass. */
     removed: z.array(z.string()),
   }),
+  // The OpenCode prune's one-off VACUUM ran past its cap and was killed, letting held OpenCode runs go (BOS-622).
+  z.object({
+    type: z.literal("runner.opencode_vacuum_cut"),
+    heldSeconds: z.number().int().nonnegative().max(86_400),
+    bytes: z.number().nonnegative(),
+    agentHome: z.boolean(),
+  }),
   // The runner's start-up self-test of the agent fence (BOS-321).
   z.object({ type: z.literal("runner.sandbox"), report: SandboxReport }),
 ]);
