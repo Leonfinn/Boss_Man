@@ -842,6 +842,7 @@ function usesScratchUnsafely(c: string): boolean {
   const keywords = new Set(["if", "then", "do", "else", "elif", "while", "until", "!", "time", "{", "}", "fi", "done", "esac", "in"]);
   const clean = (w: string): string => w.replace(/^\.\//, "").replace(/\/+$/, "");
   const written = new Set<string>();
+  let unknownWrite = false; // a write whose file name the judge can't be sure of: plain static imports are not harmless then
   const scratchVars = new Set<string>();
   const scratchWord = /\/tmp(?:\/|$|:)|\$\{?TMPDIR|mktemp/;
   const parsed = segs.map((s) => {
@@ -852,7 +853,19 @@ function usesScratchUnsafely(c: string): boolean {
     const args = s.words.slice(k + 1);
     for (const o of s.out) if (o !== "/dev/null" && !/^\d+$|^-$/.test(o)) written.add(clean(o));
     const flagless = args.filter((a) => !a.startsWith("-"));
-    if (/^(?:cp|mv|install|ln)$/.test(head) && flagless.length) written.add(clean(flagless[flagless.length - 1]!));
+    if (/^(?:cp|mv|install|ln)$/.test(head) && flagless.length) {
+      written.add(clean(flagless[flagless.length - 1]!));
+      // Into a folder (`cp /tmp/c.py .`, `-t DIR`) the new file keeps the source's name: count that name as written too.
+      for (const a of flagless) written.add(clean(a.replace(/^.*\//, "")));
+    }
+    // A download that names its own file (`curl -O URL`, `-J`, `wget URL` without -O) writes a name the URL decides.
+    if (head === "curl" || head === "wget") {
+      const saves = head === "wget" ? !args.some((a) => /^(?:-O|--output-document)/.test(a)) : args.some((a) => /^-[A-Za-z]*[OJ]|^--remote-name|^--remote-header-name/.test(a));
+      if (saves) {
+        unknownWrite = true;
+        for (const a of args) if (/^[a-z][\w+.-]*:\/\//i.test(a)) written.add(clean(a.replace(/[?#].*$/, "").replace(/^.*\//, "")));
+      }
+    }
     if (head === "tee") for (const a of flagless) written.add(clean(a));
     // Readers on the safe list that still write a file: `sort -o OUT`, `uniq IN OUT`, `xxd -r IN OUT`.
     // Output options of the other readers on the list (`sort -o`, `tree -o`), also at the end of a flag cluster (`sort -uo OUT`).
@@ -925,12 +938,17 @@ function usesScratchUnsafely(c: string): boolean {
   // its own /tmp file is placed by inlineCodeOk, as before.
   const playOutside = (code: string): boolean => written.size > 0 || scratchVars.size > 0 || scratchWord.test(code === "" ? c : c.split(code).join(""));
   const inScratchPlay = written.size > 0 || scratchVars.size > 0 || scratchWord.test(c);
-  const interpreters = /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh)$/;
+  const interpWords = "python[\\d.]*|pypy[\\d.]*|ipython[\\d.]*|node(?:js)?|tsx|ts-node|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh";
+  const interpreters = new RegExp(`^(?:${interpWords})$`);
   // Any word by which inline code can bring in or run other code, a dotted one too (`runpy.run_path`, `os.system`), or the
   // shell's `source` / `.`. Reading a file as data (`readFileSync`) is not a loader; feeding it to exec / eval / Function is.
   // A static import of a plain module name (`import json`, `from os import path`, `require('fs')`) can only load a module
   // that `named` checks against the files the command wrote, so it is taken out first; a path or built name is not.
   const loadsCode = (text: string): boolean => {
+    if (unknownWrite) return /\b(?:import|from|require\w*|include\w*|source|load\w*|use|do|exec\w*|eval\w*)\b|__import__|\w*Context\b|(?:^|[;&|(\s])\.\s+\S/.test(text) || loadsCodeStripped(text);
+    return loadsCodeStripped(text);
+  };
+  const loadsCodeStripped = (text: string): boolean => {
     const rest = text
       .replace(/\bfrom\s+[\w.]+\s+import\s+[\w*, ]+/g, " ")
       .replace(/\bimport\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*/g, " ")
@@ -939,8 +957,17 @@ function usesScratchUnsafely(c: string): boolean {
   };
   // A heredoc fed to an interpreter is inline code too (the parser skips its body).
   if (inScratchPlay) {
-    const heredoc = /\b(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh)\b[^\n;|&]*<<-?\s*['"]?\w+['"]?[^\n]*\n([\s\S]*)/g;
+    const heredoc = new RegExp(`\\b(?:${interpWords})\\b[^\\n;|&]*<<-?\\s*['"]?\\w+['"]?[^\\n]*\\n([\\s\\S]*)`, "g");
     for (const m of c.matchAll(heredoc)) if (playOutside(m[1]!) && (loadsCode(m[1]!) || mentionsWritten(m[1]!))) return true;
+    // Code piped to an interpreter that has no script argument (`echo "import c" | python3 -`, `cat c.py | node`) is read from stdin:
+    // the text before the pipe is checked like a heredoc body, and a pipe from `cat` of a written or scratch file is code too.
+    const piped = new RegExp(`\\|\\s*(?:(?:env|exec|nohup|time)\\s+)*(?:${interpWords})(?:\\s+-[A-Za-z]*)*\\s*(?=$|[;&|\\n)])`, "g");
+    for (const m of c.matchAll(piped)) {
+      const before = c.slice(0, m.index!);
+      if (loadsCode(before) || mentionsWritten(before)) return true;
+      const last = before.split(/[;&|\n]/).pop() ?? "";
+      if (/^\s*cat\b/.test(last) && last.split(/\s+/).some((w) => w !== "cat" && !w.startsWith("-") && w !== "" && (isWritten(w) || isScratch(w)))) return true;
+    }
   }
   let extracted = false;
   for (const p of parsed) {
@@ -992,8 +1019,18 @@ function usesScratchUnsafely(c: string): boolean {
     // Only the inline code or module name (the words after -c/-e/-r/-m) is checked here; a written file given as plain data
     // to a checked-in script (`node scripts/use.js out.json`) is judged below as before.
     // Any single-dash flag cluster holding c/e/E/r/m/M/p (`-c`, `-pe`, `-mc`, `-MC`, `-ec`), or --eval / --print / --require.
-    const codeAt = args.findIndex((a) => /^-[A-Za-z]*[cermEpM]/.test(a) || /^--(?:eval|print|require|import|exec)\b/.test(a));
-    if (codeAt >= 0 && interpreters.test(sh) && playOutside(args.slice(codeAt + 1).join(" "))) {
+    // An interpreter behind a runner (`pnpm exec node -e`, `pnpm tsx -e`, `npx tsx -e`, `uv run python -c`, `poetry run python -c`).
+    let ish = sh;
+    let iargs = args;
+    if (/^(?:pnpm|npx|bunx|yarn|npm|uv|poetry|pipx)$/.test(sh)) {
+      let j = 0;
+      while (j < iargs.length && (iargs[j]!.startsWith("-") || /^(?:exec|run|dlx|x|--)$/.test(iargs[j]!))) j++;
+      const w = iargs[j] ?? "";
+      if (interpreters.test(w.replace(/^.*\//, ""))) { ish = w.replace(/^.*\//, ""); iargs = iargs.slice(j + 1); }
+    }
+    const codeAt = iargs.findIndex((a) => /^-[A-Za-z]*[cermEpM]/.test(a) || /^--(?:eval|print|require|import|exec)\b/.test(a));
+    if (codeAt >= 0 && interpreters.test(ish) && playOutside(iargs.slice(codeAt + 1).join(" "))) {
+      const args = iargs;
       const flag = args[codeAt]!;
       const code = args.slice(codeAt + 1).join(" ");
       // After a write or with a /tmp path anywhere, inline code that loads, requires, sources, imports or executes anything gets
