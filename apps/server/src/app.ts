@@ -32,12 +32,12 @@ import { getHold, maintenanceService } from "./services/maintenance.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
-import { addonsService, unknownAddons } from "./services/addons.js";
+import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
-import { hostFactsService } from "./services/host-facts.js";
+import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
@@ -69,7 +69,7 @@ import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
-import { hashFiles } from "./services/skill-files.js";
+import { skillChangeEntry, skillSide } from "./services/skill-files.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { ownerRepliesService } from "./services/owner-replies.js";
@@ -257,7 +257,12 @@ export async function buildApp(opts: AppOptions) {
   // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
   // card reads it through addonFacts, and a failed read is "unknown" for all (warnings only), never a refused card.
   const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), now: opts.now });
-  const addonFacts = () => addonsSvc.facts().catch(() => unknownAddons("Boss Man couldn't read the add-on state just now"));
+  // The host deployer's add-on report (BOS-419) is merged in; the worse state wins when the two disagree.
+  const addonFacts = async () => {
+    const own = await addonsSvc.facts().catch(() => unknownAddons("Boss Man couldn't read the add-on state just now"));
+    const reported = await hostFacts.reportedAddons().catch(() => ({}));
+    return mergeHostAddons(own, reported, new Date().toISOString());
+  };
   // The socket peer, not req.ip: the edge is the hop itself, and X-Forwarded-For is the client's to set.
   app.addHook("onRequest", async (req) => addonsSvc.noteRequest(req.socket.remoteAddress));
   const leader = opts.leader ?? createLeader();
@@ -286,8 +291,8 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
-  const hostFacts = hostFactsService({ dir: opts.deployerDir, log: (m) => app.log.warn(m) });
-  const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), log: (m) => app.log.warn(m) });
+  const hostFacts = hostFactsService({ dir: opts.deployerDir, db, now: opts.now, log: (m) => app.log.warn(m) });
+  const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m) });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
@@ -420,6 +425,7 @@ export async function buildApp(opts: AppOptions) {
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
     addons: addonFacts,
+    hostFacts: () => hostFacts.sync(),
     commit: process.env.BOSSMAN_COMMIT || "dev",
     startedAt: new Date(STARTED_AT),
     now: opts.now,
@@ -462,7 +468,7 @@ export async function buildApp(opts: AppOptions) {
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   async function quotaWatch(fundingSourceId: string) {
     const t = (opts.now ?? (() => new Date()))();
-    const status = await funding.status(fundingSourceId, t);
+    const status = await funding.forecasts(fundingSourceId, t);
     if (!status) return;
     for (const [window, f] of Object.entries(status.forecasts)) {
       if (!f?.beforeReset || !f.runsOutAt || f.utilization < 0.5) continue;
@@ -1092,6 +1098,16 @@ export async function buildApp(opts: AppOptions) {
     // BOS-313: check the merged result before pushing it (off by default while it rolls out).
     owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
     owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
+    // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
+    owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS] }));
+    owner.put("/api/host-facts", async (req, reply) => {
+      const body = z.object({ key: z.string(), value: z.string() }).parse(req.body);
+      try {
+        return { ...(await hostFacts.confirm(body.key, body.value)), ownerFacts: [...OWNER_FACTS] };
+      } catch (e) {
+        return reply.code(400).send({ error: e instanceof Error ? e.message : "Couldn't save that fact." });
+      }
+    });
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
       return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null };
@@ -1773,50 +1789,15 @@ export async function buildApp(opts: AppOptions) {
         const old = await skillsSvc.get(id, skillId);
         const oldSkillMd = old.files.find((f) => f.path === "SKILL.md")?.text ?? "";
         const s = await skillsSvc.write(id, { ...b, replaceId: skillId });
-        const newSkillMd = Buffer.from(s.files.find((f) => f.path === "SKILL.md")?.content ?? "", "base64").toString("utf8");
-        const newBundle = hashFiles(s.files).bundleHash;
         // An edited skill is new, unreviewed text: log it so an approved skill can never change without a trace.
-        // The summary shows only the region that differs, so a hidden tail or a description change still shows.
-        const differing = (before: string, after: string) => {
-          const min = Math.min(before.length, after.length);
-          let start = 0;
-          while (start < min && before[start] === after[start]) start++;
-          let endBefore = before.length;
-          let endAfter = after.length;
-          while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) {
-            endBefore--;
-            endAfter--;
-          }
-          return { before: before.slice(start, endBefore), after: after.slice(start, endAfter) };
-        };
-        // Keep both ends when it is long: a payload is often added at the end, after harmless opening text.
-        const flat = (text: string, max: number) => {
-          const one = text.replace(/\s+/g, " ").trim();
-          if (one.length <= max) return one;
-          const half = Math.max(1, Math.floor((max - 1) / 2));
-          return `${one.slice(0, half)}…${one.slice(-half)}`;
-        };
-        const diff = differing(oldSkillMd, newSkillMd);
-        const head = `Owner edited the skill ${s.name}${s.name !== old.name ? ` (was ${flat(old.name, 40)})` : ""} from ${old.bundleHash.slice(0, 12)} to ${newBundle.slice(0, 12)}.`;
-        const tail = " Not security-reviewed; full text in detail.";
-        // Leave room for the head and tail, then share what is left between the two differing sides.
-        const room = Math.max(20, 300 - head.length - tail.length - 30);
-        const shown = !diff.before && !diff.after ? "The visible text is unchanged." : `Old: "${flat(diff.before, Math.floor(room / 2))}" New: "${flat(diff.after, Math.floor(room / 2))}".`;
-        await record(db, {
-          companyId: id,
-          kind: "skill.edited_by_owner",
-          summary: `${head} ${shown}${tail}`,
-          // The activity row's summary is capped, so the full old and new content is kept beside it.
-          detail: {
-            skillId,
-            name: { before: old.name, after: s.name },
-            description: { before: old.description, after: s.description },
-            bundleHash: { before: old.bundleHash, after: newBundle },
-            skillMd: { before: oldSkillMd, after: newSkillMd },
-            changedRegion: diff,
-            removedFiles: old.files.filter((f) => f.path !== "SKILL.md").map((f) => f.path),
-          },
-        });
+        const entry = skillChangeEntry(
+          skillId,
+          { name: old.name, description: old.description, bundleHash: old.bundleHash, skillMd: oldSkillMd, paths: old.files.map((f) => f.path) },
+          skillSide(s),
+          (from, to, was) => `Owner edited the skill ${s.name}${was} from ${from} to ${to}`,
+          " Not security-reviewed; full text in detail.",
+        );
+        await record(db, { companyId: id, kind: "skill.edited_by_owner", ...entry });
         return { id: s.id, name: s.name };
       } catch (err) {
         return skillErrors(reply)(err);
