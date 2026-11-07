@@ -109,6 +109,30 @@ export function missingVerdicts(criteria: readonly Criterion[], note: string | n
 /** The after-merge criteria with no verdict yet: what keeps a merged ticket open. */
 export const unreportedAfterMerge = (criteria: readonly Criterion[], note: string | null | undefined): string[] => missingVerdicts(criteria, note, "after");
 
+/** The after-merge criteria reported fail: a live check that failed, which gets a follow-up ticket (DR-009 #5, BOS-575). */
+export const failedAfterMerge = (criteria: readonly Criterion[], note: string | null | undefined): string[] =>
+  readVerdicts(criteria, note)
+    .filter((r, i) => isAfterMerge(criteria[i]!) && r.verdict === "fail")
+    .map((r) => r.criterion);
+
+/**
+ * At merge (BOS-575): nothing can have failed on the live work yet, so a criterion still at fail when the
+ * branch lands hasn't been shown, it has been put off ("3 fail: measured after merge, owner accepted").
+ * It is carried over: marked after merge, and its stale fail dropped from the note (a fail always wins
+ * in readVerdicts, so it would otherwise outvote the later pass). The passes are kept by number. Null when
+ * no criterion is at fail, so the note is left exactly as it was.
+ */
+export function carryFailedOver(criteria: readonly Criterion[], note: string | null | undefined): { criteria: Criterion[]; carried: string[]; note: string } | null {
+  const verdicts = readVerdicts(criteria, note);
+  if (!verdicts.some((r) => r.verdict === "fail")) return null;
+  const next = criteria.map((c, i): Criterion => (verdicts[i]!.verdict === "fail" ? { text: criterionText(c), after: "merge" } : c));
+  const passed = verdicts.flatMap((r, i) => (r.verdict === "pass" ? [`${i + 1} pass`] : []));
+  const put = verdicts.flatMap((r, i) => (r.verdict === "fail" ? [i + 1] : []));
+  // No pass or fail word in the second sentence, so it can't be read as a verdict for any criterion.
+  const rest = `Carried over at merge, to show now the work is live: criterion ${put.join(" and ")}`;
+  return { criteria: next, carried: verdicts.filter((r) => r.verdict === "fail").map((r) => r.criterion), note: passed.length ? `${passed.join("; ")}. ${rest}` : rest };
+}
+
 /** Words that mean a check can only be settled once the work is live, not in a review. */
 const LIVE = /\b(after (the )?merg(?:e|ing)|once (it'?s |it is )?(merged|live|deployed|in production)|post-?merge|standby window|live deploy|on a real host|on the (real|production) host|on your (own )?(host|machine|server)|on the (owner'?s )?(host|machine|server))\b/i;
 
@@ -122,4 +146,15 @@ export function afterMergeLint(criteria: readonly Criterion[]): string {
   const names = loose.map((c) => `"${criterionText(c)}"`).join(", ");
   const them = loose.length === 1 ? "it" : "them";
   return `${names} can only be checked once the work is live: mark ${them} "on a real host" so reviewers don't fail the ticket on ${them}. This is a warning only.`;
+}
+/**
+ * The criteria a stuck review could move to "after the merge" (BOS-422): what the reviewers' words fail, when every one
+ * of those reads like a live check (see afterMergeLint) and there is nothing else to fix. Empty when a review has a line
+ * comment, fails nothing we can name, or fails any criterion that must hold before merge.
+ */
+export function movableFailures(criteria: readonly Criterion[], comments: readonly unknown[], reviewText: string): string[] {
+  if (comments.length) return [];
+  const failed = readVerdicts(criteria, reviewText).flatMap((r, i) => (r.verdict === "fail" ? [criteria[i]!] : []));
+  if (!failed.length || failed.some((c) => isAfterMerge(c) || !LIVE.test(criterionText(c)))) return [];
+  return failed.map(criterionText);
 }

@@ -56,7 +56,11 @@ x-server-env: &server-env
   BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
   BOSSMAN_PORTAL_PORT: "3101"
   BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
+  # The stall profiler (BOS-602): 0 turns it off. Empty = on.
+  BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
   BOSSMAN_DEPLOYER_DIR: /run/deployer
+  # JS heap cap in MiB, as in docker-compose.yml (BOS-410).
+  NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
   # The deployer runs the migrations (the migrate service) before a colour starts; a server only checks.
   BOSSMAN_MIGRATE_ON_START: "0"
   # Forwarded headers are believed from the proxy's fixed address on the private "front" network, and from nobody else.

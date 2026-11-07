@@ -29,6 +29,41 @@ HEALTH_TIMEOUT="${BOSSMAN_HEALTH_TIMEOUT:-120}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# BEGIN readable-check (the same text is in rebuild-live.sh, host-deployer.sh and deploy.sh; deploy.test.sh keeps them equal)
+# BOS-562: the server image copies file modes as they are on disk and the server runs as user node, so a git-tracked
+# file that others can't read (or a folder they can't read and search) makes it crash at start. Reads modes only and
+# changes nothing. Only tracked paths count: .env, secrets/ and the data folder must stay private.
+unreadable_tracked() { # checkout folder: the tracked files and folders others can't use, one path per line
+  (
+    cd "$1" || exit 0
+    {
+      git ls-files -z | xargs -0 -r stat -c 'f %a %n' --
+      { echo .; git -c core.quotepath=off ls-files | awk '{ while (sub("/[^/]*$", "")) print }'; } | sort -u | tr '\n' '\0' | xargs -0 -r stat -c 'd %a %n' --
+    } 2>/dev/null | while read -r kind mode path; do
+      m=$((8#$mode))
+      if [[ $kind == f ]]; then ((m & 4)) || printf '%s\n' "$path"; else (((m & 5) == 5)) || printf '%s\n' "$path"; fi
+    done
+  ) || true
+}
+readable_problem() { # checkout folder: prints nothing when all is readable, else the message with the fix
+  local dir bad n
+  dir="$(cd "$1" && pwd)" || return 0
+  bad="$(unreadable_tracked "$dir")"
+  [[ -n $bad ]] || return 0
+  n="$(grep -c '' <<<"$bad")"
+  printf "%s file(s) or folder(s) in %s can't be read by the server, which runs as user node and gets the permissions the files have on disk, so it would crash when it starts (a root shell with umask 077 does this to every file git writes). First %s:\n%s\nFix, then run this again:\n  cd %q && git ls-files -z | xargs -0 chmod go+r && git ls-files | awk '{ while (sub(\"/[^/]*\$\", \"\")) print }' | sort -u | xargs -d '\\\\n' chmod go+rx && chmod go+rx ." \
+    "$n" "$dir" "$((n < 10 ? n : 10))" "$(head -n 10 <<<"$bad" | sed 's/^/  /')" "$dir"
+}
+# END readable-check
+
+# Every git command here runs under umask 022: run from a root shell with umask 077 it would write files the server (user node) can't read (BOS-562).
+git() { (umask 022; command git "$@"); }
+# Stops (nothing changed) when the checkout has files the server could not read; the message says the fix.
+require_readable() {
+  local problem
+  problem="$(readable_problem .)"
+  [[ -z $problem ]] || { MESSAGE="the checkout has files the server cannot read; see the output for the fix"; die "$problem"; }
+}
 
 # True when the files changed between two commits mean the runners need a new image.
 needs_runner() { # old new
@@ -59,7 +94,7 @@ backup_db() {
   mkdir -p "$BACKUP_DIR"
   BACKUP="$BACKUP_DIR/bossman-$(date +%F-%H%M).sql.gz"
   if ((DRY)); then say "[dry-run] pg_dump | gzip > $BACKUP (then check it is not empty and gzip -t passes)"; return; fi
-  (umask 077; docker compose exec -T db pg_dump -U bossman bossman | gzip >"$BACKUP.partial") || { rm -f "$BACKUP.partial"; die "The backup failed. Nothing was changed."; }
+  (set -o pipefail; umask 077; docker compose exec -T db pg_dump -U bossman bossman | gzip >"$BACKUP.partial") || { rm -f "$BACKUP.partial"; die "The backup failed. Nothing was changed."; }
   if ! { [[ -s $BACKUP.partial ]] && gzip -t "$BACKUP.partial"; }; then rm -f "$BACKUP.partial"; die "The backup is empty or damaged. Nothing was changed."; fi
   mv "$BACKUP.partial" "$BACKUP"
   say "Backup saved: $BACKUP ($(du -h "$BACKUP" | cut -f1))"
@@ -87,10 +122,11 @@ rebuild_and_start() {
   local svcs=(server)
   # The launcher is only part of the stack when its profile is on.
   if ((DRY)) || docker compose config --services | grep -qx launcher; then svcs+=(launcher); fi
+  require_readable
   step "Building (${svcs[*]})"
   run docker compose build "${svcs[@]}"
   step "Restarting"
-  run docker compose up -d
+  run docker compose up -d --no-deps "${svcs[@]}"
   step "Waiting for the server to be healthy (up to ${HEALTH_TIMEOUT}s)"
   wait_healthy
 }
@@ -98,6 +134,7 @@ rebuild_and_start() {
 print_rollback_help() {
   say ""
   say "The server did not become healthy. Nothing was undone automatically."
+  say "Last 20 lines of the server log:"; docker compose logs --no-color --tail 20 server 2>&1 | cut -c1-300 || true
   say "Look at the logs first:   docker compose logs --tail 100 server"
   say "To go back to the old code (does not touch the database):   scripts/deploy.sh --rollback"
   say "  or by hand:   git checkout $FROM && docker compose build && docker compose up -d"
@@ -157,6 +194,7 @@ main() {
     say "About to deploy these commits:"; git log --oneline "HEAD..$new"
   fi
 
+  require_readable
   step "Backing up the database"
   backup_db
   write_status

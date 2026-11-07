@@ -28,6 +28,8 @@ function fakeGitea() {
   const commits = new Map<number, string[]>();
   // Branch heads at the host, by branch name (BOS-130).
   const heads = new Map<string, string>();
+  // A status the host answers for a branch instead of its head, for errors other than "not found" (BOS-577).
+  const branchErrors = new Map<string, number>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -54,12 +56,14 @@ function fakeGitea() {
     if (method === "GET" && url === `${GITEA}/api/v1/repos/leon/site/commits/${HEAD}/status`) return json(200, checks);
     const branch = /^\/branches\/(.+)$/.exec(url.slice(`${GITEA}/api/v1/repos/leon/site`.length));
     if (method === "GET" && branch) {
+      const failed = branchErrors.get(branch[1]!);
+      if (failed) return json(failed, { message: "internal error" });
       const sha = heads.get(branch[1]!);
       return sha ? json(200, { name: branch[1], commit: { id: sha } }) : json(404, { message: "no such branch" });
     }
     return json(404, { message: `no fake for ${method} ${url}` });
   }) as typeof globalThis.fetch;
-  return { fetch, calls, pr, mergeAnswers, checks, pulls, commits, heads };
+  return { fetch, calls, pr, mergeAnswers, checks, pulls, commits, heads, branchErrors };
 }
 
 async function setup(opts: { token?: boolean } = {}) {
@@ -214,19 +218,33 @@ describe("a pull request whose branch carries another open ticket's work (BOS-13
     expect(await c.state()).toMatchObject({ systemState: "done", mergeCommit: "e".repeat(40) });
   });
 
-  it("doesn't merge when the host can't say what the other ticket is carrying", async () => {
+  it("still merges when another open ticket's branch was never pushed to the host (BOS-577)", async () => {
     const c = (ctx = await setup());
     await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
-    // An open ticket whose branch has no pull request; the host doesn't know that branch.
+    // An in-progress ticket with a branch of its own that the host has never seen: it carries nothing.
+    const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Permission gate", assigneeAgentId: c.worker.id, state: "in_progress" })).json() as { id: string };
+    await c.db.update(tickets).set({ branch: `bossman/${other.id}` }).where(eq(tickets.id, other.id));
+    await c.db.update(tickets).set({ pullRequestNumber: 7, pullRequestUrl: `${GITEA}/leon/site/pulls/7`, pullRequestHead: "b".repeat(40) }).where(eq(tickets.id, c.ticket.id));
+
+    const res = await c.req("POST", `/api/tickets/${c.ticket.id}/pull-request/merge`);
+    expect(res.statusCode).toBe(200);
+    expect(c.gitea.calls.some((x) => x.url.endsWith("/pulls/7/merge"))).toBe(true);
+    expect(await c.state()).toMatchObject({ systemState: "done", mergeCommit: "e".repeat(40) });
+  });
+
+  it("doesn't merge when the host can't say what another ticket's branch is carrying (BOS-577)", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    // An open ticket whose branch the host fails to answer for (not a plain "not found"): the gate can't check it.
     const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Permission gate", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
     await c.db.update(tickets).set({ branch: `bossman/${other.id}` }).where(eq(tickets.id, other.id));
+    c.gitea.branchErrors.set(`bossman/${other.id}`, 500);
     await c.db.update(tickets).set({ pullRequestNumber: 7, pullRequestUrl: `${GITEA}/leon/site/pulls/7`, pullRequestHead: "b".repeat(40) }).where(eq(tickets.id, c.ticket.id));
 
     const res = await c.req("POST", `/api/tickets/${c.ticket.id}/pull-request/merge`);
     expect(res.statusCode).toBe(409);
     expect(res.json().message).toContain("so it wasn't merged");
     expect(c.gitea.calls.some((x) => x.url.endsWith("/pulls/7/merge"))).toBe(false);
-    const t = await c.state();
-    expect(t).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect(await c.state()).toMatchObject({ systemState: "review", mergeCommit: null });
   });
 });
