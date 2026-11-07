@@ -810,8 +810,9 @@ function usesScratchUnsafely(c: string): boolean {
       const cmdWord = args.find((a, i) => !a.startsWith("-") && !/^-[IiLnPsdE]$/.test(args[i - 1] ?? ""));
       if ((written.size || scratchWord.test(c) || scratchVars.size) && !(cmdWord !== undefined && safe.has(cmdWord) && cmdWord !== "tar")) return true;
     }
-    if (tooling.has(sh) && toolingRunsScratch(sh, args, isScratch, isWritten)) return true;
-    if (tooling.has(sh) && [...written].some((p) => /(?:^|\/)(?:\.git\/.*|\.gitconfig|\.npmrc|\.yarnrc(?:\.yml)?|\.pnpmfile\.cjs|package\.json|config|\.gitattributes)$/.test(p))) return true;
+    // git's own config, hooks and -C are BOS-378 (Kit); only pnpm/npm/yarn are handled here.
+    if (tooling.has(sh) && sh !== "git" && toolingRunsScratch(sh, args, isScratch, isWritten)) return true;
+    if (tooling.has(sh) && sh !== "git" && [...written].some((p) => /(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.yml)?|\.pnpmfile\.cjs|package\.json)$/.test(p))) return true;
     const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
       if (usesScratchUnsafely(args[dashC + 1] ?? "")) return true;

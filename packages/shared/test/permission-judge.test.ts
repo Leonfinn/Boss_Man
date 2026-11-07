@@ -586,7 +586,8 @@ describe("rules judge: round 3 (BOS-377)", () => {
     "pnpm vitest --config /tmp/v.config.ts",
     "pnpm -C /tmp/p t",
     "npm --prefix /tmp/p run t",
-    `git init /tmp/r && printf '[core]\\n\\tfsmonitor = "sh /tmp/x.sh"\\n' >> /tmp/r/.git/config && git -C /tmp/r status`,
+    // (the git config / -C half of F3 is BOS-378)
+    "echo '{\"scripts\":{\"t\":\"sh /tmp/x.sh\"}}' > /tmp/p/package.json && pnpm test",
     // F4
     "tar -xf /tmp/a.tar && node w.js",
     "unzip -o /tmp/a.zip && node w.js",
