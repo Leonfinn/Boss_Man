@@ -13,6 +13,8 @@ import { linkPieces, type LinkContext } from "../links";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
 type Chat = { agentId: string; items: Message[]; state: string };
+/** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
+type Maintenance = { on: false } | { on: true; runs: number; chatOpen: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
@@ -64,7 +66,19 @@ function busyText(state: string, name: string) {
   return state.replace(/^waiting: /, "Waiting: ");
 }
 
-export function ChatPage({ companies, companyId, agentId, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; go: (to: string) => void; onChanged: () => void }) {
+/** One plain line while a runner update waits (BOS-349): chat stays open while agents work, then holds briefly for the swap. */
+export function UpdateNote({ m }: { m: Maintenance | null }) {
+  if (!m?.on) return null;
+  return (
+    <p className="banner" role="status">
+      {m.chatOpen
+        ? `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish: chat stays open until then.`
+        : "Updating, back in a moment. New messages are saved and answered when it is done."}
+    </p>
+  );
+}
+
+export function ChatPage({ companies, companyId, agentId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const threads = usePoll((signal) => (company ? api<Thread[]>(`/api/companies/${company.id}/chat/threads`, { signal }) : Promise.resolve([])), 5000, company?.id ?? "none");
   const team = threads.data ?? [];
@@ -176,6 +190,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
           </nav>
           {current && (
             <div className="messenger-chat">
+              <UpdateNote m={maintenance} />
               <header className="messenger-head">
                 <a className="back" href={`#/chat/${company.id}`} aria-label="Back to the team">
                   ←
