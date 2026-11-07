@@ -109,6 +109,24 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(await c.open()).toHaveLength(0);
   });
 
+  it("lists only the cards a restart would reset on the update card, not every owner to-do (BOS-551)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies);
+    const raise = (question: string, context: Record<string, unknown>) =>
+      c.db.insert(decisions).values({ companyId: co!.id, kind: "question", tier: "owner", question, options: ["Done", "Skip"], recommendedOption: "Done", context: context as never }).returning();
+    // A measurement the raising agent marked as reset by a restart: it must be done before the update.
+    const [measure] = await raise("Read the memory figure", { type: "question", steps: ["Read the memory figure in Settings."], resetsOnRestart: true });
+    // An unrelated setup card with steps: it must not clutter the update card.
+    await raise("Turn on ntfy", { type: "question", steps: ["Open Settings → Add-ons → ntfy."] });
+    // An update hand-apply to-do: it is itself an update, so leave it out.
+    await c.db.insert(decisions).values({ companyId: co!.id, kind: "approval", tier: "owner", question: "Apply the last update by hand", options: ["Done"], recommendedOption: "Done", context: { type: "owner_todo", ofDecisionId: randomUUID(), steps: ["Apply it."], target: "server" } as never });
+
+    await c.available({ commits: [{ sha: B, subject: "Add rate limiting" }], paths: ["apps/server/src/x.ts"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect((d!.context as { doAfter?: Array<{ decisionId: string; label: string }> }).doAfter).toEqual([{ decisionId: measure!.id, label: "Read the memory figure" }]);
+  });
+
   it("names the merged tickets and what changes the risk, on the card and the to-do (BOS-213)", async () => {
     const c = (ctx = await setup());
     const [co] = await c.db.select().from(companies).limit(1);
@@ -828,9 +846,10 @@ describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
       { sha: B, subject: `Merge "Server memory fix" (${fix!.id})` },
       { sha: C, subject: `Merge "Plan page titles are cut off" (${other!.id})` },
     ];
-    // A card raised after the deploy card: newest first would put it on top.
+    // A hands-on card (steps for the owner) raised after the deploy card: the do-this-next order (BOS-551)
+    // breaks the tie between two hands-on cards newest first, so without the marker it goes on top.
     const newer = async () =>
-      (await c.db.insert(decisions).values({ companyId: co!.id, kind: "question", question: "A newer question", options: ["Yes", "No"], recommendedOption: "Yes", context: { type: "question" }, createdAt: new Date(Date.now() + 60_000) }).returning())[0]!;
+      (await c.db.insert(decisions).values({ companyId: co!.id, kind: "question", question: "A newer question", options: ["Done", "Not now"], recommendedOption: "Done", context: { type: "question", steps: ["Open Settings → Secrets and add the key"] }, createdAt: new Date(Date.now() + 60_000) }).returning())[0]!;
     return { co: co!, fix: fix!, commits, newer };
   }
   type Urgent = { heading: string; fixes: Array<{ ticketId: string; ref: string; symptom: string }>; repeat?: boolean };

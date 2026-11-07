@@ -487,6 +487,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   };
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
+  // (BOS-551) The server puts waiting cards last and marks them; show them in the "Waiting, nothing to do
+  // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
+  const queueCards = shown.filter((d) => !d.waiting);
+  const waitingCards = shown.filter((d) => !!d.waiting);
   const open = shown.filter((d) => !answered[d.id]);
   // Too long for an answer: the text goes in a .txt file, and the agent is told where to read it whole.
   const answerAsFile = async (d: Decision, long: string) => {
@@ -627,7 +631,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         </details>
       )}
 
-      {loaded && shown.length === 0 ? (
+      {loaded && queueCards.length === 0 && waitingCards.length === 0 ? (
         agentsWorking > 0 ? (
           <State img={art.busy} alt="Agents at work, nothing needs you" title="Nothing needs you yet">
             <p>{agentsWorking === 1 ? "1 agent is" : `${agentsWorking} agents are`} working. They'll raise a decision here when they need an answer, an approval or more budget.</p>
@@ -639,6 +643,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         )
       ) : (
         <>
+          {queueCards.length > 0 && (
+          <>
           <details className="formula">
             <summary>How the ranking works</summary>
             <p>The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
@@ -655,7 +661,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
             </ul>
           </details>
           <ol className="queue">
-            {shown.map((d) => {
+            {queueCards.map((d) => {
               const k = kindOf(d);
               const total = Math.max(1, d.parts.blocking + d.parts.urgency + d.parts.age + d.parts.liveRun);
               const w = (n: number) => `${Math.round((n / total) * 48)}px`;
@@ -682,6 +688,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                   </div>
                   <div className="body">
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                      {d.step ? (
+                        <span className="tag blue" title="Do this next, in this order" aria-label={`Step ${d.step}`}>
+                          Step {d.step}
+                        </span>
+                      ) : null}
                       <span className={`tag ${k.tone}`}>{k.label}</span>
                       <span className="muted" style={{ fontSize: 13 }}>
                         {d.companyName}
@@ -689,6 +700,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {d.tier === "ceo" ? ` · for ${d.forAgentName ?? "the CEO"}` : ""}
                       </span>
                     </div>
+                    {d.doAfter?.length ? (
+                      <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>
+                        Do after: {d.doAfter.join("; ")}
+                      </p>
+                    ) : null}
+                    {d.doBefore?.length ? (
+                      <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>
+                        Do before: {d.doBefore.join("; ")}
+                      </p>
+                    ) : null}
                     <TicketRefs about={d.about} />
                     {/* A Boss Man update carrying the fix for a live problem (BOS-639) leads with it, above everything else on the card. */}
                     {d.context?.type === "self_deploy" && d.context.urgent && (
@@ -1108,6 +1129,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               );
             })}
           </ol>
+          </>
+          )}
+          {waitingCards.length > 0 && (
+            // (BOS-551) Cards whose ticket is back with an agent, or that the agent is re-checking: not the
+            // owner's to do yet. Folded at the bottom so they never sit beside the cards that are ready.
+            <details className="sub">
+              <summary>Waiting, nothing to do yet ({waitingCards.length})</summary>
+              <ul>
+                {waitingCards.map((d) => (
+                  <li key={d.id} style={{ marginBottom: 8 }}>
+                    <TicketRefs about={d.about} />
+                    <strong>{d.question.split("\n")[0]}</strong>
+                    {d.waiting ? <div className="muted" style={{ fontSize: 13 }}>{d.waiting}</div> : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
         </>
       )}
     </>
