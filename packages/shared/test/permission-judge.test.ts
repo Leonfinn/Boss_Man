@@ -632,3 +632,50 @@ describe("rules judge: disguised paths and unknown launchers (BOS-378, Jane roun
     allows(["nice -n 10 bash scripts/check-all.sh", "timeout 600 bash scripts/check-all.sh", "setsid nohup bash scripts/check-all.sh", "flock /tmp/l pnpm test", "grep -r node src/"]);
   });
 });
+
+// BOS-378, Rex's round 12: a script file run from inside a `-c`/`-S` string, or loaded through a startup/loader
+// environment variable, still got Allow on be3db767 because the judge never opened that text. Both are now judged as if
+// typed plainly. Every deny row here was Allow on be3db767.
+describe("rules judge: script run from inside a -c/-S string or a loader variable (BOS-378, Rex round 12)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+
+  describe("1. a script file inside a shell's -c string", () => {
+    denies([
+      "bash -c 'bash /tmp/x'",
+      'bash -c "bash /tmp/x"',
+      "sh -c 'node /tmp/x.js'",
+      "bash -lc 'bash /tmp/x'",
+      "su -c 'bash /tmp/x'",
+      "doas -c 'node /tmp/x.js'",
+      "ionice -c3 bash -c 'node /tmp/x.js'",
+    ]);
+    // Plain commands and own-folder scripts inside the string are still Allow.
+    allows(["bash -c 'echo hi'", "bash -c 'cd scripts && node x.js'", "bash -c 'pnpm test'"]);
+  });
+
+  describe("2. a script file inside env -S", () => {
+    denies(["env -S 'node /tmp/x.js'", "env -S 'bash /tmp/x'"]);
+    allows(["env -S 'python3 scripts/x.py'"]);
+  });
+
+  describe("3. a script loaded through a startup/loader variable", () => {
+    denies([
+      'NODE_OPTIONS="--require /tmp/x.js" node a.js',
+      "NODE_OPTIONS=/tmp/x.js node a.js",
+      "NODE_OPTIONS='--require=/tmp/x.js' node a.js",
+      "PYTHONSTARTUP=/tmp/x python3 a.py",
+      "PYTHONPATH=/tmp python3 a.py",
+      "PERL5OPT=-Mlib=/tmp/x.pl perl a.pl",
+      "BASH_ENV=/tmp/x.sh bash a.sh",
+      "LD_PRELOAD=/tmp/x.so ls",
+      "RUBYOPT='-r /tmp/x.rb' ruby a.rb",
+      "ENV=/tmp/x.sh sh",
+    ]);
+    // Plain tuning flags and an own-folder module path are still Allow.
+    allows(["NODE_OPTIONS='--max-old-space-size=4096' node a.js", "PYTHONPATH=./vendor python3 scripts/x.py"]);
+  });
+});

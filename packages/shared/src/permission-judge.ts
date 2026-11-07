@@ -247,7 +247,10 @@ export function judgePermission(question: string, command: string | null, ownFol
   // tar and unzip, must be placed too.
   for (const t of toolTargets(forTargets)) addTarget(t);
   // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
+  // Code handed to a shell or interpreter as a string (`sh -c '…'`, `env -S '…'`) and code loaded through an environment
+  // variable (`NODE_OPTIONS="--require /tmp/x.js" node a.js`) is judged as if written plainly (BOS-378, Rex's round 12).
   if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || unknownLauncherBeforeInterpreter(c)) return result("outside");
+  if (nestedCodeUnread(c, inOwn, writeOk) || loaderEnvUnread(c, inOwn)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
@@ -686,6 +689,59 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
     if (/^\|/.test(m[0]!) || /\|&?\s*$/.test(before)) {
       const prev = before.replace(/\|&?\s*$/, "").split(/&&|\|\||[;&|\n]/).pop() ?? "";
       if (!/^\s*(?:echo|printf)\s/.test(prev) || /\$\(|\x60|</.test(prev)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Code handed to a shell or interpreter as one string, which the judge would otherwise never open: `sh -c '…'` /
+ * `bash -c`, `env -S '…'`, and `su -c`/`doas -c` style launchers. The inner text is judged with the same outside checks
+ * as if it were typed plainly, so a script file inside it (`bash -c 'bash /tmp/x'`) is read the same way (BOS-378, Rex
+ * round 12). Allow-list: only the recognised `-c`/`-S` string forms are unwrapped; everything else is left to the checks
+ * above. Bounded so nested `sh -c 'sh -c …'` strings can't recurse forever.
+ */
+function nestedCodeUnread(c: string, inOwn: (p: string) => boolean, writeOk: (t: string) => boolean, depth = 0): boolean {
+  if (depth > 3) return false;
+  // A command string given to a shell or interpreter with -c, or to `env -S` / `doas`/`sudo`/`su`/`busybox …`. The string
+  // is captured whole (quotes kept). The word before it is a launcher the judge already unwraps elsewhere.
+  const NESTED_LAUNCHER = /(?:^|[;&|(\n]\s*)(?:(?:[\w./-]*\/)?(?:sh|bash|zsh|dash|ksh|su|doas|sudo|busybox|chroot|nsenter|unshare|script|env))\b((?:[^;&|\n'"]|'[^']*'|"[^"]*")*)/g;
+  for (const m of c.matchAll(NESTED_LAUNCHER)) {
+    const words = shellWords(m[1]!);
+    let at = -1;
+    for (let i = 0; i < words.length; i++) {
+      if (words[i]!.startsWith("-") && !words[i]!.startsWith("--") && /c|S/.test(words[i]!.slice(1))) { at = i; break; }
+      if (!words[i]!.startsWith("-")) break;
+    }
+    if (at < 0 || at + 1 >= words.length) continue;
+    const inner = words[at + 1]!;
+    if (inner.trim() === "") continue;
+    if (runsUnreadFile(inner, inOwn) || !inlineCodeOk(inner, writeOk) || unknownLauncherBeforeInterpreter(inner)) return true;
+    if (nestedCodeUnread(inner, inOwn, writeOk, depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * Variables that make an interpreter or the loader read and run a file the judge never sees: NODE_OPTIONS can name a
+ * `--require`/`--import`/`--loader` script, PYTHONSTARTUP/BASH_ENV/ENV/ZDOTDIR a startup script, PERL5OPT/RUBYOPT a
+ * preload, and LD_PRELOAD/LD_LIBRARY_PATH a library. Each must name only a plain path inside the agent's own checkout;
+ * any `/tmp` path, unreadable path word, variable, home or `..` means the loaded code is unknown (BOS-378, Rex round 12).
+ */
+const LOADER_ENV = /^(?:NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|PERL5LIB|RUBYOPT|BASH_ENV|ENV|ZDOTDIR|LD_PRELOAD|LD_LIBRARY_PATH|NODE_PATH|GEM_HOME)$/;
+function loaderEnvUnread(c: string, inOwn: (p: string) => boolean): boolean {
+  // `NAME=value cmd` anywhere, with the value quoted or not.
+  for (const m of c.matchAll(/(?:^|[;\s&|(])([A-Za-z_]\w*)=(?:'([^']*)'|"([^"]*)"|([^\s;&|)]*))/g)) {
+    if (!LOADER_ENV.test(m[1]!)) continue;
+    const val = m[2] ?? m[3] ?? m[4] ?? "";
+    // Split the value on whitespace and `:` (PATH-style); every word must be a plain path inside the own folder.
+    for (const w of val.split(/[\s:]+/).filter(Boolean)) {
+      // `--require /tmp/x.js`, `--import=./scripts/x.mjs`: take the part after an `=`, drop a leading loader flag.
+      const p = w.includes("=") ? w.slice(w.indexOf("=") + 1) : /^--/.test(w) ? "" : w;
+      if (p === "") continue;
+      const n = plainPath(p.replace(/^['"]+|['"]+$/g, ""));
+      if (n === null || n === "" || /^~/.test(p) || climbsOut(n) || /^\/tmp(\/|$)/.test(n)) return true;
+      if (n.startsWith("/") && !inOwn(n)) return true;
     }
   }
   return false;
