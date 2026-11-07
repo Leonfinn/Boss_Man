@@ -438,7 +438,7 @@ export async function buildApp(opts: AppOptions) {
     alert: (input) => alerts.raise(input),
     now: opts.now,
   });
-  const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w), replies: ownerReplies });
+  const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w), replyLane: (agentId, w) => scheduler.replyLaneFor(agentId, { reason: "message", ...w }), replies: ownerReplies });
   const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
   app.addHook("onClose", async () => semantic.stop());
   const wiki = wikiService(db, semantic);

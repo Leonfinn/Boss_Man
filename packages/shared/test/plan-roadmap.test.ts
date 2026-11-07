@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dateIn, featureHorizon, layoutPlan, milestoneHorizon, milestoneStatus } from "../src/index.js";
+import { dateIn, dateInCacheSize, featureHorizon, layoutPlan, milestoneHorizon, milestoneStatus } from "../src/index.js";
 
 describe("layoutPlan", () => {
   // design -> api -> ui, api -> docs; vendor (engagement) -> api; done "spec" -> design.
@@ -56,6 +56,17 @@ describe("milestoneStatus", () => {
   it("reads today in the owner's time zone", () => {
     expect(dateIn(new Date("2026-10-16T23:30:00Z"), "Europe/London")).toBe("2026-10-17");
     expect(dateIn(new Date("2026-10-16T23:30:00Z"), "America/New_York")).toBe("2026-10-16");
+  });
+  it("keeps its formatter cache bounded however a zone is spelt (BOS-643)", () => {
+    const at = new Date("2026-10-16T23:30:00Z");
+    // 2,000 different casings of "europe/london" (13 characters, so 2^13 to choose from): Intl
+    // accepts each one and gives London's date, but the cache must not keep them all.
+    for (let n = 0; n < 2000; n++) {
+      const spelt = [..."europe/london"].map((c, i) => ((n >> i) & 1 ? c.toUpperCase() : c)).join("");
+      expect(dateIn(at, spelt)).toBe("2026-10-17");
+      expect(dateInCacheSize()).toBeLessThanOrEqual(256);
+    }
+    expect(dateIn(at, "America/New_York")).toBe("2026-10-16");
   });
 });
 
