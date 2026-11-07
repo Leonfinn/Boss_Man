@@ -34,7 +34,7 @@ import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { AGE_STEP_MS, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
+import { agedRank, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
 export type Limits = {
@@ -136,6 +136,13 @@ const wakeClassOf = (w: { reason: string; causedByRunId?: string | null }): Wake
 
 /** Boss Man's own alerts go up the alert ladder (BOS-64): the Scrum Master, then the CEO, then the owner. */
 type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "companyId" | "question">) => Promise<unknown>;
+
+/** The plan-first instruction, by harness: only Claude Code is in plan mode and has ExitPlanMode; OpenCode runs in build mode and has no plan tool (BOS-531). */
+export function planFirstText(agentKind: string): string {
+  if (agentKind === "claude") return "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.";
+  // Any harness but Claude Code (today OpenCode) has no plan mode, so it submits its plan through the bossman submit_plan tool.
+  return "This ticket is plan-first, and you have no plan mode or ExitPlanMode here. Investigate without changing anything, then call submit_plan (with this ticket's id and your plan) so the plan approver gets a card to answer. Do not change code until the plan is approved; stop and wait for the answer.";
+}
 
 export function schedulerService(
   db: Db,
@@ -688,7 +695,7 @@ export function schedulerService(
           );
         lines.push("", PLAIN_SUMMARY_RULE);
         lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session." + (t.t.systemState === "review" ? " This ticket is already in review: a set_ticket_state to review only updates the note and does not re-request reviews (ticket_reply also works)." : ""));
-        if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
+        if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", planFirstText(agent.agentKind));
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));
         // The ticket's conversation with the owner (R65).
         const talk = await conversationLines(db, t.t.id);
@@ -896,6 +903,9 @@ export function schedulerService(
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
       prompt: chapter?.prompt ?? wakePrompt,
       mcpToken,
+      // Every run gets the Boss Man tools; a runner that can't reach them stops the run loudly
+      // rather than let it work blind (BOS-552). An older runner ignores it and behaves as before.
+      mcpRequired: true,
       ...(chapter?.resumeSessionId ? { resumeSessionId: chapter.resumeSessionId } : !chapter && previous?.acpSessionId ? { resumeSessionId: previous.acpSessionId } : {}),
       ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
       ...(skillSet.length ? { skills: skillSet } : {}),
@@ -1375,16 +1385,16 @@ export function schedulerService(
         .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t), like(wakes.statusReason, QUOTA_HOLD_LIKE)))))
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
       if (queue.length === 0) return result;
-      // Priority order, but a wake Boss Man scheduled gains 1 for every 15 minutes it has waited, so a
-      // low-priority watch can't wait for ever behind a full house (DR-002). The stored priority, and
-      // so the quota hold, is untouched. Someone-is-waiting wakes go first. The sort is stable, so
-      // equal ranks stay oldest first.
+      // Priority order, but a wake Boss Man scheduled or an agent started gains 1 for every 15 minutes
+      // it has waited, up to a cap, so neither a low-priority watch nor an engagement or nudge can wait
+      // for ever behind a full house of newer work (DR-002, DR-031). The stored priority, and so the
+      // quota hold, is untouched. Someone-is-waiting wakes go first. Equal ranks go oldest first.
       // A wake for an urgent ticket gains 1 more, within its class (BOS-346): the ticket's flag counts, not only the reason.
       const queuedTicketIds = [...new Set(queue.flatMap((w) => (w.ticketId ? [w.ticketId] : [])))];
       const urgentIds = new Set(queuedTicketIds.length ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.urgent, true), inArray(tickets.id, queuedTicketIds)))).map((r) => r.id) : []);
-      const rank = (w: (typeof queue)[number]) => w.priority + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0) + (wakeClassOf(w) === "scheduled" ? Math.floor((t.getTime() - w.createdAt.getTime()) / AGE_STEP_MS) : 0);
+      const rank = (w: (typeof queue)[number]) => agedRank(w.priority, wakeClassOf(w), t.getTime() - w.createdAt.getTime()) + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0);
       const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
-      queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a));
+      queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a) || a.createdAt.getTime() - b.createdAt.getTime());
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
