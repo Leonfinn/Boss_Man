@@ -46,6 +46,16 @@ readable_problem() { # checkout folder: prints nothing when all is readable, els
 step() { printf '\n== %s\n' "$*"; }
 die() { printf '\nSTOPPED: %s\n' "$*" >&2; exit 1; }
 
+# DR-020 G: take the host deployer's lock ($D/lock, the file host-deployer.sh flocks) before reading the live colour or
+# touching anything, so a hand rebuild can't race a deploy's switch-back. Held until this script exits (fd 9).
+[[ -d $D ]] || die "the deployer folder $D doesn't exist, so there is no lock to take. Set BOSSMAN_DEPLOYER to it, then run this again."
+LOCK_WAIT="${REBUILD_LOCK_WAIT_SECONDS:-120}"
+exec 9>"$D/lock" || die "can't open the deployer's lock file $D/lock. Nothing was changed."
+if ! flock -n 9; then
+  echo "The host deployer is running a deploy or a switch-back (it holds $D/lock). Waiting up to ${LOCK_WAIT}s for it to finish..."
+  flock -w "$LOCK_WAIT" 9 || die "the host deployer still holds $D/lock after ${LOCK_WAIT}s, so nothing was changed. Look at the end of $D/deployer.log and the files in $D/state to see what it is doing, wait for it to finish (a deploy or soak switch-back can take several minutes), then run this again."
+fi
+
 # The live colour, read the way host-deployer.sh reads it; the include is never followed through a symlink.
 colour="${1:-}"
 if [[ -z $colour ]]; then

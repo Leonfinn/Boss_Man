@@ -119,4 +119,39 @@ eval "$(sed -n 's/^  cd /cd /p' "$T/out")"
 git -C "$T/repo" rev-parse HEAD >"$T/commit" # the repo has new commits now
 run green || fail "the printed fix did not make the rebuild go through with a private .env and secrets/"
 logged "compose build server-green" || fail "didn't build with a private .env and secrets/"
+# DR-020 G: the deployer's lock. A held lock makes the rebuild wait, then refuse before touching anything;
+# one freed while it waits lets it go on; and while it runs, the deployer's own non-blocking take fails.
+command -v flock >/dev/null || fail "flock is needed for the lock test"
+holder() { # seconds: hold $T/deployer/lock for that long, in the background
+  (exec 8>"$T/deployer/lock"; flock 8; sleep "$1") &
+  hold_pid=$!; sleep 0.5
+}
+holder 30
+before="$(ls "$T/backups")"
+REBUILD_LOCK_WAIT_SECONDS=1 run green && fail "rebuilt while the deployer held its lock"
+grep -q "STOPPED: the host deployer still holds $T/deployer/lock after 1s" "$T/out" || fail "didn't say what holds the lock"
+grep -q "run this again" "$T/out" || fail "didn't say what to do"
+[[ ! -s $FAKE_LOG ]] || fail "touched docker while the lock was held"
+[[ "$(ls "$T/backups")" == "$before" ]] || fail "made a backup while the lock was held"
+kill "$hold_pid" 2>/dev/null || true; wait "$hold_pid" 2>/dev/null || true
+holder 2
+REBUILD_LOCK_WAIT_SECONDS=20 run green || fail "didn't go on once the lock was freed"
+grep -q "Waiting up to 20s" "$T/out" || fail "didn't say it was waiting"
+logged "compose build server-green" || fail "didn't build after the lock was freed"
+wait "$hold_pid" 2>/dev/null || true
+# While the script runs it holds the lock: a build that blocks lets us try the deployer's own flock -n.
+cat >"$T/bin/docker" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"pg_dump"*) echo "-- dump" ;;
+  *"compose build"*) if (exec 8>"$BOSSMAN_DEPLOYER/lock"; flock -n 8); then echo free >"$FAKE_DIR/lockstate"; else echo held >"$FAKE_DIR/lockstate"; fi; exit 1 ;;
+esac
+FAKE
+run green && fail "the lock probe build should have failed"
+[[ "$(cat "$T/lockstate")" == held ]] || fail "the lock was not held while the rebuild ran"
+# And it is released when the script exits.
+(exec 8>"$T/deployer/lock"; flock -n 8) || fail "the lock was still held after the script exited"
+# A missing deployer folder is refused with its name.
+BOSSMAN_DEPLOYER="$T/nowhere" run green && fail "ran without a deployer folder"
+grep -q "STOPPED: the deployer folder $T/nowhere doesn't exist" "$T/out" || fail "didn't name the missing deployer folder"
 echo "rebuild-live.sh: all checks passed"
