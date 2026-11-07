@@ -28,12 +28,13 @@ import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 import { ceoNotesLines } from "./agent-notes.js";
 import { skillsForRun } from "./skills.js";
+import { fairOrder, HELD_AGENT, HELD_ALL_COMPANIES, HELD_CHAT, HELD_COMPANY } from "./fair-share.js";
 import { conversationLines } from "./ticket-chat.js";
 import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { AGE_STEP_MS, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
+import { agedRank, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
 export type Limits = {
@@ -135,6 +136,13 @@ const wakeClassOf = (w: { reason: string; causedByRunId?: string | null }): Wake
 
 /** Boss Man's own alerts go up the alert ladder (BOS-64): the Scrum Master, then the CEO, then the owner. */
 type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "companyId" | "question">) => Promise<unknown>;
+
+/** The plan-first instruction, by harness: only Claude Code is in plan mode and has ExitPlanMode; OpenCode runs in build mode and has no plan tool (BOS-531). */
+export function planFirstText(agentKind: string): string {
+  if (agentKind === "claude") return "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.";
+  // Any harness but Claude Code (today OpenCode) has no plan mode, so it submits its plan through the bossman submit_plan tool.
+  return "This ticket is plan-first, and you have no plan mode or ExitPlanMode here. Investigate without changing anything, then call submit_plan (with this ticket's id and your plan) so the plan approver gets a card to answer. Do not change code until the plan is approved; stop and wait for the answer.";
+}
 
 export function schedulerService(
   db: Db,
@@ -687,7 +695,7 @@ export function schedulerService(
           );
         lines.push("", PLAIN_SUMMARY_RULE);
         lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session." + (t.t.systemState === "review" ? " This ticket is already in review: a set_ticket_state to review only updates the note and does not re-request reviews (ticket_reply also works)." : ""));
-        if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
+        if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", planFirstText(agent.agentKind));
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));
         // The ticket's conversation with the owner (R65).
         const talk = await conversationLines(db, t.t.id);
@@ -943,6 +951,13 @@ export function schedulerService(
       .onConflictDoNothing();
   }
 
+  /** The all-companies and per-company run limits: the owner's Settings when saved (settings.run_limits), else the defaults. */
+  async function limitsNow() {
+    const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
+    const stored = lrow?.value as { instance?: number; company?: number } | undefined;
+    return { maxTotal: stored?.instance ?? limits.instance, maxCompany: stored?.company ?? limits.company };
+  }
+
   const self = {
     limits,
     hasRoom,
@@ -957,16 +972,27 @@ export function schedulerService(
       if (await globallyPaused()) return 0;
       if (await getHold(db)) return 0;
       if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
-      const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
-      const stored = lrow?.value as { instance?: number; company?: number } | undefined;
-      const maxTotal = stored?.instance ?? limits.instance;
-      const maxCompany = stored?.company ?? limits.company;
+      const { maxTotal, maxCompany } = await limitsNow();
       const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
       const live = await db.select({ companyId: runs.companyId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`));
       const waiting = await db.select({ companyId: wakes.companyId }).from(wakes).where(and(inArray(wakes.status, ["queued", "deferred"]), ne(wakes.reason, CHAT_REASON)));
       const total = live.length + waiting.length;
       const mine = live.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
-      return Math.max(0, Math.min(maxTotal - reserved - total, maxCompany - reserved - mine));
+      // A company with nothing running or waiting still gets one, however full other companies'
+      // queues are: the scheduler gives an idle company's wake the next free slot (BOS-582, DR-032).
+      const allCompanies = mine === 0 ? Math.max(1, maxTotal - reserved - total) : maxTotal - reserved - total;
+      return Math.max(0, Math.min(allCompanies, maxCompany - reserved - mine));
+    },
+
+    /**
+     * The run limits in force (the owner's Settings over the defaults) and how many work runs are
+     * going, across all companies and in this one, for server_status (BOS-582). Counts only: no other
+     * company's agents or tickets.
+     */
+    async runLimits(companyId: string) {
+      const { maxTotal, maxCompany } = await limitsNow();
+      const live = await db.select({ companyId: runs.companyId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`));
+      return { allCompanies: { limit: maxTotal, running: live.length }, company: { limit: maxCompany, running: live.filter((r) => r.companyId === companyId).length } };
     },
 
     /**
@@ -1356,16 +1382,16 @@ export function schedulerService(
         .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t), like(wakes.statusReason, QUOTA_HOLD_LIKE)))))
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
       if (queue.length === 0) return result;
-      // Priority order, but a wake Boss Man scheduled gains 1 for every 15 minutes it has waited, so a
-      // low-priority watch can't wait for ever behind a full house (DR-002). The stored priority, and
-      // so the quota hold, is untouched. Someone-is-waiting wakes go first. The sort is stable, so
-      // equal ranks stay oldest first.
+      // Priority order, but a wake Boss Man scheduled or an agent started gains 1 for every 15 minutes
+      // it has waited, up to a cap, so neither a low-priority watch nor an engagement or nudge can wait
+      // for ever behind a full house of newer work (DR-002, DR-031). The stored priority, and so the
+      // quota hold, is untouched. Someone-is-waiting wakes go first. Equal ranks go oldest first.
       // A wake for an urgent ticket gains 1 more, within its class (BOS-346): the ticket's flag counts, not only the reason.
       const queuedTicketIds = [...new Set(queue.flatMap((w) => (w.ticketId ? [w.ticketId] : [])))];
       const urgentIds = new Set(queuedTicketIds.length ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.urgent, true), inArray(tickets.id, queuedTicketIds)))).map((r) => r.id) : []);
-      const rank = (w: (typeof queue)[number]) => w.priority + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0) + (wakeClassOf(w) === "scheduled" ? Math.floor((t.getTime() - w.createdAt.getTime()) / AGE_STEP_MS) : 0);
+      const rank = (w: (typeof queue)[number]) => agedRank(w.priority, wakeClassOf(w), t.getTime() - w.createdAt.getTime()) + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0);
       const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
-      queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a));
+      queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a) || a.createdAt.getTime() - b.createdAt.getTime());
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
@@ -1379,10 +1405,7 @@ export function schedulerService(
       // An owner chat has its own slot per agent and uses none of the work slots below.
       const working = active.filter((r) => r.purpose !== "chat");
       // The owner's Settings override the instance and company limits when saved (settings.run_limits).
-      const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
-      const stored = lrow?.value as { instance?: number; company?: number } | undefined;
-      const maxTotal = stored?.instance ?? limits.instance;
-      const maxCompany = stored?.company ?? limits.company;
+      const { maxTotal, maxCompany } = await limitsNow();
       let total = working.length;
       const byCompany = new Map<string, number>();
       const byAgent = new Map<string, number>();
@@ -1410,7 +1433,9 @@ export function schedulerService(
       const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
       const pausedAgents = new Set((await db.select({ id: agents.id }).from(agents).where(eq(agents.paused, true))).map((a) => a.id));
 
-      for (const w of queue) {
+      // Fair share (BOS-582, DR-032): a company with no work run going has its best wake looked at
+      // first, so a busy company's steady stream of wakes can't hold it off the server for ever.
+      for (const w of fairOrder(queue, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON)) {
         const defer = async (reason: string, notBefore: Date | null) => {
           // A quota-held wake is looked at again every pass (BOS-449); only write when something changed.
           if (w.status === "deferred" && w.statusReason === reason && (w.notBefore?.getTime() ?? null) === (notBefore?.getTime() ?? null)) {
@@ -1436,7 +1461,23 @@ export function schedulerService(
         const isChat = w.reason === CHAT_REASON;
         // Chats with the owner are held only by their agent's one chat slot; work wakes face all three limits.
         const spare = wakeClassOf(w) === "waiting" ? 0 : reserved;
-        if (isChat ? chatting.has(w.agentId) : total + spare >= maxTotal || (byCompany.get(w.companyId) ?? 0) + spare >= maxCompany || (byAgent.get(w.agentId) ?? 0) >= limits.agent) {
+        // The most specific limit that holds the wake is the one named, so server_status tells the
+        // all-companies limit apart from the company's own (BOS-582). A company with nothing running
+        // may use the slot kept for cards across all companies, as a card may: otherwise a busy
+        // company's cards would take every slot that frees (DR-032).
+        const mine = byCompany.get(w.companyId) ?? 0;
+        const held = isChat
+          ? chatting.has(w.agentId)
+            ? HELD_CHAT
+            : null
+          : (byAgent.get(w.agentId) ?? 0) >= limits.agent
+            ? HELD_AGENT
+            : mine + spare >= maxCompany
+              ? HELD_COMPANY
+              : total + (mine === 0 ? 0 : spare) >= maxTotal
+                ? HELD_ALL_COMPANIES
+                : null;
+        if (held) {
           // A review stuck behind its busy reviewer goes to another qualified reviewer who is free.
           const waited = t.getTime() - w.createdAt.getTime();
           if (w.reason === REVIEW_REASON && (byAgent.get(w.agentId) ?? 0) >= limits.agent && waited >= limits.reviewHandoverMs) {
@@ -1447,7 +1488,7 @@ export function schedulerService(
             }
             if (left !== w.note) await db.update(wakes).set({ note: left }).where(eq(wakes.id, w.id));
           }
-          await wait("at a concurrency limit");
+          await wait(held);
           continue;
         }
 

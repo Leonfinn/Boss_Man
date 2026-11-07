@@ -388,6 +388,7 @@ export async function buildApp(opts: AppOptions) {
   });
   const serverStatus = serverStatusService(db, {
     memory,
+    runLimits: (id) => scheduler.runLimits(id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -568,6 +569,7 @@ export async function buildApp(opts: AppOptions) {
     wake: (input) => scheduler.notify(input.agentId, input),
     isConnected: (runnerId) => runners.isConnected(runnerId),
     runnerSettling: (runnerId) => runners.isSettling(runnerId, (opts.now ?? (() => new Date()))()),
+    runnerRestartedAt: (runnerId) => runners.restartedAt(runnerId),
     endRun: (runId, outcome, at, how) => runners.endRun(runId, outcome, at, how),
     // Free run slots go to idle in-progress work (BOS-574, DR-029).
     freeSlots: (companyId) => scheduler.freeSlots(companyId),
