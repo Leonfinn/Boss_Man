@@ -734,3 +734,36 @@ describe("rules judge: unknown environment and git global options (BOS-630)", ()
     "git -C . log --oneline",
   ]);
 });
+
+// BOS-695 (Kit, from Jane's BOS-630 round 2): bash/sh still read options after `-c`, so an option word between `-c` and the
+// command string must not hide the string from the judge. Every row here got Allow before this fix.
+describe("rules judge: shell options after -c (BOS-695)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  denies([
+    "bash -c -e 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -x 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -v 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c +e 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "sh -c -e 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -o pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c +o errexit 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -O extglob 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -ex 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -e -- 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "echo x > c.sh; bash -c -e './c.sh'",
+    "echo x > c.sh; bash -c -o pipefail './c.sh'",
+    "bash -c -e 'node /tmp/x.js'",
+    // An option form the judge can't place: no Allow.
+    "bash -c --posix 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+  ]);
+  allows([
+    "bash -c 'pnpm test'",
+    "bash -c -e 'pnpm test'",
+    "bash -c -o pipefail 'pnpm test'",
+    "bash -c -e -- 'pnpm test'",
+    "sh -c 'ls -la'",
+  ]);
+});
