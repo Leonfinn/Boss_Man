@@ -2259,6 +2259,16 @@ function ServerPanel() {
             {b.colours.map((c) => (
               <ColourRow key={c.colour} c={c} />
             ))}
+            {b.colours.some((c) => !c.up) && (
+              <>
+                <dt>Note</dt>
+                <dd data-testid="colour-down-note">
+                  {b.colours.find((c) => c.colour === b.self)?.role === "leader"
+                    ? "One colour is not running, so there is nothing to switch back to. This is normal after a finished update (the old copy is stopped on purpose); if it is not, check the last update's result."
+                    : "This copy is not leading and the other colour is not running, so nothing is in charge. Start the live colour on the host and send it SIGUSR2; the update's alert lists the exact commands. If both colours are stopped this page cannot load at all, so use that alert."}
+                </dd>
+              </>
+            )}
           </>
         )}
       </dl>

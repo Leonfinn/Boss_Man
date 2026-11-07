@@ -162,7 +162,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional() }),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -195,6 +195,15 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("models.probe"), requestId: z.string(), agentKind: z.enum(["claude", "codex", "opencode"]) }),
   /** Check the runner's add-ons (docs/12); answered with AddonReport[]. Sent only to runners with the "addons" feature. */
   z.object({ type: z.literal("addons.check"), requestId: z.string() }),
+  /**
+   * Run a queued check job (DR-003, BOS-316) in a process the runner owns, in its own detached worktree of this exact commit.
+   * It is not tied to any agent session. Answered with check.progress and check.done messages, not a reply.
+   */
+  z.object({ type: z.literal("check.run"), jobId: Uuid, projectId: Uuid, ticketId: Uuid, commit: z.string().min(7).max(64), command: z.string().min(1), timeoutMs: z.number().int().positive().optional() }),
+  /** Stop a check job. Only the server sends this; agents have no way to. */
+  z.object({ type: z.literal("check.cancel"), jobId: Uuid }),
+  /** The server has recorded this job’s result; the runner can stop re-sending it. */
+  z.object({ type: z.literal("check.ack"), jobId: Uuid }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /**
    * Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current
@@ -229,17 +238,24 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     /** The ids of every run this runner really has (BOS-583); the server closes any other open run of this runner. Absent from an older runner: the server then closes nothing. */
     liveRuns: z.array(Uuid).max(2000).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
+    /** Check jobs this runner is running now (BOS-316): the server puts back in line any it thinks run here but are not listed. */
+    checkJobs: z.array(Uuid).max(100).optional(),
   }),
+
   z.object({ type: z.literal("event"), entry: JournalEntry }),
   z.object({ type: z.literal("ping") }),
   z.object({ type: z.literal("pong") }),
+  /** A running check job printed something: the log tail so far (BOS-316). */
+  z.object({ type: z.literal("check.progress"), jobId: Uuid, tail: z.string().max(20_000) }),
+  /** A check job ended (BOS-316). commit is the commit that was checked; the server ignores an answer for any other. */
+  z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000) }),
   /** An answer to a request command. Not journalled: it can always be asked for again. */
   z.object({ type: z.literal("reply"), requestId: z.string(), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() }),
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "deploy-tag"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "deploy-tag"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -258,6 +274,8 @@ export type ServerMessage = z.infer<typeof ServerMessage>;
 export type WorkspaceDiff = {
   baseCommit: string;
   head: string;
+  /** The tree of head: two commits with one tree are the same code (check results are reused by it). */
+  tree?: string;
   /** Commits on the ticket's branch since the base, newest first. */
   commits: Array<{ sha: string; subject: string }>;
   /** Files changed, with line counts, including uncommitted and untracked work. */
@@ -299,6 +317,8 @@ export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools:
 
 /** The outcome of merging a ticket's branch (R46). */
 export type MergeResult =
+  /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
+  | { status: "prepared"; commit: string; tree: string; targetSha: string }
   | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number } }
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }

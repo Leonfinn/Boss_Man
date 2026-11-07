@@ -15,7 +15,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, DEPLOY_REF, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
-import { checkQueueEnv } from "./fence.js";
+import { checkQueueEnv, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
 
 const run = promisify(execFile);
@@ -105,6 +105,8 @@ export class Workspaces {
     private readonly baseEnv: NodeJS.ProcessEnv = process.env,
     /** check-all.sh's shared queue folder (checkQueueEnv), so the merge check takes turns with agents' checks. */
     private readonly coordDir?: string,
+    /** Fence for server-queued check jobs (BOS-316, security F1): a job runs a commit nobody has reviewed yet. */
+    private readonly jobFence?: { level: FenceLevel; pnpmStore?: string },
   ) {}
 
   repoDir = (projectId: string) => path.join(this.root, "repos", `${projectId}.git`);
@@ -392,7 +394,8 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", baseCommit], { cwd: dir, env });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      return { baseCommit, head, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
+      const tree = await this.git(["rev-parse", "HEAD^{tree}"], { cwd: dir });
+      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
     } finally {
       rmSync(index, { force: true });
     }
@@ -500,19 +503,73 @@ export class Workspaces {
     return this.runCheck(await this.reopen(spec), command, timeoutMs, queueMaxMs);
   }
 
+  /**
+   * Runs a server-queued check job (DR-003, BOS-316): a detached worktree of exactly this commit, a process group the runner
+   * owns, no lock files (the server holds the slots). Nothing here depends on an agent session. `cancel` is for the server only.
+   */
+  async runCommitCheck(
+    spec: { projectId: string; jobId: string; commit: string },
+    command: string,
+    timeoutMs: number,
+    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void } = {},
+  ): Promise<VerifyResult> {
+    if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
+    const repo = this.repoDir(spec.projectId);
+    const dir = path.join(this.root, "check-jobs", spec.jobId);
+    rmSync(dir, { recursive: true, force: true });
+    await this.withRepoLock(spec.projectId, async () => {
+      await this.git(["worktree", "prune"], { cwd: repo });
+      mkdirSync(path.dirname(dir), { recursive: true });
+      await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
+    });
+    try {
+      return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, spec.jobId) });
+    } finally {
+      await this.withRepoLock(spec.projectId, async () => {
+        await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
+        rmSync(dir, { recursive: true, force: true });
+        await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+      });
+    }
+  }
+
+  /**
+   * The fence and own HOME/TMPDIR for one job, like an agent session's: the job's folder, its own home and temp folder, the pnpm
+   * store, and the shared repo with only objects/refs/logs writable. The runner's token, data folder and other tickets' worktrees
+   * are outside it. On a runner that can't fence, the job runs as before (the same fallback sessions have).
+   */
+  private jobFenceFor(repo: string, dir: string, jobId: string): { env: Record<string, string>; wrap: (bin: string, args: string[]) => { bin: string; args: string[] } } | undefined {
+    if (!this.jobFence || this.jobFence.level === "unavailable") return undefined;
+    const home = path.join(this.root, "check-jobs-home", jobId);
+    const tmp = path.join(home, "tmp");
+    mkdirSync(tmp, { recursive: true });
+    const env: Record<string, string> = { HOME: home, TMPDIR: tmp, XDG_CACHE_HOME: path.join(home, ".cache"), XDG_CONFIG_HOME: path.join(home, ".config"), BOSSMAN_CHECK_STORE: "off", GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null", GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "gc.auto", GIT_CONFIG_VALUE_2: "0" };
+    const readWrite: string[] = [];
+    if (this.jobFence.pnpmStore) {
+      mkdirSync(this.jobFence.pnpmStore, { recursive: true });
+      env.npm_config_store_dir = this.jobFence.pnpmStore;
+      readWrite.push(this.jobFence.pnpmStore);
+    }
+    const readOnly = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
+    const rules = fenceProfile({ cwd: dir, home, tmp, repo: repoGrant(repo, dir), readOnly, readWrite });
+    return { env, wrap: (bin, args) => fencedCommand(rules, bin, args) };
+  }
+
   /** One check command in a folder: its own process group, output kept to the last 8 KB. */
-  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS): Promise<VerifyResult> {
+  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void; fence?: { env: Record<string, string>; wrap: (bin: string, args: string[]) => { bin: string; args: string[] } } }): Promise<VerifyResult> {
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
       // Own process group, so a timeout can take down pnpm, tsc, vitest and their workers, not just the shell.
       // The check starts with default HUP/INT/TERM handling: a server started with those ignored would pass that on, and a shell can't undo it
       // (so check-all's own signal trap and its tests never fire). env --default-signal needs GNU coreutils; without it the command runs as before.
-      const child = spawn("sh", ["-c", 'if env --default-signal=HUP,INT,TERM true 2>/dev/null; then exec env --default-signal=HUP,INT,TERM sh -c "$0"; fi; exec sh -c "$0"', command], {
+      const sigScript = 'if env --default-signal=HUP,INT,TERM true 2>/dev/null; then exec env --default-signal=HUP,INT,TERM sh -c "$0"; fi; exec sh -c "$0"';
+      const launch = job?.fence ? job.fence.wrap("sh", ["-c", sigScript, command]) : { bin: "sh", args: ["-c", sigScript, command] };
+      const child = spawn(launch.bin, launch.args, {
         cwd: dir,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
         // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
-        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
+        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1", ...job.fence?.env } : this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
       });
       const killGroup = (signal: NodeJS.Signals) => {
         try {
@@ -521,6 +578,11 @@ export class Workspaces {
           // group already gone
         }
       };
+      job?.onStart?.(() => {
+        timedOut = true;
+        killGroup("SIGTERM");
+        hardKill = setTimeout(() => finish(null), VERIFY_KILL_GRACE_MS);
+      });
       let tail = "";
       // While check-all.sh waits in its queue the clock is the (long) queue limit; it restarts at the full timeout once the checks really begin.
       // The queue limit is a no-progress limit (BOS-370): it restarts whenever the printed place changes.
@@ -529,6 +591,7 @@ export class Workspaces {
       let lastPlace = "";
       const onData = (chunk: string) => {
         tail = (tail + chunk).slice(-8192);
+        job?.onOutput?.(tail);
         if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
           slotTaken = true;
           arm(timeoutMs);
@@ -579,7 +642,8 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null): Promise<MergeResult> {
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string } | null = null): Promise<MergeResult> {
+    if (phase) return this.mergePhase(spec, target, message, secrets, phase);
     if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS);
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
@@ -605,6 +669,50 @@ export class Workspaces {
         if (attempt === 1) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
       }
       throw new Error("unreachable");
+    });
+  }
+
+  /**
+   * Server-queued merge checks (DR-003, BOS-316) split the merge in two. "prepare" builds the merge commit and keeps it under a
+   * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
+   * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
+   */
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string }): Promise<MergeResult> {
+    const auth = gitAuthEnv(secrets);
+    const repo = this.repoDir(spec.projectId);
+    const branch = `refs/heads/${branchFor(spec.ticketId)}`;
+    const keep = `refs/bossman/merge/${spec.ticketId}`;
+    return this.withRepoLock(spec.projectId, async (): Promise<MergeResult> => {
+      const ticketDir = this.ticketDir(spec.ticketId);
+      if (existsSync(path.join(ticketDir, ".git"))) {
+        const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir });
+        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+      }
+      const tried = await this.tryMerge(repo, branch, target, auth);
+      if (tried.status !== "clean") return tried;
+      const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
+      const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
+      if (problems.length) return { status: "migration_journal" as const, problems };
+      if (phase.phase === "prepare") {
+        const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
+        await this.git(["update-ref", keep, commit], { cwd: repo });
+        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha };
+      }
+      // The target moved to something whose merge differs from what was checked: check again.
+      if (tried.tree !== phase.tree) return { status: "main_moved" };
+      // Same tree. The checked commit itself if its parents are still current; otherwise a new commit with the same tree.
+      const parents = (await this.git(["rev-list", "--parents", "-n", "1", phase.commit], { cwd: repo })).split(" ").slice(1);
+      const same = parents[0] === tried.targetSha && parents[1] === tried.branchSha;
+      const toPush = same ? phase.commit : await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
+      const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
+      if (pushed.code !== 0) {
+        // Rejected: the target moved again (try once more) or the push is refused for good (the next prepare would say so).
+        const again = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+        if (again === tried.targetSha) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
+        return { status: "main_moved" };
+      }
+      await this.git(["update-ref", "-d", keep], { cwd: repo }).catch(() => undefined);
+      return { status: "merged", commit: toPush, checked: { sha: phase.commit, tree: tried.tree, ms: 0 } };
     });
   }
 

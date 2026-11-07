@@ -24,7 +24,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, launcher, memory, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, launcher, memory, checks, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -83,6 +83,8 @@ const bg = createBackground(
     // What each runner's add-ons say about their health (docs/12).
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
+    // The server-owned check queue (DR-003): starts due jobs and marks silent ones stuck, each with a recorded reason. Does nothing while check_queue_mode is legacy.
+    { name: "check queue", everyMs: Number(env.BOSSMAN_CHECK_QUEUE_MS ?? 15_000), run: async () => { await checks.sweep(); } },
     // Synthetic's quota, cached and read at most every 5 minutes; warns the owner once per period at 80% and 100% (BOS-239).
     { name: "synthetic quota", everyMs: Number(env.BOSSMAN_SYNTHETIC_QUOTA_MS ?? 5 * 60_000), run: () => refreshSyntheticQuota() },
     // Housekeeping (BOS-416): deletes runner events older than BOSSMAN_RUNNER_EVENTS_DAYS (default 60), in small batches. // leader-only
