@@ -66,7 +66,8 @@ logins="$(dc logs --no-color tailscale 2>&1 | grep -c "NeedsLogin" || true)"
 echo "restarts during the watch: $n (exit codes: ${codes:-none}), each start waited for a login (expected without a key: about one per 60 s)"
 
 echo "== it says it needs a login (running, not crashing)"
-dc logs --no-color tailscale 2>&1 | grep -qiE "NeedsLogin|authkey" || fail "no login prompt in the logs"
+# Read the logs first: under pipefail, grep -q quitting at its first match can SIGPIPE "docker compose logs" and fail the pipe.
+grep -qiE "NeedsLogin|authkey" <<<"$(dc logs --no-color tailscale 2>&1)" || fail "no login prompt in the logs"
 
 echo "== state is written and survives a restart"
 dc exec -T tailscale sh -c 'ls /var/lib/tailscale | grep -q .' || fail "state folder is empty"
@@ -80,7 +81,7 @@ after="$(dc exec -T tailscale sh -c 'ls /var/lib/tailscale' | sort | tr '\n' ' '
 echo "== guide's key steps with a placeholder key (the sidecar must reject it; no real login is tried)"
 TS_AUTHKEY=tskey-auth-rehearse-not-a-real-key dc up -d --no-deps --force-recreate tailscale
 sleep 20
-if dc logs --no-color tailscale 2>&1 | grep -qiE "invalid|unauthorized|auth.?key|NeedsLogin"; then
+if grep -qiE "invalid|unauthorized|auth.?key|NeedsLogin" <<<"$(dc logs --no-color tailscale 2>&1)"; then
   echo "placeholder key was refused or ignored, as expected"
 else
   echo "note: no refusal seen in the logs for the placeholder key (wording may differ)"
