@@ -87,7 +87,7 @@ export const WATCHDOG_RULE_LABEL: Record<WatchdogRule, string> = {
   unassigned: "nobody is assigned",
   run_crashed: "its last run crashed",
   run_ended_unmoved: "its last run ended without moving it",
-  idle_agent: "in progress with no run for 15 minutes",
+  idle_agent: "in progress with no run for the set time",
   unstarted: "ready to start but no run has started on it",
   stale_in_progress: "no movement in progress",
   stale_review: "no movement in review",

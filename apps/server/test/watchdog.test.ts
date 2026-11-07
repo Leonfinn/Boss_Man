@@ -120,7 +120,7 @@ describe("the watchdog sweep (BOS-58)", () => {
     expect(w!.note).toContain('"Design the filter bar"');
     expect(w!.note).toContain("nobody is assigned");
     expect(w!.note).toContain('"Fix login"');
-    expect(w!.note).toContain("no run for 15 minutes");
+    expect(w!.note).toContain("no run for the set time");
     expect(w!.note).not.toContain("Fresh");
     // No model ran: the only thing it did was queue one wake.
     expect(await ctx.db.select().from(runs)).toHaveLength(0);
@@ -947,7 +947,7 @@ describe("open issues and the timeline (BOS-199)", () => {
     const issues = res.json() as Array<{ ticketId: string; warning: string; holder: string; done: unknown[]; nextText: string }>;
     expect(issues).toHaveLength(1);
     expect(issues[0]).toMatchObject({ ticketId: t.id, holder: "scrum_master" });
-    expect(issues[0]!.warning).toContain("no run for 15 minutes");
+    expect(issues[0]!.warning).toContain("no run for the set time");
     expect(issues[0]!.nextText).toBe("Checks again");
     expect((await ctx.watchdog.status(ctx.companyId)).openFlags).toBe(issues.length);
 

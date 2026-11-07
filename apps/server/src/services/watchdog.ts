@@ -609,7 +609,9 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     // low again later can see the whole span: the last check that found it low is kept on the company.
     const since = c.watchdogSpareAt;
     if (!room) {
-      if (since) await db.update(companies).set({ watchdogSpareAt: null, watchdogSpareAlertedAt: null }).where(eq(companies.id, c.id));
+      // Busy again clears the stretch. Clear whenever either time is set: rule 3 can alert on its first
+      // check (before `since` is written), and a latch left on would silence the CEO for good.
+      if (since || c.watchdogSpareAlertedAt) await db.update(companies).set({ watchdogSpareAt: null, watchdogSpareAlertedAt: null }).where(eq(companies.id, c.id));
       return;
     }
     const b = await body();
@@ -635,7 +637,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const summary = `${busy} of ${limit} run slots busy${b.idle.length ? `; idle: ${b.idle.join(", ")}` : ""}${b.open.length ? `; waiting: ${b.open.slice(0, 6).join(", ")}` : ""}`;
     if (s.recordOnly) {
       await recordMove({ companyId: c.id, kind: "record_spare_capacity_alert", reason: `spare capacity (${busy}/${limit} busy)`, after: { busy, limit, idle: b.idle.length }, summary: `Record only: would have told the CEO there is spare capacity. ${summary}` });
-      await db.update(companies).set({ watchdogSpareAlertedAt: t }).where(eq(companies.id, c.id));
+      await db.update(companies).set({ watchdogSpareAt: since ?? t, watchdogSpareAlertedAt: t }).where(eq(companies.id, c.id));
       return;
     }
     const boss = await ceo(c.id);
@@ -649,7 +651,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       about: [],
       dedupeKey: `spare-capacity:${c.id}`,
     });
-    await db.update(companies).set({ watchdogSpareAlertedAt: t }).where(eq(companies.id, c.id));
+    await db.update(companies).set({ watchdogSpareAt: since ?? t, watchdogSpareAlertedAt: t }).where(eq(companies.id, c.id));
     await log({ companyId: c.id, kind: "spare_capacity_alert", targetAgentId: boss.id, reason: `spare capacity (${busy}/${limit} busy)`, after: { busy, limit, idle: b.idle.length }, summary: `Told ${boss.name} there is spare capacity: ${summary}`, undoable: false });
   }
 

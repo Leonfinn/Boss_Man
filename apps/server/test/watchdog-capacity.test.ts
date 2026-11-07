@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, companies, decisions, runs, ticketDependencies, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
@@ -38,8 +38,12 @@ async function setup() {
     for (let i = 0; i < n; i++) await db.insert(runs).values({ companyId, agentId: dev.id, purpose: "work", startedAt: ago(1) });
   };
   const cards = () => db.select().from(decisions).where(eq(decisions.dedupeKey, `spare-capacity:${companyId}`));
+  // End the busy runs so the next sweep sees the company idle again.
+  const free = async () => {
+    await db.update(runs).set({ endedAt: clock }).where(and(eq(runs.companyId, companyId), isNull(runs.endedAt)));
+  };
   const smWakes = () => db.select().from(wakes).where(eq(wakes.agentId, sm.id));
-  return { ...built, db, close, req, companyId, sm, dev, ceo: ceo!, project, advance, ago, ticket, switchOn, busy, cards, smWakes, now: () => clock };
+  return { ...built, db, close, req, companyId, sm, dev, ceo: ceo!, project, advance, ago, ticket, switchOn, busy, free, cards, smWakes, now: () => clock };
 }
 
 beforeEach(async () => {
@@ -126,8 +130,26 @@ describe("idle-capacity rules 3 and 4 (BOS-659)", () => {
     expect((await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "spare_capacity_alert")))).toHaveLength(1);
   });
 
-  it("stays quiet when the company is busy enough, or nothing is waiting", async () => {
+  it("rule 3 alerts on the first sweep, and again on a later quiet stretch after the company has been busy (latch clears)", async () => {
     await ctx.switchOn();
+    await ctx.busy(8); // first sweep has no prior low-time, so `since` is null when rule 3 fires.
+    await ctx.ticket({ title: "Shipped work", systemState: "review" });
+    await ctx.watchdog.run();
+    expect((await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "spare_capacity_alert")))).toHaveLength(1);
+    // The company gets busy again: the stretch clears, so the latch must not stay on.
+    await ctx.free();
+    await ctx.busy(9); // full enough that neither rule fires → reset.
+    ctx.advance(5);
+    await ctx.watchdog.run();
+    // Quiet again, only merges left: a second alert must reach the CEO.
+    await ctx.free();
+    await ctx.busy(8);
+    ctx.advance(5);
+    await ctx.watchdog.run();
+    expect((await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "spare_capacity_alert")))).toHaveLength(2);
+  });
+
+  it("stays quiet when the company is busy enough, or nothing is waiting", async () => {    await ctx.switchOn();
     // 9 busy (rule 3/4 clear) with ready work waiting: nothing to say.
     await ctx.busy(9);
     await ctx.ticket({ title: "Ready but not running", stateChangedAt: ctx.ago(120) });
