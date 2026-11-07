@@ -37,6 +37,12 @@ function nodeClass(n: PlanNode) {
   return "pl-node";
 }
 
+/** A blocker named by its ticket reference first, then its title, so the reference survives truncation. */
+function causeLabel(node: PlanNode | undefined) {
+  if (!node) return "an earlier step";
+  return node.ref ? `${node.ref} ${node.title}` : node.title;
+}
+
 /** Everything upstream and downstream of a node, to light up its chains. */
 function related(id: string, edges: PlanData["edges"]) {
   const out = new Set([id]);
@@ -118,7 +124,10 @@ function Graph({ plan }: { plan: PlanData }) {
             <div key={n.id} className={nodeClass(n)} style={{ left: p.x, top: p.y, width: W, height: H, opacity: lit && !lit.has(n.id) ? 0.25 : 1 }}>
               <button type="button" className="pl-hit" aria-pressed={focus === n.id} aria-label={`Show ${n.title}'s chain`} onClick={() => setFocus(focus === n.id ? null : n.id)} />
               <div className="pl-top">
-                <span className="label">{KIND[n.kind]}</span>
+                <span className="pl-kind">
+                  <span className="label">{KIND[n.kind]}</span>
+                  {n.ref && <span className="pl-ref">{n.ref}</span>}
+                </span>
                 <span className="pl-state">{n.state.replace(/_/g, " ")}</span>
               </div>
               <a href={n.link} className="pl-title" title={n.title}>
@@ -127,7 +136,7 @@ function Graph({ plan }: { plan: PlanData }) {
               <div className="pl-foot">
                 {n.blocked ? (
                   <span title={n.causes.map((c) => byId.get(c)?.title).join(", ")}>
-                    Waiting on {byId.get(n.causes[0] ?? "")?.title ?? "an earlier step"}
+                    Waiting on {causeLabel(byId.get(n.causes[0] ?? ""))}
                     {n.causes.length > 1 ? ` +${n.causes.length - 1}` : ""}
                   </span>
                 ) : n.open && n.holdingUp > 0 ? (
