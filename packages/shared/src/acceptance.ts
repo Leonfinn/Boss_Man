@@ -147,3 +147,14 @@ export function afterMergeLint(criteria: readonly Criterion[]): string {
   const them = loose.length === 1 ? "it" : "them";
   return `${names} can only be checked once the work is live: mark ${them} "on a real host" so reviewers don't fail the ticket on ${them}. This is a warning only.`;
 }
+/**
+ * The criteria a stuck review could move to "after the merge" (BOS-422): what the reviewers' words fail, when every one
+ * of those reads like a live check (see afterMergeLint) and there is nothing else to fix. Empty when a review has a line
+ * comment, fails nothing we can name, or fails any criterion that must hold before merge.
+ */
+export function movableFailures(criteria: readonly Criterion[], comments: readonly unknown[], reviewText: string): string[] {
+  if (comments.length) return [];
+  const failed = readVerdicts(criteria, reviewText).flatMap((r, i) => (r.verdict === "fail" ? [criteria[i]!] : []));
+  if (!failed.length || failed.some((c) => isAfterMerge(c) || !LIVE.test(criterionText(c)))) return [];
+  return failed.map(criterionText);
+}

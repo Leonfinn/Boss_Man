@@ -17,6 +17,9 @@ export const HELD_ALL_COMPANIES = "at a concurrency limit: all companies";
 /** An owner chat waits only for its agent's one chat slot. */
 export const HELD_CHAT = "at a concurrency limit: this agent is already chatting";
 
+/** A CEO reply run (BOS-434) waits only for its agent's one reply slot. */
+export const HELD_REPLY = "at a concurrency limit: this agent is already answering";
+
 /**
  * The queue in the order the pass should look at it. Lazy on purpose: `isIdle` is asked again before
  * every wake, so a launch earlier in the same pass (which makes its company busy) ends that

@@ -279,7 +279,7 @@ case "$a" in
   "ps -q "*) x=${a#ps -q }; x=${x#server-}; [[ -e $W/running.$x ]] && echo cid ;;
   "exec -T db pg_dump"*) echo dump ;;
   "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
-  "run --rm migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
+  "run --rm --no-deps migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
   "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
   "kill -s USR1 server-"*) c=${a##*server-}; echo "signal USR1 $c" >>"$DL"; [[ -n ${FAKE_NO_DEMOTE:-} ]] || echo standby >"$W/role.$c" ;;
@@ -447,6 +447,17 @@ FAKE_VERIFY_FAIL=green bg
 order "$DL" "signal USR1 blue" "signal USR2 green" "reload now green" "signal USR1 green" "signal USR2 blue" "reload now blue" "stopped green"
 live_is blue; [[ ! -e $D/state/soak ]] || fail "soak recorded for a failed swap"
 has "$T/hook.out" '"result": "rolled_back"'
+
+# 18b. The old colour died and the new one then fails its checks: the switch-back has nothing to go back to, so the new colour is NOT stopped; the alert carries the recovery commands.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+b3b="$(push apps/server/bg3b)"; bgreq "$b3b"; bg
+[[ $(status result) == deployed ]] || fail "setup swap 18b: $(cat "$D/outbox/status.json")"
+: >"$DL"; rm -f "$W/running.blue"
+FAKE_VERIFY_FAIL=green bg
+[[ $(status result) == failed ]] || fail "no old colour: $(cat "$D/outbox/status.json")"
+hasnt "$DL" "stopped green"; [[ -e $W/running.green ]] || fail "the new colour was stopped with nothing to go back to"
+has "$D/outbox/status.json" "docker compose kill -s USR2 server-green"
+has "$T/hook.out" '"result": "failed"'
 
 # 19. A failed smoke test on the idle colour: nobody is demoted, the idle colour is stopped, failure webhook.
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"

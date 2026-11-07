@@ -127,7 +127,11 @@ fi
 
 # Not in a slot yet: wait in the line. The runner's shared copy (BOSSMAN_CHECK_SLOT, shipped in its image) wins over the one
 # beside this script, so every waiter on the runner follows one copy of the queue rules, whatever branch it checks.
-if [ "$in_slot" = no ]; then
+# BOSSMAN_CHECK_NO_LOCK=1 (set by the runner for a server-queued job, DR-003): the server holds the slots, so this script
+# touches no lock file and does not queue; it still keeps the result store.
+if [ -n "${BOSSMAN_CHECK_NO_LOCK:-}" ]; then
+  echo "check-all: slot taken, running the checks (the server holds the slots; no lock files)"
+elif [ "$in_slot" = no ]; then
   if [ -n "$pre_done" ]; then echo "check-all: ${BOSSMAN_CHECK_SLOT_USED:-the slot script} ran the checks without holding a check slot; stopping" >&2; exit 2; fi
   slot_script="$(dirname "$self")/check-slot.sh"
   if [ -n "${BOSSMAN_CHECK_SLOT:-}" ] && [ -f "$BOSSMAN_CHECK_SLOT" ]; then slot_script=$BOSSMAN_CHECK_SLOT; fi
