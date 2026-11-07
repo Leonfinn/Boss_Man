@@ -4,7 +4,7 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -248,9 +248,20 @@ export class SessionManager {
    * so the server can start a recovery run (R42). Call once, before handling commands.
    */
   recoverInterrupted() {
-    // A crash can leave a run's token file behind; at startup no live run owns one (BOS-553).
+    // A crash can leave a run's token file behind (BOS-553). Only folders older than 10 minutes go:
+    // the file is deleted seconds after the session opens, and another process sharing this tmp
+    // folder (parallel test files) may own a younger one that is still being read.
     try {
-      for (const name of readdirSync(tmpdir())) if (name.startsWith("bossman-mcp-")) rmSync(path.join(tmpdir(), name), { recursive: true, force: true });
+      for (const name of readdirSync(tmpdir())) {
+        if (!name.startsWith("bossman-mcp-")) continue;
+        const dir = path.join(tmpdir(), name);
+        try {
+          if (Date.now() - statSync(dir).mtimeMs < 600_000) continue;
+        } catch {
+          continue;
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
     } catch {
       /* best effort */
     }

@@ -1,5 +1,5 @@
 // BOS-553: a Claude run's Boss Man token goes to Claude Code in a 0600 file, never in the command line the adapter passes on.
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,9 +64,15 @@ describe("Claude MCP config file", () => {
 
   it("sweeps token folders a crashed runner left in tmp at startup", () => {
     const stale = mkdtempSync(path.join(tmpdir(), "bossman-mcp-"));
+    const fresh = mkdtempSync(path.join(tmpdir(), "bossman-mcp-"));
     writeFileSync(path.join(stale, "mcp.json"), "{}");
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(stale, hourAgo, hourAgo);
     new SessionManager({ mcpUrl: "x", emit: () => {}, resolveEnv: async () => ({}) }).recoverInterrupted();
     expect(existsSync(stale)).toBe(false);
+    // A young folder may belong to a live run of another process sharing this tmp: it must survive (it broke the canary in parallel tests).
+    expect(existsSync(fresh)).toBe(true);
+    rmSync(fresh, { recursive: true, force: true });
   });
 
   it("gives two runs different files", async () => {
