@@ -58,7 +58,34 @@ RUNNER_PATHS='^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
-g() { git -C "$REPO" "$@"; }
+# Every git command that can write the checkout runs under umask 022: from a root shell or cron with umask 077 it would leave files the server (user node) cannot read (BOS-562).
+g() { (umask 022; git -C "$REPO" "$@"); }
+# BEGIN readable-check (the same text is in rebuild-live.sh, host-deployer.sh and deploy.sh; deploy.test.sh keeps them equal)
+# BOS-562: the server image copies file modes as they are on disk and the server runs as user node, so a git-tracked
+# file that others can't read (or a folder they can't read and search) makes it crash at start. Reads modes only and
+# changes nothing. Only tracked paths count: .env, secrets/ and the data folder must stay private.
+unreadable_tracked() { # checkout folder: the tracked files and folders others can't use, one path per line
+  (
+    cd "$1" || exit 0
+    {
+      git ls-files -z | xargs -0 -r stat -c 'f %a %n' --
+      { echo .; git -c core.quotepath=off ls-files | awk '{ while (sub("/[^/]*$", "")) print }'; } | sort -u | tr '\n' '\0' | xargs -0 -r stat -c 'd %a %n' --
+    } 2>/dev/null | while read -r kind mode path; do
+      m=$((8#$mode))
+      if [[ $kind == f ]]; then ((m & 4)) || printf '%s\n' "$path"; else (((m & 5) == 5)) || printf '%s\n' "$path"; fi
+    done
+  ) || true
+}
+readable_problem() { # checkout folder: prints nothing when all is readable, else the message with the fix
+  local dir bad n
+  dir="$(cd "$1" && pwd)" || return 0
+  bad="$(unreadable_tracked "$dir")"
+  [[ -n $bad ]] || return 0
+  n="$(grep -c '' <<<"$bad")"
+  printf "%s file(s) or folder(s) in %s can't be read by the server, which runs as user node and gets the permissions the files have on disk, so it would crash when it starts (a root shell with umask 077 does this to every file git writes). First %s:\n%s\nFix, then run this again:\n  cd %q && git ls-files -z | xargs -0 chmod go+r && git ls-files | awk '{ while (sub(\"/[^/]*\$\", \"\")) print }' | sort -u | xargs -d '\\\\n' chmod go+rx && chmod go+rx ." \
+    "$n" "$dir" "$((n < 10 ? n : 10))" "$(head -n 10 <<<"$bad" | sed 's/^/  /')" "$dir"
+}
+# END readable-check
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { ((DRY)) || printf '%s %s\n' "$(now)" "$*" >>"$LOG"; printf '%s\n' "$*"; }
@@ -168,32 +195,46 @@ refresh_available() {
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
-# Host facts (BOS-427): the machine's own name and, for the folders it knows, their owner, group and mode,
-# read with `stat` only (never their contents). The server's owner-card lint (R6) uses this to refuse a step
-# that would run as the owner's login and hit a folder that login can't read. Every folder is optional: one
-# that isn't there is skipped, and a stat that fails is skipped too, so a host on another layout still gets a
-# record. The file is written mode 644 (no secrets in it) and only replaced when it changed.
+# Host facts (BOS-427, BOS-541): the machine's own name and, for the folders it knows, their owner, group, mode
+# and role, read with `stat` only (never their contents). The server's owner-card lint (R6) uses this to refuse a
+# step that would run as the owner's login and hit a folder that login can't read, or would open a backup, data
+# or secrets folder to everyone. The role is what the folder IS on this host, not what its name looks like: the
+# install folder holds the database backups by default, so it carries the "backups" role too. Every folder is
+# optional: one that isn't there is skipped, and a stat that fails is skipped too, so a host on another layout
+# still gets a record. The file is written mode 644 (no secrets in it) and only replaced when it changed.
 write_host_facts() {
   local f="$OUTBOX/host.json"
   ((DRY)) && { log "[dry-run] would write $f"; return 0; }
   local name; name="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost)"
   name="${name%%[[:space:]]*}"
   [[ $name =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || name="localhost"
-  local rows="" sep="" p o g m
+  local rows="" sep="" p d o g m r
   # The install folder (the deployer's parent), the deployer folder, backups, data and the checkout's secrets.
-  local -a folders=("$D/.." "$D" "${BOSSMAN_BACKUP_DIR:-$D/..}" "${BOSSMAN_DATA:-/srv/boss-man/data}" "$REPO/secrets")
+  # One folder can have more than one role (the install folder holds the backups by default), so paths repeat.
+  local -a folders=("$D/..:install" "${BOSSMAN_BACKUP_DIR:-$D/..}:backups" "$D:deployer" "${BOSSMAN_DATA:-/srv/boss-man/data}:data" "$REPO/secrets:secrets")
+  # Roles by path, in a fixed order (private ones first), so the same host always gets the same row.
+  local -A roles=()
   for p in "${folders[@]}"; do
-    [[ -n $p && -d $p ]] || continue
-    p="$(cd "$p" 2>/dev/null && pwd)" || continue
+    r="${p##*:}" d="${p%:*}"
+    [[ -n $d && -d $d ]] || continue
+    d="$(cd "$d" 2>/dev/null && pwd)" || continue
+    [[ -n $d ]] || continue
+    case " ${roles[$d]:-} " in *" $r "*) continue ;; esac
+    case $r in
+      backups | data | secrets) roles[$d]="$r${roles[$d]:+ ${roles[$d]}}" ;;
+      *) roles[$d]="${roles[$d]:+${roles[$d]} }$r" ;;
+    esac
+  done
+  while IFS= read -r p; do
     [[ -n $p ]] || continue
     o="$(stat -c %U "$p" 2>/dev/null || stat -c %u "$p" 2>/dev/null)" || continue
     g="$(stat -c %G "$p" 2>/dev/null || stat -c %g "$p" 2>/dev/null)" || continue
     m="$(stat -c %a "$p" 2>/dev/null)" || continue
     [[ $m =~ ^[0-7]{3,4}$ ]] || continue
-    # Avoid listing the same folder twice (install and backups can be the same folder).
-    [[ $rows == *"\"path\": $(jstr "$p")"* ]] && continue
-    rows+="$sep{\"path\": $(jstr "$p"), \"owner\": $(jstr "$o"), \"group\": $(jstr "$g"), \"mode\": \"$m\"}"; sep=", "
-  done
+    local rl="" rlsep=""
+    for r in ${roles[$p]}; do rl+="$rlsep$(jstr "$r")"; rlsep=", "; done
+    rows+="$sep{\"path\": $(jstr "$p"), \"owner\": $(jstr "$o"), \"group\": $(jstr "$g"), \"mode\": \"$m\", \"roles\": [$rl]}"; sep=", "
+  done < <(printf '%s\n' "${!roles[@]}" | LC_ALL=C sort)
   printf '{"version": 1, "name": %s, "writtenAt": %s, "ownership": [%s]}\n' "$(jstr "$name")" "$(jstr "$(now)")" "$rows" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
@@ -349,6 +390,12 @@ backup_database() {
 
 BG_RESULT="" BG_MSG="" BG_BACKUP="" BG_LIVE="" BG_IDLE="" BG_PREV=""
 bg_fail() { BG_RESULT=$1; BG_MSG=$2; return 1; }
+# The last 20 lines of a colour's container log, for a message that says it never came up (BOS-562); short lines, one block.
+colour_log_tail() { # colour
+  local t
+  t="$(compose logs --no-color --tail 20 "server-$1" 2>&1 | cut -c1-200 | head -c 2500 || true)"
+  [[ -z $t ]] || printf " Last 20 lines of the server-%s log:\n%s" "$1" "$t"
+}
 
 # Reverses a hand-over: demote the new colour, promote the old, point the proxy back, check, stop the new one.
 switch_back() {
@@ -385,13 +432,16 @@ pre_fail() { # message: undo what happened before the hand-over; the live colour
 }
 
 do_deploy_bluegreen() {
-  local c why=""
+  local c why="" problem
   BG_PREV="$FROM"
   BG_LIVE="$(live_colour)" || { bg_fail failed "No usable $INCLUDE: do the first blue/green bring-up by hand (docs/06-install-truenas.md, 9d)."; return 1; }
   BG_IDLE="$(other_colour "$BG_LIVE")"
   for c in proxy "server-$BG_LIVE"; do
     [[ -n $(compose ps -q "$c" 2>/dev/null) ]] || { bg_fail failed "The $c container is not running; nothing was changed."; return 1; }
   done
+  # Files the server (user node) cannot read would crash the new colour at start (BOS-562): stop before the backup and build.
+  problem="$(readable_problem "$REPO")"
+  [[ -z $problem ]] || { bg_fail failed "$problem"$'\n'"Nothing was changed."; return 1; }
   rm -f "$STATE/soak" # a swap while the last one is soaking ends that soak: its standby is about to be rebuilt
 
   log "Blue/green: $BG_LIVE is live; building $BG_IDLE at ${COMMIT:0:8}."
@@ -402,7 +452,7 @@ do_deploy_bluegreen() {
   BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
   compose up -d --no-deps --force-recreate "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Starting $BG_IDLE failed."; return 1; }
   # It is a standby because the live colour holds the leader lock; seeing that also shows the lock works.
-  wait_ready "server-$BG_IDLE" standby "$COMMIT" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby at ${COMMIT:0:8} within ${BG_READY_SECONDS}s."; return 1; }
+  wait_ready "server-$BG_IDLE" standby "$COMMIT" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby at ${COMMIT:0:8} within ${BG_READY_SECONDS}s.$(colour_log_tail "$BG_IDLE")"; return 1; }
   # A login-free read straight from the idle colour (not through the proxy).
   [[ $(probe "server-$BG_IDLE" 3100 /api/setup 2>/dev/null | jfield needsSetup) == False ]] || { pre_fail "The smoke test on $BG_IDLE failed (GET /api/setup)."; return 1; }
 
@@ -586,7 +636,7 @@ main() {
     finish rejected "Rejected: this request was already handled."
   fi
 
-  local head tip last wait
+  local head tip last wait problem
   head="$FROM"
   [[ -n $head ]] || finish failed "The checkout at $REPO is not a git repository."
   if [[ $TARGET == server ]]; then
@@ -614,6 +664,7 @@ main() {
   fi
 
   if ((DRY)); then
+    if [[ $TARGET == server ]]; then problem="$(readable_problem "$REPO")"; [[ -z $problem ]] || log "[dry-run] the real run would stop: $problem"; fi
     log "[dry-run] checks passed: would run: $(if [[ $TARGET != server ]]; then echo "scripts/update-runner.sh"; elif bluegreen_enabled; then echo "a blue/green swap to ${COMMIT:0:8}"; else echo "scripts/deploy.sh --yes --no-runner --commit ${COMMIT:0:8}"; fi)"
     exit 0
   fi

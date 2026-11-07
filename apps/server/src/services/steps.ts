@@ -7,9 +7,11 @@
 // ```sh host="nas01" as="login". That line is not part of what the owner pastes; the web app reads it and shows
 // "On nas01, as the logged-in account." above the command. A block with neither is refused (R6).
 
+import { HOST_NAME, parseStep, strayFence, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
 
-export type Where = { host: string; as: "root" | "login" };
+// The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
+export { parseStep, strayFence, type StepPiece, type Where };
 export type Command = { sh: string; where?: Where };
 
 /** Marks a command inside `step(...)`: it is rendered as its own block. `where` says where and as whom it runs. */
@@ -18,7 +20,7 @@ export const sh = (command: string, where?: Where): Command => ({ sh: command, .
 /** The fence line naming a block's host and account, e.g. sh host="nas01" as="root". It is not part of what the owner pastes. */
 export function whereFence(where: Where): string {
   // A recorded host's name is a plain DNS-style name: no spaces, quotes or shell syntax, so it can't break the fence.
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(where.host)) throw new Error(`Host is not a plain name (letters, digits, dot, dash, underscore): ${where.host}`);
+  if (!HOST_NAME.test(where.host)) throw new Error(`Host is not a plain name (letters, digits, dot, dash, underscore): ${where.host}`);
   if (where.as !== "root" && where.as !== "login") throw new Error(`A block runs as root or login, not ${String(where.as)}`);
   return `sh host="${where.host}" as="${where.as}"`;
 }
@@ -55,37 +57,8 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
     .join("\n\n");
 }
 
-export type StepPiece = { type: "text"; text: string } | { type: "command"; text: string; where?: Where };
-
-/**
- * The fence line's host and account. `sh` alone means an older block that names neither (R6 refuses it); a
- * fence line that isn't one of the two forms is not read as a guess, it is read as "no host" and R6 says so.
- */
-function fenceWhere(lang: string): { where?: Where } {
-  if (lang === "sh") return {};
-  const m = /^sh\s+host="([A-Za-z0-9][A-Za-z0-9_.-]{0,63})"\s+as="(root|login)"$/.exec(lang);
-  return m ? { where: { host: m[1]!, as: m[2] as Where["as"] } } : {};
-}
-
-/** Splits a step into sentences and command blocks; the web app has the same logic for rendering. */
-export function parseStep(text: string): StepPiece[] {
-  const out: StepPiece[] = [];
-  const re = /```([^\n`]*)\n([\s\S]*?)\n```/g;
-  let last = 0;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    const before = text.slice(last, m.index).trim();
-    if (before) out.push({ type: "text", text: before });
-    const { where } = fenceWhere(m[1]!.trim());
-    out.push({ type: "command", text: m[2]!, ...(where ? { where } : {}) });
-    last = m.index + m[0].length;
-  }
-  const rest = text.slice(last).trim();
-  if (rest) out.push({ type: "text", text: rest });
-  return out;
-}
-
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R9" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R9" | "R14" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -146,7 +119,7 @@ function pieces(text: string) {
   const blocks = blockPieces.map((p) => p.text);
   const prose = parts.filter((p) => p.type === "text").map((p) => p.text).join("\n");
   const inline = [...prose.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!);
-  return { blocks, blockPieces, inline, prose };
+  return { blocks, blockPieces, inline, prose, stray: strayFence(parts) };
 }
 
 /** Names a piece of shell sets: `X=…` (also inline, `X=1 cmd`, and after export/local), `read X Y`, `for X in`. */
@@ -168,8 +141,8 @@ function usesIn(code: string): string[] {
 /**
  * Checks an agent's owner steps the way the owner will read them (BOS-417, DR-008 Q1): refuse what can't work
  * as written, warn about what might not. R1 a pointer to another document instead of the action; R2 a shell
- * variable no step up to this one sets; R3 a command that isn't copy-safe (`commandProblem`), or a placeholder
- * in inline code; R4 a `{{…}}` token, which Boss Man can't fill in yet. Warnings: a wiki or ticket link, more
+ * variable no step up to this one sets; R3 a command that isn't copy-safe (`commandProblem`), a placeholder
+ * in inline code, or a ``` that isn't a complete block and would show as raw text (BOS-550); R4 a `{{…}}` token, which Boss Man can't fill in yet. Warnings: a wiki or ticket link, more
  * than one command in a step or more than 12 steps, and hedging next to a command.
  *
  * R6 (BOS-427) is the host and account check: every command block says where it runs and as whom, and a block
@@ -181,6 +154,10 @@ function usesIn(code: string): string[] {
  * R9 (DR-023), only when `addons` are given: a step that names an add-on (ADDON_WORDS) that is not set up,
  * stopped or waiting for a login is refused, and one whose state is unknown is warned about; the add-on the
  * card itself sets up (`setsUp`) is exempt.
+ *
+ * R14 (DR-028) runs on every card: a git command that writes the checkout must run inside a `(umask 022 && …)`
+ * subshell (`gitUmaskFindings`), and a `umask` outside a subshell is refused, since it stays set in the owner's terminal.
+ * A CEO override can't let it through.
  *
  * `facts` is either the host facts array (R6 alone, the older call shape) or a `LintFacts` object carrying
  * `hosts`, `addons` and `setsUp`. Each rule runs only when its facts are there.
@@ -197,7 +174,9 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
     const step = i + 1;
-    const { blocks, blockPieces, inline, prose } = pieces(text);
+    const { blocks, blockPieces, inline, prose, stray } = pieces(text);
+    // A ``` the parser couldn't pair would reach the owner as raw text, with no Copy button (BOS-550).
+    if (stray !== null) refuse.push({ step, rule: "R3", problem: `has a \`\`\` that isn't a complete command block, so the owner would see it as raw text ("${stray.slice(0, 80)}"). Put the opening fence line, the command and a closing \`\`\` each on a line of its own` });
     const code = [...blocks, ...inline];
     for (const [re, problem] of DOC_POINTERS) {
       const m = re.exec(prose);
@@ -222,6 +201,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
     const host = lintHost(blockPieces, step, given.hosts, staged, step === 1);
     refuse.push(...host.refuse);
     warn.push(...host.warn);
+    for (const c of code) refuse.push(...gitUmaskFindings(step, c));
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
     if (LINK.test(prose)) warn.push({ step, rule: "warn", problem: "links to a wiki page or ticket; fine as background, but the step itself must be complete" });
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
@@ -236,8 +216,17 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
 // Ownership is a host fact (host.json, written by the host deployer from `stat`); nothing here guesses.
 // ---------------------------------------------------------------------------------------------------
 
-/** A folder's ownership as the host recorded it: owner (a name or uid), group, and the mode as 3 or 4 octal digits. */
-export type Ownership = { path: string; owner: string; group: string; mode: string };
+/** What a host uses a recorded folder for, as host-deployer.sh writes it (BOS-541). Order matters: it is the
+ * precedence when one folder has several roles, and the private ones come first so R6 reads the strictest. */
+export const FOLDER_ROLES = ["backups", "data", "secrets", "install", "deployer"] as const;
+export type FolderRole = (typeof FOLDER_ROLES)[number];
+
+/** Roles the owner never wants open to everyone: a backup copy, the database's files and secrets belong to their owner. */
+const PRIVATE_ROLES: ReadonlySet<FolderRole> = new Set<FolderRole>(["backups", "data", "secrets"]);
+
+/** A folder's ownership as the host recorded it: owner (a name or uid), group, and the mode as 3 or 4 octal digits.
+ * `role` is what the host says the folder is for; absent on a record from an older deployer. */
+export type Ownership = { path: string; owner: string; group: string; mode: string; role?: FolderRole };
 /** One host as Boss Man recorded it: its name, the owner's login account there, and its known folders. */
 export type HostFacts = { name: string; login?: string; ownership: Ownership[] };
 
@@ -296,8 +285,16 @@ const opensToAll = (mode: string) => {
   return !Number.isNaN(m) && (m & 0o007) !== 0;
 };
 
-/** A recorded folder the owner never wants open to the world (the ticket: "never make backups world-readable"). */
+/**
+ * A recorded folder the owner never wants open to the world (the ticket: "never make backups world-readable").
+ * Its role decides when the host recorded one (BOS-541: backups live in the install folder by default, so a name
+ * is not enough); a folder from an older deployer, with no role, is still judged by its name.
+ */
 const PRIVATE_FOLDER = /(^|\/)(backups?|secrets?)(\/|$)/i;
+const isPrivate = (rec: Ownership & { folder: string }) => (rec.role ? PRIVATE_ROLES.has(rec.role) : PRIVATE_FOLDER.test(rec.folder));
+
+/** What R6 calls a private folder in its refusal, so the owner knows why it was refused. */
+const privateWhat = (rec: Ownership & { folder: string }) => (rec.role === "backups" ? "Backups" : rec.role === "secrets" ? "Secrets" : rec.role === "data" ? "The database's files" : "Backups and secrets");
 
 /**
  * Split one command into simple commands at the shell's separators, keeping each one's quoted words whole.
@@ -429,12 +426,12 @@ function readCommand(words: string[]): { asRoot: boolean; shellRoot: boolean; pr
 const READS = new Set(["ls", "cat", "cp", "rsync", "scp", "tar", "find", "du", "stat", "head", "tail", "less", "more", "grep", "rg", "diff", "sha256sum", "sha512sum", "wc", "file", "sed", "awk", "zgrep", "zcat", "gunzip", "base64", "cmp", "md5sum"]);
 /** Commands that put a copy somewhere (so R6 checks the destination, and remembers a copy staged for the login). */
 const STAGES = new Set(["install", "chown", "cp", "rsync", "mv"]);
-/** Commands whose mode option can open a folder to everyone. */
-const MODES = new Set(["chmod", "install", "umask"]);
+/** Commands whose mode option can open a folder to everyone. Not umask: its value means the opposite of a mode (umask 077 is private), and R14 checks it (DR-028). */
+const MODES = new Set(["chmod", "install"]);
 
 /** True when a command's mode opens it to everyone (an octal whose other bits are set, or o+rX / a+rX). */
 function modeOpensUp(p: Prog): boolean {
-  const mode = p.name === "umask" ? p.args[0] : p.mode ?? p.args.find((a) => /^[0-7]{3,4}$/.test(a) || /^[ugoa]*[+=][rwxX]+$/.test(a));
+  const mode = p.mode ?? p.args.find((a) => /^[0-7]{3,4}$/.test(a) || /^[ugoa]*[+=][rwxX]+$/.test(a));
   if (!mode) return false;
   if (/^[0-7]{3,4}$/.test(mode)) return (parseInt(mode, 8) & 0o007) !== 0;
   return /[ao][+=]?[rwxX]/.test(mode);
@@ -500,6 +497,18 @@ function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, s
         // Only an absolute destination names the folder a copy can stage; a relative one (`.`, `~/x`) is a
         // path the shell works out, so R6 neither warns about it nor treats it as a folder made readable.
         const dest = operands.at(-1) ?? null;
+        // A copy out of a private folder is refused when its mode opens it to everyone, whatever the destination
+        // (BOS-541: `install -m 644 <backups>/db.sql.gz /home/<login>/` is a world-readable backup). The mode is
+        // the copy's own (-m), else the login's umask or `install`'s default 755; a copy by root with no mode
+        // keeps the source's mode, so it is refused only when the source is already open. This runs even for a
+        // relative destination, because the source is what makes it a backup.
+        const privateRec = sources.map((s) => recordedFolder(s, known)).find((r): r is Ownership & { folder: string } => r !== null && isPrivate(r));
+        if (privateRec) {
+          const sourceOpen = opensToAll(privateRec.mode);
+          const opens = p.mode !== undefined ? opensToAll(p.mode) : p.name === "install" ? true : asRoot ? sourceOpen : modeOpensUp(p);
+          if (opens)
+            refuse.push({ step, rule: "R6", problem: `copies ${sources.find((s) => inside(s, privateRec.folder))} out of a private folder (${privateRec.folder}) with a mode that opens it to everyone. ${privateWhat(privateRec)} stay readable only by their owner` });
+        }
         if (!dest) continue;
         const rec = recordedFolder(dest, known);
         if (!rec) {
@@ -512,15 +521,15 @@ function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, s
         // if it could read the source.
         const namesLogin = p.owner !== undefined && p.owner !== "root";
         if (sourceReadable && (namesLogin || (!asRoot && p.owner === undefined))) stagedForLogin(where.host, rec.folder);
-        // An install or chown that opens a backup folder's mode to everyone is refused, like chmod below.
-        if (MODES.has(p.name) && modeOpensUp(p) && PRIVATE_FOLDER.test(rec.folder))
-          refuse.push({ step, rule: "R6", problem: `opens ${dest} to everyone with ${p.name}. Backups and secrets stay readable only by their owner` });
+        // An install or chown that opens a private folder's mode to everyone is refused, like chmod below.
+        if (MODES.has(p.name) && modeOpensUp(p) && isPrivate(rec))
+          refuse.push({ step, rule: "R6", problem: `opens ${dest} to everyone with ${p.name}. ${privateWhat(rec)} stay readable only by their owner` });
         continue;
       }
       if (MODES.has(p.name) && modeOpensUp(p)) {
         for (const target of abs) {
           const rec = recordedFolder(target, known);
-          if (rec && PRIVATE_FOLDER.test(rec.folder)) refuse.push({ step, rule: "R6", problem: `opens ${target} to everyone with ${p.name}. Backups and secrets stay readable only by their owner` });
+          if (rec && isPrivate(rec)) refuse.push({ step, rule: "R6", problem: `opens ${target} to everyone with ${p.name}. ${privateWhat(rec)} stay readable only by their owner` });
         }
         continue;
       }
@@ -535,8 +544,98 @@ function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, s
   return { refuse, warn };
 }
 
+// ---------------------------------------------------------------------------------------------------
+// R14 (DR-028, the 6 Nov outage): git writes files with the terminal's umask. Under a root shell's 077 the
+// checkout came out root-only, the image built from it couldn't read its own code, and both colours went down.
+// So a git step that writes the checkout runs as (umask 022 && cd <src> && git …): the subshell keeps 022 from
+// staying set in the owner's root terminal, where it would make their later hand-made backups world-readable.
+// ---------------------------------------------------------------------------------------------------
+
+/** git subcommands that write files in the working tree. */
+const GIT_WRITES = new Set(["checkout", "switch", "merge", "pull", "reset", "restore", "rebase", "cherry-pick", "revert", "stash", "am", "apply", "clone", "worktree", "submodule"]);
+/** Their read-only forms (`git stash list`), which write nothing. */
+const GIT_READ_ONLY = new Set(["list", "show", "status", "summary"]);
+/** git's own options that take the next word as their value (`git -C <dir> checkout`). */
+const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+/** The subshell R14 accepts: it opens with umask 022 (or 0022), then && or ;. */
+const UMASK_SUBSHELL = /^\(\s*umask\s+0?022\s*(?:&&|;)/;
+
+/** The index of the ) closing the ( at `open`, skipping quoted text; -1 if it never closes. */
+function closingParen(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === "'") {
+      const end = text.indexOf("'", i + 1);
+      if (end === -1) return -1;
+      i = end;
+    } else if (c === "\"") {
+      for (i++; i < text.length && text[i] !== "\""; i++) if (text[i] === "\\") i++;
+    } else if (c === "\\") i++;
+    else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * A command with its subshells cut out: every one, or with `only` just those it matches (the accepted umask
+ * subshells), so what is left runs under the terminal's own umask. Any parenthesis not cut (a plain subshell,
+ * `$(…)`) becomes a command separator, so the git inside it is still seen.
+ */
+function outsideSubshells(command: string, only?: RegExp): string {
+  let out = "";
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!;
+    if (c === "'" || c === "\"") {
+      let j = i + 1;
+      while (j < command.length && command[j] !== c) j += c === "\"" && command[j] === "\\" ? 2 : 1;
+      out += command.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    if (c === "(") {
+      const end = closingParen(command, i);
+      if (end !== -1 && (!only || only.test(command.slice(i, end + 1)))) {
+        out += " ; ";
+        i = end;
+        continue;
+      }
+    }
+    out += c === "(" || c === ")" ? " ; " : c;
+  }
+  return out;
+}
+
+/**
+ * R14: refuse a git command that writes the checkout outside a `(umask 022 && …)` subshell, and a `umask` set
+ * at the top level, where it stays set in the owner's terminal. A umask inside any subshell ends with it, so
+ * `(umask 077; pg_dump … >backup)`, the private-backup form our own scripts use, passes. A word split, not a
+ * parser: git hidden in a quoted `sh -c` string is not seen.
+ */
+export function gitUmaskFindings(step: number, command: string): LintFinding[] {
+  const out: LintFinding[] = [];
+  for (const words of simpleCommands(outsideSubshells(command))) {
+    const prog = readCommand(words).prog;
+    if (prog?.name === "umask" && prog.args.length)
+      out.push({ step, rule: "R14", problem: `sets umask outside a subshell, so it stays set in the owner's terminal: ${command.slice(0, 120)}. Put it with the command it is for, in a subshell: (umask 022 && cd <folder> && git …)` });
+  }
+  for (const words of simpleCommands(outsideSubshells(command, UMASK_SUBSHELL))) {
+    const prog = readCommand(words).prog;
+    if (prog?.name !== "git") continue;
+    let j = words.findIndex((w) => w.split("/").pop() === "git") + 1;
+    while (j < words.length && words[j]!.startsWith("-")) j += GIT_VALUE_OPTS.has(words[j]!) ? 2 : 1;
+    const sub = words[j];
+    if (!sub || !GIT_WRITES.has(sub)) continue;
+    if (["stash", "worktree", "submodule"].includes(sub) && GIT_READ_ONLY.has(words[j + 1] ?? "")) continue;
+    out.push({ step, rule: "R14", problem: `runs git ${sub} outside a (umask 022 && …) subshell, so the files it writes take the terminal's umask (a root shell's 077 leaves the checkout unreadable by the server, as on 6 Nov): ${command.slice(0, 120)}. Write it as (umask 022 && cd <folder> && git ${sub} …)` });
+  }
+  return out;
+}
+
 /** Rules a CEO override can't let through: a command the owner can't paste as it is, or a value Boss Man doesn't have. */
-export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4"]);
+// R14 too (DR-028): its fix is always the same subshell, so there is never a reason to let a bare git step through.
+export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R14"]);
 
 /** One line per finding, for the agent's refusal or the CEO's list. */
 export const lintLines = (fs: LintFinding[]) => fs.map((f) => `- Step ${f.step}: ${f.problem}.`).join("\n");

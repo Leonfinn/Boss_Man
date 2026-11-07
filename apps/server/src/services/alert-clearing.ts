@@ -8,6 +8,7 @@ import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { decisions, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
+import { signoffClearedReason } from "./signoff.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
@@ -26,6 +27,11 @@ export type ClearWhen =
    * at once; only a clean run proves the credential is fixed (BOS-469, security review).
    */
   | { kind: "accountRanOk"; fundingSourceId: string }
+  /**
+   * The owner's sign-off card (DR-021): the ticket no longer waits on the sign-off. It was signed off, merged,
+   * cancelled or moved out of review, a new review round started, or its risk no longer needs the owner.
+   */
+  | { kind: "signoffNotWaiting"; ticketId: string }
   /**
    * An add-on's setup card (DR-023 D): the add-on reads running, seen working after the card was raised.
    * "Running" alone isn't enough: Tailscale stays running for a day after its last request and ntfy until
@@ -65,6 +71,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "accountRanOk":
         if (typeof c.fundingSourceId === "string") out.push({ kind: "accountRanOk", fundingSourceId: c.fundingSourceId });
+        break;
+      case "signoffNotWaiting":
+        if (typeof c.ticketId === "string") out.push({ kind: "signoffNotWaiting", ticketId: c.ticketId });
         break;
       case "addonRunning":
         if ((ADDONS as readonly unknown[]).includes(c.addon)) out.push({ kind: "addonRunning", addon: c.addon as Addon });
@@ -149,6 +158,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
           .limit(1);
         return clean?.endedAt ? `a run on the account succeeded at ${hhmm(clean.endedAt)}` : null;
       }
+      case "signoffNotWaiting":
+        return signoffClearedReason(db, c.ticketId);
       case "addonRunning": {
         const f = (await addonFacts())?.[c.addon];
         if (f?.state !== "running" || !f.since) return null;
@@ -198,6 +209,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         .where(and(eq(decisions.id, row.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id, question: decisions.question });
       if (!done) continue;
+      // A sign-off card holds its ticket: the hold goes with it, or the ticket would stay blocked on a closed card.
+      if ((row.context as { type?: string } | null)?.type === "risk_review") await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, row.id));
       closed++;
       // A ticket that waited on the card (a setup card raised with blocksTicketId) waits no longer, the
       // same as when its raiser withdraws it; its assignee is woken with the news.
