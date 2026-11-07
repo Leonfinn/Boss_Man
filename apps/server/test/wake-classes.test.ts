@@ -61,6 +61,10 @@ describe("wake classes: the table", () => {
     // A command's options in the owner-replies service (BOS-425), not a wake.
     "unanswered at 5 minutes, the agent is woken again",
     "unanswered at 10 minutes, the CEO is asked",
+    // The reasons a dropped do-after/do-before link is reported to its raiser (BOS-625), not wakes.
+    "another company",
+    "not open",
+    "unknown",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {

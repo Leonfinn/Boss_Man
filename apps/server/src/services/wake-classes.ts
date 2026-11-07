@@ -22,6 +22,7 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "decision answered": "waiting",
   "deploy approved": "waiting",
   "deploy rejected": "waiting",
+  "ceo reply": "waiting",
   // Scheduled by Boss Man.
   "ticket watch": "scheduled",
   "tree stopped": "scheduled",
@@ -29,6 +30,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "missed work": "scheduled",
   "urgent idle": "scheduled",
   "idle slot": "scheduled",
+  "idle agents": "scheduled",
+  "spare capacity": "scheduled",
   "status check": "scheduled",
   resume: "scheduled",
   watchdog: "scheduled",
