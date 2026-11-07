@@ -645,7 +645,8 @@ function shellSegments(c: string, bad?: { v: boolean }): { words: string[]; out:
       if (depth !== 0 && bad) bad.v = true;
     }
     if (ch === "$" && c[i + 1] === "(") { endSeg(); modes.push("sub"); i++; continue; }
-    if (dq) { if (/\s/.test(ch)) endWord(); else { cur += ch; has = true; } continue; }
+    // Inside double quotes a space or newline belongs to the word (`bash -c "python3 c.py"` is one inner command, not two words).
+    if (dq) { cur += ch; has = true; continue; }
     if (ch === "#" && !has) { while (i < c.length && c[i] !== "\n") i++; i--; continue; }
     if (ch === ")") { endSeg(); if (modes[modes.length - 1] === "sub") modes.pop(); continue; }
     if (ch === "(" || ch === ";" || ch === "|" || ch === "\n" || (ch === "&" && c[i + 1] !== ">")) {
@@ -848,6 +849,7 @@ function usesScratchUnsafely(c: string): boolean {
   const keywords = new Set(["if", "then", "do", "else", "elif", "while", "until", "!", "time", "{", "}", "fi", "done", "esac", "in"]);
   const clean = (w: string): string => w.replace(/^\.\//, "").replace(/\/+$/, "");
   const written = new Set<string>();
+  let unknownWrite = false; // a write whose file name the judge can't be sure of: plain static imports are not harmless then
   const scratchVars = new Set<string>();
   const scratchWord = /\/tmp(?:\/|$|:)|\$\{?TMPDIR|mktemp/;
   const parsed = segs.map((s) => {
@@ -858,15 +860,46 @@ function usesScratchUnsafely(c: string): boolean {
     const args = s.words.slice(k + 1);
     for (const o of s.out) if (o !== "/dev/null" && !/^\d+$|^-$/.test(o)) written.add(clean(o));
     const flagless = args.filter((a) => !a.startsWith("-"));
-    if (/^(?:cp|mv|install|ln)$/.test(head) && flagless.length) written.add(clean(flagless[flagless.length - 1]!));
+    if (/^(?:cp|mv|install|ln)$/.test(head) && flagless.length) {
+      written.add(clean(flagless[flagless.length - 1]!));
+      // Into a folder (`cp /tmp/c.py .`, `-t DIR`) the new file keeps the source's name: count that name as written too.
+      for (const a of flagless) written.add(clean(a.replace(/^.*\//, "")));
+    }
+    // A download that names its own file (`curl -O URL`, `-J`, `wget URL` without -O) writes a name the URL decides.
+    if (head === "curl" || head === "wget") {
+      const saves = head === "wget" ? !args.some((a) => /^(?:-O|--output-document)/.test(a)) : args.some((a) => /^-[A-Za-z]*[OJ]|^--remote-name|^--remote-header-name/.test(a));
+      if (saves) {
+        unknownWrite = true;
+        for (const a of args) if (/^[a-z][\w+.-]*:\/\//i.test(a)) written.add(clean(a.replace(/[?#].*$/, "").replace(/^.*\//, "")));
+      }
+    }
     if (head === "tee") for (const a of flagless) written.add(clean(a));
     // Readers on the safe list that still write a file: `sort -o OUT`, `uniq IN OUT`, `xxd -r IN OUT`.
-    if (head === "sort") for (let i = 0; i < args.length; i++) {
-      if (/^(?:-o|--output)$/.test(args[i]!)) written.add(clean(args[i + 1] ?? ""));
+    // Output options of the other readers on the list (`sort -o`, `tree -o`), also at the end of a flag cluster (`sort -uo OUT`).
+    if (head === "sort" || head === "tree") for (let i = 0; i < args.length; i++) {
+      if (/^-[A-Za-z]*o$|^--output$/.test(args[i]!)) written.add(clean(args[i + 1] ?? ""));
       else if (/^--output=/.test(args[i]!)) written.add(clean(args[i]!.slice(9)));
       else if (/^-[A-Za-z]*o./.test(args[i]!) && !args[i]!.startsWith("--")) written.add(clean(args[i]!.replace(/^-[A-Za-z]*?o/, "")));
     }
-    if ((head === "uniq" || (head === "xxd" && args.includes("-r"))) && flagless.length >= 2) written.add(clean(flagless[flagless.length - 1]!));
+    if ((head === "uniq" || head === "xxd") && flagless.length >= 2) written.add(clean(flagless[flagless.length - 1]!));
+    // zip OUT.zip files; tar -c/-r/-u -f OUT; sed -i FILE and sed's `w FILE`: archive or file output the command names.
+    if (head === "zip" && flagless.length) written.add(clean(flagless[0]!));
+    if (head === "tar") {
+      const mode = (args[0] ?? "").replace(/^-/, "");
+      const makes = /^[A-Za-z]*[cru]/.test(mode) || args.some((a) => /^--(?:create|append|update)$/.test(a));
+      for (let i = 0; i < args.length; i++) {
+        if (makes && /^-?[A-Za-z]*f$/.test(args[i]!) && !args[i]!.startsWith("--")) written.add(clean(args[i + 1] ?? ""));
+        else if (makes && /^--file=/.test(args[i]!)) written.add(clean(args[i]!.slice(7)));
+        else if (makes && args[i] === "--file") written.add(clean(args[i + 1] ?? ""));
+      }
+    }
+    if (head === "sed") {
+      // `sed -n 'w OUT'`, `sed 's/a/b/w OUT'`. (`sed -i` edits a file that already exists, so it is not counted here.)
+      for (const a of args) {
+        const m = /(?:^|[;{}\n])\s*[wW]\s+(\S+)\s*$/.exec(a) ?? /^s(.).*\1.*\1[gpiImMe0-9]*[wW]\s+(\S+)\s*$/s.exec(a);
+        if (m) written.add(clean(m[m.length - 1]!));
+      }
+    }
     for (let i = 0; i < args.length; i++) {
       if ((head === "curl" && /^(?:-o|--output)$/.test(args[i]!)) || (head === "wget" && /^(?:-O|--output-document)$/.test(args[i]!))) written.add(clean(args[i + 1] ?? ""));
       const of = /^of=(.+)$/.exec(args[i]!);
@@ -908,6 +941,68 @@ function usesScratchUnsafely(c: string): boolean {
     for (const m of text.matchAll(/(?:^|[^\w.])import\s+([\w., ]+)/g)) if (named(m[1]!)) return true; // `import os, c`
     return false;
   };
+  // A write by the shell, or a /tmp path somewhere other than in the inline code itself: self-contained inline code that names
+  // its own /tmp file is placed by inlineCodeOk, as before.
+  const playOutside = (code: string): boolean => written.size > 0 || scratchVars.size > 0 || scratchWord.test(code === "" ? c : c.split(code).join(""));
+  const inScratchPlay = written.size > 0 || scratchVars.size > 0 || scratchWord.test(c);
+  const interpWords = "python[\\d.]*|pypy[\\d.]*|ipython[\\d.]*|node(?:js)?|tsx|ts-node|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh";
+  const interpreters = new RegExp(`^(?:${interpWords})$`);
+  // Any word by which inline code can bring in or run other code, a dotted one too (`runpy.run_path`, `os.system`), or the
+  // shell's `source` / `.`. Reading a file as data (`readFileSync`) is not a loader; feeding it to exec / eval / Function is.
+  // A static import of a plain module name (`import json`, `from os import path`, `require('fs')`) can only load a module
+  // that `named` checks against the files the command wrote, so it is taken out first; a path or built name is not.
+  const loadsCode = (text: string): boolean => {
+    if (unknownWrite) return /\b(?:import|from|require\w*|include\w*|source|load\w*|use|do|exec\w*|eval\w*)\b|__import__|\w*Context\b|(?:^|[;&|(\s])\.\s+\S/.test(text) || loadsCodeStripped(text);
+    return loadsCodeStripped(text);
+  };
+  const loadsCodeStripped = (text: string): boolean => {
+    const rest = text
+      .replace(/\bfrom\s+[\w.]+\s+import\s+[\w*, ]+/g, " ")
+      .replace(/\bimport\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*/g, " ")
+      .replace(/\brequire\(\s*['"][^'"./][^'"]*['"]\s*\)/g, " ");
+    return /\b(?:\w*exec\w*|\w*eval\w*|require\w*|import\w*|__import__|source|load\w*|dofile|include\w*|use|do|run_path|runpy|system|spawn\w*|popen|fork|Function|compile|subprocess|child_process|\w*Context)\b|(?:^|[;&|(\s])\.\s+\S/.test(rest);
+  };
+  // A heredoc fed to an interpreter is inline code too (the parser skips its body).
+  if (inScratchPlay) {
+    const heredoc = new RegExp(`\\b(?:${interpWords})\\b[^\\n;|&]*<<-?\\s*['"]?\\w+['"]?[^\\n]*\\n([\\s\\S]*)`, "g");
+    for (const m of c.matchAll(heredoc)) if (playOutside(m[1]!) && (loadsCode(m[1]!) || mentionsWritten(m[1]!))) return true;
+    // Code piped to an interpreter that has no script argument (`echo "import c" | python3 -`, `cat c.py | node`) is read from stdin:
+    // the text before the pipe is checked like a heredoc body, and a pipe from `cat` of a written or scratch file is code too.
+    // A here-string is code on stdin too: the rest of the line is checked like a heredoc body.
+    const hereStr = new RegExp(`\\b(?:${interpWords})\\b[^\\n;|&]*<<<[ \\t]*([^\\n]*)`, "g");
+    for (const m of c.matchAll(hereStr)) if (playOutside(m[1]!) && (loadsCode(m[1]!) || mentionsWritten(m[1]!))) return true;
+    // The segment after each pipe is parsed: redirects dropped, runners looked through, then an interpreter with no script
+    // operand (no word with a dot or slash) and no -c/-e code reads its program from stdin; a lone `-` is stdin too.
+    const pipeSeg = /(?<!\|)\|(?!\|)((?:(?!&&)[^;\n|)])*)/g;
+    const piped: { index: number }[] = [];
+    for (const m of c.matchAll(pipeSeg)) {
+      const words = m[1]!
+        .replace(/\d*>&\d+|&>>?\s*\S+|\d*>>?\s*\S+|\d*<\s*\S+/g, " ")
+        .split(/\s+/)
+        .filter((w) => w !== "" && w !== "&");
+      while (words.length && /^(?:env|exec|nohup|time)$/.test(words[0]!)) words.shift();
+      let ai = 0;
+      if (words.length && /^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(words[0]!)) {
+        ai = words.findIndex((w) => interpreters.test(w.replace(/^.*\//, "")));
+        if (ai < 0) continue;
+      }
+      if (!interpreters.test((words[ai] ?? "").replace(/^.*\//, ""))) continue;
+      const rest = words.slice(ai + 1);
+      // Only a flag that carries inline code (one with an operand after it) means the program is not on stdin; for shells
+      // only a cluster ending in `c` does (`bash -e` is errexit, `python3 -E` ignores the environment, `node -p` has no code).
+      const shellInterp = /^(?:sh|bash|zsh|dash|ksh)$/.test((words[ai] ?? "").replace(/^.*\//, ""));
+      const codeFlag = shellInterp ? /^-[A-Za-z]*c$/ : /^-[A-Za-z]*[cermEpM]|^--(?:eval|print|require|import|exec)\b/;
+      if (rest.some((a, k) => codeFlag.test(a) && k + 1 < rest.length)) continue;
+      if (rest.some((a) => a !== "-" && /[./]/.test(a))) continue;
+      piped.push({ index: m.index! });
+    }
+    for (const m of piped) {
+      const before = c.slice(0, m.index);
+      if (loadsCode(before) || mentionsWritten(before)) return true;
+      const last = before.split(/[;&|\n]/).pop() ?? "";
+      if (/^\s*cat\b/.test(last) && last.split(/\s+/).some((w) => w !== "cat" && !w.startsWith("-") && w !== "" && (isWritten(w) || isScratch(w)))) return true;
+    }
+  }
   let extracted = false;
   for (const p of parsed) {
     let { head, args } = p;
@@ -957,8 +1052,26 @@ function usesScratchUnsafely(c: string): boolean {
     if (tooling.has(sh) && sh !== "git" && [...written].some((p) => /(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.yml)?|\.pnpmfile\.cjs|package\.json)$/.test(p))) return true;
     // Only the inline code or module name (the words after -c/-e/-r/-m) is checked here; a written file given as plain data
     // to a checked-in script (`node scripts/use.js out.json`) is judged below as before.
-    const codeAt = args.findIndex((a) => /^-[A-Za-z]*[cermE]$/.test(a) || a === "--eval");
-    if (written.size > 0 && codeAt >= 0 && /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh)$/.test(sh) && (mentionsWritten(args.slice(codeAt + 1).join(" ")) || (/^-[A-Za-z]*m$/.test(args[codeAt]!) && named(args[codeAt + 1] ?? "")))) return true;
+    // Any single-dash flag cluster holding c/e/E/r/m/M/p (`-c`, `-pe`, `-mc`, `-MC`, `-ec`), or --eval / --print / --require.
+    // An interpreter behind a runner (`pnpm exec node -e`, `pnpm tsx -e`, `npx tsx -e`, `uv run python -c`, `poetry run python -c`).
+    let ish = sh;
+    let iargs = args;
+    if (/^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(sh)) {
+      // The first interpreter word anywhere in the arguments (`pnpm --filter x exec node`, `uv run --with y python`).
+      const j = iargs.findIndex((a) => interpreters.test(a.replace(/^.*\//, "")));
+      if (j >= 0) { ish = iargs[j]!.replace(/^.*\//, ""); iargs = iargs.slice(j + 1); }
+    }
+    const codeAt = iargs.findIndex((a) => /^-[A-Za-z]*[cermEpM]/.test(a) || /^--(?:eval|print|require|import|exec)\b/.test(a));
+    if (codeAt >= 0 && interpreters.test(ish) && playOutside(iargs.slice(codeAt + 1).join(" "))) {
+      const args = iargs;
+      const flag = args[codeAt]!;
+      const code = args.slice(codeAt + 1).join(" ");
+      // After a write or with a /tmp path anywhere, inline code that loads, requires, sources, imports or executes anything gets
+      // no Allow, whatever it names: it can build the file name at run time. A module named by a joined flag (`-mc`, `-MC`) counts.
+      if (loadsCode(code) || loadsCode(flag.replace(/^-[A-Za-z]*?[mMr]/, "import "))) return true;
+      if (mentionsWritten(code) || named(flag.replace(/^-[A-Za-z]*?[mMr]/, ""))) return true;
+      if (/^-[A-Za-z]*[mMr]$|^--(?:require|import)$/.test(flag) && named(args[codeAt + 1] ?? "")) return true; // `-m c`, `-r ./c.js`
+    }
     const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
       // `bash -c -- 'cmd'`: the command string is the first word after -c that is not `--`.
