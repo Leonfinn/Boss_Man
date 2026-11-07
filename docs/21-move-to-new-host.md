@@ -175,11 +175,19 @@ List what is still running, then stop each remaining service except `db` by name
 docker compose ps --services --filter status=running
 ```
 
-That list misses runner containers, which the launcher starts outside Compose. They should be gone already: the CEO's "all runs ended, merges frozen" message means none is left. Confirm with this; it must print nothing (a name still listed is a run in progress, so stop and ask the CEO before going on):
+That list misses runner containers, which the launcher starts outside Compose. The launcher keeps one `boss-man-runner-<company>` container per company running (restart policy `unless-stopped`), and it stays up after the CEO's "all runs ended, merges frozen" message, with the company data folder mounted. Stopping the launcher does not stop it. First check that no run is in progress (the CEO's "all runs ended" message); if unsure, stop and ask the CEO. Then stop the runners (skip if the list is empty):
+
+```sh
+docker stop $(docker ps -q --filter name=boss-man-runner-)
+```
+
+Re-run the check; it must now print nothing:
 
 ```sh
 docker ps --filter name=boss-man-runner- --format '{{.Names}}'
 ```
+
+The launcher starts the runners again by itself on the new host, so you do not start them by hand.
 
 ntfy runs as its own Compose project, so that list does not show it. Stop it too, so nothing writes to `$NTFY_DATA` while it is copied (skip if you do not run ntfy):
 
