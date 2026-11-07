@@ -6,7 +6,7 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
-import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
+import { MERGE_MISSED_AFTER_MS, ticketRef } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
@@ -20,7 +20,7 @@ import { getHold } from "./maintenance.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { derivedSignoff, sweepMissingSignoffs } from "./signoff.js";
 import { progressSweep } from "./progress.js";
-import { CARRY_ON_NOTE, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
+import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
   staleAfterMs: number;
@@ -63,6 +63,10 @@ export type SweepLimits = {
   emptyRunsBeforeReassign: number;
   /** After a CEO plan's deadline the stuck card stays quiet this much longer (BOS-612). */
   planGraceMs: number;
+  /** One "agents are idle, hand out work" wake to the CEO per company per this long (BOS-615). */
+  idleAskEveryMs: number;
+  /** More tickets than this in review and the CEO's idle-agents list puts no-code work first (BOS-615). */
+  mergeLineLongAt: number;
   /** After a runner restart, how long its replayed "interrupted" reports get before a run it never reported is closed as lost (BOS-579). */
   restartReplayMs: number;
 };
@@ -86,8 +90,12 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   idleFillsPerDay: 4,
   emptyRunsBeforeReassign: 3,
   planGraceMs: 30 * 60_000,
+  idleAskEveryMs: 30 * 60_000,
+  mergeLineLongAt: 10,
   restartReplayMs: 2 * 60_000,
 };
+/** How many unassigned tickets the CEO's idle-agents wake lists (BOS-615). */
+const IDLE_ASK_TICKETS = 8;
 /**
  * The line a re-queued wake carries at the end of its note: it is how the retries of one original
  * wake are counted without a column (BOS-480), and it tells the agent why it was started again.
@@ -971,7 +979,6 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
         ),
       );
-    if (!rows.length) return result;
     const busy = await busyAgents();
     const rank = (c: (typeof rows)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
     const candidates = rows
@@ -1017,7 +1024,171 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       room.set(ticket.companyId, (room.get(ticket.companyId) ?? 0) - 1);
       result.woken++;
     }
-    return result;
+    const roomIn = async (companyId: string) => {
+      if (!room.has(companyId)) room.set(companyId, await opts.freeSlots!(companyId));
+      return room.get(companyId) ?? 0;
+    };
+    const ready = await readySlots(t, busy, roomIn, (companyId) => room.set(companyId, (room.get(companyId) ?? 0) - 1));
+    const asked = await askCeoForWork(t, busy, roomIn);
+    return { ...result, ready, asked };
+  }
+
+  /**
+   * Tier 2 of the idle-slot sweep (BOS-615): an idle agent's assigned `ready` ticket is its next up (the CEO
+   * or PM puts the plan's next ticket there), so a free slot starts it at once rather than after missed
+   * work's half hour. Agents with in-progress work that isn't waiting on a booked check are left to tier 1
+   * and missed work, so a ready ticket never pulls an agent off what it was doing. Same order, quiet time and
+   * per-ticket limits as tier 1; blocked tickets and plan-first ones awaiting approval are skipped, and so is a
+   * ticket missed work has already nudged today (its own ladder ends in the "looks stuck" card).
+   */
+  async function readySlots(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>, take: (companyId: string) => void) {
+    const msObjective = alias(objectives, "ms_objective");
+    const rows = await db
+      .select({ ticket: tickets, krPriority: objectives.priority, msPriority: msObjective.priority })
+      .from(tickets)
+      .innerJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
+      .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+      .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
+      .leftJoin(msObjective, eq(msObjective.id, milestones.objectiveId))
+      .where(
+        and(
+          eq(tickets.systemState, "ready"),
+          eq(agents.paused, false),
+          isNull(agents.retiredAt),
+          eq(companies.paused, false),
+          // Plan-first tickets wait for their plan's approval, as in missed work.
+          or(eq(tickets.planFirst, false), isNotNull(tickets.planApprovedAt)),
+          // Quiet as long as tier 1 asks, so a ticket just assigned (its "assigned" wake) or just handed back isn't doubled.
+          lte(tickets.lastActivityAt, new Date(t.getTime() - limits.idleFillAfterMs)),
+          isNull(tickets.monitorAt),
+          sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
+          sql`not exists (select 1 from tickets doing where doing.assignee_agent_id = ${tickets.assigneeAgentId} and doing.system_state = 'in_progress' and doing.monitor_at is null)`,
+        ),
+      );
+    const rank = (c: (typeof rows)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
+    const candidates = rows
+      .filter((c) => !busy.has(c.ticket.assigneeAgentId!))
+      .sort((a, b) => Number(b.ticket.urgent) - Number(a.ticket.urgent) || rank(a) - rank(b) || a.ticket.createdAt.getTime() - b.ticket.createdAt.getTime());
+    let woken = 0;
+    for (const { ticket } of candidates) {
+      const agentId = ticket.assigneeAgentId!;
+      if (busy.has(agentId)) continue;
+      if ((await roomIn(ticket.companyId)) <= 0) continue;
+      if (await isBlocked(ticket.id)) continue;
+      const ticketRuns = await db.select({ lastEventAt: runs.lastEventAt, endedAt: runs.endedAt }).from(runs).where(eq(runs.ticketId, ticket.id));
+      if (ticketRuns.some((r) => !r.endedAt)) continue;
+      const lastActive = ticketRuns.reduce<Date>((m, r) => later(later(m, r.lastEventAt), r.endedAt)!, ticket.lastActivityAt);
+      if (t.getTime() - lastActive.getTime() < limits.idleFillAfterMs) continue;
+      const recent = await db
+        .select({ createdAt: wakes.createdAt, reason: wakes.reason })
+        .from(wakes)
+        .where(and(eq(wakes.ticketId, ticket.id), inArray(wakes.reason, [IDLE_SLOT_REASON, MISSED_REASON]), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
+        .orderBy(desc(wakes.createdAt));
+      // Once missed work has nudged this ticket, its ladder (two wakes, then "looks stuck") owns it; more wakes here would only hold that card back.
+      if (recent.some((w) => w.reason === MISSED_REASON)) continue;
+      if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.idleFillEveryMs) continue;
+      if (recent.length >= limits.idleFillsPerDay) continue;
+      await opts.wake({
+        agentId,
+        ticketId: ticket.id,
+        reason: IDLE_SLOT_REASON,
+        priority: 1,
+        note: `A run slot is free and you have nothing else running, so start this ticket: it is assigned to you and ready, which makes it your next up. If it can't start yet (it waits on something, or isn't yours to do), say why on the ticket and move it back to backlog or blocked, so Boss Man doesn't offer it again.`,
+      });
+      busy.add(agentId);
+      take(ticket.companyId);
+      woken++;
+    }
+    return woken;
+  }
+
+  /**
+   * Tier 3 of the idle-slot sweep (BOS-615): slots are still free, and some agents have nothing to do (idle,
+   * no ready or in-progress ticket, no review they owe; the stalled-review sweep handles reviewers). The
+   * server doesn't pick unassigned work itself, as the fit (role, plan first, risk) is the CEO's call, so the
+   * CEO gets one batched wake listing the idle agents and the top unassigned tickets. At most one per
+   * company per `idleAskEveryMs`, and none while the same agents and tickets were already listed within
+   * `missedEveryMs`, so an agent the CEO leaves idle on purpose doesn't start a CEO run every half hour.
+   */
+  async function askCeoForWork(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>) {
+    const idle = await db
+      .select({ id: agents.id, companyId: agents.companyId, name: agents.name, title: agents.title, role: agents.role })
+      .from(agents)
+      .innerJoin(companies, eq(companies.id, agents.companyId))
+      .where(
+        and(
+          ne(agents.role, "ceo"),
+          eq(agents.paused, false),
+          isNull(agents.retiredAt),
+          eq(companies.paused, false),
+          sql`not exists (select 1 from tickets mine where mine.assignee_agent_id = ${agents.id} and mine.system_state in ('ready', 'in_progress'))`,
+          sql`not exists (select 1 from review_requests owed join tickets reviewed on reviewed.id = owed.ticket_id where owed.reviewer_agent_id = ${agents.id} and owed.status = 'pending' and reviewed.system_state = 'review')`,
+        ),
+      )
+      .orderBy(asc(agents.name));
+    const byCompany = new Map<string, typeof idle>();
+    for (const a of idle) if (!busy.has(a.id)) byCompany.set(a.companyId, [...(byCompany.get(a.companyId) ?? []), a]);
+    let asked = 0;
+    for (const [companyId, people] of byCompany) {
+      const free = await roomIn(companyId);
+      if (free <= 0) continue;
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), eq(agents.paused, false), isNull(agents.retiredAt)));
+      if (!ceo) continue;
+      const lastAsks = await db
+        .select({ note: wakes.note, createdAt: wakes.createdAt })
+        .from(wakes)
+        .where(and(eq(wakes.companyId, companyId), eq(wakes.reason, IDLE_AGENTS_REASON), gt(wakes.createdAt, new Date(t.getTime() - limits.missedEveryMs))))
+        .orderBy(desc(wakes.createdAt))
+        .limit(1);
+      if (lastAsks[0] && t.getTime() - lastAsks[0].createdAt.getTime() < limits.idleAskEveryMs) continue;
+      const msObjective = alias(objectives, "ms_objective");
+      const open = await db
+        .select({ ticket: tickets, prefix: companies.ticketPrefix, krPriority: objectives.priority, msPriority: msObjective.priority })
+        .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
+        .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+        .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
+        .leftJoin(msObjective, eq(msObjective.id, milestones.objectiveId))
+        .where(and(eq(tickets.companyId, companyId), inArray(tickets.systemState, ["backlog", "ready"]), isNull(tickets.assigneeAgentId)));
+      if (!open.length) continue;
+      // While the merge line is long, work that needs no check slot (no-code: research, wiki, docs) goes first.
+      const [{ waiting } = { waiting: 0 }] = await db.select({ waiting: sql<number>`count(*)::int` }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")));
+      const lineLong = waiting > limits.mergeLineLongAt;
+      const rank = (c: (typeof open)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
+      open.sort(
+        (a, b) =>
+          (lineLong ? Number(b.ticket.noCode) - Number(a.ticket.noCode) : 0) ||
+          Number(b.ticket.urgent) - Number(a.ticket.urgent) ||
+          rank(a) - rank(b) ||
+          Number(b.ticket.systemState === "ready") - Number(a.ticket.systemState === "ready") ||
+          a.ticket.createdAt.getTime() - b.ticket.createdAt.getTime(),
+      );
+      const top: string[] = [];
+      for (const { ticket, prefix } of open) {
+        if (top.length >= IDLE_ASK_TICKETS) break;
+        if (await isBlocked(ticket.id)) continue;
+        const marks = [ticket.systemState, ticket.urgent ? "urgent" : null, ticket.noCode ? "no code, needs no check slot" : null, ticket.planFirst ? "plan first" : null, ticket.risk ? `${ticket.risk} risk` : null].filter(Boolean).join(", ");
+        top.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (${marks})`);
+      }
+      if (!top.length) continue;
+      // The lists, without the slot count that changes every pass: the same lists already asked about aren't asked again.
+      const body = [
+        `Idle agents (no live run, no ready or in-progress ticket, no review owed):`,
+        ...people.map((p) => `- ${p.name} (${p.title ?? p.role})`),
+        ``,
+        `Unassigned tickets, most important first${lineLong ? ` (no-code first: ${waiting} tickets wait to merge)` : ""}:`,
+        ...top,
+        ``,
+        `Give an idle agent its next ticket with assign_ticket and move it to ready; Boss Man then starts it in a free slot. Match the role, keep plan-first and risky work for agents who can carry it, and leave an agent idle if nothing fits. You are asked again only when this list changes.`,
+      ].join("\n");
+      if (lastAsks[0]?.note?.endsWith(`\n${body}`)) continue;
+      await opts.wake({ agentId: ceo.id, reason: IDLE_AGENTS_REASON, priority: 1, note: `${free} run slot${free === 1 ? " is" : "s are"} free and ${people.length === 1 ? "an agent has" : `${people.length} agents have`} nothing to work on.\n${body}` });
+      asked++;
+    }
+    return asked;
   }
 
   /**
