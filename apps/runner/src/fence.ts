@@ -169,10 +169,32 @@ export function addGitConfig(env: NodeJS.ProcessEnv, key: string, value: string)
 
 /**
  * The runner's fence setting for its SessionManager: its self-tested level, each agent's home in
- * the runner's data volume, and the pnpm store pnpm already uses at the workspaces volume's root.
+ * the runner's data volume, and the pnpm store under the workspaces volume's root.
+ * The store is always a folder under the volume, never the volume's root itself or `/`: the fence
+ * grants everything beneath a rule, so the root would hand agents the whole volume (other agents'
+ * copies, the merge gate's results), and the gate's own store (`<store>-gate`) would land on the
+ * runner's root disk (BOS-633).
  */
 export function runnerFence(level: FenceLevel, dataDir: string, workspacesRoot: string) {
   return { level, agentsRoot: path.join(dataDir, "agents"), pnpmStore: path.join(workspacesRoot, ".pnpm-store") };
+}
+
+/**
+ * The shared pnpm store the runner will actually use (BOS-568), where PNPM_STORE_DIR may move it (e.g. to a
+ * folder on a bigger volume). Empty means `<workspacesRoot>/.pnpm-store`. The value must be a folder strictly
+ * under the workspaces volume: `/`, the volume's root and anything above it are refused, since the fence would
+ * grant the whole volume and the gate store beside the store would leave the volume's own disk (BOS-633).
+ */
+export function pnpmStoreDir(workspacesRoot: string, raw: string | undefined): string {
+  const p = (raw ?? "").trim();
+  if (!p) return path.join(workspacesRoot, ".pnpm-store");
+  if (!p.startsWith("/") || p.includes("\0") || p.split("/").includes("..")) throw new Error(`PNPM_STORE_DIR should be an absolute path inside the runner, like ${path.join(workspacesRoot, ".pnpm-store")}, not ${raw}`);
+  const resolved = path.posix.normalize(p).replace(/\/+$/, "") || "/";
+  const root = path.resolve(workspacesRoot);
+  if (resolved === "/" || resolved === root || !resolved.startsWith(root + "/")) {
+    throw new Error(`PNPM_STORE_DIR must be a folder under ${root} (the runner's only writable volume), not ${raw}: the volume's root would grant agents the whole volume and put the gate's store on the root disk`);
+  }
+  return resolved;
 }
 
 /**
@@ -200,6 +222,33 @@ export function sandboxSelfTest(): SandboxReport {
     }
   }
   return { landlockAbi: abi, errno, level: probe === false ? "unavailable" : level, missing, userns, probe };
+}
+
+/**
+ * Prunes one pnpm store of packages no install references any more (BOS-633). Both stores only ever grow as
+ * lockfiles change, on the volume every agent's work lives on, so the runner does this daily. pnpm's store
+ * lock makes it safe beside a running install, and it never removes a package something still links to.
+ * Never throws: a missing store, a wrong pnpm or a busy lock is logged and skipped, and there is always the next run.
+ */
+export function pruneStore(storeDir: string, log: (m: string) => void = () => {}, bin = "pnpm"): { pruned: boolean; why?: string } {
+  if (!existsSync(storeDir)) return { pruned: false, why: "no store yet" };
+  const r = spawnSync(bin, ["store", "prune", "--store-dir", storeDir], { encoding: "utf8", timeout: 10 * 60_000 });
+  if (r.error) {
+    log(`pnpm store prune of ${storeDir} failed: ${r.error.message}`);
+    return { pruned: false, why: r.error.message };
+  }
+  if (r.status !== 0) {
+    const why = (r.stderr || r.stdout || "").trim().split("\n").slice(-3).join(" ") || `exit ${r.status}`;
+    log(`pnpm store prune of ${storeDir} failed: ${why}`);
+    return { pruned: false, why };
+  }
+  log(`pnpm store prune of ${storeDir}: ${(r.stdout || "").trim().split("\n").pop() ?? "done"}`);
+  return { pruned: true };
+}
+
+/** Prunes the shared store and the gate's store beside it, in turn, one failing without stopping the other. */
+export function pruneStores(shared: string, log: (m: string) => void = () => {}, bin = "pnpm") {
+  return { shared: pruneStore(shared, log, bin), gate: pruneStore(`${shared}-gate`, log, bin) };
 }
 
 /**
