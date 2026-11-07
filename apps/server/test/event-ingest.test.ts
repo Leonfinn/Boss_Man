@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, costEvents, fundingSources, quotaSamples, runnerEvents, runners, runs, runTokens } from "../src/db/schema.js";
+import { activity, costEvents, fundingSources, quotaSamples, runnerEventAttempts, runnerEvents, runners, runs, runTokens } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -72,6 +72,32 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     // A resend of the same seq is a duplicate: not applied again, not stored twice.
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
+    // A resent event the server already has must not leave a try-count row behind (BOS-606, Rod).
+    expect(await c.db.select().from(runnerEventAttempts)).toHaveLength(0);
+  });
+
+  it("leaves no try-count row behind when the same event is ingested twice (BOS-606, Rod)", async () => {
+    const c = (ctx = await setup());
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.ended" as const, runId: c.runId, stopReason: "end_turn", error: null } };
+    // The runner replays already-stored events after every reconnect, so a duplicate is the normal case.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
+    expect(await c.db.select().from(runnerEventAttempts)).toHaveLength(0);
+  });
+
+  it("clears a failed event's try count once it is kept and acked (BOS-606, Rod)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    // A plain Error with no code: retried to the cap, then kept, marked and acked.
+    vi.spyOn(c.funding, "recordCost").mockImplementation(async () => {
+      throw new Error("something went wrong applying this");
+    });
+    await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("something went wrong");
+    await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("something went wrong");
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(runnerEventAttempts)).toHaveLength(0);
   });
 
   // BOS-623: markEnded deleted the token on the outer handle, which on PGlite's one connection waits

@@ -142,23 +142,20 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   }
 
   /**
-   * How applying this event failed, which decides whether to retry it, retry a few times, or store,
-   * mark and ack it so the stream moves on (BOS-584, BOS-606).
-   *
-   * - `permanent`: a data or constraint error (SQLSTATE 22/23), or a clear code bug: it fails the same
-   *   way on every resend, so keep it, mark it and ack it.
-   * - `transient`: a database connection failure (Node codes such as ECONNRESET, or pg's codeless
-   *   "Connection terminated" / pool timeout), SQLSTATE 08xxx/40xxx, or any other coded Postgres
-   *   error: the database may come back, so roll back and let the runner resend.
-   * - `unknown`: no code at all and not a clear code bug. It could be a payload bug, so after
-   *   MAX_APPLY_ATTEMPTS tries it is stored, marked and acked rather than stalling the stream for ever.
+   * Whether a database problem is temporary: a connection failure, SQLSTATE 08xxx/40xxx, or any
+   * other coded Postgres error. These always roll back and let the runner resend, and are never
+   * counted toward the retry cap (BOS-584, BOS-606).
    */
-  function applyFailure(err: unknown, attempts: number): "permanent" | "transient" | "unknown" {
+  function isTransientApplyError(err: unknown): boolean {
     const code = sqlStateOf(err);
-    if (code !== null) return /^2[23]/.test(code) ? "permanent" : "transient";
-    if (isTransientConnectionError(err)) return "transient";
-    if (isClearCodeError(err)) return "permanent";
-    return attempts >= MAX_APPLY_ATTEMPTS ? "permanent" : "unknown";
+    if (code !== null) return !/^2[23]/.test(code);
+    return isTransientConnectionError(err);
+  }
+
+  /** A clear code bug: it fails the same way on every resend, so it is kept, marked and acked at once. */
+  function isPermanentApplyError(err: unknown): boolean {
+    const code = sqlStateOf(err);
+    return code !== null ? /^2[23]/.test(code) : isClearCodeError(err);
   }
 
   /**
@@ -305,26 +302,51 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       // effect is rolled back and the event is kept, marked and logged, so the stream moves on.
       // An unexplained error is retried MAX_APPLY_ATTEMPTS times before that (BOS-606), so a database
       // blip is never dropped, while a payload bug still can't hold the stream for ever.
-      let skipped: string | null = null;
-      // A transient failure rolls back the whole ingest, so the tries for one seq are counted in a
-      // small transaction of their own that commits before it. That count can't live on the event row:
-      // a rollback there would take it too, and an event that never applies would be retried for ever.
-      const tried = await bumpAttempt(runner.id, entry.seq);
-      const { inserted, afterCommit } = await db.transaction(async (tx) => {
-        const rows = await tx
-          .insert(runnerEvents)
-          .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
-          .onConflictDoNothing()
-          .returning({ id: runnerEvents.id });
-        if (rows.length === 0) return { inserted: false, afterCommit: [] as Array<() => Promise<unknown>> };
-        // The savepoint separates applying from storing, so a data error can undo only the effects
-        // while the event row stays and the stream moves on.
-        try {
+      // Tries are counted only when applying fails, in a small transaction of their own that commits
+      // on its own. A failed ingest rolls back the whole event transaction, so the count can't live
+      // on the event row: a rollback there would take it too, and an event that never applies would
+      // be retried for ever. Counting only on failure also means the normal path costs no extra write
+      // and a resent event that has already landed leaves nothing behind (BOS-606).
+      try {
+        const { inserted, afterCommit } = await db.transaction(async (tx) => {
+          const rows = await tx
+            .insert(runnerEvents)
+            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
+            .onConflictDoNothing()
+            .returning({ id: runnerEvents.id });
+          if (rows.length === 0) return { inserted: false, afterCommit: [] as Array<() => Promise<unknown>> };
+          // The savepoint separates applying from storing, so a data error can undo only the effects
+          // while the event row stays and the stream moves on.
           const work = await tx.transaction((sp) => apply(sp, runner, entry.event, at));
           return { inserted: true, afterCommit: work };
-        } catch (err) {
-          if (applyFailure(err, tried) !== "permanent") throw err;
-          skipped = (err as Error).message;
+        });
+        // Landed (applied): the event and its effects are committed, so any tries are history.
+        if (inserted) await clearAttempts(runner.id, entry.seq);
+        if (inserted) {
+          // Only outward-facing work (the permission hook) runs after the commit, and it is repeatable.
+          for (const step of afterCommit) await step();
+          for (const h of syncHooks) await h(runner, entry.event);
+          for (const l of listeners) l(runner, entry.event);
+        }
+        return inserted;
+      } catch (err) {
+        // A temporary database problem: roll back and let the runner resend. It is never counted
+        // toward the cap, so an outage can't burn an event's tries.
+        if (isTransientApplyError(err)) throw err;
+        // A clear code bug is permanent on the first try. Any other unexplained error might be a
+        // payload bug, so it is retried up to MAX_APPLY_ATTEMPTS before being kept and acked. The
+        // count is bumped outside the (now rolled-back) event transaction, on its own connection.
+        const permanent = isPermanentApplyError(err);
+        const tried = permanent ? 1 : await bumpAttempt(runner.id, entry.seq);
+        if (!permanent && tried < MAX_APPLY_ATTEMPTS) throw err;
+        const skipped = (err as Error).message;
+        // Keep the event without its effects, mark it and ack it so the stream moves on: the insert
+        // and the activity row commit together, and the tries are cleared once it has landed.
+        await db.transaction(async (tx) => {
+          await tx
+            .insert(runnerEvents)
+            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
+            .onConflictDoNothing();
           await record(tx, {
             companyId: runner.companyId,
             kind: "runner_event_failed",
@@ -332,18 +354,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
             detail: { seq: entry.seq, type: entry.event.type, error: skipped, attempts: tried },
             at,
           });
-          return { inserted: true, afterCommit: [] as Array<() => Promise<unknown>> };
-        }
-      });
-      // Landed (applied or skipped for good): its tries are history, and a later resend should start afresh.
-      if (inserted) await clearAttempts(runner.id, entry.seq);
-      if (inserted) {
-        // Only outward-facing work (the permission hook) runs after the commit, and it is repeatable.
-        for (const step of afterCommit) await step();
-        for (const h of syncHooks) await h(runner, entry.event);
-        for (const l of listeners) l(runner, entry.event);
+        });
+        await clearAttempts(runner.id, entry.seq);
+        return true;
       }
-      return inserted;
     },
 
     /**
