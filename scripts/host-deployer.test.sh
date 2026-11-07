@@ -86,6 +86,15 @@ has "$D/outbox/host.json" '"mode": "'
 hasnt "$D/outbox/host.json" '"login"' # the deployer runs as root and doesn't guess the owner's account
 [[ $(stat -c %a "$D/outbox/host.json") == 644 ]] || fail "host.json is not mode 644"
 node -e 'const h=require(process.argv[1]);if(!Array.isArray(h.ownership)||!h.ownership.length)process.exit(1);for(const o of h.ownership)if(!/^\/[^"]*$/.test(o.path)||!/^[0-7]{3,4}$/.test(o.mode)||!o.owner||!o.group)process.exit(2)' "$D/outbox/host.json" || fail "host.json ownership is malformed: $(cat "$D/outbox/host.json")"
+# 1a2. Roles (BOS-541): each known folder says what it is for. The deployer folder is "deployer"; the install
+# folder is "install", and the backups folder is "backups" (here a separate folder; the default layout, below,
+# has the install folder do both). One row per folder, roles in a fixed order.
+mkdir -p "$BOSSMAN_BACKUP_DIR"; host
+role_of() { node -e 'const h=require(process.argv[1]);const p=process.argv[2];const r=h.ownership.find(o=>o.path===p);if(!r)process.stdout.write("MISSING");else process.stdout.write((r.roles||[]).join(","))' "$D/outbox/host.json" "$1"; }
+[[ $(role_of "$(cd "$D/.." && pwd)") == install ]] || fail "install folder role: $(cat "$D/outbox/host.json")"
+[[ $(role_of "$(cd "$D" && pwd)") == deployer ]] || fail "deployer folder role: $(cat "$D/outbox/host.json")"
+[[ $(role_of "$BOSSMAN_BACKUP_DIR") == backups ]] || fail "backups folder role: $(cat "$D/outbox/host.json")"
+node -e 'const h=require(process.argv[1]);const paths=h.ownership.map(o=>o.path);if(new Set(paths).size!==paths.length)process.exit(1);if(h.ownership.some(o=>!Array.isArray(o.roles)||!o.roles.length))process.exit(2);const all=new Set(h.ownership.flatMap(o=>o.roles));for(const r of all)if(!["install","deployer","backups","data","secrets"].includes(r))process.exit(3)' "$D/outbox/host.json" || fail "host.json roles are malformed: $(cat "$D/outbox/host.json")"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
 sed -i 's/^AVAILABLE_REFRESH_SECONDS=0$/AVAILABLE_REFRESH_SECONDS=300/' "$D/host.conf"
 printf '{"tip":"stale"}\n' >"$D/outbox/available.json"
@@ -95,6 +104,13 @@ host
 [[ $(jget "$D/outbox/available.json" tip) == "$c1" ]] || fail "inbox/check did not refresh the offer"
 [[ ! -e $D/inbox/check ]] || fail "inbox/check was left behind"
 conf 0
+
+# 1c. The default layout: with no BOSSMAN_BACKUP_DIR the backups live in the install folder itself, so that one
+# folder is recorded as both install and backups (BOS-541). R6 reads the role, so it still knows it is private.
+# The deployer sits beside $T/src, as on a real host, so the checkout is found the usual way.
+D_default="$T/default-deployer"; mkdir -p "$D_default/inbox" "$D_default/outbox"
+BOSSMAN_DEPLOYER="$D_default" BOSSMAN_BACKUP_DIR="" "$here/host-deployer.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (default layout)"; }
+node -e 'const h=require(process.argv[1]);const p=process.argv[2];const r=h.ownership.find(o=>o.path===p);if(!r)process.exit(1);const want=["backups","install"];const got=r.roles||[];if(got.join(",")!==want.join(",")){console.error("roles: "+got.join(","));process.exit(2)}' "$D_default/outbox/host.json" "$(cd "$D_default/.." && pwd)" || fail "default install folder roles: $(cat "$D_default/outbox/host.json")"
 
 # 2. A good server request runs the fixed action, writes status and history, and stays quiet on success.
 req server "$c1" 11111111-1111-1111-1111-111111111111
@@ -332,6 +348,18 @@ printf 'REPO=%s\nSOAK_SECONDS=abc\n' "$T/src" >"$D/host.conf"; chmod 600 "$D/hos
 hasnt "$D/outbox/available.json" '"soakSeconds"'
 has "$D/deployer.log" "SOAK_SECONDS is not a whole number of seconds"
 conf 0; : >"$D/inbox/check"; bg
+
+# 14b. BOS-562: a checkout with files the server (user node) can't read is refused before the backup and build; nothing changes.
+reset_world blue "$cur"
+(cd "$T/src" && chmod 600 "$(git ls-files | head -1)")
+bgreq "$b1"; bg --dry-run; has "$T/out" "the real run would stop"; rm -f "$D/inbox/request.json"
+bgreq "$b1"; bg
+has "$D/outbox/status.json" '"result": "failed"'
+has "$D/outbox/status.json" "can't be read by the server"
+[[ "$(git -C "$T/src" rev-parse HEAD)" == "$cur" ]] || fail "moved the checkout despite unreadable files"
+grep -q 'pg_dump' "$STUB_LOG" && fail "backed up despite unreadable files"
+(cd "$T/src" && chmod 644 "$(git ls-files | head -1)")
+reset_world blue "$cur"
 unset COMPOSE_FILE
 bgreq "$b1"; bg --dry-run; has "$T/out" "would run: scripts/deploy.sh --yes --no-runner --commit ${b1:0:8}"; rm -f "$D/inbox/request.json"
 printf "COMPOSE_FILE='docker-compose.yml:deploy/truenas-bluegreen.yml'\n" >"$T/src/.env.tmp"; mv "$T/src/.env.tmp" "$T/src/.env"
@@ -490,6 +518,20 @@ hasnt "$DL" "signal"; live_is green
 # Not blue/green: refused.
 unset COMPOSE_FILE; "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without blue/green should fail"; has "$T/out" "does not use blue/green"
 export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
+
+# 30. A run that was cut off (status stuck on "running"): the next tick marks it failed, puts the checkout back on what answers,
+# drops a trial window for a version that is not running, and touches no container (BOS-494).
+reset_world blue "$P"; git -C "$T/src" fetch -q origin 2>/dev/null || true; git -C "$T/src" reset -q --hard "$b1"
+printf '{"id": "%s", "target": "server", "result": "running", "message": "Running", "from_commit": "%s", "to_commit": "%s", "started": "2026-11-04T23:05:00Z", "ended": "", "at": "2026-11-04T23:05:00Z", "backup": ""}\n' "11111111-1111-1111-1111-111111111111" "$P" "$b1" >"$D/outbox/status.json"
+printf 'old=blue new=green deadline=%s commit=%s prev=%s\n' "$(($(date +%s) + 900))" "$b1" "$P" >"$D/state/soak"
+: >"$DL"; bg
+[[ $(status result) == failed ]] || fail "interrupted run: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "cut off"
+[[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout not put back on the running commit"
+[[ ! -e $D/state/soak ]] || fail "soak for a version that is not running was kept"
+hasnt "$DL" "stopped"; hasnt "$DL" "signal"; live_is blue
+# Ticking again changes nothing more.
+bg; [[ $(status result) == failed ]] || fail "second tick changed the status"
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"

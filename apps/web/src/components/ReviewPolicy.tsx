@@ -76,7 +76,8 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
   };
   return (
     // Seven columns of selects are wider than a card: scroll inside it rather than past its edge.
-    <div style={{ overflowX: "auto" }}>
+    // Vertical stays hidden so a one-pixel overflow can't swallow the page's wheel (BOS-554).
+    <div style={{ overflowX: "auto", overflowY: "hidden" }}>
     <table style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
         <tr style={{ textAlign: "left" }}>

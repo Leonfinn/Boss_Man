@@ -51,7 +51,7 @@ import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
-import { commandProblem, parseStep } from "./steps.js";
+import { commandProblem, parseStep, strayFence } from "./steps.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -543,7 +543,10 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
 export function ownerSetupProblem(steps: string[]): string | null {
   const text = steps.join("\n");
   if (!text.trim()) return "it has no steps";
-  for (const piece of parseStep(text)) {
+  const pieces = parseStep(text);
+  const stray = strayFence(pieces);
+  if (stray !== null) return `a \`\`\` isn't a complete command block, so it would show as raw text: ${stray}`;
+  for (const piece of pieces) {
     if (piece.type !== "command") continue;
     const problem = commandProblem(piece.text);
     if (problem) return `a command is not copy-safe (${problem}): ${piece.text}`;
