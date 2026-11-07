@@ -11,6 +11,7 @@ import { Decisions } from "./pages/Decisions";
 import { Engagement, Engagements } from "./pages/Engagements";
 import { Run } from "./pages/Run";
 import { Runs } from "./pages/Runs";
+import { MergeQueue } from "./pages/MergeQueue";
 import { ProjectsPage, Settings } from "./pages/Settings";
 import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
@@ -62,7 +63,7 @@ function useFeedNotifications(feed: NoticeFeed | null) {
 }
 
 /** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
-const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "rules", "settings", "projects"]);
+const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "merge-queue", "rules", "settings", "projects"]);
 const CHOSEN = "bm-company";
 function remember(id: string, set: (id: string) => void) {
   set(id);
@@ -137,6 +138,13 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   });
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
+  // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
+  // the badge and the page share one request. A failure just leaves the badge off.
+  const mergeQueue = usePoll(
+    (signal) => (current ? api<{ waitingCount: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
+    20_000,
+    `merge-badge-${current?.id}`,
+  );
   useEffect(() => {
     if (inRoute && inRoute !== chosen) remember(inRoute, setChosen);
   }, [inRoute, chosen]);
@@ -176,6 +184,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         decisions={decisions.data ?? []}
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
+        mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
@@ -208,6 +217,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Plan companies={list} companyId={companyId} go={go} />
         ) : page === "runs" ? (
           route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
+        ) : page === "merge-queue" ? (
+          <MergeQueue companies={list} companyId={companyId} />
         ) : page === "tickets" && route[1] ? (
           <Ticket key={route[1]} id={route[1]} companies={list} />
         ) : page === "scrum-master" ? (
