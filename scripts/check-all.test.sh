@@ -402,7 +402,7 @@ if command -v flock >/dev/null; then
   # The retry budget counts from the slot-taken time, not from before the queue wait (P13 Q4). A check that waits
   # longer than the budget, then hits EAGAIN, is still retried; measured from before the wait it was never retried.
   : >"$t/count"; export COUNT="$t/count"
-  rc=0; ( cd "$here/.." && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BUDGET_SECONDS=15 CHECK_ALL_QUEUE_TEST_SLEEP=16 BOSSMAN_CHECK_BODY='echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3' ./scripts/check-all.sh >"$t/budget.out" 2>&1 ) || rc=$?
+  rc=0; ( cd "$here/.." && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BUDGET_SECONDS=8 CHECK_ALL_QUEUE_TEST_SLEEP=9 BOSSMAN_CHECK_BODY='echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3' ./scripts/check-all.sh >"$t/budget.out" 2>&1 ) || rc=$?
   [ "$rc" -eq 3 ] || fail "budget after queue wait: rc $rc, want 3: $(cat "$t/budget.out")"
   [ "$(runs)" -eq 3 ] || fail "budget after queue wait: ran $(runs) times, want 3 (a long wait must not use up the retry budget)"
   # A signal leaves a trace and frees the queue place: the output, the stored log and the result store get "killed by signal <name>",
