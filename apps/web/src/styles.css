@@ -850,6 +850,11 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .image-thumbs img { width: 120px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
 .file-chip { display: inline-block; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* The collapse toggle, badge dot and Log out icon only appear from just above the phone bar (BOS-290). These base hides must come before the media block below so the block's display rules win. */
+.side .side-collapse { display: none; }
+.side .count-dot { display: none; }
+.side .logout-icon { display: none; }
+
 /* Wherever the menu sits beside the page (a phone turns it into a bar above the page at 640px), it fills the window and stays in view while the page scrolls, scrolling on its own where it is taller than the window. */
 @media (min-width: 641px) {
   /* From just above the phone bar the menu keeps its own column beside the page, so it never wraps onto a full-width row that the full-height rule would then stretch over the whole screen. */
@@ -881,9 +886,6 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
   .side.collapsed .foot .logout { display: inline-flex; align-items: center; justify-content: center; width: 100%; padding: 8px; }
   .side.collapsed .logout-icon { display: block; }
 }
-.side .side-collapse { display: none; }
-.side .count-dot { display: none; }
-.side .logout-icon { display: none; }
 /* A narrow screen's expanded menu opens over the page instead of pushing it (BOS-290). */
 @media (min-width: 641px) and (max-width: 1180px) {
   .app:not(.side-collapsed) > nav.side { position: fixed; z-index: 30; left: 0; top: 0; bottom: 0; width: 232px; box-shadow: 8px 0 24px rgb(0 0 0 / 0.4); }
