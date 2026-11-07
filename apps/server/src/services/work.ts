@@ -65,6 +65,9 @@ type TicketPatch = {
 /** Roles that may move a ticket into work whatever it waits on (BOS-254): the CEO, a manager, or the owner (no agent). */
 const START_OVERRIDE_ROLES = new Set(["ceo", "manager"]);
 
+/** The states a ticket has when its work is code: moving into one of these clears a stale no-code mark (BOS-532). */
+const CODE_STATES = new Set<SystemState>(["ready", "in_progress", "review"]);
+
 /**
  * Why a ticket may not start (BOS-254): it still waits on an unfinished ticket or engagement, or it is
  * in the Backlog and nobody handed it over. Null when it may start. `actor.agentId` is the agent
@@ -537,6 +540,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
       if (patch.ownerSetup !== undefined) fields.ownerSetup = patch.ownerSetup?.trim() || null;
       if (dest) Object.assign(fields, { projectId: dest.id });
+      // A merged ticket goes back to its assignee as no-code so a live check can be reported and it can
+      // close (DR-024 #5). If it is then reopened for real work (BOS-532), the flag is stale: a code state
+      // it moves into by hand clears it, so review and done ask for a diff again. Boss Man's own move back
+      // from the merge (internal) and a no-code move to done leave it as set.
+      if (t.noCode && patch.noCode === undefined && col?.systemState && CODE_STATES.has(col.systemState) && col.systemState !== t.systemState) fields.noCode = false;
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
       // starts and before a plan is approved turns it on for high and critical, off otherwise.
       if (patch.risk !== undefined && patch.planFirst === undefined && !t.planApprovedAt && (t.systemState === "backlog" || t.systemState === "ready"))

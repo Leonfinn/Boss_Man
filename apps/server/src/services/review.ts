@@ -442,6 +442,15 @@ export function reviewService(
     return { outcome: "merged" as const, delivered: null, detail: { commit, ...(left ? { afterMerge: left } : {}), ...(carry ? { carried: carry.carried } : {}) } };
   }
 
+  /**
+   * True when a merged, no-code ticket's branch shows no commit after the merge: the after-merge step is done,
+   * and a ticket reopened for real code (BOS-532) has nothing new to review yet. The diff read must have
+   * seen the branch (a runner that couldn't say never blocks the close).
+   */
+  function reopenedForCode(t: typeof tickets.$inferSelect, changed: WorkspaceDiff | null): boolean {
+    return !!changed && !!t.noCode && !!t.mergeCommit && !afterMergeLeft(t) && (changed.head === t.mergeCommit || !changed.head);
+  }
+
   /** Checks the merged ticket now has to show: its after-merge criteria still without a pass or fail. */
   function afterMergeLeft(t: typeof tickets.$inferSelect): string[] | null {
     const left = unreportedAfterMerge(t.acceptanceCriteria, t.stateNote);
@@ -1133,7 +1142,16 @@ export function reviewService(
 
       // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
       // merge, and running the check anyway could send the ticket back for a failure it can't fix.
-      const changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+      let changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+      // A ticket sent back after its merge as no-code, then reopened for real work (BOS-532): a commit on its
+      // branch now is that work. Clear the stale no-code mark and read the diff again (a diff read over the
+      // old commit may show nothing), so the review checks code and the branch merges like any other.
+      if (t.noCode && changed?.commits.length) {
+        await db.update(tickets).set({ noCode: false }).where(eq(tickets.id, ticketId));
+        await record(db, { companyId: t.companyId, ticketId, kind: "reopened", summary: "Reopened for code: its branch has new commits again, so it is no longer a no-code ticket." });
+        t = { ...t, noCode: false };
+        changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+      }
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.
       await this.requireSignoff(t, changed ? changed.head : t.branch ? "" : null);
@@ -1145,6 +1163,12 @@ export function reviewService(
         }
         // Nothing to merge, but a live check still can't be made before the change is live (DR-024 #5): keep it to show.
         if (afterMergeLeft(t)) return closeAfterMerge(t, null, causedByRunId);
+        // Already merged with nothing after it: the after-merge step, done now. A ticket reopened for real
+        // code (BOS-532) must not close on that step's empty diff: it goes back for the change instead.
+        if (await reopenedForCode(t, changed)) {
+          const delivered = await sendBack(`The live check is recorded and this ticket was reopened for more work, but its branch has no new commits yet: ${NOTHING_CHANGED} Then move the ticket back to review.`, "reopened, nothing changed");
+          return { outcome: "empty", delivered };
+        }
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
         return { outcome: "done", delivered: null, detail: { note: "Nothing in the repository changed, so there was nothing to check or merge." } };
       }

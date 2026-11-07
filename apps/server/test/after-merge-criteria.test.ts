@@ -215,6 +215,45 @@ describe("after-merge criteria", () => {
     expect(recorded.systemState).toBe("in_progress");
   });
 
+  it("reopening a merged ticket for code clears its no-code mark, so review and done ask for a diff again", async () => {
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", branch: null, mergeCommit: "a".repeat(40), noCode: true, stateNote: `${LIVE.text} pass` });
+    // The owner reopens it to do real work: from then on it is a code ticket again.
+    expect((await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "ready" })).statusCode).toBe(200);
+    let now = await ctx.row(t.id);
+    expect(now.systemState).toBe("ready");
+    expect(now.noCode).toBe(false);
+    // Its assignee moving it into work keeps it code; with nothing changed it can't reach review.
+    const c = await ctx.agent(ctx.dev.id);
+    await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Back to it." } });
+    now = await ctx.row(t.id);
+    expect(now.systemState).toBe("in_progress");
+    expect(now.noCode).toBe(false);
+    const refused = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: `${BEFORE} pass.` } }));
+    expect(refused).toContain("Nothing in the repository changed");
+    expect((await ctx.row(t.id)).systemState).toBe("in_progress");
+  });
+
+  it("a no-code ticket sent back after its merge, reopened for code, does not close on the live check's empty diff", { timeout: 120_000 }, async () => {
+    const { db, req, co, dev, project } = ctx;
+    await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
+    const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
+    // The branch still stands at the merge, as it does after the after-merge step: no new commits.
+    ctx.runners.connect(reg.runnerId, (command) => {
+      if (command.type === "workspace.diff")
+        queueMicrotask(() => ctx.runners.resolveReply({ requestId: (command as { requestId: string }).requestId, ok: true, data: { baseCommit: "b".repeat(40), head: "c".repeat(40), commits: [], files: [], diff: "", truncated: false } }));
+      if (command.type === "workspace.carried") queueMicrotask(() => ctx.runners.resolveReply({ requestId: (command as { requestId: string }).requestId, ok: true, data: { carried: [] } }));
+      return true;
+    });
+    const t = await ctx.ticket({ title: "Reopened for code", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "review", mergeCommit: "c".repeat(40), noCode: true, stateNote: `${LIVE.text} pass` });
+    await db.update(tickets).set({ branch: `bossman/${t.id}` }).where(eq(tickets.id, t.id));
+    const r = await ctx.review.landVisible(t.id, "the owner");
+    // Not closed as an after-merge step: sent back to make the change (it is a code ticket now).
+    expect(r.outcome).toBe("empty");
+    const after = await ctx.row(t.id);
+    expect(after.systemState).toBe("in_progress");
+    expect(after.noCode).toBe(false);
+  });
+
   // BOS-575: BOS-525 merged with "3 fail: timing measured after merge (owner accepted, follow-up ticket)",
   // closed as done, and its measurement went to a bare, unowned hand-made ticket (BOS-542).
   const SLOTS = ["Where the check slot count is set is stated on the ticket", "Slot count is configurable (default 1) and 2 slots run two checks at once, with a test", "A full check with 2 slots running still finishes inside the run limit (timing shown)", "No host-specific values", "check-quick passes"];
