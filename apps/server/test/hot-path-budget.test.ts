@@ -27,7 +27,10 @@ const LIMIT_MS = 100;
 const ITERATIONS = 5;
 const COUNTS = { runs: 20_000, costEvents: 50_000, decisions: 2_000, tickets: 1_000 };
 
-/** Items that fail the budget today: name -> follow-up ticket. Skipped in the test. */
+/** Looser ceiling for KNOWN_SLOW items: still catches a real regression (the BOS-643 dateIn loop blocked 3-4 s). Removing the entry tightens the item to LIMIT_MS. */
+const KNOWN_SLOW_CEILING_MS = 1000;
+
+/** Items that fail the budget today: name -> follow-up ticket. Held to KNOWN_SLOW_CEILING_MS instead of LIMIT_MS. */
 const KNOWN_SLOW: Record<string, string> = {
   // funding.ts spendFor reads every cost event of the source and sums in JS (~265 ms); the run.quota forecast runs the same read (~88 ms, borderline).
   "route: funding status": "BOS-671",
@@ -239,14 +242,12 @@ describe("hot-path budget (BOS-653)", () => {
   it(`keeps every item under ${LIMIT_MS} ms of event-loop block`, async () => {
     const over: string[] = [];
     for (const [name, fn] of Object.entries(list)) {
-      if (KNOWN_SLOW[name]) {
-        report.push(`${name.padEnd(34)} skipped (${KNOWN_SLOW[name]})`);
-        continue;
-      }
+      const slow = KNOWN_SLOW[name];
+      const limit = slow ? KNOWN_SLOW_CEILING_MS : LIMIT_MS;
       const m = await measure(fn);
-      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms`);
-      if (m.block > LIMIT_MS) over.push(`${name}: ${m.block.toFixed(0)} ms`);
+      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms${slow ? `   (known slow, ${slow}; ceiling ${limit} ms)` : ""}`);
+      if (m.block > limit) over.push(`${name}: ${m.block.toFixed(0)} ms (limit ${limit})`);
     }
     expect(over).toEqual([]);
-  }, 55_000);
+  }, 90_000);
 });
