@@ -16,7 +16,7 @@ import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { AnswerError, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
+import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
@@ -28,7 +28,7 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -540,6 +540,38 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       const links = await missingPageNote(db, scope.companyId, `${question}\n${options.join("\n")}\n${steps?.join("\n") ?? ""}`);
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${links ? `\n\n${links}` : ""}`);
+    },
+  );
+
+  server.registerTool(
+    "submit_plan",
+    {
+      description: "For a plan-first ticket when you have no plan mode or ExitPlanMode (OpenCode and other non-Claude agents): save your plan on the ticket and raise the plan card for the approver. Approving it releases the ticket (the same as approving a plan from ExitPlanMode); \"Keep planning\" sends you feedback to revise, and you call submit_plan again. Stop and wait after calling it; don't change code until you are woken with the approval.",
+      inputSchema: { ticketId: z.string().uuid(), plan: z.string().min(1).max(40000) },
+    },
+    async ({ ticketId, plan }) => {
+      const [t] = await db.select({ id: tickets.id, title: tickets.title, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!t) return fail("No ticket with that ID in your company.");
+      if (!t.planFirst) return fail("This ticket is not plan-first, so it needs no plan card.");
+      if (t.planApprovedAt) return fail("This ticket's plan is already approved; go ahead with it.");
+      const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
+      if (reviewWrite) return fail(reviewWrite);
+      let d: { id: string };
+      try {
+        d = await decisions.raise({
+          companyId: scope.companyId,
+          agentId: scope.agentId,
+          question: `Plan for "${t.title}": approve it?\n\n${plan}`.slice(0, 4000),
+          options: [APPROVE_PLAN, KEEP_PLANNING],
+          recommended: APPROVE_PLAN,
+          blocksTicketId: ticketId,
+          plan,
+        });
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+      return text(`Plan card ${d.id} is with the plan approver. You'll be woken with the answer; stop now and don't change code until the plan is approved.`);
     },
   );
 
@@ -1253,7 +1285,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -2050,7 +2082,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       if (missing.length)
         return fail(
           state === "done"
-            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket): their answer records the check's pass or fail, so you can close it once they have.`
+            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket): their answer records the check's pass or fail, so you can close it once they have. A fail still closes this ticket: Boss Man opens the follow-up for it, assigned to this ticket's assignee.`
             : `This ticket has acceptance criteria to report before it merges, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".${withCriteria.criteria.some(isAfterMerge) ? " The after-merge criteria don't need a verdict at review." : ""}`,
         );
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
@@ -2089,6 +2121,16 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       }
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}${until ? ` (until ${until.toISOString().slice(0, 16).replace("T", " ")} UTC${blocked_reason?.trim() ? `: ${blocked_reason.trim()}` : ""})` : ""}`, at });
       await noteRunTicket(ticketId);
+      // A live check that failed doesn't hold the merged ticket open: Boss Man opens a filled-in, owned
+      // follow-up for it (DR-009 #5, BOS-575), so nobody files a bare title by hand. A cancel makes none.
+      const failedLive = state === "done" && !sameState && (outcome ?? "completed") === "completed" ? failedAfterMerge(withCriteria.criteria, reported) : [];
+      let followUp = "";
+      if (failedLive.length) {
+        const f = await review.followUpFailedChecks(ticketId, failedLive, reported ?? "", scope.agentId).catch(() => null);
+        followUp = f
+          ? `\n\nAn after-merge check failed, so Boss Man opened the follow-up ${f.ref} (#/tickets/${f.id}) "${f.title}", assigned to ${f.assignee ?? "the CEO"}, and told the CEO. Don't create another one.`
+          : `\n\nAn after-merge check failed, but Boss Man couldn't open its follow-up ticket. Create it with create_ticket: a description of what failed, a risk and an assignee, and this ticket's link.`;
+      }
       const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(moved?.featureId);
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
@@ -2101,7 +2143,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // have nothing for them to do, and the developer is the only one who knows.
       const [setupNow] = state === "review" && !sameState ? await db.select({ ownerSetup: tickets.ownerSetup }).from(tickets).where(eq(tickets.id, ticketId)) : [];
       const setupHint = state === "review" && !sameState && !setupNow?.ownerSetup?.trim() ? "\n\nIf the owner has to do anything once this is live (a setting, a secret, a button), add the steps in plain words by button path with set_ticket_state ownerSetup." : "";
-      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${warn}${setupHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
+      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${warn}${setupHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 

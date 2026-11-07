@@ -386,6 +386,7 @@ export async function buildApp(opts: AppOptions) {
   });
   const serverStatus = serverStatusService(db, {
     memory,
+    runLimits: (id) => scheduler.runLimits(id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -473,6 +474,15 @@ export async function buildApp(opts: AppOptions) {
     const ownerTz = (await notes.getSettings()).quietHours?.timeZone ?? OWNER_TZ;
     await funding.refreshSynthetic((n) => notes.notify({ companyId: null, agentId: null, ...n }), ownerTz);
   }
+  // A run the runner's hello left out was closed by the server: resume it like an interrupted one (BOS-583, BOS-574).
+  runners.onLost((runId) =>
+    deploysSvc
+      .onRunEnded(runId)
+      .then(() => chat.onRunEnded(runId, null, true))
+      .then(() => recovery.onInterrupted(runId))
+      .then(() => scheduler.tick())
+      .catch((err) => app.log.error({ err, runId }, "resuming a lost run failed")),
+  );
   runners.onEvent((runner, event) => {
     // CEO continuity: a chapter follows its runs' sessions and context use.
     if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter update failed"));
