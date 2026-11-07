@@ -13,8 +13,8 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup() {
-  const { db, close } = await openPglite();
+async function setup(logQuery?: (sql: string) => void) {
+  const { db, close } = await openPglite(undefined, logQuery ? { logQuery } : {});
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws" });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
@@ -134,5 +134,39 @@ describe("limit estimate and daily use (R78)", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ requested: "flag", link: "#/funding", title: expect.stringMatching(/^Claude Max: the limit "5-hour window" runs out about \w{3} \d{1,2} \S+ at \d\d:\d\d$/) });
     expect(sent[0]!.body).toContain("60%");
+  });
+
+  // BOS-604 / BOS-649 T1: the alert only needs the forecasts, but it used to build the whole
+  // Funding page status (a week of runs per day, per company, and every cost event) on each event.
+  it("checks the quota alert without reading runs or spend, even with 20,000 runs", async () => {
+    const queries: string[] = [];
+    let logging = false;
+    const c = (ctx = await setup((q) => logging && queries.push(q)));
+    const agent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", fundingSourceId: c.sub.id })).json() as { id: string };
+    const now = Date.now();
+    const rows = Array.from({ length: 20_000 }, (_, i) => ({ companyId: c.company.id, agentId: agent.id, startedAt: new Date(now - (i % 7) * 86_400_000 - i * 1000), inputTokens: 10, outputTokens: 1 }));
+    for (let i = 0; i < rows.length; i += 2000) await c.db.insert(runs).values(rows.slice(i, i + 2000));
+    await c.db.insert(costEvents).values(Array.from({ length: 2000 }, (_, i) => ({ fundingSourceId: c.sub.id, companyId: c.company.id, costMicros: 10, occurredAt: new Date(now - i * 60_000) })));
+    const reg = (await c.req("POST", `/api/companies/${c.company.id}/runner`)).json() as { runnerId: string };
+    const [runnerRow] = await c.db.select().from(runners).where(eq(runners.id, reg.runnerId));
+    const reset = resetIn(4);
+    await c.db.insert(quotaSamples).values({ fundingSourceId: c.sub.id, window: "five_hour", utilization: 0.3, resetsAt: new Date(reset * 1000), observedAt: new Date(now - 3_600_000) });
+
+    logging = true;
+    const t = performance.now();
+    await c.runners.ingest(runnerRow!, { seq: 1, at: new Date().toISOString(), event: { type: "run.quota", fundingSourceId: c.sub.id, claudeMeta: meta(0.6, reset) } });
+    await vi.waitFor(async () => expect(await c.db.select().from(notifications)).toHaveLength(1), { interval: 5 });
+    const ms = performance.now() - t;
+    logging = false;
+
+    // Measured at 20,000 runs: the old path ran 18 queries (2 of them over runs and cost events)
+    // in ~340 ms; this one runs 10 in ~65 ms. The table check is the guard; the counts leave room
+    // for ingest to grow and for a busy runner.
+    const touches = (table: string) => queries.filter((q) => q.includes(`from "${table}"`) || q.includes(`join "${table}"`));
+    expect(touches("runs")).toEqual([]);
+    expect(touches("cost_events")).toEqual([]);
+    const own = queries.filter((q) => !(q.startsWith("select") && q.includes('from "notifications"'))); // minus the test's own polling
+    expect(own.length).toBeLessThanOrEqual(15);
+    expect(ms).toBeLessThan(1000);
   });
 });
