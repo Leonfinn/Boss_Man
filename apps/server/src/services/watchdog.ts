@@ -591,7 +591,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         .where(
           and(
             eq(tickets.companyId, c.id),
-            notInArray(tickets.systemState, ["ready", "backlog", "done"]),
+            inArray(tickets.systemState, ["in_progress", "blocked", "review"]),
             isNotNull(tickets.assigneeAgentId),
             or(isNotNull(tickets.monitorAt), isNotNull(tickets.blockedUntil)),
           ),
