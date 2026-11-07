@@ -2,7 +2,7 @@
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
 import { useState, type FormEvent } from "react";
 import type { Company, Decision } from "../api";
-import { Activity, BookOpen, FolderGit2, Bell, Gavel, Handshake, LayoutDashboard, ListChecks, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
+import { Activity, BookOpen, FolderGit2, Bell, GitMerge, Gavel, Handshake, LayoutDashboard, ListChecks, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 
 type Item = { id: string; label: string; icon: LucideIcon };
@@ -21,6 +21,7 @@ const GROUPS: Array<{ title: string; items: Item[] }> = [
     items: [
       { id: "projects", label: "Projects", icon: FolderGit2 },
       { id: "roadmap", label: "Roadmap", icon: Map },
+      { id: "merge-queue", label: "Merge queue", icon: GitMerge },
       { id: "plan", label: "Plan", icon: ListChecks },
       { id: "wiki", label: "Wiki", icon: BookOpen },
       { id: "features", label: "Features", icon: Sparkles },
@@ -120,6 +121,7 @@ export function Sidebar(props: {
   decisions: Decision[];
   unread: number;
   feedback: number;
+  mergeWaiting: number;
   notifications: NotificationPermission | "unsupported";
   onPickCompany: (id: string) => void;
   onCreateCompany: (name: string) => Promise<void>;
@@ -157,6 +159,7 @@ export function Sidebar(props: {
                     <span className="nav-label">{n.label}</span>
                     {n.id === "decisions" && decisionsHere > 0 && <span className="count" aria-label={`${decisionsHere} waiting`}>{decisionsHere}</span>}
                     {n.id === "feedback" && props.feedback > 0 && <span className="count" aria-label={`${props.feedback} to process`}>{props.feedback}</span>}
+                    {n.id === "merge-queue" && props.mergeWaiting > 0 && <span className="count" aria-label={`${props.mergeWaiting} waiting to merge`}>{props.mergeWaiting}</span>}
                     {n.id === "notifications" && props.unread > 0 && <span className="count" aria-label={`${props.unread} unread`}>{props.unread}</span>}
                   </a>
                   {n.id === "chat" && starred.length > 0 && (

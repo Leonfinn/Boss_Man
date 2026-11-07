@@ -1,5 +1,5 @@
 {
-  "id": "235a1881-3ad1-4161-b76f-929983049514",
+  "id": "d7462dda-c6f5-4053-83e3-9847dcd0cde0",
   "prevId": "e95fdc0c-229b-4d19-954b-e8bc22ccb8b2",
   "version": "7",
   "dialect": "postgresql",
@@ -1135,6 +1135,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "check_results_company_at": {
+          "name": "check_results_company_at",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1311,13 +1332,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "fence_mode": {
-          "name": "fence_mode",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'off'"
         }
       },
       "indexes": {},
