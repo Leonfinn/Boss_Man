@@ -468,7 +468,7 @@ export async function buildApp(opts: AppOptions) {
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   async function quotaWatch(fundingSourceId: string) {
     const t = (opts.now ?? (() => new Date()))();
-    const status = await funding.status(fundingSourceId, t);
+    const status = await funding.forecasts(fundingSourceId, t);
     if (!status) return;
     for (const [window, f] of Object.entries(status.forecasts)) {
       if (!f?.beforeReset || !f.runsOutAt || f.utilization < 0.5) continue;
