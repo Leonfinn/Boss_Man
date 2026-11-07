@@ -173,7 +173,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // tar and unzip, must be placed too.
   for (const t of toolTargets(forTargets)) addTarget(t);
   // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
-  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn)) return result("outside");
+  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || usesScratchUnsafely(c)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
@@ -581,6 +581,201 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
       const prev = before.replace(/\|&?\s*$/, "").split(/&&|\|\||[;&|\n]/).pop() ?? "";
       if (!/^\s*(?:echo|printf)\s/.test(prev) || /\$\(|\x60|</.test(prev)) return true;
     }
+  }
+  return false;
+}
+
+/**
+ * Splits a command into segments of words the way a shell would (quotes, backslashes, `$(`, backticks, `(`, `;&|`, newlines,
+ * heredoc bodies and comments), so a quoted or escaped command word (`"node"`, `n\ode`) reads as the word it runs.
+ * Redirects are lifted out: `out` holds output targets, and input targets stay as plain words. Over-splitting is fine.
+ */
+function shellSegments(c: string): { words: string[]; out: string[] }[] {
+  const segs: { words: string[]; out: string[] }[] = [];
+  let words: string[] = [];
+  let out: string[] = [];
+  let cur = "";
+  let has = false;
+  let redir: "out" | "in" | null = null;
+  const modes: ("dq" | "sub")[] = [];
+  const pendingTags: string[] = [];
+  const endWord = (): void => {
+    if (!has) return;
+    if (redir === "out") out.push(cur);
+    else words.push(cur);
+    redir = null;
+    cur = "";
+    has = false;
+  };
+  const endSeg = (): void => {
+    endWord();
+    redir = null;
+    if (words.length || out.length) segs.push({ words, out });
+    words = [];
+    out = [];
+  };
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i]!;
+    const dq = modes[modes.length - 1] === "dq";
+    if (ch === "\\") { cur += c[++i] ?? ""; has = true; continue; }
+    if (!dq && ch === "'") {
+      const e = c.indexOf("'", i + 1);
+      cur += c.slice(i + 1, e < 0 ? c.length : e);
+      has = true;
+      i = e < 0 ? c.length : e;
+      continue;
+    }
+    if (ch === '"') { if (dq) modes.pop(); else modes.push("dq"); has = true; continue; }
+    if (ch === "`") { endSeg(); continue; }
+    if (ch === "$" && c[i + 1] === "(") { endSeg(); modes.push("sub"); i++; continue; }
+    if (dq) { if (/\s/.test(ch)) endWord(); else { cur += ch; has = true; } continue; }
+    if (ch === "#" && !has) { while (i < c.length && c[i] !== "\n") i++; i--; continue; }
+    if (ch === ")") { endSeg(); if (modes[modes.length - 1] === "sub") modes.pop(); continue; }
+    if (ch === "(" || ch === ";" || ch === "|" || ch === "\n" || (ch === "&" && c[i + 1] !== ">")) {
+      endSeg();
+      if (ch === "\n") {
+        for (const tag of pendingTags.splice(0)) {
+          let j = i + 1;
+          for (;;) {
+            let e = c.indexOf("\n", j);
+            if (e < 0) e = c.length;
+            const done = c.slice(j, e).trim() === tag || e >= c.length;
+            j = e + 1;
+            if (done) break;
+          }
+          i = j - 2;
+        }
+      }
+      continue;
+    }
+    if (ch === ">" || ch === "<" || ch === "&") {
+      if (/^\d+$/.test(cur) && ch !== "&") { cur = ""; has = false; }
+      endWord();
+      let op = ch;
+      while (/[>&|<]/.test(c[i + 1] ?? "") && op.length < 3) op += c[++i];
+      if (op === "<<" || op === "<<-") {
+        let j = i + 1;
+        while (c[j] === " " || c[j] === "\t") j++;
+        const m = /^(['"]?)([\w.-]+)\1/.exec(c.slice(j));
+        if (m) pendingTags.push(m[2]!);
+        redir = null;
+      } else if (op[0] === ">" || op[0] === "&") redir = op.endsWith("&") && /^\s*\d/.test(c.slice(i + 1)) ? null : "out";
+      else redir = null;
+      continue;
+    }
+    if (/\s/.test(ch)) { endWord(); continue; }
+    cur += ch;
+    has = true;
+  }
+  endSeg();
+  return segs;
+}
+
+/**
+ * Deny-by-default for scratch paths. In a command that names a /tmp path or a path the command itself writes (redirect, tee,
+ * cp, mv, curl -o ...), the only commands allowed to mention that path are readers and file tools (cat, grep, ls, cp, rm,
+ * tee ...). Any other command word (an interpreter however it is spelled or wrapped, `./w.js`, flock, strace, npx, `FOO=/tmp/x
+ * cmd`) is code the judge can't read. pnpm/npm/yarn/git may name a /tmp path but not a path the command wrote, and not with an
+ * exec-style word. Over-denial (generate a file, then feed it to a checked-in script) is accepted.
+ */
+function usesScratchUnsafely(c: string): boolean {
+  const segs = shellSegments(c);
+  const safe = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf rm rmdir mkdir cp mv ln tee touch cd pushd popd " +
+    "test [ [[ realpath dirname basename readlink du df sort uniq cut tr jq md5sum sha256sum sha1sum mktemp export local unset set read for " +
+    "true false sleep chmod date tar unzip gzip gunzip zip curl wget sed less more tree nl od xxd hexdump column").split(" "));
+  const tooling = new Set(["pnpm", "npm", "yarn", "git"]);
+  const keywords = new Set(["if", "then", "do", "else", "elif", "while", "until", "!", "time", "{", "}", "fi", "done", "esac", "in"]);
+  const clean = (w: string): string => w.replace(/^\.\//, "").replace(/\/+$/, "");
+  const written = new Set<string>();
+  const scratchVars = new Set<string>();
+  const scratchWord = /\/tmp(?:\/|$|:)|\$\{?TMPDIR|mktemp/;
+  const parsed = segs.map((s) => {
+    let k = 0;
+    const assigns: string[] = [];
+    while (k < s.words.length && (/^\w+\+?=/.test(s.words[k]!) || keywords.has(s.words[k]!))) { if (!keywords.has(s.words[k]!)) assigns.push(s.words[k]!); k++; }
+    const head = s.words[k] ?? "";
+    const args = s.words.slice(k + 1);
+    for (const o of s.out) if (o !== "/dev/null" && !/^\d+$|^-$/.test(o)) written.add(clean(o));
+    const flagless = args.filter((a) => !a.startsWith("-"));
+    if (/^(?:cp|mv|install|ln)$/.test(head) && flagless.length) written.add(clean(flagless[flagless.length - 1]!));
+    if (head === "tee") for (const a of flagless) written.add(clean(a));
+    for (let i = 0; i < args.length; i++) {
+      if ((head === "curl" && /^(?:-o|--output)$/.test(args[i]!)) || (head === "wget" && /^(?:-O|--output-document)$/.test(args[i]!))) written.add(clean(args[i + 1] ?? ""));
+      const of = /^of=(.+)$/.exec(args[i]!);
+      if (head === "dd" && of) written.add(clean(of[1]!));
+    }
+    return { head, args, assigns };
+  });
+  for (const p of parsed) for (const a of p.assigns) {
+    const m = /^(\w+)\+?=(.*)$/.exec(a)!;
+    if (scratchWord.test(m[2]!)) scratchVars.add(m[1]!);
+  }
+  written.delete("");
+  const isWritten = (w: string): boolean => {
+    const t = clean(w);
+    const base = t.replace(/^.*\//, "");
+    for (const p of written) if (t === p || t.startsWith(p + "/") || (base !== "" && base === p.replace(/^.*\//, "")) || (p.includes("$") && t.includes(p))) return true;
+    return false;
+  };
+  const isScratch = (w: string): boolean => scratchWord.test(w) || [...scratchVars].some((v) => new RegExp(`\\$\\{?${v}\\b`).test(w));
+  for (const p of parsed) {
+    let { head, args } = p;
+    const assigns = [...p.assigns];
+    // Peel plain wrappers that only start the real command: `setsid nohup`, `env A=b`, `timeout 120`, `nice -n 5`, `time`.
+    for (let guard = 0; guard < 8 && /^(?:setsid|nohup|nice|time|command|exec|env|timeout|flock)$/.test(head); guard++) {
+      let i = 0;
+      if (head === "flock") {
+        // flock [-nx..] <lock file> <command...>: the lock file is not the command's code (no -c form is peeled).
+        while (args[i]?.startsWith("-")) i++;
+        if (args.slice(0, i).some((a) => /^-[A-Za-z]*c$|^--command/.test(a))) break;
+        head = args[i + 1] ?? "";
+        args = args.slice(i + 2);
+        continue;
+      }
+      while (i < args.length && (args[i]!.startsWith("-") || /^\w+=/.test(args[i]!) || (head === "timeout" && /^\d[\w.]*$/.test(args[i]!)) || (head === "nice" && /^-?\d+$/.test(args[i]!)))) {
+        if (/^\w+=/.test(args[i]!)) assigns.push(args[i]!);
+        else if (/^(?:-n|-u|-C|-S|-s|-k)$/.test(args[i]!) && head !== "env") i++;
+        i++;
+      }
+      if (head === "timeout" && /^\d[\w.]*$/.test(args[i] ?? "")) i++;
+      head = args[i] ?? "";
+      args = args.slice(i + 1);
+    }
+    if (head === "") continue;
+    const sh = head.replace(/^.*\//, "");
+    const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
+    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
+      if (usesScratchUnsafely(args[dashC + 1] ?? "")) return true;
+      continue;
+    }
+    const all = [...assigns.map((a) => a.slice(a.indexOf("=") + 1)), head, ...args];
+    const hitsWritten = all.some(isWritten);
+    const hitsScratch = hitsWritten || all.some(isScratch);
+    if (!hitsScratch) continue;
+    const name = head.replace(/^.*\//, "");
+    if (head.includes("/") && !safe.has(name) && !tooling.has(name)) return true; // `/tmp/w.js`, `./w.js`, `/usr/bin/node /tmp/x`
+    if (safe.has(name) && !head.includes("/")) {
+      if (name === "find" || (name === "sed" && args.some((a) => /^-[a-zA-Z]*f|^--file/.test(a)))) return true;
+      continue;
+    }
+    if (name === "find" && !args.some((a) => /^-(?:exec|execdir|ok|okdir)$/.test(a))) continue;
+    if (tooling.has(name)) {
+      if (hitsWritten && name !== "git") return true; // git reads or stages a written file; its `-c` and exec forms are denied below
+      if (args.some((a) => /^(?:exec|dlx|x|node|nodejs|python[\d.]*|sh|bash|zsh|env|eval|-c|--eval|--exec)$/.test(a)) || (name === "git" && args.includes("-c"))) return true;
+      continue;
+    }
+    // `node scripts/build.js --out /tmp/out`: a plain interpreter whose script is a checked-in relative file. Nothing before
+    // the script (flags, -I/tmp, an assignment) may be scratch or written; later words are the script's data.
+    if (head === name && /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh)$/.test(name) && !assigns.some((a) => isScratch(a) || isWritten(a.slice(a.indexOf("=") + 1)))) {
+      // Inline code (-c / -e) is read by inlineCodeOk, which places the paths it names.
+      const inl = args.findIndex((a) => !a.startsWith("-") || /^-[A-Za-z]*[ceE]$/.test(a));
+      if (inl >= 0 && args[inl]!.startsWith("-") && !args.slice(0, inl).some((a) => isScratch(a) && /^-[A-Za-z]/.test(a) && !/^-[A-Za-z]$/.test(a))) continue;
+      const at = args.findIndex((a) => !a.startsWith("-"));
+      const before = at < 0 ? args : args.slice(0, at + 1);
+      const script = at < 0 ? "" : args[at]!;
+      if (at >= 0 && !/^[/~$]|\.\./.test(script) && !before.some((a) => isScratch(a) || isWritten(a))) continue;
+    }
+    return true;
   }
   return false;
 }
