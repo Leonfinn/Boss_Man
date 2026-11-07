@@ -20,7 +20,8 @@ const facts = (s: Partial<Record<keyof AddonFacts, AddonState>>): AddonFacts => 
   for (const [k, v] of Object.entries(s)) f[k as keyof AddonFacts] = { state: v, since: null, source: `test says ${v}` };
   return f;
 };
-const r9 = (steps: string[], f: AddonFacts, setsUp?: keyof AddonFacts) => lintOwnerSteps(steps, { addons: f, setsUp });
+// A rehearsed proof, so a tailscale command isn't also refused for R11 (DR-024): these tests are about R9.
+const r9 = (steps: string[], f: AddonFacts, setsUp?: keyof AddonFacts) => lintOwnerSteps(steps, { addons: f, setsUp }, { rehearsed: true, script: "tailscale", commit: "0123abcd" });
 const STAGE5 = ["On your phone, open https://bossman.tailnet.ts.net and log in.", "Check the test push arrived on your phone."];
 
 describe("lintOwnerSteps R9", () => {

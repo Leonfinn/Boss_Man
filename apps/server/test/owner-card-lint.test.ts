@@ -16,6 +16,8 @@ import { lintOwnerSteps, sh, step, type CardLint, type SelfDeployFacts } from ".
 
 const TRIED = "Checked the host from the runner; agents have no access to the owner's machine.";
 const rules = (steps: string[]) => lintOwnerSteps(steps).refuse.map((f) => `${f.step}:${f.rule}`);
+/** These cards have host commands; R11 (proof, card-lint-proof.test.ts) is not what they test. */
+const REHEARSED = { rehearsed: true as const, script: "tailscale", commit: "0123abcd" };
 /** Every command block says where and as whom (BOS-427, R6); these tests are about the other rules. */
 const H = { host: "nas01", as: "root" as const };
 
@@ -48,7 +50,8 @@ describe("lintOwnerSteps", () => {
       "Open Settings → Server and runner → Updates and press Build and update runners. It costs $5 a month.",
       "Follow the instructions on the screen to sign in.",
     ];
-    expect(lintOwnerSteps(ok).refuse).toEqual([]);
+    // read still sets NAME for R2, but R10 refuses it: the owner would have to type the value (DR-024).
+    expect(lintOwnerSteps(ok, undefined, REHEARSED).refuse).toEqual([expect.objectContaining({ step: 8, rule: "R10" })]);
   });
 
   it("refuses a command the owner would have to edit, and an unfilled {{token}}", () => {
@@ -64,7 +67,7 @@ describe("lintOwnerSteps", () => {
       "Background is on BOS-276; open Settings → Server and runner.",
       step("Check it:", sh("docker ps", H), "Then:", sh("docker logs server-blue", H)),
       step("It should be green by now:", sh("docker ps", H)),
-    ]);
+    ], undefined, REHEARSED);
     expect(r.refuse).toEqual([]);
     expect(r.warn.map((f) => f.step)).toEqual([1, 2, 3]);
     expect(lintOwnerSteps(Array.from({ length: 13 }, () => "Open Settings.")).warn).toHaveLength(1);
@@ -400,7 +403,11 @@ describe("raise_decision checks the owner's steps", () => {
   it("raises a good card with its warnings stored, and a CEO override with its reason", async () => {
     const c = (ctx = await setup());
     const w = await c.mcp(c.worker.id);
-    const ok = await w.callTool({ name: "raise_decision", arguments: card([step("On the new host, list the containers (background on BOS-276):", sh("DOCKER_HOST=unix:///run/docker.sock docker ps", H))]) });
+    const steps = [step("On the new host, list the containers (background on BOS-276):", sh("DOCKER_HOST=unix:///run/docker.sock docker ps", H))];
+    // A host command without proof is refused (R11, DR-024); with it, the card keeps the proof for its banner.
+    expect(textOf(await w.callTool({ name: "raise_decision", arguments: card(steps) }))).toMatch(/Step 1: has a host command, so the card needs proof/);
+    expect(textOf(await w.callTool({ name: "raise_decision", arguments: card(steps, { proof: "rehearsed" }) }))).toMatch(/proof must be/);
+    const ok = await w.callTool({ name: "raise_decision", arguments: card(steps, { proof: "not rehearsed: the owner's new host, never tried there" }) });
     expect(isError(ok)).toBe(false);
     const ceo = await c.mcp(c.ceo.id);
     const over = await ceo.callTool({ name: "raise_decision", arguments: card(["Follow docs/06 on the new host."], { question: "Install on the new host?", lintOverride: "The owner asked to be pointed at the guide." }) });
@@ -408,6 +415,7 @@ describe("raise_decision checks the owner's steps", () => {
     const rows = await c.db.select().from(decisions);
     const lintOf = (q: string) => (rows.find((d) => d.question === q)!.context as { lint?: CardLint }).lint;
     expect(lintOf("Move Boss Man to the new host?")!.warn).toEqual([expect.objectContaining({ step: 1, rule: "warn", problem: expect.stringMatching(/links to a wiki page or ticket/) })]);
+    expect(lintOf("Move Boss Man to the new host?")!.proof).toEqual({ rehearsed: false, part: "the owner's new host, never tried there" });
     expect(lintOf("Install on the new host?")!.override).toMatchObject({ reason: "The owner asked to be pointed at the guide.", findings: [{ step: 1, rule: "R1" }] });
     // The CEO's list shows both.
     const list = textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list" } }));

@@ -66,6 +66,15 @@ describe("side menu height", () => {
     expect(main?.body).toContain("flex: 1 1 0");
   });
 
+  it("narrows the menu to an icon strip when collapsed, inside the same beside-the-page layout (BOS-290)", () => {
+    const [strip] = rules(".app.side-collapsed > nav.side");
+    if (!strip) throw new Error("collapsed sidebar width rule missing from styles.css");
+    expect(strip.at).toBe("min-width: 641px");
+    expect(strip.body).toContain("flex: 0 0 64px");
+    // The expanded menu keeps its 232px column, so the strip only swaps the width.
+    expect(side().body).toContain("flex: 0 0 232px");
+  });
+
   it("leaves the phone bar above the page alone", () => {
     // The max-width 640px block must not pin the menu's height.
     const blocks = css.match(/@media\s*\(max-width: 640px\)\s*\{([\s\S]*?)\n\}/g) ?? [];
