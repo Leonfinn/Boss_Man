@@ -17,7 +17,9 @@ const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head>
 <body><div class="app">
 <nav class="side" aria-label="Main">${Array.from({ length: 40 }, (_, i) => `<a href="#" class="nav">Item ${i}</a>`).join("")}</nav>
-<main><h1>Page</h1><p>Body</p></main>
+<main><h1>Page</h1><p>Body</p>
+<div class="board-scroll"><div class="board">${Array.from({ length: 6 }, (_, i) => `<section class="lane"><h2>Lane ${i}</h2></section>`).join("")}</div></div>
+</main>
 </div></body></html>`;
 
 const profiles = (() => {
@@ -105,6 +107,19 @@ describe.skipIf(!browser)("side menu at the owner's recorded device profiles", (
         expect(Math.round(m.bottom)).toBe(m.winH);
         expect(m.overflowY).toBe("auto");
         expect(m.reachable).toBe(true);
+        // An example board screen at this profile: the board is not cut off at the window's right
+        // edge, and its last lane is reachable by scrolling the board (the BOS-599 page-short class).
+        const board = await page.evaluate(() => {
+          const scroll = document.querySelector(".board-scroll") as HTMLElement;
+          const boardEl = document.querySelector(".board") as HTMLElement;
+          const lastLane = boardEl.lastElementChild as HTMLElement;
+          scroll.scrollLeft = scroll.scrollWidth;
+          const b = lastLane.getBoundingClientRect();
+          const s = scroll.getBoundingClientRect();
+          return { fits: s.right <= window.innerWidth + 1, reachable: b.right <= s.right + 1 && b.left >= s.left - 1 };
+        });
+        expect(board.fits).toBe(true);
+        expect(board.reachable).toBe(true);
       } finally {
         await page.close();
       }
