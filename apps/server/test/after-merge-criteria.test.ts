@@ -228,11 +228,24 @@ describe("after-merge criteria", () => {
     now = await ctx.row(t.id);
     expect(now.systemState).toBe("in_progress");
     expect(now.noCode).toBe(false);
-    // And a hand move to review from the reopened state is treated as code work (no-code stays cleared).
-    await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "review" });
-    now = await ctx.row(t.id);
-    expect(now.systemState).toBe("review");
-    expect(now.noCode).toBe(false);
+  });
+
+  it("a plain no-code ticket keeps its no-code mark through ready, in_progress and review, and closes on an empty diff", async () => {
+    // Never merged: a research or wiki ticket is no-code for its whole life. Moving it between states
+    // must not clear the flag, or review would send it back for a diff it never has.
+    const t = await ctx.ticket({ title: "Wiki only", assigneeAgentId: ctx.dev.id, systemState: "backlog", noCode: true });
+    const c = await ctx.agent(ctx.dev.id);
+    await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "ready" });
+    expect((await ctx.row(t.id)).noCode).toBe(true);
+    await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Writing the page." } });
+    expect((await ctx.row(t.id)).noCode).toBe(true);
+    const moved = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Page written." } });
+    expect(textOf(moved)).not.toContain("Nothing in the repository changed");
+    expect((await ctx.row(t.id)).noCode).toBe(true);
+    // The owner moving it between code states keeps it no-code too.
+    await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "in_progress" });
+    await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "ready" });
+    expect((await ctx.row(t.id)).noCode).toBe(true);
   });
 
   it("a no-code ticket sent back after its merge, reopened for code, does not close on the live check's empty diff", { timeout: 120_000 }, async () => {
@@ -249,11 +262,12 @@ describe("after-merge criteria", () => {
     const t = await ctx.ticket({ title: "Reopened for code", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "review", mergeCommit: "c".repeat(40), noCode: true, stateNote: `${LIVE.text} pass` });
     await db.update(tickets).set({ branch: `bossman/${t.id}` }).where(eq(tickets.id, t.id));
     const r = await ctx.review.landVisible(t.id, "the owner");
-    // Not closed as an after-merge step: sent back to make the change (it is a code ticket now).
+    // Not closed as an after-merge step: sent back to make the change instead of closing on the empty
+    // diff. The mark is only cleared once a real commit lands (see the reopen test above), so it stays
+    // set here, but the send-back keeps the ticket from being done without one.
     expect(r.outcome).toBe("empty");
     const after = await ctx.row(t.id);
     expect(after.systemState).toBe("in_progress");
-    expect(after.noCode).toBe(false);
   });
 
   // BOS-575: BOS-525 merged with "3 fail: timing measured after merge (owner accepted, follow-up ticket)",
