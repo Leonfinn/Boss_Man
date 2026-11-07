@@ -7,7 +7,7 @@ import type { secretsService } from "../services/secrets.js";
 
 type Runners = ReturnType<typeof runnersService>;
 
-// Runner events received but not yet stored, across every socket on this process (BOS-410). A
+// Runner events received and not yet stored (the one being stored included), across every socket on this process (BOS-410). A
 // slow database makes these pile up in memory; the memory sampler logs the count.
 let ingestWaiting = 0;
 export const runnerIngestWaiting = () => ingestWaiting;
@@ -16,7 +16,7 @@ export async function runnerSocketRoutes(
   app: FastifyInstance,
   runners: Runners,
   secrets: ReturnType<typeof secretsService>,
-  opts: { heartbeatMs?: number; isLeader?: () => boolean } = {},
+  opts: { heartbeatMs?: number; isLeader?: () => boolean; checks?: Pick<ReturnType<typeof import("../services/check-dispatcher.js").checkDispatcher>, "onHello" | "onDone" | "onProgress"> } = {},
 ) {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
 
@@ -93,14 +93,16 @@ export async function runnerSocketRoutes(
               send({ type: "welcome", lastSeq: await runners.lastSeq(runner.id) });
               void runners.checkAddons(runner.id).catch((err) => app.log.warn({ err, runnerId: runner.id }, "add-on check failed"));
               // Verdicts that may have been lost in a dropped connection are sent again.
+              // The runs the runner really has: any other open run of this runner is closed after a short wait (BOS-583).
+              if (msg.liveRuns) runners.reconcileLater(runner, msg.liveRuns);
               if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "re-sending verdicts failed"));
+              await opts.checks?.onHello(runner.id, msg.checkJobs).catch((err) => app.log.error({ err, runnerId: runner.id }, "check queue hello failed"));
             });
             return;
           case "event":
             ingestWaiting++;
             queue = queue
               .then(async () => {
-                ingestWaiting--;
                 await runners.ingest(runner, msg.entry);
                 send({ type: "ack", upTo: msg.entry.seq });
               })
@@ -108,7 +110,17 @@ export async function runnerSocketRoutes(
                 app.log.error({ err, runnerId: runner.id, seq: msg.entry.seq, companyId: runner.companyId }, "runner event failed");
                 // No ack: the runner keeps the entry and resends it after reconnecting.
                 socket.close(1011, "ingest failed");
+              })
+              // Counted down however the event ends, a failed hello ahead of it included (Jane, BOS-472).
+              .finally(() => {
+                ingestWaiting--;
               });
+            return;
+          case "check.progress":
+            queue = queue.then(() => opts.checks?.onProgress(msg)).catch((err) => app.log.warn({ err, runnerId: runner.id }, "check progress failed"));
+            return;
+          case "check.done":
+            queue = queue.then(() => opts.checks?.onDone(runner.id, msg)).catch((err) => app.log.error({ err, runnerId: runner.id }, "check result failed"));
             return;
           case "reply":
             runners.resolveReply(msg);

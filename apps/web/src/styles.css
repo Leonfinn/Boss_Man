@@ -738,7 +738,14 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 #ticket-props-body { display: flex; flex-direction: column; gap: 8px; }
 #ticket-props-body[hidden] { display: none; }
 .props-toggle { min-height: 32px; padding: 0 10px; font-size: 13px; }
+/* Folded, the Work panel is a one-line card: it sits in the narrow right-hand column, which shrinks to its
+   content (`auto`), so the description keeps the main one and desktop width is unchanged. Without the
+   placement rules below, the grid hands the 1fr share to whichever column comes last in the source, which
+   on a tablet or an unfolded foldable is the panel, and the description is crushed into roughly 200px
+   (BOS-485). The explicit placement fixes it without touching the phone order. */
 .ticket-layout.props-collapsed { grid-template-columns: minmax(0, 1fr) auto; }
+.ticket-layout.props-collapsed > .ticket-main { grid-column: 1; grid-row: 1; }
+.ticket-layout.props-collapsed > .ticket-props { grid-column: 2; grid-row: 1; min-width: 0; }
 .ticket-props small { font-size: 12px; }
 .fold { padding: 0; }
 .fold > summary { display: flex; gap: 10px; align-items: flex-start; padding: 14px 18px; cursor: pointer; list-style: none; }
@@ -774,6 +781,9 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 @media (max-width: 900px) {
   .ticket-layout, .ticket-layout.props-collapsed { grid-template-columns: minmax(0, 1fr); }
   .ticket-props { position: static; order: -1; }
+  /* One column: back to source order, so the description keeps the width and a folded Work panel sits below it (BOS-485). */
+  .ticket-layout.props-collapsed > .ticket-main, .ticket-layout.props-collapsed > .ticket-props { grid-column: 1; grid-row: auto; }
+  .ticket-layout.props-collapsed > .ticket-props { max-width: none; }
 }
 /* On a phone the owner's jobs come first: read, reply, approve. The Work panel goes last and folds
    to one row, the review and the conversation sit near the top, and the conversation runs down the
@@ -832,11 +842,12 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .image-thumbs img { width: 120px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
 .file-chip { display: inline-block; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Wherever the menu sits beside the page (a phone turns it into a bar above the page at 640px), it fills the window and stays in view while the page scrolls, scrolling on its own where it is taller than the window. 100dvh follows a mobile browser's address bar; 100vh is the fallback where dvh is unsupported. */
+/* Wherever the menu sits beside the page (a phone turns it into a bar above the page at 640px), it fills the window and stays in view while the page scrolls, scrolling on its own where it is taller than the window. */
 @media (min-width: 641px) {
   /* From just above the phone bar the menu keeps its own column beside the page, so it never wraps onto a full-width row that the full-height rule would then stretch over the whole screen. */
   .app { flex-wrap: nowrap; }
-  .app > nav.side { flex: 0 0 232px; position: sticky; top: 0; align-self: flex-start; height: 100vh; height: 100dvh; min-height: 0; overflow-y: auto; }
+  /* A phone browser's toolbar showing makes 100dvh shorter than the window, leaving a blank strip under a menu that only fills 100dvh. So the menu fills the window with 100vh instead and scrolls its own contents inside that: it always reaches the bottom edge, and Notifications can still be scrolled into view from behind the toolbar. */
+  .app > nav.side { flex: 0 0 232px; position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
   .app > main { flex: 1 1 0; }
 }
 .related { display: flex; flex-direction: column; gap: 8px; }
@@ -894,3 +905,18 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .messenger .chat-form .owner-message-count, .messenger .chat-form .owner-message-over { flex-basis: 100%; }
 .chat-form .owner-message-count { width: 100%; }
 .activity-compose textarea { field-sizing: content; }
+
+/* ---------- The merge queue (BOS-587) ---------- */
+/* A read-only screen: one card per item, each a ticket line, its state in a tag, and what happens next.
+   It is one column at every width, so a phone shows the same thing without a sideways scroll. */
+.mq-list { display: flex; flex-direction: column; gap: 8px; }
+.mq-item { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; min-width: 0; }
+.mq-item.stuck { border-color: var(--red-ink); }
+.mq-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.mq-head a { font-size: 14px; font-weight: 500; color: var(--head); text-decoration: none; overflow-wrap: anywhere; min-width: 0; }
+.mq-head a:hover { text-decoration: underline; }
+.mq-head .mono { font-size: 12px; color: var(--muted); }
+.mq-wait { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.mq-line { margin: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+.mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.mq-next a { color: var(--accent-ink); }
