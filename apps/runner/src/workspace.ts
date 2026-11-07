@@ -5,16 +5,17 @@
 //   tickets/<ticketId>        the ticket's worktree, on branch bossman/<ticket>
 //   reviews/<ticketId>        a reviewer's own detached copy of that work
 //   patches/<ticketId>.patch  uncommitted work saved when a worktree is released
+//   scratch/<ticketId>        a ticket's kept proofs and check logs (BOSSMAN_SCRATCH), unlike /tmp
 //
 // Lessons from cline/kanban: creation is serialised per repo, an existing worktree is never
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { checkQueueEnv, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
 
@@ -113,6 +114,8 @@ export class Workspaces {
 
   repoDir = (projectId: string) => path.join(this.root, "repos", `${projectId}.git`);
   ticketDir = (ticketId: string) => path.join(this.root, "tickets", ticketId);
+  /** A ticket's kept scratch (BOSSMAN_SCRATCH): proofs and check logs that outlive the runner and /tmp. */
+  scratchDir = (ticketId: string) => path.join(this.root, "scratch", ticketId);
   mergeCheckDir = (ticketId: string) => path.join(this.root, "merge-checks", ticketId);
   reviewDir = (ticketId: string) => path.join(this.root, "reviews", ticketId);
   patchFile = (ticketId: string) => path.join(this.root, "patches", `${ticketId}.patch`);
@@ -342,6 +345,11 @@ export class Workspaces {
       }
       await this.git(["worktree", "remove", "--force", dir], { cwd: repo });
       await this.git(["worktree", "prune"], { cwd: repo });
+      // The ticket is done with its worktree: its kept scratch goes with it (BOS-592), like the worktree's own files.
+      // The server confirms that by itself (a ticket done, or a week past), so a stray release can't remove it first.
+      const scratch = this.scratchDir(spec.ticketId);
+      const age = Date.now() - (statSync(scratch, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
+      if (age > RELEASED_SCRATCH_KEEP_MS) rmSync(scratch, { recursive: true, force: true });
       // Turn checkpoints only matter while the ticket is being worked on.
       for (const c of await this.checkpoints(spec.projectId, spec.ticketId)) await this.git(["update-ref", "-d", c.ref], { cwd: repo });
       return { savedPatch };
@@ -388,7 +396,8 @@ export class Workspaces {
    */
   readImage(ticketId: string, file: string, maxBytes = 5 * 1024 * 1024): { base64: string; size: number } {
     if (!file || file.includes("\0")) throw new Error("Give the image's path.");
-    const dirs = [this.ticketDir(ticketId), this.reviewDir(ticketId), path.join(this.root, ticketId)].filter((d) => existsSync(d)).map((d) => realpathSync(d));
+    // The kept scratch (BOSSMAN_SCRATCH) counts too: a screenshot a proof left there is still the ticket's own image.
+    const dirs = [this.ticketDir(ticketId), this.reviewDir(ticketId), path.join(this.root, ticketId), this.scratchDir(ticketId)].filter((d) => existsSync(d)).map((d) => realpathSync(d));
     const candidates = path.isAbsolute(file) ? [path.resolve(file)] : dirs.map((d) => path.resolve(d, file));
     for (const c of candidates) {
       if (!existsSync(c)) continue;
@@ -1087,6 +1096,26 @@ export class Workspaces {
       if (UUID.test(ticketId) && UUID.test(projectId)) tickets.push({ ticketId, projectId, bytes: await diskUsage(dir) });
     }
 
+    // Scratch (BOSSMAN_SCRATCH, BOS-592) lives on the kept disk and is never the clutter the tmp sweep
+    // clears, so it goes only when its ticket's work (and review copy) are released and it has been quiet for a few
+    // hours, or after a week without a write, whichever comes first. A run inside the last week is barely writing:
+    // touching a folder at its top level keeps it alive.
+    const scratch: DiskReport["scratch"] = [];
+    const scratchRoot = path.join(this.root, "scratch");
+    for (const ticketId of list(scratchRoot)) {
+      // Only a per-ticket folder is ever touched: nothing here can reach another folder of the volume.
+      if (!UUID.test(ticketId)) continue;
+      const dir = path.join(scratchRoot, ticketId);
+      const released = !existsSync(this.ticketDir(ticketId)) && !existsSync(path.join(this.root, "reviews", ticketId));
+      const age = now - (statSync(dir, { throwIfNoEntry: false })?.mtimeMs ?? now);
+      if ((released && age > RELEASED_SCRATCH_KEEP_MS) || age > SCRATCH_KEEP_MS) {
+        rmSync(dir, { recursive: true, force: true });
+        removed.push(ticketId);
+        continue;
+      }
+      scratch.push({ ticketId, bytes: await diskUsage(dir) });
+    }
+
     // A review copy git no longer knows about (its repo pruned it) is only clutter.
     for (const ticketId of list(path.join(this.root, "reviews"))) {
       const dir = path.join(this.root, "reviews", ticketId);
@@ -1119,8 +1148,55 @@ export class Workspaces {
 
     const repos = await Promise.all(list(reposDir).filter((n) => n.endsWith(".git")).map(async (n) => ({ projectId: n.slice(0, -4), bytes: await diskUsage(path.join(reposDir, n)) })));
     const patchesBytes = await diskUsage(path.join(this.root, "patches"));
-    const usedBytes = tickets.reduce((a, t) => a + t.bytes, 0) + repos.reduce((a, r) => a + r.bytes, 0) + patchesBytes;
-    return { usedBytes, tickets, repos, removed };
+    const scratchBytes = scratch.reduce((a, s) => a + s.bytes, 0);
+    const usedBytes = tickets.reduce((a, t) => a + t.bytes, 0) + repos.reduce((a, r) => a + r.bytes, 0) + patchesBytes + scratchBytes;
+    return { usedBytes, tickets, repos, scratch, removed };
+  }
+
+  /**
+   * Moves leftovers from /tmp into a ticket's kept scratch (BOS-592), where the tmp sweep never reaches them:
+   * a proof or log an older run wrote in /tmp survives this runner's restart. Only the top level of /tmp is
+   * looked at: a folder that is one of the ticket's own folder names, or a loose file named for the ticket.
+   * Returns what it moved. Best effort: a name already in scratch is never overwritten.
+   */
+  rescueTmp(ticketId: string, tmpDir = "/tmp"): string[] {
+    if (!UUID.test(ticketId)) return [];
+    const scratch = this.scratchDir(ticketId);
+    const id = ticketId.toLowerCase();
+    const moved: string[] = [];
+    for (const name of existsSync(tmpDir) ? readdirSync(tmpDir) : []) {
+      const from = path.join(tmpDir, name);
+      const lower = name.toLowerCase();
+      // A fenced run writes its check log where it can reach (/tmp) under a kept name, and it lands in scratch as the
+      // check's own log: check-all.log for bossman-scratch-<ticket>.log, check-quick.log for the -quick one.
+      const checkLog = lower === `bossman-scratch-${id}.log` ? "check-all.log" : lower === `bossman-scratch-${id}-quick.log` ? "check-quick.log" : null;
+      const target = path.join(scratch, checkLog ?? name);
+      // A kept check log is the one thing the kept folders may already have: never copy one back over it.
+      if (name === "check-all.log" || name === "check-quick.log") continue;
+      // The check scripts work through /tmp too (it may be another file system), as bossman-scratch-<ticket>.log.
+      const mine = checkLog !== null || lower === id || lower.startsWith(`${id}.`) || lower.startsWith(`${id}-`) || lower.startsWith(`${id}_`);
+      if (!mine || existsSync(target)) continue;
+      // A symlink is never followed nor moved: it could point at another ticket's file, and a link in the scratch
+      // would read as that file from the next run on.
+      const st = lstatSync(from, { throwIfNoEntry: false });
+      if (!st || st.isSymbolicLink()) continue;
+      try {
+        mkdirSync(scratch, { recursive: true });
+        renameSync(from, target);
+        moved.push(name);
+      } catch {
+        // Another file system (/tmp on its own volume) or a file that moved meanwhile: /tmp goes, so a copy is
+        // the only way to keep it.
+        try {
+          if (st.isDirectory()) cpSync(from, target, { recursive: true });
+          else copyFileSync(from, target);
+          moved.push(name);
+        } catch {
+          // Leave it for the sweep.
+        }
+      }
+    }
+    return moved;
   }
 
   /** For tests and the run view: the saved patch, if any. */
