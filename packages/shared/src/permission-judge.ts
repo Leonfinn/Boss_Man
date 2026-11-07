@@ -590,7 +590,7 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
  * heredoc bodies and comments), so a quoted or escaped command word (`"node"`, `n\ode`) reads as the word it runs.
  * Redirects are lifted out: `out` holds output targets, and input targets stay as plain words. Over-splitting is fine.
  */
-function shellSegments(c: string): { words: string[]; out: string[] }[] {
+function shellSegments(c: string, bad?: { v: boolean }): { words: string[]; out: string[] }[] {
   const segs: { words: string[]; out: string[] }[] = [];
   let words: string[] = [];
   let out: string[] = [];
@@ -627,6 +627,16 @@ function shellSegments(c: string): { words: string[]; out: string[] }[] {
     }
     if (ch === '"') { if (dq) modes.pop(); else modes.push("dq"); has = true; continue; }
     if (ch === "`") { endSeg(); continue; }
+    // Arithmetic `$((1<<2))` / `((x<<2))` is not a command or a heredoc: skip to the matching `))` when it holds no substitution.
+    if ((ch === "$" && c[i + 1] === "(" && c[i + 2] === "(") || (ch === "(" && c[i + 1] === "(" && !has && !words.length)) {
+      const start = ch === "$" ? i + 3 : i + 2;
+      let depth = 2;
+      let j = start;
+      for (; j < c.length && depth > 0; j++) { if (c[j] === "(") depth++; else if (c[j] === ")") depth--; }
+      const body = c.slice(start, j);
+      if (depth === 0 && !/\$\(|\x60/.test(body)) { cur += "ARITH"; has = true; i = j - 1; continue; }
+      if (depth !== 0 && bad) bad.v = true;
+    }
     if (ch === "$" && c[i + 1] === "(") { endSeg(); modes.push("sub"); i++; continue; }
     if (dq) { if (/\s/.test(ch)) endWord(); else { cur += ch; has = true; } continue; }
     if (ch === "#" && !has) { while (i < c.length && c[i] !== "\n") i++; i--; continue; }
@@ -639,9 +649,10 @@ function shellSegments(c: string): { words: string[]; out: string[] }[] {
           for (;;) {
             let e = c.indexOf("\n", j);
             if (e < 0) e = c.length;
-            const done = c.slice(j, e).trim() === tag || e >= c.length;
+            const found = c.slice(j, e).trim() === tag;
             j = e + 1;
-            if (done) break;
+            if (found) break;
+            if (e >= c.length) break; // no terminator line: the shell reads to the end of the command as the body too
           }
           i = j - 2;
         }
@@ -656,8 +667,10 @@ function shellSegments(c: string): { words: string[]; out: string[] }[] {
       if (op === "<<" || op === "<<-") {
         let j = i + 1;
         while (c[j] === " " || c[j] === "\t") j++;
-        const m = /^(['"]?)([\w.-]+)\1/.exec(c.slice(j));
-        if (m) pendingTags.push(m[2]!);
+        // The tag is the whole word with quotes and backslashes removed, as the shell reads it (`E"OF"` is EOF).
+        const m = /^(?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"\\])+/.exec(c.slice(j));
+        if (m) pendingTags.push(m[0].replace(/['"\\]/g, ""));
+        else if (bad) bad.v = true;
         redir = null;
       } else if (op[0] === ">" || op[0] === "&") redir = op.endsWith("&") && /^\s*\d/.test(c.slice(i + 1)) ? null : "out";
       else redir = null;
@@ -671,6 +684,46 @@ function shellSegments(c: string): { words: string[]; out: string[] }[] {
   return segs;
 }
 
+/** A command that unpacks an archive or copies a folder tree in. */
+function extractsFiles(name: string, args: string[]): boolean {
+  if (name === "tar") return args.some((a, i) => /^-[A-Za-z]*x|^--(?:extract|get)$/.test(a) || (i === 0 && /^[A-Za-z]*x/.test(a)));
+  if (name === "unzip") return !args.some((a) => /^-[A-Za-z]*[lvtpZ]/.test(a));
+  if (/^(?:7z|7za|7zr|cpio|rsync)$/.test(name)) return true;
+  if (name === "cp") return args.some((a) => /^-[A-Za-z]*[rRa]|^--(?:recursive|archive)$/.test(a));
+  return false;
+}
+
+/** Options on commands from the reader list that run a program of the caller's choosing. */
+function runsProgramOption(name: string, args: string[]): boolean {
+  const any = (re: RegExp): boolean => args.some((a) => re.test(a));
+  if (name === "tar") return any(/^-[A-Za-z]*[IF]|^--(?:use-compress-program|to-command|checkpoint-action|info-script|new-volume-script|rmt-command|rsh-command|transform-command)\b/) || args.some((a) => /^[A-Za-z]*[xcrutd][A-Za-z]*[IF]/.test(a));
+  if (name === "sort") return any(/^--compress-program\b/);
+  if (name === "zip" || name === "unzip") return any(/^-TT$|^-[A-Za-z]*TT|^--unzip-command\b/);
+  if (name === "rg") return any(/^--(?:pre|hostname-bin)\b/);
+  if (name === "wget") return any(/^--use-askpass\b|^-e$|^--execute\b/);
+  if (name === "less" || name === "more") return any(/^--lesskey|^-k$/);
+  return false;
+}
+
+/** pnpm/npm/yarn/git run scripts and config from places named on their command line: not from a scratch or written path. */
+function toolingRunsScratch(name: string, args: string[], isScratch: (w: string) => boolean, isWritten: (w: string) => boolean): boolean {
+  const hit = (w: string | undefined): boolean => w !== undefined && (isScratch(w) || isWritten(w));
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    const eq = a.indexOf("=");
+    const val = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : args[i + 1];
+    const opt = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+    if (/^(?:-C|--dir|--prefix|--cwd|--config|--git-dir|--work-tree|--workspace-dir|--userconfig|--globalconfig|--use-yarnrc|--require|-r|--loglevel-file|--root)$/.test(opt) && hit(val)) return true;
+    if (/^-[CD]./.test(a) && hit(a.slice(2))) return true;
+  }
+  if (name === "git") return false;
+  // pnpm/npm/yarn: a package-manager verb may take a scratch output path; any other word is a package bin (`pnpm tsx /tmp/x.ts`).
+  const verbs = /^(?:install|i|ci|add|remove|rm|update|up|run|run-script|test|t|build|typecheck|lint|dev|start|store|prune|audit|list|ls|outdated|pack|why|licenses|dedupe|rebuild|fetch|prefetch)$/;
+  const sub = args.find((a) => !a.startsWith("-"));
+  if (sub !== undefined && !verbs.test(sub) && args.some(hit)) return true;
+  return false;
+}
+
 /**
  * Deny-by-default for scratch paths. In a command that names a /tmp path or a path the command itself writes (redirect, tee,
  * cp, mv, curl -o ...), the only commands allowed to mention that path are readers and file tools (cat, grep, ls, cp, rm,
@@ -679,7 +732,9 @@ function shellSegments(c: string): { words: string[]; out: string[] }[] {
  * exec-style word. Over-denial (generate a file, then feed it to a checked-in script) is accepted.
  */
 function usesScratchUnsafely(c: string): boolean {
-  const segs = shellSegments(c);
+  const bad = { v: false };
+  const segs = shellSegments(c, bad);
+  if (bad.v) return true; // the parser can't tell where a heredoc or arithmetic ends: fail closed
   const safe = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf rm rmdir mkdir cp mv ln tee touch cd pushd popd " +
     "test [ [[ realpath dirname basename readlink du df sort uniq cut tr jq md5sum sha256sum sha1sum mktemp export local unset set read for " +
     "true false sleep chmod date tar unzip gzip gunzip zip curl wget sed less more tree nl od xxd hexdump column").split(" "));
@@ -718,6 +773,7 @@ function usesScratchUnsafely(c: string): boolean {
     return false;
   };
   const isScratch = (w: string): boolean => scratchWord.test(w) || [...scratchVars].some((v) => new RegExp(`\\$\\{?${v}\\b`).test(w));
+  let extracted = false;
   for (const p of parsed) {
     let { head, args } = p;
     const assigns = [...p.assigns];
@@ -743,6 +799,19 @@ function usesScratchUnsafely(c: string): boolean {
     }
     if (head === "") continue;
     const sh = head.replace(/^.*\//, "");
+    // F4: once a command has unpacked an archive or copied a folder in, files it never wrote by name may exist. Only readers
+    // and file tools may follow in the same command.
+    if (extracted && !(safe.has(sh) && !head.includes("/"))) return true;
+    if (extractsFiles(sh, args)) extracted = true;
+    // F2: options that make an otherwise harmless tool run a program.
+    if (runsProgramOption(sh, args)) return true;
+    // F3: xargs builds a command from its input; with a scratch or written path anywhere it is unread code.
+    if (sh === "xargs") {
+      const cmdWord = args.find((a, i) => !a.startsWith("-") && !/^-[IiLnPsdE]$/.test(args[i - 1] ?? ""));
+      if ((written.size || scratchWord.test(c) || scratchVars.size) && !(cmdWord !== undefined && safe.has(cmdWord) && cmdWord !== "tar")) return true;
+    }
+    if (tooling.has(sh) && toolingRunsScratch(sh, args, isScratch, isWritten)) return true;
+    if (tooling.has(sh) && [...written].some((p) => /(?:^|\/)(?:\.git\/.*|\.gitconfig|\.npmrc|\.yarnrc(?:\.yml)?|\.pnpmfile\.cjs|package\.json|config|\.gitattributes)$/.test(p))) return true;
     const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
       if (usesScratchUnsafely(args[dashC + 1] ?? "")) return true;

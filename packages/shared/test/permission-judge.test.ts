@@ -560,3 +560,49 @@ describe("rules judge: scratch paths are for readers only (BOS-377)", () => {
     "node scripts/gen.js > out.json; cat out.json; node scripts/use.js out.json",
   ]);
 });
+
+// BOS-377 round 3 (Jane F1-F4): heredoc parsing, program-running options, tooling/xargs, extracted files.
+describe("rules judge: round 3 (BOS-377)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const w = `echo x > /tmp/x.js; `;
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  denies([
+    // F1
+    `${w}echo $((1<<2))\n"node" /tmp/x.js`,
+    `cat <<E"OF" >/dev/null\nhi\nEOF\n${w}"node" /tmp/x.js`,
+    `${w}cat <<'E'OF >/dev/null\nhi\nEOF\n"node" /tmp/x.js`,
+    // F2
+    "tar -xf /tmp/a.tar --to-command='node /tmp/x.js'",
+    "tar -cf /tmp/a.tar --checkpoint=1 --checkpoint-action=exec='node /tmp/x.js' f",
+    "tar -I /tmp/x.sh -xf a.tar",
+    "sort -S 1K --compress-program=/tmp/x.sh file",
+    "zip -T -TT 'node /tmp/x.js' /tmp/a.zip f",
+    // F3
+    "echo /tmp/x.sh | xargs sh",
+    "pnpm tsx /tmp/x.ts",
+    "pnpm vitest --config /tmp/v.config.ts",
+    "pnpm -C /tmp/p t",
+    "npm --prefix /tmp/p run t",
+    `git init /tmp/r && printf '[core]\\n\\tfsmonitor = "sh /tmp/x.sh"\\n' >> /tmp/r/.git/config && git -C /tmp/r status`,
+    // F4
+    "tar -xf /tmp/a.tar && node w.js",
+    "unzip -o /tmp/a.zip && node w.js",
+    "mkdir -p /tmp/s && echo x > /tmp/s/q.js && tar -cf /tmp/a.tar -C /tmp/s q.js --transform s/q/w/ && tar -xf /tmp/a.tar && node w.js",
+    "cp -r /tmp/d . && ./d/run.sh",
+  ]);
+  allows([
+    "echo $((1<<2)) && node scripts/x.js",
+    "cat > /tmp/n.md <<'EOF'\nhi\nEOF\ncat /tmp/n.md",
+    "tar -tf /tmp/a.tar",
+    "tar -czf /tmp/a.tgz src",
+    "tar -xf /tmp/a.tar && ls",
+    "sort /tmp/a.txt | uniq",
+    "pnpm test 2>&1 | tee /tmp/t.log",
+    "pnpm run build --outDir /tmp/out",
+    "git status",
+    "find /tmp/out -name '*.log' | xargs rm -f",
+  ]);
+});
