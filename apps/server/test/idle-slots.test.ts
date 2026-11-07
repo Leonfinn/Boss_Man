@@ -6,8 +6,9 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { deploys, deployTargets, runnerEvents, runners, runs, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
-import { CARRY_ON_NOTE, IDLE_SLOT_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
+import { agents, deploys, deployTargets, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
+import type { SweepLimits } from "../src/services/sweeps.js";
 
 const MIN = 60_000;
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -17,9 +18,9 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup() {
+async function setup(sweepLimits?: Partial<SweepLimits>) {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws" });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", ...(sweepLimits ? { sweepLimits } : {}) });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -255,5 +256,82 @@ describe("free run slots go to idle in-progress work (BOS-574)", () => {
     expect((await c.db.select().from(wakes).where(eq(wakes.id, card!.id)))[0]!.status).toBe("launched");
     expect((await c.db.select().from(wakes).where(eq(wakes.id, held!.id)))[0]!.status).toBe("launched");
     expect(await c.wakesOf(IDLE_SLOT_REASON)).toEqual([]);
+  });
+});
+
+describe("free run slots offer idle agents their next ticket (BOS-615)", () => {
+  /** Ann's only work sits in review. The company came with its CEO. */
+  async function team(c: Awaited<ReturnType<typeof setup>>) {
+    const ann = await c.hire("Ann");
+    const [gandalf] = await c.db.select().from(agents).where(and(eq(agents.companyId, c.company.id), eq(agents.role, "ceo")));
+    const inReview = await c.working("Ann's finished work", ann.id, 40 * MIN, { systemState: "review" });
+    await c.run(ann.id, inReview, { endedAgoMs: 40 * MIN, lastEventAgoMs: 40 * MIN, outcome: "end_turn" });
+    return { ann, gandalf, inReview };
+  }
+
+  it("an agent whose work is all in review is started on its assigned ready ticket within one sweep", async () => {
+    const c = (ctx = await setup());
+    const { ann } = await team(c);
+    // Assigned and ready, quiet for 15 minutes: missed work would wait half an hour for it.
+    const next = await c.working("Ann's next up", ann.id, 15 * MIN, { systemState: "ready" });
+    // An unassigned ticket the CEO could hand out, so the CEO would be asked if Ann were left out.
+    await c.working("Unassigned", ann.id, 0, { systemState: "backlog", assigneeAgentId: null });
+    expect(await c.sweeps.run()).toMatchObject({ idleSlots: { woken: 0, ready: 1, asked: 0 }, missedWork: { woken: 0 } });
+    const [w] = await c.wakesOf(IDLE_SLOT_REASON);
+    expect(w).toMatchObject({ agentId: ann.id, ticketId: next, priority: 1, status: "queued" });
+    expect(w!.note).toMatch(/ready, which makes it your next up/);
+    // Ann now has a waiting wake, so she is not idle: neither tier offers her anything more.
+    expect(await c.sweeps.run()).toMatchObject({ idleSlots: { ready: 0, asked: 0 } });
+    expect(await c.wakesOf(IDLE_AGENTS_REASON)).toEqual([]);
+  });
+
+  it("an idle agent with nothing ready gets the CEO one wake naming them, with the unassigned work; not a reviewer who owes a review", async () => {
+    const c = (ctx = await setup({ mergeLineLongAt: 0 }));
+    const { ann, gandalf, inReview } = await team(c);
+    const rex = await c.hire("Rex");
+    await c.db.insert(reviewRequests).values({ ticketId: inReview, kind: "code", reviewerAgentId: rex.id, round: 1 });
+    await c.working("Important code work", ann.id, 0, { systemState: "backlog", assigneeAgentId: null, urgent: true });
+    await c.working("Write up the research", ann.id, 0, { systemState: "backlog", assigneeAgentId: null, noCode: true });
+    const result = await c.sweeps.run();
+    expect(result.idleSlots).toMatchObject({ woken: 0, ready: 0, asked: 1 });
+    const asks = await c.wakesOf(IDLE_AGENTS_REASON);
+    expect(asks).toHaveLength(1);
+    expect(asks[0]).toMatchObject({ agentId: gandalf!.id, ticketId: null, priority: 1 });
+    const note = asks[0]!.note!;
+    expect(note).toMatch(/^\d+ run slots are free and an agent has nothing to work on/);
+    expect(note).toContain("- Ann (worker)");
+    expect(note).not.toContain("Rex");
+    expect(note).not.toContain(gandalf!.name);
+    // One ticket waits to merge, past the (test) limit of 0: the no-code ticket is listed before the urgent one.
+    expect(note).toContain("no-code first: 1 tickets wait to merge");
+    expect(note.indexOf("Write up the research")).toBeLessThan(note.indexOf("Important code work"));
+    expect(note).toMatch(/assign_ticket/);
+
+    // Not again within the half hour, nor after it while the list is the same.
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 0 });
+    await c.db.update(wakes).set({ status: "launched", createdAt: new Date(Date.now() - 31 * MIN) }).where(eq(wakes.reason, IDLE_AGENTS_REASON));
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 0 });
+    // Rex's review is done and he is idle too: the list changed, so the CEO is asked again.
+    await c.db.update(reviewRequests).set({ status: "approved", decidedAt: new Date() }).where(eq(reviewRequests.reviewerAgentId, rex.id));
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 1 });
+    const [latest] = (await c.wakesOf(IDLE_AGENTS_REASON)).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    expect(latest!.note).toContain("- Rex (worker)");
+  });
+
+  it("offers nothing while no run slot is free", async () => {
+    const c = (ctx = await setup());
+    // Company limit 4 keeps one slot for cards: three live runs fill it.
+    await c.db.insert(settings).values({ key: "run_limits", value: { instance: 10, company: 4 } });
+    for (const n of ["Busy 1", "Busy 2", "Busy 3"]) {
+      const a = await c.hire(n);
+      await c.run(a.id, await c.working(n, a.id, 0), { lastEventAgoMs: MIN });
+    }
+    const { ann } = await team(c);
+    await c.working("Ann's next up", ann.id, 15 * MIN, { systemState: "ready" });
+    await c.working("Unassigned", ann.id, 0, { systemState: "backlog", assigneeAgentId: null });
+    expect(await c.scheduler.freeSlots(c.company.id)).toBe(0);
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ woken: 0, ready: 0, asked: 0 });
+    expect(await c.wakesOf(IDLE_SLOT_REASON)).toEqual([]);
+    expect(await c.wakesOf(IDLE_AGENTS_REASON)).toEqual([]);
   });
 });
