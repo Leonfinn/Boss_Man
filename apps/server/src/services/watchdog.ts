@@ -6,9 +6,12 @@
 import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { readWatchdogSettings, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, companies, decisions, engagements, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
+import type { AlertInput } from "./alert-ladder.js";
+import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
-import { checkAsk } from "./decisions.js";
+import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
+import type { AddonFacts } from "./addons.js";
+import type { CardLint, HostFacts } from "./steps.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
@@ -56,16 +59,22 @@ type Notify = (agentId: string, input: { ticketId?: string | null; reason: strin
 type Nudge = (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string; wakeId: string } | { ok: false; error: string }>;
 
 export type WatchdogDeps = {
+  /** Add-on facts for the card lint's R9 (DR-023). Absent: R9 is not checked. */
+  addons?: () => Promise<AddonFacts>;
   notify: Notify;
   nudge: Nudge;
-  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string }) => Promise<{ id: string }>;
+  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint }) => Promise<{ id: string }>;
   assign: (ticketId: string, agentId: string | null) => Promise<unknown>;
   /** Puts a ticket back in the state it was in (through the normal ticket update, so it is versioned and logged). */
   restoreState: (ticketId: string, state: SnapTicket["state"]) => Promise<unknown>;
   /** A "Got it" decision for the owner: reaches their queue and their phone. */
   alert: (companyId: string, question: string) => Promise<unknown>;
+  /** Boss Man's own alert on the ladder, starting at the CEO (BOS-450). Absent: held-wake alerts are not raised. */
+  alertCeo?: (input: AlertInput) => Promise<unknown>;
   notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string }) => Promise<unknown>;
   now?: () => Date;
+  /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
+  hosts?: () => Promise<HostFacts[]>;
   /** The owner's local hour (0-23) at a moment; the daily summary goes out from 8. Defaults to UTC. */
   localHour?: (t: Date) => number;
   log?: (msg: string) => void;
@@ -281,6 +290,9 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
 
   // ---------- The sweep ----------
 
+  /** A wake held by the quota hold has a status reason that starts "subscription " (scheduler.ts). */
+  const notQuotaHeld = sql`(${wakes.status} <> 'deferred' or ${wakes.statusReason} is null or ${wakes.statusReason} not like 'subscription %')`;
+
   /** The board as the rules see it: open tickets, their runs since they last moved, and what holds them. */
   async function snapshot(companyId: string): Promise<Snapshot & { titles: Map<string, { ref: string; title: string; state: string; assigneeAgentId: string | null }> }> {
     const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
@@ -289,8 +301,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const none = { tickets: [], runs: [], holds: [], titles: new Map() };
     if (!ids.length) return none;
     const waiting = new Set(
-      // A wake parked behind a paused agent (or company) isn't a plan: nobody is going to pick it up.
-      (await db.select({ agentId: wakes.agentId, ticketId: wakes.ticketId }).from(wakes).innerJoin(agents, eq(agents.id, wakes.agentId)).where(and(inArray(wakes.ticketId, ids), inArray(wakes.status, ["queued", "deferred"]), eq(agents.paused, false)))).map((w) => `${w.agentId}:${w.ticketId}`),
+      // A wake parked behind a paused agent (or company), or held by the subscription usage limit, isn't a plan: nobody is going to pick it up (BOS-450).
+      (await db.select({ agentId: wakes.agentId, ticketId: wakes.ticketId }).from(wakes).innerJoin(agents, eq(agents.id, wakes.agentId)).where(and(inArray(wakes.ticketId, ids), inArray(wakes.status, ["queued", "deferred"]), eq(agents.paused, false), notQuotaHeld))).map((w) => `${w.agentId}:${w.ticketId}`),
     );
     // Tickets already in the owner's queue through another sweep: not handed to the Scrum Master as well.
     const owned = await db
@@ -433,12 +445,82 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     return `- ${info?.ref ?? f.ticketId} "${title(info?.title ?? "a ticket")}" (${info?.state ?? "?"}), flag ${f.id}: ${WATCHDOG_RULE_LABEL[f.rule as WatchdogRule]}; ${facts.join(", ")}. Suggested: ${SUGGEST[f.rule as WatchdogRule]}.`;
   }
 
+  /** How long a wake may sit behind the usage limit before the CEO is told: an hour, or half that for an urgent ticket (BOS-450). */
+  const QUOTA_HELD_MS = 60 * 60_000;
+  const QUOTA_HELD_URGENT_MS = 30 * 60_000;
+
+  /** Whether an account has room: it has readings and none of its windows is past its hold threshold. The scheduler's own test (hasRoom). */
+  async function accountHasRoom(source: typeof fundingSources.$inferSelect, t: Date) {
+    const samples = await db.selectDistinctOn([quotaSamples.window]).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, source.id)).orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
+    if (!samples.length) return false;
+    const off = new Set(source.quotaDisabledWindows ?? []);
+    return !samples.some((x) => !off.has(x.window) && x.utilization >= source.quotaHoldAt && (!x.resetsAt || x.resetsAt > t));
+  }
+
+  /**
+   * A wake held by the subscription quota is not a plan (BOS-450). Once one has been held an hour (half an hour for an
+   * urgent ticket) the CEO gets one alert for it, saying who, what, which account and window, for how long and whether
+   * another account could take over. One per held wake: the log remembers it, so the next sweep adds nothing.
+   * Wakes behind a paused agent are a different cause and are not touched here. No wake is exempt, merge wakes included.
+   */
+  async function quotaHeldAlerts(c: typeof companies.$inferSelect, s: WatchdogSettings, t: Date) {
+    if (!deps.alertCeo) return;
+    const held = await db
+      .select({ wake: wakes, agentName: agents.name, sourceId: agents.fundingSourceId, number: tickets.number, title: tickets.title, urgent: tickets.urgent })
+      .from(wakes)
+      .innerJoin(agents, eq(agents.id, wakes.agentId))
+      .leftJoin(tickets, eq(tickets.id, wakes.ticketId))
+      .where(and(eq(wakes.companyId, c.id), eq(wakes.status, "deferred"), like(wakes.statusReason, "subscription %"), eq(agents.paused, false)));
+    for (const h of held) {
+      const age = t.getTime() - h.wake.createdAt.getTime();
+      if (age < (h.urgent ? QUOTA_HELD_URGENT_MS : QUOTA_HELD_MS)) continue;
+      const [told] = await db
+        .select({ id: watchdogActions.id })
+        .from(watchdogActions)
+        .where(and(eq(watchdogActions.companyId, c.id), inArray(watchdogActions.kind, ["quota_held_alert", "record_quota_held_alert"]), sql`${watchdogActions.after}->>'wakeId' = ${h.wake.id}`))
+        .limit(1);
+      if (told) continue;
+      const window = /^subscription (.+?) window nearly used up/.exec(h.wake.statusReason ?? "")?.[1] ?? "usage";
+      const [source] = h.sourceId ? await db.select().from(fundingSources).where(eq(fundingSources.id, h.sourceId)) : [];
+      const others = source
+        ? await db.select().from(fundingSources).where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "anthropic"), isNotNull(fundingSources.fallbackRank), ne(fundingSources.id, source.id)))
+        : [];
+      let roomOn: string | null = null;
+      for (const o of others) if (await accountHasRoom(o, t)) { roomOn = o.name; break; }
+      const elsewhere = roomOn
+        ? `Another account has room: ${roomOn}.${source?.fallbackRank == null ? ` ${source?.name} has no order set, so work cannot switch to it by itself: set its order on the Funding page.` : " Check why work did not move to it."}`
+        : others.length
+          ? "No other account has room right now."
+          : "No other account is set up to take over (add one on the Funding page).";
+      const ref = h.number != null ? ticketRef(c.ticketPrefix, h.number) : null;
+      const what = ref ? `${ref} "${h.title}"` : "work with no ticket";
+      const summary = `${h.agentName}'s wake for ${what} has been held ${ago(age)} by the ${window} usage limit on ${source?.name ?? "its account"}. ${elsewhere}`;
+      if (s.recordOnly) {
+        await recordMove({ companyId: c.id, kind: "record_quota_held_alert", ticketId: h.wake.ticketId, targetAgentId: h.wake.agentId, reason: `held ${ago(age)} by the usage limit`, after: { wakeId: h.wake.id }, summary: `Record only: would have told the CEO. ${summary}` });
+        continue;
+      }
+      await deps.alertCeo({
+        companyId: c.id,
+        kind: "quota_held",
+        from: "ceo",
+        why: "work is held by the usage limit, which only the CEO can act on",
+        question: `${summary} Work stays stopped until the window resets or an account with room is available. Decide whether to switch the agent's account, mark the ticket urgent, or wait.`,
+        ticketId: h.wake.ticketId,
+        about: [h.wake.agentId],
+        dedupeKey: `quota-held:${h.wake.id}`,
+        cause: { ...(source ? { account: { fundingSourceId: source.id, name: source.name, window } } : {}), agents: [h.wake.agentId] },
+      });
+      await log({ companyId: c.id, kind: "quota_held_alert", ticketId: h.wake.ticketId, targetAgentId: h.wake.agentId, reason: `held ${ago(age)} by the usage limit`, after: { wakeId: h.wake.id, window, account: source?.name ?? null, anotherAccountHasRoom: roomOn }, summary: `Told the CEO: ${summary}`, undoable: false });
+    }
+  }
+
   async function sweepCompany(c: typeof companies.$inferSelect) {
     const t = now();
     const s = readWatchdogSettings(c.watchdog);
     const snap = await snapshot(c.id);
     await syncFlags(c.id, evaluate(snap, s, t), s);
     await db.update(companies).set({ watchdogLastSweepAt: t }).where(eq(companies.id, c.id));
+    await quotaHeldAlerts(c, s, t);
 
     // An escalated flag the CEO hasn't cleared within its limit starts over: the Scrum Master gets it again, with fresh snoozes.
     const escalated = await db.select().from(watchdogFlags).where(and(eq(watchdogFlags.companyId, c.id), eq(watchdogFlags.status, "open"), isNotNull(watchdogFlags.escalatedAt)));
@@ -1079,8 +1161,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
-      const bad = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps });
-      if (bad) throw new WatchdogError(422, bad);
+      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
         const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, t.id));
@@ -1089,7 +1171,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       }
       const f = await handedFlag(companyId, t.id, "raise_decision");
       await capOrFail(companyId, s);
-      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), steps: input.steps?.length ? input.steps : undefined, stillNeeded: input.stillNeeded?.trim() || undefined });
+      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), steps: input.steps?.length ? input.steps : undefined, stillNeeded: input.stillNeeded?.trim() || undefined, lint: ask.lint });
       return log({ companyId, kind: "raise_decision", ticketId: t.id, flagId: f.id, actorAgentId: sm.id, actorRunId: runId, reason, before: { state: t.systemState }, after: { decisionId: d.id }, undoable: true, summary: `${sm.name} asked the owner a question about it: ${reason}` });
     },
 
@@ -1140,6 +1222,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
           const [d] = await db.select().from(decisions).where(eq(decisions.id, after.decisionId!));
           if (!d || d.status !== "open") throw new WatchdogError(409, "The owner has already answered it (or it was withdrawn), so it can't be taken back.");
           await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(eq(decisions.id, d.id));
+          await markDecisionNotificationRead(db, d.id);
           await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
           // Back to where it was, if nothing else holds it now.
           const [t] = await db.select().from(tickets).where(eq(tickets.id, a.ticketId!));

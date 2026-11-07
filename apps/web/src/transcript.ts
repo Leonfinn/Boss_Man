@@ -68,8 +68,12 @@ export function describe(item: TranscriptItem): { tone: "text" | "tool" | "note"
           return { tone: "note", label: u.mode === "load" ? "Resumed the saved session after a restart" : "Started a fresh session after a restart" };
         case "checkpoint":
           return { tone: "note", label: `Checkpoint ${String(u.turn ?? "")}: ${Number(u.files ?? 0)} file${Number(u.files) === 1 ? "" : "s"} changed this turn` };
-        case "message_delivered":
-          return { tone: "note", label: "Message delivered", body: u.text ?? "" };
+        case "message_delivered": {
+          // The run carries only the start of a long message; say how much there was so it isn't read as the whole thing.
+          const shown = String(u.text ?? "");
+          const full = Number(u.fullLength ?? 0);
+          return { tone: "note", label: "Message delivered", body: full > shown.length ? `${shown}… (${full.toLocaleString()} characters in all; the rest is on the ticket)` : shown };
+        }
         default:
           return { tone: "note", label: String(u.kind ?? "update").replace(/_/g, " ") };
       }

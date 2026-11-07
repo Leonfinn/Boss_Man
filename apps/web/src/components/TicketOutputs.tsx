@@ -1,6 +1,7 @@
 // What a ticket produced (R69): wiki pages, repo files and links its agents attached.
 import { ticketRef } from "@boss-man/shared";
 import { api } from "../api";
+import { wikiHref } from "../links";
 import { when } from "../pages/Runs";
 
 export type Artifact = { ticketId?: string; fromTitle?: string; fromNumber?: number | null; id: string; kind: "wiki_page" | "repo_file" | "url"; title: string; slug: string | null; path: string | null; ref: string | null; url: string | null; agent: string | null; runId: string | null; createdAt: string };
@@ -34,7 +35,8 @@ export function TicketOutputs({ items, companyId, onChanged, code, ticketId, pre
         <li key={a.id}>
           <span className="tag">{a.kind === "wiki_page" ? "wiki" : a.kind === "repo_file" ? "repo file" : "link"}</span>
           {a.kind === "wiki_page" ? (
-            <a href={`#/wiki/${companyId}/${a.slug}`}>{a.title}</a>
+            // The one shared wiki address builder (BOS-358), so a page opens the same from here and chat.
+            <a href={wikiHref(a.slug ?? "", companyId)}>{a.title}</a>
           ) : a.kind === "url" ? (
             <a href={a.url!} target="_blank" rel="noopener noreferrer">
               {a.title}

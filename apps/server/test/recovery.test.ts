@@ -64,7 +64,7 @@ describe("recovery after a runner restart (R42)", () => {
 
     expect((await c.db.select().from(runs).where(eq(runs.id, first.runId)))[0]!.outcome).toBe("interrupted");
     const [w] = await c.db.select().from(wakes).where(eq(wakes.reason, "resume"));
-    expect(w).toMatchObject({ agentId: c.ceo.id, ticketId: t.id, resumeRunId: first.runId, causedByRunId: first.runId, causationDepth: 1 });
+    expect(w).toMatchObject({ agentId: c.ceo.id, ticketId: t.id, resumeRunId: first.runId, causedByRunId: null, causationDepth: 0 });
     expect(w!.note).toContain("1. Read src/checkout.ts\n2. npm test");
     expect(w!.note).not.toContain("git commit");
     expect(w!.note).toMatch(/check whether it already happened/);

@@ -9,8 +9,9 @@ import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
-type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null };
-type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; tickets: Array<{ id: string; title: string }> };
+type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
+// revisionCount is every version, which can be more than the first page the page carries (BOS-496).
+type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; revisionCount?: number; tickets: Array<{ id: string; title: string }> };
 type OldVersion = { id: string; title: string; body: string; createdAt: string; agent: string | null };
 
 type Draft = { title: string; body: string; folder: string };
@@ -123,10 +124,25 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   const page = usePoll((signal) => api<PageDetail>(`/api/companies/${companyId}/wiki/${slug}`, { signal }), 30_000, `${companyId}/${slug}`);
   const [editing, setEditing] = useState(false);
   const [history, setHistory] = useState(false);
+  // Versions opened from "Show older versions", older than the first page the page carries (BOS-496).
+  const [older, setOlder] = useState<{ rows: Revision[]; busy: boolean; error: string | null }>({ rows: [], busy: false, error: null });
   const [old, setOld] = useState<OldVersion | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => (setEditing(false), setHistory(false), setOld(null)), [slug]);
+  useEffect(() => (setEditing(false), setHistory(false), setOlder({ rows: [], busy: false, error: null }), setOld(null)), [slug]);
   const p = page.data;
+  const versions = [...(p?.revisions ?? []), ...older.rows];
+  const hasMore = !!p && versions.length < (p.revisionCount ?? p.revisions.length);
+  const showMore = async () => {
+    if (!p) return;
+    setOlder((o) => ({ ...o, busy: true, error: null }));
+    try {
+      const rows = await api<Revision[]>(`/api/companies/${companyId}/wiki/${slug}?versions=1&offset=${versions.length}`);
+      // Drop any overlap, so a save made while paging can't list a version twice.
+      setOlder((o) => ({ rows: [...o.rows, ...rows.filter((r) => !p.revisions.some((x) => x.id === r.id) && !o.rows.some((x) => x.id === r.id))], busy: false, error: null }));
+    } catch (err) {
+      setOlder((o) => ({ ...o, busy: false, error: (err as Error).message }));
+    }
+  };
   // A link can name a section (slug#Heading); land on that heading once the page has rendered.
   useEffect(() => {
     if (!p || !section) return;
@@ -136,7 +152,8 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   }, [p?.id, section]);
 
   const save = async (v: Draft) => {
-    const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: v });
+    // The owner is replacing the page they just edited, so the agent shrink guard never blocks their own save.
+    const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: { ...v, replace: true } });
     setEditing(false);
     setOld(null);
     onChanged();
@@ -154,7 +171,29 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
       setError((err as Error).message);
     }
   };
-  const showOld = async (id: string) => setOld(await api<OldVersion>(`/api/companies/${companyId}/wiki-revisions/${id}`));
+  // A version that fails to open says so, instead of the click looking dead (BOS-430).
+  const showOld = async (id: string) => {
+    setError(null);
+    try {
+      setOld(await api<OldVersion>(`/api/companies/${companyId}/wiki-revisions/${id}`));
+    } catch {
+      setError("Couldn't open that version. Try again; nothing on the page has changed.");
+    }
+  };
+  // Putting a version back goes through restore, so the old text comes back even if it looks like a shrink,
+  // and the restore is a new version of its own that can be undone (BOS-430).
+  const restoreOld = async (revisionId: string) => {
+    setError(null);
+    try {
+      await api(`/api/companies/${companyId}/wiki-restore`, { method: "POST", body: { slug, revisionId } });
+      setOld(null);
+      setHistory(true);
+      onChanged();
+      page.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
 
   if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} go={go} /> : <p className="error" role="alert">{page.error.message}</p>;
   if (!p) return null;
@@ -192,7 +231,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
             New page here
           </button>
           <button type="button" className="btn" aria-expanded={history} onClick={() => setHistory((h) => !h)}>
-            History ({p.revisions.length})
+            History ({p.revisionCount ?? p.revisions.length})
           </button>
           <button type="button" className="btn" onClick={() => void remove()}>
             Delete
@@ -202,12 +241,13 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
       {history && (
         <section aria-label="History" style={{ borderTop: "1px solid var(--line)", paddingTop: 10 }}>
           <ul style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {p.revisions.map((r, i) => (
+            {versions.map((r, i) => (
               <li key={r.id} style={{ fontSize: 14 }}>
                 <button type="button" className="link" onClick={() => void showOld(r.id)}>
                   {when(r.createdAt)}
                 </button>{" "}
                 by {r.agent ?? "you"}
+                {typeof r.size === "number" && <span className="muted"> · {r.size.toLocaleString("en-GB")} characters</span>}
                 {i === 0 && " (current)"}
                 {r.runId && (
                   <>
@@ -218,6 +258,17 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
               </li>
             ))}
           </ul>
+          {/* Every save is kept, so the oldest is always reachable: page further back to find it (BOS-496). */}
+          {hasMore && (
+            <button type="button" className="btn" disabled={older.busy} onClick={() => void showMore()}>
+              {older.busy ? "Loading…" : `Show older versions (${(p.revisionCount ?? versions.length) - versions.length} more)`}
+            </button>
+          )}
+          {older.error && (
+            <p className="error" role="alert">
+              {older.error}
+            </p>
+          )}
         </section>
       )}
       {old && (
@@ -225,7 +276,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           <span>
             You're looking at the version from {when(old.createdAt)} by {old.agent ?? "you"}.
           </span>
-          <button type="button" className="btn primary" onClick={() => void save({ title: old.title, body: old.body, folder: p.folder }).catch((err: Error) => setError(err.message))}>
+          <button type="button" className="btn primary" onClick={() => void restoreOld(old.id)}>
             Put this version back
           </button>
           <button type="button" className="btn" onClick={() => setOld(null)}>
@@ -233,7 +284,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           </button>
         </div>
       )}
-      <Markdown text={(old ?? p).body} wikiCompanyId={companyId} />
+      <Markdown text={(old ?? p).body} linkContext={{ companyId }} />
       {error && (
         <p className="error" role="alert">
           {error}
@@ -342,7 +393,7 @@ function BriefView({ companyId }: { companyId: string }) {
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <h2 style={{ fontSize: 22, fontWeight: 600 }}>Company brief</h2>
-      <Markdown text={brief.data.markdown} />
+      <Markdown text={brief.data.markdown} linkContext={{ companyId }} />
     </article>
   );
 }

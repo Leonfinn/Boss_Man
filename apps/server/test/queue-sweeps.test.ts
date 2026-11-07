@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, getTableName, inArray, ne, sql } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
-import { openPglite } from "../src/db/client.js";
+import { openPglite, type Db } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
-import { activity, agents, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
+import { effectiveDueDate, rankDecision, ticketRef, type BlockedTicket } from "@boss-man/shared";
+import { activity, agents, companies, decisions, keyResults, milestones, notifications, objectives, runs, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -17,8 +18,38 @@ afterEach(async () => {
 
 type Row = { id: string; kind: string; question: string; recommendedOption: string; score: number; reasons: string[]; blocks: Array<{ ticketId: string; depth: number }>; dueDate: string | null };
 
+/** Wraps a db so every select made while `reads.on` is set is counted, with the rows it returned (BOS-409). */
+function countReads(inner: Db) {
+  const reads = { on: false, queries: 0, rows: 0, byTable: {} as Record<string, number> };
+  const wrap = (b: object, table = ""): object =>
+    new Proxy(b, {
+      get(target, prop) {
+        const v = Reflect.get(target, prop, target);
+        if (typeof v !== "function") return v;
+        if (prop === "then")
+          return (ok?: (r: unknown) => unknown, bad?: (e: unknown) => unknown) =>
+            v.call(target, (r: unknown) => {
+              if (reads.on && Array.isArray(r)) {
+                reads.queries++;
+                reads.rows += r.length;
+                reads.byTable[table] = (reads.byTable[table] ?? 0) + r.length;
+              }
+              return ok ? ok(r) : r;
+            }, bad);
+        return (...a: unknown[]) => {
+          const out = v.apply(target, a);
+          const from = prop === "from" ? getTableName(a[0] as never) : table;
+          return out && typeof out === "object" ? wrap(out, from) : out;
+        };
+      },
+    });
+  const db = new Proxy(inner, { get: (t, p) => (p === "select" ? (...a: unknown[]) => wrap((t.select as (...x: unknown[]) => object)(...a)) : Reflect.get(t, p, t)) }) as Db;
+  return { db, reads };
+}
+
 async function setup() {
-  const { db, close } = await openPglite();
+  const { db: rawDb, close } = await openPglite();
+  const { db, reads } = countReads(rawDb);
   let offset = 0;
   const clock = () => new Date(Date.now() + offset);
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: clock });
@@ -38,9 +69,13 @@ async function setup() {
   const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: clock().toISOString(), event });
   const ticket = async (body: Record<string, unknown>) => (await req("POST", `/api/projects/${project.id}/tickets`, body)).json() as { id: string };
   const queue = async () => (await req("GET", "/api/decisions")).json() as Row[];
-  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number; longTicketlessRuns: { raised: number } };
+  // A stalled-run card climbs the alert ladder now (DR-017): it belongs to the Scrum Master/CEO, never the
+  // owner's queue unless it is an owner kind. These tests read the card itself, whatever rung holds it, in
+  // the CEO's own view (which carries the same evidence and reasons the owner's queue shows).
+  const alerts = async () => (await built.decisions.queue({ includeAll: true, companyId: company.id })) as unknown as Row[];
+  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; neverStartedRuns: number; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
-  return { ...built, db, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
+  return { ...built, db, reads, close, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, sweep, advance, clock, offline, online };
 }
 
 describe("ranked decision queue (R20)", () => {
@@ -260,6 +295,63 @@ describe("stale blockers (R21)", () => {
     expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.worker.id, ticketId: tls.id, reason: "unblocked" })]);
   });
 
+  it("withdraws the row once the blocked ticket is done, and flags only the live pairs (BOS-409)", async () => {
+    ctx = await setup();
+    const a = await blockedPair(ctx.ceo.id);
+    const other = await ctx.ticket({ title: "Get certs", assigneeAgentId: ctx.ceo.id });
+    const waiting = await ctx.ticket({ title: "Ship site", state: "blocked", assigneeAgentId: ctx.worker.id });
+    await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: other.id });
+    ctx.advance(25 * HOUR);
+    expect((await ctx.sweep()).staleBlockers).toEqual({ open: 2, raised: 2 });
+    await ctx.req("PATCH", `/api/tickets/${a.tls.id}`, { state: "done" });
+    expect((await ctx.sweep()).staleBlockers).toEqual({ open: 1, raised: 0 });
+    const open = await ctx.db.select().from(decisions).where(and(eq(decisions.kind, "stale_blocker"), eq(decisions.status, "open")));
+    expect(open).toHaveLength(1);
+    expect(open[0]!.question).toContain("Get certs");
+  });
+
+  it("reads the same rows however many done tickets or unrelated runs exist, and a fixed number of queries per live dependency count (BOS-409)", async () => {
+    ctx = await setup();
+    const measure = async () => {
+      ctx.reads.queries = 0;
+      ctx.reads.rows = 0;
+      ctx.reads.byTable = {};
+      ctx.reads.on = true;
+      await ctx.sweep();
+      ctx.reads.on = false;
+      return { queries: ctx.reads.queries, deps: ctx.reads.byTable["ticket_dependencies"] ?? 0, runs: ctx.reads.byTable["runs"] ?? 0 };
+    };
+    const pair = async (title: string) => {
+      const blocker = await ctx.ticket({ title: `Blocker ${title}`, assigneeAgentId: ctx.ceo.id });
+      const waiting = await ctx.ticket({ title: `Waiting ${title}`, state: "blocked", assigneeAgentId: ctx.worker.id });
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: blocker.id });
+      return { blocker, waiting };
+    };
+    await pair("a");
+    await pair("b");
+    ctx.advance(25 * HOUR);
+    await ctx.sweep(); // raises both cards, so the measured passes are steady-state
+    const two = await measure();
+
+    // Done tickets with dependencies, and runs on tickets nobody is waiting on, must not be read.
+    let loose = { id: "" };
+    for (let i = 0; i < 4; i++) {
+      const { waiting } = await pair(`done${i}`);
+      await ctx.req("PATCH", `/api/tickets/${waiting.id}`, { state: "done" });
+      loose = waiting;
+    }
+    const at = ctx.clock();
+    for (let i = 0; i < 6; i++) await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: loose.id, status: "succeeded", startedAt: at, lastEventAt: at, endedAt: at } as never);
+    expect(await measure()).toEqual(two);
+
+    // More live dependencies add no queries: blockers and engagements are fetched in one query each.
+    for (let i = 0; i < 6; i++) await pair(`live${i}`);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const eight = await measure();
+    expect(eight.queries).toBe(two.queries);
+  });
+
   it("withdraws the row once the blocker is done", async () => {
     ctx = await setup();
     const { domain } = await blockedPair(ctx.ceo.id);
@@ -289,7 +381,7 @@ describe("stalled runs (R32)", () => {
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
     ctx.advance(2 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
-    const [row] = await ctx.queue();
+    const [row] = await ctx.alerts();
     expect(row).toMatchObject({ kind: "stalled_run", recommendedOption: "Keep waiting" });
     expect(row!.question).toBe('CEO has sent nothing for 6 minutes while working on "Checkout error states". It may be stuck, or busy with a long command.');
     expect(ctx.commands.some((c) => c.type === "run.cancel")).toBe(false);
@@ -298,25 +390,117 @@ describe("stalled runs (R32)", () => {
     expect(ctx.commands.at(-1)).toEqual({ type: "run.cancel", runId });
   });
 
-  it("holds the never-started alert while the runner has only just reconnected (BOS-331)", async () => {
+  it("leaves a never-started run alone while the runner has only just reconnected (BOS-331)", async () => {
     ctx = await setup();
     await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
     await ctx.scheduler.tick();
     ctx.advance(6 * 60_000);
-    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    expect(await ctx.sweep()).toMatchObject({ stalledRuns: { raised: 0 }, neverStartedRuns: 0 });
     const status = (await ctx.serverStatus.status(ctx.company.id)) as { runner: { swapping: boolean } | null };
     expect(status.runner?.swapping).toBe(true);
   });
 
-  it("says when a run never started, and recommends cancelling it", async () => {
+  describe("runs that never start (BOS-480)", () => {
+  const starts = () => ctx.commands.filter((c): c is Extract<RunnerCommand, { type: "run.start" }> => c.type === "run.start");
+  const runRow = async (runId: string) => (await ctx.db.select().from(runs).where(eq(runs.id, runId)))[0]!;
+  /** A runner past its settling time, as after a restart some while ago, with a known boot. */
+  async function settled() {
     ctx = await setup();
+    await ctx.db.update(runners).set({ bootId: "boot-1" });
+    ctx.advance(11 * 60_000);
+  }
+
+  it("ends a never-started run on a connected, settled runner and queues its wake again within 4 minutes, with no card", async () => {
+    await settled();
+    const t = await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
+    await ctx.scheduler.tick();
+    const first = starts().at(-1)!;
+    const [original] = await ctx.db.select().from(wakes).where(eq(wakes.runId, first.runId));
+    ctx.advance(2 * 60_000);
+    expect((await ctx.sweep()).neverStartedRuns).toBe(0);
+    expect((await runRow(first.runId)).endedAt).toBeNull();
+    ctx.advance(60_000);
+    expect((await ctx.sweep()).neverStartedRuns).toBe(1);
+    expect(await runRow(first.runId)).toMatchObject({ outcome: "lost: never started", endedAt: expect.any(Date) });
+    // The runner is told to drop it, in case it is still setting it up.
+    expect(ctx.commands).toContainEqual({ type: "run.cancel", runId: first.runId });
+    const again = (await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id))).filter((w) => w.id !== original!.id && w.note?.includes("the earlier start never began"));
+    expect(again).toHaveLength(1);
+    expect(again[0]).toMatchObject({ ticketId: t.id, reason: original!.reason, priority: original!.priority, resumeRunId: original!.resumeRunId, causedByRunId: null });
+    expect(again[0]!.note).toBe(`${original!.note ? `${original!.note}\n\n` : ""}[Boss Man started this again: the earlier start never began (retry 1 of 2)]`);
+    expect(await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"))).toEqual([]);
+    // Nothing is asked of anyone, even well past the stall limit.
+    ctx.advance(10 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+  });
+
+  it("keeps a resumed run's resume link through the retry", async () => {
+    await settled();
+    const t = await ctx.ticket({ title: "Checkout error states" });
+    const [old] = await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: t.id, startedAt: ctx.clock(), endedAt: ctx.clock(), outcome: "interrupted" }).returning();
+    await ctx.scheduler.wake({ agentId: ctx.worker.id, ticketId: t.id, reason: "resume", priority: 3, note: "Picks up.", resumeRunId: old!.id });
+    await ctx.scheduler.tick();
+    const first = starts().at(-1)!;
+    ctx.advance(3 * 60_000);
+    await ctx.sweep();
+    const again = (await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.worker.id))).filter((w) => w.runId !== first.runId);
+    expect(again).toEqual([expect.objectContaining({ reason: "resume", priority: 3, resumeRunId: old!.id, note: "Picks up.\n\n[Boss Man started this again: the earlier start never began (retry 1 of 2)]" })]);
+  });
+
+  it("leaves alone a run the runner says is waiting for the repo lock", async () => {
+    await settled();
     await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
     await ctx.scheduler.tick();
-    ctx.advance(11 * 60_000);
-    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
-    const [row] = await ctx.queue();
-    expect(row).toMatchObject({ kind: "stalled_run", recommendedOption: "Cancel run" });
-    expect(row!.question).toBe(`CEO's run on "Checkout error states" never started: the runner hasn't reported it beginning in 11 minutes, probably because the runner restarted. Cancel it, then message CEO on the task to start again.`);
+    const { runId } = starts().at(-1)!;
+    await ctx.emit({ type: "runner.log", level: "info", message: `Run ${runId} is waiting for the repo lock before it can start; trying again until it frees.` });
+    ctx.advance(20 * 60_000);
+    expect((await ctx.sweep()).neverStartedRuns).toBe(0);
+    expect((await runRow(runId)).endedAt).toBeNull();
+  });
+
+  it("after two retries, the third failure is one CEO card per runner boot listing every agent, which never asks to cancel", async () => {
+    await settled();
+    const designer = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Designer" })).json() as { id: string };
+    await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.worker.id });
+    await ctx.ticket({ title: "Login page", assigneeAgentId: designer.id });
+    const card = async () => ctx.db.select().from(decisions).where(eq(decisions.dedupeKey, `runner-boot:${(await ctx.db.select().from(runners))[0]!.id}:boot-1`));
+    const live = async (agentId: string) => (await ctx.db.select().from(runs).where(and(eq(runs.agentId, agentId)))).filter((r) => !r.endedAt);
+    for (let round = 1; round <= 3; round++) {
+      await ctx.scheduler.tick();
+      expect(await live(ctx.worker.id)).toHaveLength(1);
+      expect(await live(designer.id)).toHaveLength(1);
+      expect(await card()).toEqual([]);
+      ctx.advance(3 * 60_000);
+      expect((await ctx.sweep()).neverStartedRuns).toBe(2);
+    }
+    const cards = await card();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.question).toBe(
+      `2 runs never started on the runner, even after Boss Man started each again 2 times: Engineer on "Checkout error states"; Designer on "Login page". Boss Man has stopped trying. Check the runner (Settings → Server and runner), then wake these agents again.`,
+    );
+    // Raised at the CEO (DR-017 A), and never a "Cancel it" card.
+    expect((cards[0]!.context as { ladder: { rung: string } }).ladder.rung).toBe("ceo");
+    expect(await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"))).toEqual([]);
+    // No fourth try.
+    await ctx.scheduler.tick();
+    expect(await live(ctx.worker.id)).toEqual([]);
+    expect(await live(designer.id)).toEqual([]);
+  });
+
+  it("a 'runner offline' launch failure raises no card, and the wake still starts once the runner is back", async () => {
+    ctx = await setup();
+    ctx.offline();
+    const t = await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.worker.id });
+    await ctx.scheduler.tick();
+    await ctx.scheduler.tick();
+    const [w] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(w).toMatchObject({ status: "queued", statusReason: "runner offline" });
+    expect(await ctx.db.select().from(decisions)).toEqual([]);
+    ctx.online();
+    await ctx.scheduler.tick();
+    expect(starts().filter((s) => s.agentId === ctx.worker.id)).toHaveLength(1);
+    expect(await ctx.db.select().from(decisions)).toEqual([]);
+  });
   });
 
   it("withdraws when the run speaks again, and says nothing more after keep waiting", async () => {
@@ -326,11 +510,11 @@ describe("stalled runs (R32)", () => {
     await ctx.sweep();
     await ctx.emit({ type: "run.update", runId, update: { sessionUpdate: "agent_message_chunk" } } as RunnerEvent);
     await ctx.sweep();
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
 
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    const [row] = await ctx.queue();
+    const [row] = await ctx.alerts();
     await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Keep waiting" });
     ctx.advance(10 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
@@ -341,14 +525,14 @@ describe("stalled runs (R32)", () => {
     await launch();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    const [row] = await ctx.queue();
+    const [row] = await ctx.alerts();
     await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Keep waiting" });
     ctx.advance(29 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
     ctx.advance(2 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
   });
 
   it("closes the alert when the run's ticket is already done", async () => {
@@ -356,10 +540,10 @@ describe("stalled runs (R32)", () => {
     const { ticket } = await launch();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, ticket.id));
     await ctx.sweep();
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
   });
 
   it("links a stall notice to its run and a stale blocker to the blocked ticket", async () => {
@@ -372,6 +556,9 @@ describe("stalled runs (R32)", () => {
     await ctx.req("POST", `/api/tickets/${tls.id}/dependencies`, { ticketId: domain.id });
     ctx.advance(25 * HOUR);
     await ctx.sweep();
+    // A stall notice stops at the CEO now (DR-017), so put it where the owner would see it (as the ladder does on
+    // a timeout or the CEO's escalate) to check the link it carries. The chain is unchanged.
+    await ctx.db.update(decisions).set({ tier: "owner", context: sql`jsonb_set(${decisions.context}, '{ladder,rung}', '"owner"')` }).where(eq(decisions.kind, "stalled_run"));
     await ctx.notes.syncDecisions();
     const links = Object.fromEntries((await ctx.db.select({ k: decisions.kind, l: notifications.link }).from(notifications).innerJoin(decisions, eq(decisions.id, notifications.decisionId))).map((r) => [r.k, r.l]));
     expect(links).toMatchObject({ stalled_run: `#/runs/${runId}`, stale_blocker: `#/tickets/${tls.id}` });
@@ -384,23 +571,13 @@ describe("stalled runs (R32)", () => {
     await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run npm test", status: "completed" } } as unknown as RunnerEvent);
     ctx.advance(14 * 60_000);
     await ctx.sweep();
-    const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
+    const [row] = (await ctx.alerts()) as Array<Row & { evidence: Record<string, any> }>;
     expect(row!.evidence).toMatchObject({ runId, agent: "CEO", ticketId: ticket.id, ticket: "Checkout error states", runner: { connected: true }, waitingOnOwner: false });
     expect(row!.evidence.lastStep).toMatchObject({ type: "run.update", event: { update: { title: "Run npm test" } } });
     expect(new Date(row!.evidence.lastEventAt).getTime()).toBeLessThan(Date.now() + 1000);
     ctx.offline();
-    const [off] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
+    const [off] = (await ctx.alerts()) as Array<Row & { evidence: Record<string, any> }>;
     expect(off!.evidence.runner.connected).toBe(false);
-  });
-
-  it("attaches evidence to a run that never started: no events at all", async () => {
-    ctx = await setup();
-    await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
-    await ctx.scheduler.tick();
-    ctx.advance(11 * 60_000);
-    await ctx.sweep();
-    const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
-    expect(row!.evidence).toMatchObject({ lastEventAt: null, lastStep: null, ticket: "Checkout error states" });
   });
 
   it("doesn't flag a run that is waiting for a permission answer", async () => {
@@ -412,7 +589,7 @@ describe("stalled runs (R32)", () => {
     ctx.advance(30 * 60_000);
     expect((await ctx.sweep()).stalledRuns.open).toBe(0);
     // The paused agent outranks other rows.
-    expect((await ctx.queue())[0]!.reasons[0]).toBe("An agent is paused until you answer");
+    expect((await ctx.alerts())[0]!.reasons[0]).toBe("An agent is paused until you answer");
   });
 
   it("closes the alert by itself, with the reason, when the run ends after it was raised (BOS-217)", async () => {
@@ -420,11 +597,11 @@ describe("stalled runs (R32)", () => {
     const { runId } = await launch();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     const endedAt = ctx.clock();
     await ctx.emit({ type: "run.ended", runId, stopReason: "end_turn", error: null });
     // No sweep: the event alone closes it.
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
     expect(d).toMatchObject({ status: "withdrawn", dedupeKey: null, context: { withdrawn: { by: "system", note: `the run ended normally at ${endedAt.toISOString().slice(11, 16)}` } } });
     expect((await ctx.db.select().from(activity)).some((a) => a.kind === "decision_withdrawn" && a.summary.includes('CEO has sent nothing') && a.summary.includes('ended normally'))).toBe(true);
@@ -435,10 +612,10 @@ describe("stalled runs (R32)", () => {
     const { runId } = await launch();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     // No sweep: the event alone closes it.
     await ctx.emit({ type: "run.update", runId, update: { kind: "agent_message_chunk" } } as RunnerEvent);
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
     expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system", note: "the run is active again" } } });
   });
@@ -453,7 +630,7 @@ describe("stalled runs (R32)", () => {
     ctx.advance(35 * 60_000);
     const res = await ctx.sweep();
     expect(res.lostRuns).toBe(1);
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
     expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system" } } });
   });
@@ -464,12 +641,38 @@ describe("stalled runs (R32)", () => {
     await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "pnpm check-all", status: "in_progress" } } as unknown as RunnerEvent);
     ctx.advance(10 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     ctx.advance(6 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
-    const [row] = await ctx.queue();
+    const [row] = await ctx.alerts();
     expect(row!.question).toContain("has sent nothing for 16 minutes");
     expect(row!.question).toContain("It is still inside pnpm check-all, so it may just be a long command.");
+  });
+
+  it("doesn't alert at 15 or 60 minutes while a check script waits for the check slot, but does after 2 hours (BOS-518)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run quick check", rawInput: { command: "cd /work && scripts/check-quick.sh" }, status: "in_progress" } } as unknown as RunnerEvent);
+    for (const minutes of [16, 44, 30]) {
+      ctx.advance(minutes * 60_000);
+      await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+      expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    }
+    expect(await ctx.alerts()).toEqual([]);
+    ctx.advance(29 * 60_000);
+    await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    expect(await ctx.alerts()).toEqual([]);
+    ctx.advance(2 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+  });
+
+  it("still alerts after 15 minutes for a silent command that is not a check script (BOS-518)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run other", rawInput: { command: "sleep 9999 # scripts/check-quick.sh.bak" }, status: "in_progress" } } as unknown as RunnerEvent);
+    ctx.advance(16 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
   });
 
   it("doesn't raise the 5-minute alert while a connected runner is still answering pings mid-command (BOS-217)", async () => {
@@ -489,9 +692,9 @@ describe("stalled runs (R32)", () => {
     ctx = await setup();
     const { runId } = await launch();
     await ctx.emit({ type: "run.permission_request", runId, requestId: "r1", title: "git push", kind: "execute", rawInput: { command: "git push origin main" }, options: [] } as unknown as RunnerEvent);
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     await ctx.emit({ type: "run.ended", runId, stopReason: "cancelled", error: null });
-    expect(await ctx.queue()).toEqual([]);
+    expect(await ctx.alerts()).toEqual([]);
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "permission"));
     expect(d!.status).toBe("withdrawn");
   });
@@ -521,7 +724,7 @@ describe("the server ends runs it can't reach", () => {
     const { runId } = await launched();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    const [d] = await ctx.queue();
+    const [d] = await ctx.alerts();
     ctx.offline();
     expect((await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Cancel run" })).json()).toMatchObject({ delivered: false, endedHere: true });
     expect((await row(runId)).outcome).toBe("stopped: runner offline");
@@ -564,7 +767,7 @@ describe("the server ends runs it can't reach", () => {
     const { runId } = await launched();
     ctx.advance(6 * 60_000);
     await ctx.sweep();
-    expect(await ctx.queue()).toHaveLength(1);
+    expect(await ctx.alerts()).toHaveLength(1);
     ctx.offline();
     ctx.advance(28 * 60_000);
     expect((await ctx.sweep()).lostRuns).toBe(0); // 34 minutes in: not yet 30 past the 5-minute limit
@@ -572,7 +775,54 @@ describe("the server ends runs it can't reach", () => {
     const res = await ctx.sweep();
     expect(res.lostRuns).toBe(1);
     expect(await row(runId)).toMatchObject({ outcome: "lost: runner offline" });
-    expect(await ctx.queue()).toEqual([]);
+    expect((await ctx.alerts()).filter((d) => !/could not start/.test(d.question))).toEqual([]);
+  });
+
+  it("closes a run its runner restarted under, after the replay window, so it stops holding its agent (BOS-579)", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    const [before] = await ctx.db.select().from(runners).where(eq(runners.companyId, ctx.company.id));
+    await ctx.db.update(runners).set({ bootId: "boot-1" }).where(eq(runners.id, before!.id));
+    const [runner] = await ctx.db.select().from(runners).where(eq(runners.id, before!.id));
+    // A reconnect of the same process changes nothing: its runs are still going.
+    // (The restart time is the server's real clock, so this test moves the sweep's clock only after the restart.)
+    await ctx.runners.bootSeen(runner!, "boot-1");
+    expect(ctx.runners.restartedAt(runner!.id)).toBeNull();
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+
+    // The runner restarts, and never reports this run (its record of live runs was lost, say).
+    await ctx.runners.bootSeen(runner!, "boot-2");
+    const held = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "engagement", note: "Engagement: the server is back." });
+    await ctx.scheduler.tick();
+    expect((await ctx.db.select().from(wakes).where(eq(wakes.id, held.id)))[0]!.statusReason).toBe("at a concurrency limit");
+    // Inside the replay window the runner's own "interrupted" reports get their chance first.
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+    expect((await row(runId)).endedAt).toBeNull();
+
+    const starts = ctx.commands.filter((c) => c.type === "run.start").length;
+    ctx.advance(2 * 60_000);
+    expect((await ctx.sweep()).lostRuns).toBe(1);
+    expect(await row(runId)).toMatchObject({ outcome: "lost: runner restarted", endedAt: expect.any(Date) });
+    // The agent's one run slot is free again: the cut-off work is picked up (BOS-574), then the held wake goes next.
+    await ctx.scheduler.tick();
+    const next = ctx.commands.filter((c) => c.type === "run.start") as Extract<RunnerCommand, { type: "run.start" }>[];
+    expect(next).toHaveLength(starts + 1);
+    expect(next.at(-1)!.agentId).toBe(ctx.ceo.id);
+    const [resume] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "resume"));
+    expect(resume).toMatchObject({ status: "launched", resumeRunId: runId });
+  });
+
+  it("leaves a run that started after the runner restarted alone (BOS-579)", async () => {
+    ctx = await setup();
+    const [before] = await ctx.db.select().from(runners).where(eq(runners.companyId, ctx.company.id));
+    await ctx.db.update(runners).set({ bootId: "boot-1" }).where(eq(runners.id, before!.id));
+    const [runner] = await ctx.db.select().from(runners).where(eq(runners.id, before!.id));
+    await ctx.runners.bootSeen(runner!, "boot-2");
+    ctx.advance(1_000);
+    const { runId } = await launched();
+    ctx.advance(3 * HOUR);
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+    expect((await row(runId)).endedAt).toBeNull();
   });
 
   it("never reaps a run on a connected runner that has sent events", async () => {
@@ -602,5 +852,188 @@ describe("the server ends runs it can't reach", () => {
     await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "wiki upkeep", startedAt: new Date(ctx.clock().getTime() - 5 * 60_000) });
     await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: null, purpose: "chat", origin: "owner_chat", startedAt: new Date(ctx.clock().getTime() - 30 * 60_000) });
     expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
+  });
+});
+
+/**
+ * The queue as it was before BOS-413, kept in the test as the reference the new one must match: every
+ * open ticket with four joins, then every dependency row, and a chain walk that filters by done tickets.
+ * Only what the fixture needs; anything else (permission runs, deploys) reads nothing here.
+ */
+async function legacyQueue(db: Db, now: () => Date) {
+  const t = now();
+  const open = await db.select({ d: decisions, companyName: companies.name, agentName: agents.name }).from(decisions).innerJoin(companies, eq(companies.id, decisions.companyId)).leftJoin(agents, eq(agents.id, decisions.raisedByAgentId)).where(and(eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`, sql`coalesce(${decisions.context}->>'type', '') not in ('lesson', 'lesson_replace')`));
+  if (!open.length) return [];
+  const work = await db
+    .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix, dueDate: tickets.dueDate, milestoneTarget: milestones.targetDate, krPriority: objectives.priority, milestoneObjectiveId: milestones.objectiveId })
+    .from(tickets)
+    .innerJoin(companies, eq(companies.id, tickets.companyId))
+    .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
+    .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+    .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
+    .where(ne(tickets.systemState, "done"));
+  const msObjectives = [...new Set(work.map((w) => w.milestoneObjectiveId).filter((x): x is string => !!x))];
+  const msPriority = new Map((msObjectives.length ? await db.select({ id: objectives.id, p: objectives.priority }).from(objectives).where(inArray(objectives.id, msObjectives)) : []).map((o) => [o.id, o.p]));
+  const info = new Map(
+    work.map((w) => {
+      const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
+      return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null }];
+    }),
+  );
+  // The old walk: every dependency row, by blocked ticket. Rows are read in id order both times,
+  // so the order a ticket's dependents come back in (and the chain order) is the same.
+  const allDeps = await db.select().from(ticketDependencies);
+  const directIds = new Map(open.map(({ d }) => [d.id, allDeps.filter((x) => x.blockerDecisionId === d.id).map((x) => x.blockedTicketId)]));
+  const byTicket = new Map<string, string[]>();
+  for (const x of allDeps) if (x.blockerTicketId && info.has(x.blockedTicketId)) byTicket.set(x.blockerTicketId, [...(byTicket.get(x.blockerTicketId) ?? []), x.blockedTicketId]);
+  const rows = open.map(({ d, companyName, agentName }) => {
+    const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
+    const seen = new Set<string>();
+    // Same stable order as the shipped queue: nearest first, then by ticket id at each depth.
+    const order = (x: string, y: string) => x.localeCompare(y);
+    let frontier = (directIds.get(d.id) ?? []).filter((id) => info.has(id)).sort(order);
+    for (let depth = 1; frontier.length && depth <= 10; depth++) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const i = info.get(id)!;
+        chain.push({ ticketId: id, title: i.title, ref: i.ref, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
+        next.push(...(byTicket.get(id) ?? []));
+      }
+      frontier = next.sort(order);
+    }
+    const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
+    return { ...d, companyName, agentName, forAgentName: null, blocks: chain, about: [], refs: {}, ...rank };
+  });
+  // Newest first, as the shipped queue does.
+  return rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+}
+
+// BOS-413: the queue reads only what its open cards reach, and a feed read never writes.
+describe("queue reads only what the open cards reach (BOS-413)", () => {
+  /** What the queue read, by table, for one GET /api/decisions. */
+  async function measureQueue() {
+    ctx.reads.queries = 0;
+    ctx.reads.rows = 0;
+    ctx.reads.byTable = {};
+    ctx.reads.on = true;
+    const q = (await ctx.req("GET", "/api/decisions")).json() as Row[];
+    ctx.reads.on = false;
+    return { q, queries: ctx.reads.queries, byTable: ctx.reads.byTable };
+  }
+
+  it("does not read dependency rows, or tickets below a finished ticket, that no card reaches", async () => {
+    ctx = await setup();
+    const chain = async () => {
+      const a = await ctx.ticket({ title: "A" });
+      const b = await ctx.ticket({ title: "B", state: "blocked" });
+      const c = await ctx.ticket({ title: "C", state: "blocked" });
+      await ctx.req("POST", `/api/tickets/${b.id}/dependencies`, { ticketId: a.id });
+      await ctx.req("POST", `/api/tickets/${c.id}/dependencies`, { ticketId: b.id });
+      return { a, b, c };
+    };
+    const live = await chain();
+    const held = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: live.a.id });
+    // A chain below a finished ticket, and loose live work no card points at.
+    const done = await chain();
+    await ctx.req("PATCH", `/api/tickets/${done.a.id}`, { state: "done" });
+    const loose = await chain();
+    ctx.advance(HOUR);
+    await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+
+    const { q, byTable } = await measureQueue();
+    // Same output as before, still down the chain from what the card holds.
+    expect(q.find((r) => r.id === held.id)!.blocks).toEqual([
+      expect.objectContaining({ ticketId: live.a.id, depth: 1 }),
+      expect.objectContaining({ ticketId: live.b.id, depth: 2 }),
+      expect.objectContaining({ ticketId: live.c.id, depth: 3 }),
+    ]);
+    // Only the rows that name an open card, then the chain's own edges: the done chain below `done.a`
+    // and the loose chain are never read.
+    const deps = await ctx.db.select().from(ticketDependencies);
+    expect(byTable["ticket_dependencies"] ?? 0).toBeLessThan(deps.length);
+    expect(q.every((r) => r.blocks.every((b) => b.ticketId !== done.b.id && b.ticketId !== done.c.id))).toBe(true);
+    expect(q.some((r) => r.blocks.some((b) => b.ticketId === loose.a.id || b.ticketId === loose.b.id || b.ticketId === loose.c.id))).toBe(false);
+  });
+
+  it("marks a card's notification read when it is answered, without the feed read writing", async () => {
+    ctx = await setup();
+    const d = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship the beta?", options: ["Yes", "No"], recommended: "Yes" });
+    const other = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Rename the app?", options: ["Yes", "No"], recommended: "No" });
+    await ctx.notes.syncDecisions();
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(2);
+
+    // Answering marks that card read at once: the feed is right before any sweep runs.
+    expect((await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Yes" })).statusCode).toBe(200);
+    const [note] = await ctx.db.select().from(notifications).where(eq(notifications.decisionId, d.id));
+    expect(note!.readAt).not.toBeNull();
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(1);
+
+    // A close made elsewhere still shows once it settles, but a read never writes: it takes the sweep.
+    await ctx.db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, other.id));
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(1);
+    await ctx.notes.markAnsweredRead();
+    expect((await ctx.req("GET", "/api/notifications")).json().unread).toBe(0);
+  });
+
+  it("leaves a done ticket out of the chain even when the card holds it directly and it still has live dependents", async () => {
+    ctx = await setup();
+    // A ticket with a live dependent, held directly by a card that is then answered out of band: the
+    // ticket is finished while the card is still open, so it is done and still holds live work.
+    const finished = await ctx.ticket({ title: "Finished" });
+    const live = await ctx.ticket({ title: "Still waiting", state: "blocked" });
+    await ctx.req("POST", `/api/tickets/${live.id}/dependencies`, { ticketId: finished.id });
+    const card = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: finished.id });
+    // Finished behind the card's back, as another path (a merge, another ticket) would.
+    await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, finished.id));
+
+    const mine = (await ctx.queue()) as unknown as Array<Record<string, unknown> & { id: string; createdAt: string }>;
+    const row = mine.find((r) => r.id === card.id)!;
+    // The done ticket is not the start of a chain, so neither it nor its dependents appear.
+    expect(row.blocks).toEqual([]);
+
+    // The done ticket is still named as what the card is about, as before; only the chain leaves it out.
+    expect(row.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished" })]);
+    // Same chain as the old whole-table walk.
+    const legacyRaw = await legacyQueue(ctx.db, () => new Date());
+    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, createdAt: r.createdAt.toISOString() }));
+    expect(mine).toEqual(old);
+  });
+
+  it("returns the same queue as the old whole-table walk on a fixture with chained dependencies", async () => {
+    ctx = await setup();
+    const chain = async (prefix: string, length: number) => {
+      const out: Array<{ id: string }> = [];
+      for (let i = 0; i < length; i++) out.push(await ctx.ticket({ title: `${prefix} ${i}`, ...(i ? { state: "blocked" } : {}) }));
+      for (let i = 1; i < length; i++) await ctx.req("POST", `/api/tickets/${out[i]!.id}/dependencies`, { ticketId: out[i - 1]!.id });
+      return out;
+    };
+    const root = await chain("Root", 4);
+    const branch = await chain("Branch", 2);
+    await ctx.req("POST", `/api/tickets/${branch[1]!.id}/dependencies`, { ticketId: root[2]!.id });
+    // A finished ticket mid-chain: both walks stop there.
+    const doneMid = await chain("Finished", 2);
+    await ctx.req("PATCH", `/api/tickets/${doneMid[0]!.id}`, { state: "done" });
+    await chain("Loose", 3);
+    const heldCards = [
+      await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ship the chain?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: root[0]!.id }),
+      await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Start the branch?", options: ["Yes", "No"], recommended: "No", blocksTicketId: branch[0]!.id }),
+      await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Unrelated?", options: ["A", "B"], recommended: "A" }),
+    ];
+    // The shipped queue and the old body (every open ticket, then every dependency row) must agree
+    // field for field, right down to the score and its reasons. What it adds beyond the old body is
+    // the tickets a card is about and the card's references; those are filled in here for comparison.
+    const mine = (await ctx.queue()) as unknown as Array<Record<string, unknown> & { id: string; createdAt: string }>;
+    const legacyRaw = await legacyQueue(ctx.db, () => new Date());
+    const about = (id: string) => [{ ticketId: id, title: id === root[0]!.id ? "Root 0" : "Branch 0", ref: id === root[0]!.id ? "APP-1" : "APP-5" }];
+    const old = legacyRaw.map((r) => ({
+      ...r,
+      about: r.id === heldCards[0]!.id ? about(root[0]!.id) : r.id === heldCards[1]!.id ? about(branch[0]!.id) : [],
+      // A Date in the old body, an ISO string over HTTP.
+      createdAt: r.createdAt.toISOString(),
+    }));
+    expect(mine).toEqual(old);
+    expect(mine.map((r) => r.id)).toEqual(expect.arrayContaining(heldCards.map((c) => c.id)));
   });
 });

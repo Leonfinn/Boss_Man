@@ -89,6 +89,27 @@ describe("instructions from the template", () => {
   });
 });
 
+describe("reviews line (BOS-198)", () => {
+  it("shows which reviews the agent does, read-only, with a link to Settings", async () => {
+    const ada = { id: "a1", companyId: "c1", name: "Ada", role: "worker", agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null, title: "Engineer", template: "engineer", instructions: "", funding: null, fundingKind: null, retiredAt: null, status: "idle", current: null, openTickets: 0, pa: null, month: { costMicros: 0, runs: 0, tokens: 0 } };
+    const r = (reviewer: unknown, kinds?: object) => ({ planApprover: "ceo", reviewer, ownerSignoff: false, ...(kinds ? { kinds } : {}) });
+    const policy = { trivial: r("ceo"), low: r(["a1", "a9"]), medium: r(["a9", "a1"]), high: r("a1", { security: ["a9", "a1"] }), critical: r("a1", { security: "a1", infra: "a9" }) };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const body = url.includes("review-policy") ? policy : url.includes("agent-templates") ? { templates: [tpl("engineer", "Engineer")] } : url.includes("/models") ? { runner: {}, api: [] } : url.includes("/history") ? [] : url.includes("/agents") ? [ada] : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    expect(await screen.findByText(/Code \(Low\+\), Security \(High\+\)/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Change in Settings › Reviews" }).getAttribute("href")).toBe("#/settings/c1/workflow");
+    // The old setting is gone: nothing on the agent page chooses reviews.
+    expect(screen.queryByLabelText("Company's reviewer for")).toBeNull();
+  });
+});
+
 describe("CEO notes", () => {
   it("lists the CEO's notes from chat and lets the owner edit and delete them", async () => {
     const ceo = { id: "a2", companyId: "c1", name: "Boss", role: "ceo", agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null, title: null, template: null, instructions: "", funding: null, fundingKind: null, retiredAt: null, status: "idle", current: null, openTickets: 0, pa: null, month: { costMicros: 0, runs: 0, tokens: 0 } };

@@ -2,8 +2,8 @@
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useState, type FormEvent } from "react";
 import { Star } from "lucide-react";
-import { HARNESSES, THINKING_LEVELS } from "@boss-man/shared";
-import { api, usd, type Company, type FundingSource } from "../api";
+import { describeRoles, HARNESSES, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
+import { api, usd, type Company, type FundingSource, type ReviewPolicy } from "../api";
 import { Avatar } from "../components/Avatar";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
@@ -26,7 +26,6 @@ type AgentRow = {
   paused: boolean;
   starred: boolean;
   duty: string | null;
-  reviewKind?: string | null;
   avatarAt?: string | null;
   retiredAt: string | null;
   status: "working" | "idle" | "paused" | "retired";
@@ -274,6 +273,9 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
         <textarea id="hire-instructions" rows={7} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
         <small className="muted">Given to the agent at the start of every run. Tailor them to your company.</small>
       </div>
+      <small className="muted">
+        Who does code, security, infra and adversarial reviews is chosen in <a href={`#/settings/${companyId}/workflow`}>Settings › Reviews</a>. A Senior Developer hire takes the cells set to Senior Developer; name any other reviewer there.
+      </small>
       {error && (
         <p className="error" role="alert">
           {error}
@@ -313,7 +315,7 @@ function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, do
   );
 }
 
-function Edit({ a, sources, lists, refresh, onSaved, template }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void; template?: { title: string; instructions: string } }) {
+function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void; template?: { title: string; instructions: string }; policy?: { rules: ReviewPolicy; companyId: string } | null }) {
   const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", thinking: a.thinking ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -355,19 +357,13 @@ function Edit({ a, sources, lists, refresh, onSaved, template }: { a: AgentRow; 
                 <input id={`title-${a.id}`} maxLength={80} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
               </div>
             )}
-            {a.role !== "ceo" && (
+            {a.role !== "ceo" && policy?.rules.medium && (
+              // Read-only: Settings > Reviews is the one place that says who reviews (BOS-198).
               <div className="field">
-                <label htmlFor={`rk-${a.id}`}>Company's reviewer for</label>
-                <select
-                  id={`rk-${a.id}`}
-                  value={a.reviewKind ?? ""}
-                  onChange={(e) => void run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body: { reviewKind: e.target.value || null } }), e.target.value ? `${a.name} is now the ${e.target.value} reviewer.` : `${a.name} no longer reviews by kind.`)}
-                >
-                  <option value="">Nothing</option>
-                  <option value="security">Security reviews</option>
-                  <option value="infra">Infra reviews</option>
-                  <option value="adversarial">Adversarial reviews</option>
-                </select>
+                <span className="label">Reviews</span>
+                <p style={{ margin: 0 }}>
+                  {describeRoles(reviewRolesOf(policy.rules as SharedPolicy, a.id, a.template === SENIOR_DEV_TEMPLATE))} <a href={`#/settings/${policy.companyId}/workflow`}>Change in Settings › Reviews</a>
+                </p>
               </div>
             )}
             <div className="field">
@@ -654,6 +650,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
   const templates = usePoll((signal) => api<{ templates: Template[]; ceo?: Omit<Template, "role"> }>("/api/agent-templates", { signal }), 3_600_000, "agent-templates");
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 60_000, "sources");
   const models = usePoll((signal) => (company ? api<ModelLists>(`/api/companies/${company.id}/models`, { signal }) : Promise.resolve(null)), 300_000, `models-${company?.id ?? "none"}`);
+  const reviewPolicy = usePoll((signal) => (company ? api<ReviewPolicy>(`/api/companies/${company.id}/review-policy`, { signal }) : Promise.resolve(null)), 60_000, `agent-reviews-${company?.id ?? "none"}`);
   const [hiring, setHiring] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -738,7 +735,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
           </div>
         </div>
         {a.role === "ceo" && !a.retiredAt && <CeoNotes agentId={a.id} />}
-        {open === a.id && <Edit a={a} sources={srcs} lists={models.data} refresh={refreshModels} onSaved={() => changed()} template={a.role === "ceo" ? templates.data?.ceo : templates.data?.templates.find((t) => t.id === a.template)} />}
+        {open === a.id && <Edit a={a} sources={srcs} lists={models.data} refresh={refreshModels} onSaved={() => changed()} template={a.role === "ceo" ? templates.data?.ceo : templates.data?.templates.find((t) => t.id === a.template)} policy={reviewPolicy.data && company ? { rules: reviewPolicy.data, companyId: company.id } : null} />}
       </li>
     );
   };

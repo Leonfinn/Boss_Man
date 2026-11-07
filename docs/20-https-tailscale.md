@@ -31,12 +31,11 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 ## Steps
 
 1. Open the Tailscale admin console, **DNS** page. Turn on **MagicDNS**, then under **HTTPS Certificates** click **Enable HTTPS**. Note your tailnet name (it ends in `.ts.net`).
-2. On the **Settings > Keys** page, click **Generate auth key**. Leave **Reusable** off, set a short expiry, and copy the key. Do not paste it anywhere except step 4.
-3. On the Docker host, check the default private range is free, and make the state folder (use your `BOSSMAN_DATA` folder):
+2. On the **Settings > Keys** page, click **Generate auth key**. Leave **Reusable** off and **Ephemeral** off (an ephemeral machine disappears when it goes offline), set a short expiry, and copy the key. Do not paste it anywhere except step 4. **Use a key, not the interactive login link:** the Tailscale container gives up on a pending login link after about a minute and restarts, which discards the link, so a login you approve a little late never completes (see "Troubleshooting").
+3. On the Docker host, check the default private range is free (Docker creates the Tailscale state folder under your `BOSSMAN_DATA` itself on first start, so there is nothing to make by hand):
 
    ```sh
    docker network ls -q | xargs docker network inspect --format "{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}" | grep 172.30.0 || echo free
-   mkdir -p "$BOSSMAN_DATA/tailscale"
    ```
 
    If it prints a network instead of `free`, or `ip -4 route` shows 172.30.0.x in use, set `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP` and `BOSSMAN_EDGE_SERVER_IP` in `.env` (see above) before step 5.
@@ -45,13 +44,27 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    ```sh
    cp .env .env.bak
    sed -i "s#^COMPOSE_FILE=.*#&:deploy/tailscale.yml#" .env
-   echo "TS_AUTHKEY=tskey-auth-PASTE-YOUR-KEY" >> .env
+   # the leading space keeps this line out of shell history in bash by default (zsh needs HIST_IGNORE_SPACE; or edit .env in an editor instead)
+    echo "TS_AUTHKEY=tskey-auth-PASTE-YOUR-KEY" >> .env
    chmod 600 .env
    ```
 
    If `.env` has no `COMPOSE_FILE` line, add `COMPOSE_FILE=docker-compose.yml:deploy/tailscale.yml`.
    You do not need to touch `BOSSMAN_INSECURE_COOKIES`: once the sidecar file is in use, Boss Man chooses Secure per request and ignores that line. The feedback portal port is plain http, so its cookie stays non-Secure.
-5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. After it is up you can delete the `TS_AUTHKEY` line from `.env`: the login is kept in the state folder, and an empty key is fine. If the line stays, the key is spent after first use and does no harm.
+5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. Then run the check in step 5a.
+
+   **Remove the key from `.env` once it is logged in:** delete the `TS_AUTHKEY=` line (`sed -i '/^TS_AUTHKEY=/d' .env`), then `docker compose up -d tailscale`. The login is kept in the state folder, so an empty key is fine. A spent one-time key does no harm, but it should not sit in a file.
+
+5a. Check it is stable. Run these from the Boss Man folder (the one with `docker-compose.yml`); they need nothing from your `.env` (the first line only sets a helper variable). `RestartCount` must stay at 0 (or stop growing), `BackendState` must say `"Running"` (not `"NeedsLogin"`), and the state file must be well over 1000 bytes (a login that never completed leaves about 120 bytes):
+
+   ```sh
+   C=$(docker compose ps -q tailscale)
+   docker inspect --format 'RestartCount={{.RestartCount}} Status={{.State.Status}} ExitCode={{.State.ExitCode}}' "$C"
+   docker compose exec tailscale stat -c "tailscaled.state: %s bytes" /var/lib/tailscale/tailscaled.state
+   docker compose exec tailscale tailscale status --json | grep -m1 BackendState
+   ```
+
+   Run it again after two minutes; `RestartCount` must not have gone up. Then prove the login survives a restart: run `docker compose restart tailscale`, wait 30 seconds, and run the block again. `BackendState` must still be `"Running"` with no new login link in `docker compose logs tailscale`.
 6. In the Tailscale admin console the machine `boss-man` appears. Check Serve is on and Funnel is off:
 
    ```sh
@@ -69,6 +82,12 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
 
 To undo: `docker compose stop tailscale`, remove `:deploy/tailscale.yml` from `COMPOSE_FILE` (or restore `.env.bak`), then `docker compose up -d server`. The LAN address is unaffected throughout.
 
+## Troubleshooting
+
+- **The Tailscale container restarts every ~2 minutes (exit code 0), `RestartCount` keeps rising, `tailscaled.state` stays about 120 bytes, and every start logs `NeedsLogin` with a new login link.** Cause: no auth key was set, so the container waits for an interactive login. Tailscale's start-up script allows about 60 seconds for the whole start, including that wait; when it runs out, the container exits cleanly and Docker restarts it with a fresh, different login link. A link opened from an earlier start is dead, and the machine shows in the admin console as approved but disconnected. Fix: delete that machine in the admin console, do steps 2 to 5 with an auth key, and re-run step 5a. (Source: `cmd/containerboot` in the Tailscale repository, which applies a 60-second `bootCtx` to the login step; not reproduced on a live Docker host from this ticket, so confirm with step 5a.)
+- `failed to symlink socket: file exists` in the log on every restart is harmless: it is left over from the previous start.
+- **Interactive login as a fallback (no key available):** run `docker compose up -d tailscale && docker compose logs -f tailscale`, open the newest `https://login.tailscale.com/a/...` link within about 50 seconds and approve it straight away. If the container restarts first, the link is dead; use the newest one. Prefer a key.
+
 ## Backing up and moving to a new host
 
 Tailscale's login is kept in `$BOSSMAN_DATA/tailscale`. Include that folder in your backup and copy it with the rest of `$BOSSMAN_DATA` when you move.
@@ -78,7 +97,31 @@ Tailscale's login is kept in `$BOSSMAN_DATA/tailscale`. Include that folder in y
 
 ## Blue/green installs
 
-`deploy/tailscale.yml` fronts the single-server install. For blue/green (the Caddy front door in `deploy/truenas-bluegreen.yml`) the Caddy edge listener is not done yet; it is a follow-up. Until then, use the single-server install for HTTPS.
+For blue/green (the Caddy front door in `deploy/truenas-bluegreen.yml`) add a second file after `deploy/tailscale.yml`. The path is tailnet, then Tailscale, then Caddy port 3100, then the live colour. Caddy believes forwarded headers only from the Tailscale container, and each colour believes them only from Caddy. The feedback portal (3101) is never reachable through Tailscale.
+
+1. Do steps 1 to 6 above, but in step 4 use this line in `.env` (swap the host file for yours; the blue/green file must come first):
+
+   ```
+   COMPOSE_FILE=docker-compose.yml:deploy/truenas-bluegreen.yml:deploy/tailscale.yml:deploy/tailscale-bluegreen.yml
+   ```
+
+2. Two private networks are used: `edge` (Tailscale and Caddy) and `front` (Caddy and the two colours). Defaults are `172.30.0.0/29` and `172.30.0.16/28`. If either clashes with a network on your host, compose stops with "Pool overlaps". Check what is used:
+
+   ```
+   docker network inspect $(docker network ls -q) --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'
+   ```
+
+   To change them, set `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP`, `BOSSMAN_EDGE_PROXY_IP`, `BOSSMAN_FRONT_SUBNET`, `BOSSMAN_FRONT_PROXY_IP` and `BOSSMAN_FRONT_RANGE` in `.env`; every address must sit inside its subnet.
+3. Apply it (this restarts Caddy and the colours for a few seconds; it is a deployment-file change, so do it by hand, not through the self-update):
+
+   ```
+   docker compose up -d
+   ```
+
+4. Check: `docker compose exec tailscale tailscale serve status` shows `http://server:3100` and no `3101`. `docker network inspect` for `front` lists only the proxy and the two colours. Log in over `https://<your machine>.<tailnet>.ts.net` and confirm the session cookie is Secure; over the LAN address it stays plain.
+5. Undo: remove the two Tailscale files from `COMPOSE_FILE`, run `docker compose up -d`, and rewrite `active.caddy` in the old form if you rolled back the deployment files (see `docs/06-install-truenas.md`).
+
+Behaviour change: the colours now see real client addresses, so the login limit counts each device separately, where before all devices looked like Caddy.
 
 ## Host notes
 
