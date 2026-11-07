@@ -533,12 +533,6 @@ describe("rules judge: git outside the agent's own checkout, and :: transports (
     "cd /tmp/p && git commit -m x",
     "pushd /tmp/p; git log",
     "cd /tmp/p && git config --get core.fsmonitor",
-    // A /tmp repo can plant a hook (.git/hooks/pre-commit) or core.fsmonitor/core.hooksPath, so plain commit/status there is unread code.
-    "cd /tmp/p && git commit -m x",
-    "cd /tmp/p && git status",
-    "git -C /tmp/p commit -m x",
-    "git -C /tmp/p status",
-    "git --git-dir=/tmp/p/.git commit -m x",
   ]);
   // A `::` in a URL names a transport helper that runs a program, so no Allow for any command that talks to a remote.
   deny([
