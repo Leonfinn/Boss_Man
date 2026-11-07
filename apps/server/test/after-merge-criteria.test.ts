@@ -5,10 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { DEFAULT_REVIEW_POLICY, afterMergeLint, carryFailedOver, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, type RunnerCommand, afterMergeLint,carryFailedOver, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, reviewRequests, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, decisions, reviewRequests, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { landingText } from "../src/services/review.js";
 
@@ -54,6 +54,37 @@ async function setup() {
   };
 }
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
+
+/**
+ * Plays the company's runner (BOS-663). It answers the requests named in `replies` and refuses any other
+ * request at once with an error naming it, so a reply the test lacks fails fast instead of waiting out the
+ * request's timeout (an unanswered workspace.diff used to cost each merge test 60 s). Every refused type is
+ * kept in the returned list, for the test to show it asked nothing unexpected. Commands without a requestId
+ * are one-way notices and are just accepted.
+ */
+function standInRunner(runnerId: string, replies: Partial<Record<RunnerCommand["type"], unknown>>) {
+  const refused: string[] = [];
+  ctx.runners.connect(runnerId, (command) => {
+    const requestId = (command as { requestId?: string }).requestId;
+    if (requestId === undefined) return true;
+    const known = Object.hasOwn(replies, command.type);
+    if (!known) refused.push(command.type);
+    queueMicrotask(() =>
+      ctx.runners.resolveReply(known ? { requestId, ok: true, data: replies[command.type] } : { requestId, ok: false, error: `The test's stand-in runner has no reply for ${command.type}.` }),
+    );
+    return true;
+  });
+  return refused;
+}
+
+/** What a merge asks the runner, answered as a clean branch with one commit that merges as `commit`. */
+const mergeReplies = (commit: string): Partial<Record<RunnerCommand["type"], unknown>> => ({
+  "workspace.diff": { baseCommit: "0".repeat(40), head: "1".repeat(40), commits: [{ sha: "1".repeat(40), subject: "The change" }], files: [{ path: "src/health.ts", added: 3, removed: 0 }], diff: "", truncated: false },
+  "workspace.verify": { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 },
+  "workspace.merge": { status: "merged", commit },
+  "workspace.carried": { carried: [] },
+  "workspace.migrations": { needed: false, reason: "No other branch uses this ticket's migration numbers." },
+});
 
 const BEFORE = "Health check returns 200";
 const LIVE = { text: "Answers from the owner's Tailscale name on a real host", after: "merge" as const };
@@ -138,21 +169,13 @@ describe("after-merge criteria", () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
     const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-    const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
-    ctx.runners.connect(reg.runnerId, (command) => {
-      const ok = (data: unknown) => queueMicrotask(() => ctx.runners.resolveReply({ requestId: (command as { requestId: string }).requestId, ok: true, data }));
-      if (command.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
-      if (command.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
-      if (command.type === "workspace.carried") ok({ carried: [] });
-      if (command.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
-      return true;
-    });
-    void runner;
+    const refused = standInRunner(reg.runnerId, mergeReplies("c".repeat(40)));
     const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Live check", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE] })).json() as { id: string };
     await db.update(tickets).set({ branch: `bossman/${t.id}`, stateNote: "Health check returns 200 pass" }).where(eq(tickets.id, t.id));
     await db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
     const r = await ctx.review.landVisible(t.id, "the owner");
     expect(r.outcome).toBe("merged");
+    expect(refused).toEqual([]);
     expect((r.detail as { afterMerge?: string[] }).afterMerge).toEqual([LIVE.text]);
     const after = await ctx.row(t.id);
     // Back with its assignee, with its working copy kept so the live check can be shown where it was.
@@ -171,18 +194,12 @@ describe("after-merge criteria", () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
     const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-    ctx.runners.connect(reg.runnerId, (command) => {
-      const ok = (data: unknown) => queueMicrotask(() => ctx.runners.resolveReply({ requestId: (command as { requestId: string }).requestId, ok: true, data }));
-      if (command.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
-      if (command.type === "workspace.merge") ok({ status: "merged", commit: "e".repeat(40) });
-      if (command.type === "workspace.carried") ok({ carried: [] });
-      if (command.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
-      return true;
-    });
+    const refused = standInRunner(reg.runnerId, mergeReplies("e".repeat(40)));
     const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Owner checks the host", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE] })).json() as { id: string };
     await db.update(tickets).set({ branch: `bossman/${t.id}`, stateNote: "Health check returns 200 pass" }).where(eq(tickets.id, t.id));
     await db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
     expect((await ctx.review.landVisible(t.id, "the owner")).outcome).toBe("merged");
+    expect(refused).toEqual([]);
     expect((await ctx.row(t.id)).systemState).toBe("in_progress");
 
     // The assignee puts the live check in front of the owner; the owner answers the card.
@@ -241,18 +258,12 @@ describe("after-merge criteria", () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
     const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-    ctx.runners.connect(reg.runnerId, (command) => {
-      const ok = (data: unknown) => queueMicrotask(() => ctx.runners.resolveReply({ requestId: (command as { requestId: string }).requestId, ok: true, data }));
-      if (command.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
-      if (command.type === "workspace.merge") ok({ status: "merged", commit: "a".repeat(40) });
-      if (command.type === "workspace.carried") ok({ carried: [] });
-      if (command.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
-      return true;
-    });
+    const refused = standInRunner(reg.runnerId, mergeReplies("a".repeat(40)));
     const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Two check slots", assigneeAgentId: dev.id, acceptanceCriteria: SLOTS })).json() as { id: string };
     await db.update(tickets).set({ branch: `bossman/${t.id}`, stateNote: SLOTS_NOTE, systemState: "review" }).where(eq(tickets.id, t.id));
     const r = await ctx.review.landVisible(t.id, "the owner");
     expect(r.outcome).toBe("merged");
+    expect(refused).toEqual([]);
     expect((r.detail as { afterMerge?: string[] }).afterMerge).toEqual([SLOTS[2]]);
     const after = await ctx.row(t.id);
     expect(after.systemState).toBe("in_progress");
@@ -321,10 +332,7 @@ describe("after-merge criteria", () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
     const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-    ctx.runners.connect(reg.runnerId, (command) => {
-      if (command.type === "workspace.diff") queueMicrotask(() => ctx.runners.resolveReply({ requestId: (command as { requestId: string }).requestId, ok: true, data: { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [], files: [], diff: "", truncated: false } }));
-      return true;
-    });
+    standInRunner(reg.runnerId, { "workspace.diff": { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [], files: [], diff: "", truncated: false } });
     const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Live check 2", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE] })).json() as { id: string };
     // The CEO reviews its own company's work unless the policy names another; give it the review.
     await db.update(tickets).set({ stateNote: "Health check returns 200 pass" }).where(eq(tickets.id, t.id));
