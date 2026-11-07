@@ -666,6 +666,13 @@
       "when": 1793941639218,
       "tag": "0104_standing_rules",
       "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1793941639220,
+      "tag": "0106_decision_company_status",
+      "breakpoints": true
     }
   ]
 }

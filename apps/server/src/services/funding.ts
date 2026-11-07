@@ -409,14 +409,14 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         .sort((a, b) => b.costMicros - a.costMicros || b.tokens - a.tokens);
     },
 
-    async recordCost(input: typeof costEvents.$inferInsert) {
-      const [row] = await db.insert(costEvents).values(input).returning();
+    async recordCost(input: typeof costEvents.$inferInsert, tx: Db = db) {
+      const [row] = await tx.insert(costEvents).values(input).returning();
       return row!;
     },
 
-    async recordQuota(fundingSourceId: string, samples: QuotaSample[], observedAt = new Date()) {
+    async recordQuota(fundingSourceId: string, samples: QuotaSample[], observedAt = new Date(), tx: Db = db) {
       if (samples.length === 0) return [];
-      return db
+      return tx
         .insert(quotaSamples)
         .values(
           samples.map((s) => ({
@@ -433,9 +433,9 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     },
 
     /** Raw adapter payloads straight from the runner. */
-    async recordQuotaFromAdapter(fundingSourceId: string, payload: { claudeMeta?: unknown; codexRateLimits?: unknown }) {
+    async recordQuotaFromAdapter(fundingSourceId: string, payload: { claudeMeta?: unknown; codexRateLimits?: unknown }, tx: Db = db) {
       const samples = [...parseClaudeRateLimit(payload.claudeMeta), ...parseCodexRateLimits(payload.codexRateLimits)];
-      return this.recordQuota(fundingSourceId, samples);
+      return this.recordQuota(fundingSourceId, samples, new Date(), tx);
     },
 
     /**

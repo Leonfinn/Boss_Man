@@ -1,0 +1,1 @@
+CREATE INDEX "decisions_company_status" ON "decisions" USING btree ("company_id","status");
