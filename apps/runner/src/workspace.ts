@@ -544,22 +544,33 @@ export class Workspaces {
     if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
     const dir = path.join(this.root, "check-jobs", spec.jobId);
-    rmSync(dir, { recursive: true, force: true });
-    await this.withRepoLock(spec.projectId, async () => {
-      await this.git(["worktree", "prune"], { cwd: repo });
-      mkdirSync(path.dirname(dir), { recursive: true });
-      await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
-    });
+    const home = path.join(this.root, "check-jobs-home", spec.jobId);
+    this.activeJobs.add(spec.jobId);
     try {
-      return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, spec.jobId) });
-    } finally {
+      rmSync(dir, { recursive: true, force: true });
       await this.withRepoLock(spec.projectId, async () => {
-        await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
-        rmSync(dir, { recursive: true, force: true });
-        await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+        await this.git(["worktree", "prune"], { cwd: repo });
+        mkdirSync(path.dirname(dir), { recursive: true });
+        await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
+      try {
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, spec.jobId) });
+      } finally {
+        await this.withRepoLock(spec.projectId, async () => {
+          await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
+          rmSync(dir, { recursive: true, force: true });
+          await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+        });
+      }
+    } finally {
+      // The job's HOME/TMPDIR (whatever the tests left in it, and per-HOME caches) goes with the job.
+      rmSync(home, { recursive: true, force: true });
+      this.activeJobs.delete(spec.jobId);
     }
   }
+
+  /** Job ids whose folders belong to a check running in this process: the start-up sweep leaves them alone. */
+  private readonly activeJobs = new Set<string>();
 
   /**
    * The fence and own HOME/TMPDIR for one job, like an agent session's: the job's folder, its own home and temp folder, the pnpm
@@ -1021,6 +1032,20 @@ export class Workspaces {
         rmSync(dir, { recursive: true, force: true });
         removed.push(ticketId);
       }
+    }
+
+    // Check-job folders no running job owns: a runner restart mid-job skips the job's own clean-up. Jobs that
+    // start after this point are in activeJobs before they create anything, so the sweep never takes their folders.
+    for (const sub of ["check-jobs", "check-jobs-home"]) {
+      for (const jobId of list(path.join(this.root, sub))) {
+        if (this.activeJobs.has(jobId)) continue;
+        rmSync(path.join(this.root, sub, jobId), { recursive: true, force: true });
+        removed.push(`${sub}/${jobId}`);
+      }
+    }
+    // Their worktree entries in the repos are stale now.
+    for (const name of list(reposDir).filter((n) => n.endsWith(".git"))) {
+      await this.withRepoLock(name.slice(0, -4), () => this.git(["worktree", "prune"], { cwd: this.repoDir(name.slice(0, -4)) })).catch(() => undefined);
     }
 
     const tmp = path.join(this.root, "tmp");

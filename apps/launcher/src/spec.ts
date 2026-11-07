@@ -42,6 +42,8 @@ export type LauncherConfig = {
   guardAllow?: string[];
   /** BOSSMAN_CHECK_SLOTS: full checks (merge gate and hand runs) a runner may run at once, 1 to 16. Unset = 1; the runner needs about 3 GB of its memory limit per extra slot. */
   checkSlots?: number;
+  /** PNPM_STORE_DIR: the shared pnpm store inside the runner, a folder under the workspaces volume (default: its .pnpm-store). */
+  pnpmStoreDir?: string;
   /** How long to wait for a new guard to load its rules (default 20 s). */
   guardReadyMs?: number;
 };
@@ -79,7 +81,12 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
   return {
     Image: IMAGE,
     User: "1000:1000",
-    Env: [`BOSSMAN_URL=${cfg.serverUrl}`, `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`, ...(cfg.checkSlots && cfg.checkSlots > 1 ? [`BOSSMAN_CHECK_SLOTS=${cfg.checkSlots}`] : [])],
+    Env: [
+      `BOSSMAN_URL=${cfg.serverUrl}`,
+      `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`,
+      ...(cfg.checkSlots && cfg.checkSlots > 1 ? [`BOSSMAN_CHECK_SLOTS=${cfg.checkSlots}`] : []),
+      ...(cfg.pnpmStoreDir ? [`PNPM_STORE_DIR=${cfg.pnpmStoreDir}`] : []),
+    ],
     Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug },
     HostConfig: {
       Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${tokenFile(cfg, slug)}:${TOKEN_TARGET}:ro`],
@@ -128,6 +135,25 @@ export function parseCheckSlots(v: string | undefined): number {
   if (!v || v.trim() === "") return 1;
   if (!/^\d{1,2}$/.test(v.trim()) || Number(v) < 1 || Number(v) > 16) throw new Error(`BOSSMAN_CHECK_SLOTS should be a whole number from 1 to 16, not ${v}`);
   return Number(v);
+}
+
+/** The only writable volume a runner keeps between restarts, where the shared pnpm store must live. */
+const WORKSPACES_MOUNT = MOUNTS.find(([sub]) => sub === "workspaces")![1];
+
+/**
+ * The shared pnpm store's path inside the runner (BOS-568). Empty means the workspaces volume's .pnpm-store,
+ * which every host has. A set value must be a folder under the workspaces volume: the volume's root itself is
+ * refused, because the fence would then grant agents the whole volume (other agents' copies, the merge gate's
+ * results) and the merge gate's store (<dir>-gate) would land on the runner's root disk (BOS-633).
+ */
+export function parsePnpmStoreDir(v: string | undefined): string | undefined {
+  const p = (v ?? "").trim();
+  if (!p) return undefined;
+  if (!p.startsWith("/") || p.includes("\0") || p.split("/").includes("..")) throw new Error(`PNPM_STORE_DIR should be an absolute path inside the runner, like ${WORKSPACES_MOUNT}/.pnpm-store, not ${v}`);
+  const resolved = path.posix.normalize(p).replace(/\/+$/, "") || "/";
+  if (resolved === WORKSPACES_MOUNT) throw new Error(`PNPM_STORE_DIR must be a folder under ${WORKSPACES_MOUNT}, not the volume's root itself (the fence would grant the whole volume), like ${WORKSPACES_MOUNT}/.pnpm-store`);
+  if (!resolved.startsWith(`${WORKSPACES_MOUNT}/`)) throw new Error(`PNPM_STORE_DIR must be under ${WORKSPACES_MOUNT} (the runner's only writable volume), not ${v}`);
+  return resolved;
 }
 
 /** A CPU weight from 2 to 262144, as in compose's cpu_shares. */

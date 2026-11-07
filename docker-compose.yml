@@ -153,6 +153,10 @@ services:
       BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
       BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
       BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-1}
+      # The shared pnpm store (BOS-568). Launcher runners have one writable volume, so this must be a folder under
+      # /home/node/workspaces, never its root (the fence would grant the whole volume and the gate store would land on
+      # the root disk); any other value is refused at start-up (BOS-633).
+      PNPM_STORE_DIR: ${PNPM_STORE_DIR:-}
       BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
       BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key

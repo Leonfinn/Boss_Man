@@ -134,7 +134,11 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
 
     const { d: d2 } = await ctx.ask("rm -rf /tmp/other-agents-cache");
     const ceo = await client(ctx.ceo.id);
-    const r = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d2!.id, triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it." } });
+    // A permission card now needs the CEO's advice before it reaches the owner (BOS-233): what it's for and
+    // what a Deny stops.
+    const noAdvice = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d2!.id, triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it." } });
+    expect(isError(noAdvice)).toBe(true);
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d2!.id, triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it.", adviceNeeded: "It is needed to clear the old cache before the next build.", adviceDeny: "The cache stays, so the next build may fail or run out of space." } });
     expect(isError(r)).toBe(false);
     expect(await reload(d2!.id)).toMatchObject({ tier: "owner", status: "open" });
     expect((await reload(d2!.id)).context).toMatchObject({ triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it." });

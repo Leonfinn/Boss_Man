@@ -35,6 +35,8 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/scheduler.ts", kind: "could_not_start", why: "a run that couldn't start" },
   { file: "services/scheduler.ts", kind: "alert", why: "the add-on notice" },
   { file: "services/watchdog.ts", kind: "quota_held", why: "work held by the usage limit" },
+  { file: "services/server-health.ts", kind: "server_memory", why: "the server's memory running high or climbing" },
+  { file: "services/server-health.ts", kind: "server_freezes", why: "the server freezing again and again" },
 ];
 
 describe("the alert kinds table (DR-017 A, BOS-469)", () => {

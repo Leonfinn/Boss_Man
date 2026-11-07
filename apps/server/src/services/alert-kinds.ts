@@ -22,7 +22,9 @@ export type ClearWhen =
    * A revoked key or an empty credit balance leaves the quota windows untouched, so "room again" is true
    * at once (BOS-469, security review): only a clean run proves the credential is fixed.
    */
-  | { kind: "accountRanOk"; fundingSourceId: string };
+  | { kind: "accountRanOk"; fundingSourceId: string }
+  /** Server-health cards (BOS-640): the rule has stayed under its level for 30 minutes. */
+  | { kind: "serverCalm"; rule: "memory" | "freezes" };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
@@ -156,6 +158,19 @@ export const ALERT_KINDS = {
   quota_held: {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
+  },
+  // server-health.ts (BOS-640): the server's rss passed 60% of the memory it may use, or rose more than
+  // 1 GiB an hour for two hours. The CEO can ask for the update or the restart; it never reaches the owner
+  // by itself. Closes once memory has been under the level for 30 minutes (serverCalm).
+  server_memory: {
+    topRung: "ceo",
+    clearWhen: () => [{ kind: "serverCalm", rule: "memory" }],
+  },
+  // server-health.ts (BOS-640): more than 10 freezes over a second in 10 minutes. Only the owner can
+  // approve the update or restart the server, so it starts with them. Closes after 30 calm minutes.
+  server_freezes: {
+    topRung: "owner",
+    clearWhen: () => [{ kind: "serverCalm", rule: "freezes" }],
   },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
