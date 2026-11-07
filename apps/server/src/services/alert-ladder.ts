@@ -627,7 +627,9 @@ export function alertLadder(
         const neededFor = (input.adviceNeeded ?? "").trim();
         const denyStops = (input.adviceDeny ?? "").trim();
         if (neededFor.length < 10 || denyStops.length < 10) throw new WatchdogError(422, "A permission card needs the CEO's advice before it goes to the owner: adviceNeeded (what it's needed for: which ticket, what step) and adviceDeny (what wouldn't get done if the owner denies it).");
-        advice = { state: "advised", at: now().toISOString(), what: neededFor, denyStops };
+        // Keep advice the CEO already gave on this card (BOS-533): its recommendation is the owner's Recommend tag.
+        const earlier = (d.context as { advice?: Record<string, unknown> }).advice ?? {};
+        advice = { ...earlier, state: "advised", at: now().toISOString(), what: neededFor, denyStops };
       }
       // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
       // card may reach the owner (DR-017 A), so the ceiling doesn't apply to a deliberate escalation.
