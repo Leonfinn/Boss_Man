@@ -19,7 +19,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { CANCEL_RUN, checkAsk } from "./decisions.js";
+import { adviceOf, CANCEL_RUN, checkAsk } from "./decisions.js";
 import type { HostFacts } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { type AlertCause, type AlertKind, type AlertRung, isAlertKind, kindCeiling, kindRow, kindStart } from "./alert-kinds.js";
@@ -621,14 +621,15 @@ export function alertLadder(
       const ask = checkAsk({ ...input, byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Every permission card that reaches the owner carries the CEO's advice (BOS-233 item 2): what it's
-      // needed for and what wouldn't get done if the owner denies it.
+      // needed for and what wouldn't get done if the owner denies it. Start from any advice the CEO already
+      // added (BOS-636), so the recommendation and why given earlier aren't lost when the card is escalated;
+      // the fields passed here win over the earlier ones.
       let advice: Record<string, unknown> | null = null;
       if (d.kind === "permission") {
         const neededFor = (input.adviceNeeded ?? "").trim();
         const denyStops = (input.adviceDeny ?? "").trim();
         if (neededFor.length < 10 || denyStops.length < 10) throw new WatchdogError(422, "A permission card needs the CEO's advice before it goes to the owner: adviceNeeded (what it's needed for: which ticket, what step) and adviceDeny (what wouldn't get done if the owner denies it).");
-        // Keep advice the CEO already gave on this card (BOS-533): its recommendation is the owner's Recommend tag.
-        const earlier = (d.context as { advice?: Record<string, unknown> }).advice ?? {};
+        const earlier = adviceOf(d.context);
         advice = { ...earlier, state: "advised", at: now().toISOString(), what: neededFor, denyStops };
       }
       // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
