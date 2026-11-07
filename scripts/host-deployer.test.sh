@@ -101,6 +101,31 @@ role_of() { node -e 'const h=require(process.argv[1]);const p=process.argv[2];co
 [[ $(role_of "$(cd "$D" && pwd)") == deployer ]] || fail "deployer folder role: $(cat "$D/outbox/host.json")"
 [[ $(role_of "$BOSSMAN_BACKUP_DIR") == backups ]] || fail "backups folder role: $(cat "$D/outbox/host.json")"
 node -e 'const h=require(process.argv[1]);const paths=h.ownership.map(o=>o.path);if(new Set(paths).size!==paths.length)process.exit(1);if(h.ownership.some(o=>!Array.isArray(o.roles)||!o.roles.length))process.exit(2);const all=new Set(h.ownership.flatMap(o=>o.roles));for(const r of all)if(!["install","deployer","backups","data","secrets"].includes(r))process.exit(3)' "$D/outbox/host.json" || fail "host.json roles are malformed: $(cat "$D/outbox/host.json")"
+# 1a2. More facts (BOS-419): repo access, folders, addresses and ports, memory, add-ons and the fixed read-only checks.
+# Every field is optional for the server; none carries a URL, key or token.
+node -e '
+const h=require(process.argv[1]);const bad=m=>{console.error(m);process.exit(1)};
+if(!["https","ssh","http","other","none"].includes(h.repo.origin))bad("repo.origin");
+if(typeof h.repo.embeddedCredentials!=="boolean"||!["ok","failed","skipped"].includes(h.repo.probe))bad("repo");
+if(!h.paths.src||!h.paths.deployer||!h.paths.install)bad("paths");
+if(!Array.isArray(h.compose.files)||typeof h.compose.bluegreen!=="boolean")bad("compose");
+if(!Array.isArray(h.network.addresses)||typeof h.network.ports!=="object")bad("network");
+if(!(h.memory.totalKb>0)||h.memory.availableKb>h.memory.totalKb)bad("memory");
+for(const a of ["tailscale","ntfy","penpot"])if(!["not_set_up","stopped","needs_login","running"].includes(h.addons[a]))bad("addon "+a);
+if(Object.keys(h.addons).length!==3)bad("addons list");
+if(!h.checks.state_file_sizes)bad("checks");
+' "$D/outbox/host.json" || fail "host.json extra facts are malformed: $(cat "$D/outbox/host.json")"
+hasnt "$D/outbox/host.json" "$T/origin.git" # the origin URL is never reported
+# Ports come only from the allowlist, and only values that look like an address or a port.
+printf 'BOSSMAN_HOST_PORT=3199\nSECRET_TOKEN=abc123\nPENPOT_BIND=bad value;\n' >"$T/src/.env"
+host
+has "$D/outbox/host.json" '"BOSSMAN_HOST_PORT": "3199"'
+hasnt "$D/outbox/host.json" 'abc123'
+hasnt "$D/outbox/host.json" 'SECRET_TOKEN'
+hasnt "$D/outbox/host.json" 'PENPOT_BIND'
+rm -f "$T/src/.env"
+# The repo probe is cached for an hour: a second run does not repeat it.
+cp "$D/state/repo-probe" "$T/probe1"; sleep 1.1; host; cmp -s "$D/state/repo-probe" "$T/probe1" || fail "repo probe was repeated within the hour"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
 sed -i 's/^AVAILABLE_REFRESH_SECONDS=0$/AVAILABLE_REFRESH_SECONDS=300/' "$D/host.conf"
 printf '{"tip":"stale"}\n' >"$D/outbox/available.json"

@@ -88,10 +88,10 @@ describe("plan", () => {
     const plan = (await c.req("GET", `/api/companies/${c.company.id}/plan`)).json();
     const node = (id: string) => plan.nodes.find((n: { id: string }) => n.id === id);
     expect(plan.nodes).toHaveLength(4);
-    expect(node(design.id)).toMatchObject({ kind: "ticket", layer: 0, blocked: false, holdingUp: 2, link: `#/tickets/${design.id}`, project: "Customer app" });
+    expect(node(design.id)).toMatchObject({ kind: "ticket", ref: expect.stringMatching(/^APP-\d+$/), layer: 0, blocked: false, holdingUp: 2, link: `#/tickets/${design.id}`, project: "Customer app" });
     expect(node(ui.id)).toMatchObject({ layer: 2, blocked: true, holdingUp: 0 });
     expect(node(ui.id).causes.sort()).toEqual([d!.id, design.id].sort());
-    expect(node(d!.id)).toMatchObject({ kind: "decision", open: true, title: "Which payment provider?" });
+    expect(node(d!.id)).toMatchObject({ kind: "decision", ref: null, open: true, title: "Which payment provider?" });
 
     const links = (await c.req("GET", `/api/tickets/${api.id}/links`)).json();
     expect(links.waitsOn).toEqual([expect.objectContaining({ kind: "ticket", id: design.id, open: true, dependencyId: dep1.id })]);

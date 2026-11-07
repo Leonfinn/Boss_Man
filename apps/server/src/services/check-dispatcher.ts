@@ -64,15 +64,15 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     pump,
 
     async onDone(runnerId: string, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string }) {
-      const job = await queue.complete(msg.jobId, { commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut });
+      const job = await queue.complete(msg.jobId, { runnerId, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut });
       // The runner may forget the result once the server has seen the job end, whether or not this answer counted.
       deps.send(runnerId, { type: "check.ack", jobId: msg.jobId });
       if (job) await ended(job);
       await pump();
     },
 
-    async onProgress(msg: { jobId: string; tail: string }) {
-      await queue.progress(msg.jobId, msg.tail);
+    async onProgress(runnerId: string, msg: { jobId: string; tail: string }) {
+      await queue.progress(msg.jobId, runnerId, msg.tail);
     },
 
     /** A runner said hello with the jobs it is running: any this runner was given but does not list are gone (it restarted). */

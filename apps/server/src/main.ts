@@ -24,7 +24,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, launcher, memory, checks, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota } = await buildApp({
+const { app, launcher, memory, serverHealth, checks, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -68,6 +68,8 @@ const bg = createBackground(
     { name: "watchdog", everyMs: Number(env.BOSSMAN_WATCHDOG_MS ?? 5 * 60_000), run: () => watchdog.run() },
     // Workflow retros (docs/19): wakes the retro agent every 20 finished tickets or 7 days, whichever comes first. No model here.
     { name: "retro", everyMs: Number(env.BOSSMAN_RETRO_MS ?? 15 * 60_000), run: () => retro.sweep() },
+    // Server health (BOS-640): rss against the memory the server may use, and freezes in the last 10 minutes; raises the memory card (CEO) and the freeze card (owner). // leader-only
+    { name: "server health", everyMs: Number(env.BOSSMAN_SERVER_HEALTH_MS ?? 60_000), run: async () => { await serverHealth.check(); } },
     // Boss Man's own alerts that sat on the Scrum Master or the CEO past the time limit move up a rung (BOS-64).
     { name: "alert ladder", everyMs: Number(env.BOSSMAN_ALERT_LADDER_MS ?? 60_000), run: () => alerts.sweep() },
     // Pull requests waiting on the git host: merged there, or mergeable now (R59).

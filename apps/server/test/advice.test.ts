@@ -326,3 +326,63 @@ describe("ask the CEO for advice", () => {
     expect((await c.req("POST", `/api/decisions/${d.id}/ask-advice`, {})).statusCode).toBe(404);
   });
 });
+
+// BOS-233, item 3: the CEO can add advice to a card the owner can see without the owner asking first,
+// and can answer a non-permission card with a plain note. Advice never settles the card.
+describe("the CEO advises without being asked (BOS-233)", () => {
+  it("advises an owner-rung permission card unasked, and the owner still decides", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "permission",
+        question: "Run dd?",
+        options: ["Allow once", "Deny"],
+        recommendedOption: "Deny",
+        tier: "owner",
+        context: { type: "permission", runnerId: randomUUID(), runId: randomUUID(), requestId: randomUUID(), explain: { title: "Engineer wants to run a command", summary: "Only reads information", effect: "reads", command: "dd if=/tmp/session.db count=40" } },
+      })
+      .returning();
+    const ceo = await c.mcp(c.ceo.id);
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, outcome: "advice", what: "Copies part of a database file into another file.", needed: "No, this ticket doesn't need it.", recommendation: "deny", why: "It reads data the ticket can get another way." } });
+    expect(textOf(r)).toMatch(/Advice saved/);
+    const after = await row(c, d!.id);
+    expect(after.status).toBe("open");
+    expect(after.tier).toBe("owner");
+    expect(after.context).toMatchObject({ advice: { state: "advised", recommendation: "deny" } });
+  });
+
+  it("advises a non-permission card with a plain note, when the owner asked", async () => {
+    const c = (ctx = await setup());
+    const { d } = await c.question();
+    expect((await c.req("POST", `/api/decisions/${d.id}/ask-advice`, {})).statusCode).toBe(200);
+    const ceo = await c.mcp(c.ceo.id);
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d.id, outcome: "advice", why: "Either is fine; Stripe is the one the team already uses." } });
+    expect(isError(r)).toBe(false);
+    expect(textOf(r)).toMatch(/Advice saved/);
+    const after = await row(c, d.id);
+    expect(after.status).toBe("open");
+    expect(after.context).toMatchObject({ advice: { state: "advised", summary: expect.stringContaining("Stripe") } });
+  });
+
+  it("a permission card the CEO raised itself can't be advised by the CEO", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "permission",
+        question: "Run the deploy?",
+        options: ["Allow once", "Deny"],
+        recommendedOption: "Deny",
+        tier: "owner",
+        raisedByAgentId: c.ceo.id,
+        context: { type: "permission", runnerId: randomUUID(), runId: randomUUID(), requestId: randomUUID(), explain: { title: "The CEO wants to run a command", summary: "Deploys", effect: "changes", command: "scripts/deploy.sh" } },
+      })
+      .returning();
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, outcome: "advice", what: "It deploys the release to staging.", needed: "Yes, the release needs it.", recommendation: "allow", why: "It is the normal deploy step." } }))).toBe(true);
+    expect((await row(c, d!.id)).status).toBe("open");
+  });
+});
