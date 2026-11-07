@@ -159,6 +159,33 @@ export class Workspaces {
     return next as Promise<T>;
   }
 
+  /**
+   * Check out an existing ticket branch into the ticket's own folder, recovering by itself from
+   * the two ways that used to fail every run on a ticket (BOS-634): a half-made folder (no .git)
+   * left in the way, and the branch still checked out in some other worktree of ours (an agent
+   * switched branches inside another ticket's folder). The other worktree is moved to a detached
+   * HEAD at the same commit: its files and uncommitted changes stay, only the branch is released.
+   * A worktree outside our workspace root is never touched; that case fails with a clear message.
+   */
+  private async addBranchWorktree(repo: string, dir: string, branch: string): Promise<void> {
+    await this.git(["worktree", "prune"], { cwd: repo });
+    if (existsSync(dir) && !existsSync(path.join(dir, ".git"))) rmSync(dir, { recursive: true, force: true });
+    const listing = await this.git(["worktree", "list", "--porcelain"], { cwd: repo });
+    const mine = path.resolve(dir);
+    const tickets = path.resolve(this.root, "tickets") + path.sep;
+    let current = "";
+    for (const line of listing.split("\n")) {
+      if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+      else if (line === `branch refs/heads/${branch}` && path.resolve(current) !== mine) {
+        if (!path.resolve(current).startsWith(tickets)) {
+          throw new Error(`Branch ${branch} is checked out in ${current}, outside this runner's workspaces; release it there first.`);
+        }
+        await this.git(["switch", "--detach", "--quiet"], { cwd: current });
+      }
+    }
+    await this.git(["worktree", "add", "--quiet", dir, branch], { cwd: repo });
+  }
+
   /** The ticket's worktree, created on first use and reused (never recreated) after that. */
   async ensure(spec: WorkspaceSpec, secrets: Record<string, string | undefined> = {}): Promise<WorkspaceInfo> {
     const auth = gitAuthEnv(secrets);
@@ -185,7 +212,7 @@ export class Workspaces {
       if (branchExists) {
         // Released earlier: carry on from the branch and keep the original base.
         baseCommit = (await this.git(["config", "--get", baseKey], { cwd: repo }).catch(() => "")) || (await this.git(["rev-parse", branch], { cwd: repo }));
-        await this.git(["worktree", "add", "--quiet", dir, branch], { cwd: repo });
+        await this.addBranchWorktree(repo, dir, branch);
       } else {
         baseCommit = await this.git(["rev-parse", "--verify", `${spec.baseRef.match(/^[0-9a-f]{7,40}$/) ? spec.baseRef : `refs/remotes/origin/${spec.baseRef}`}^{commit}`], { cwd: repo });
         await this.git(["worktree", "add", "--quiet", "-b", branch, dir, baseCommit], { cwd: repo });
@@ -217,8 +244,7 @@ export class Workspaces {
       const branch = branchFor(spec.ticketId);
       const has = existsSync(repo) && (await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo }).then(() => true, () => false));
       if (!has) throw new Error("That ticket has no workspace or branch on this runner.");
-      await this.git(["worktree", "prune"], { cwd: repo });
-      await this.git(["worktree", "add", "--quiet", dir, branch], { cwd: repo });
+      await this.addBranchWorktree(repo, dir, branch);
       const patch = this.patchFile(spec.ticketId);
       if (existsSync(patch)) {
         await this.git(["apply", "--whitespace=nowarn", patch], { cwd: dir });

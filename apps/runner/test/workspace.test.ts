@@ -69,6 +69,31 @@ describe("git workspaces (R38)", () => {
     expect(ws.savedPatch(ids.a)).toBeNull();
   });
 
+  it("recovers by itself when the ticket's branch is checked out in another ticket's folder, or a half-made folder is in the way (BOS-634)", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const specA = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const specB = { projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" };
+    const a = await ws.ensure(specA);
+    const b = await ws.ensure(specB);
+    git(a.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work on A");
+    await ws.release(specA);
+    // An agent working on B switches B's folder onto A's branch, so A's branch is taken.
+    git(b.path, "switch", "-q", branchFor(ids.a));
+    writeFileSync(path.join(b.path, "b-note.txt"), "uncommitted\n");
+    // A half-made folder for A is in the way as well.
+    mkdirSync(ws.ticketDir(ids.a), { recursive: true });
+    writeFileSync(path.join(ws.ticketDir(ids.a), "junk"), "x");
+
+    const back = await ws.ensure(specA);
+    expect(back.created).toBe(true);
+    expect(git(back.path, "log", "-1", "--format=%s")).toBe("work on A");
+    expect(git(back.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branchFor(ids.a));
+    // B's folder keeps its files and uncommitted work, now on a detached HEAD.
+    expect(git(b.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+    expect(readFileSync(path.join(b.path, "b-note.txt"), "utf8")).toBe("uncommitted\n");
+  });
+
   it("does not run hooks or a filesystem monitor named in the shared repo's config", async () => {
     const r = remote();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
