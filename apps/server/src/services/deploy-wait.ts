@@ -16,15 +16,12 @@ import { companies, decisions, settings } from "../db/schema.js";
 import { CANCEL_UPDATE, KEEP_WAITING_MORE, UPDATE_NOW_ANYWAY, markDecisionNotificationRead } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import type { Available, DeployStatus, Headroom } from "./self-deploy.js";
+import { DEPLOY_WAIT_KEY, SOFT_HOLD_MAX_MS, quietRuns as envQuietRuns, softHold } from "./deploy-wait-hold.js";
 
-export const DEPLOY_WAIT_KEY = "deploy_wait";
-/** Runs allowed while the soft hold is on (and the most there may be for the machine to count as quiet). */
-export const DEFAULT_QUIET_RUNS = 3;
+export { DEPLOY_WAIT_KEY, SOFT_HOLD_MAX_MS } from "./deploy-wait-hold.js";
 export const WAIT_MINUTES = 30;
 /** A host report older than this means the deployer has stopped ticking (or the host is too loaded to tick). */
 export const HEADROOM_STALE_MS = 3 * 60_000;
-/** The soft hold never lasts longer than this, in any phase. */
-export const SOFT_HOLD_MAX_MS = 3 * 60 * 60_000;
 /** How long the hold waits after the window for the runner update to start its own drain. */
 export const HANDOVER_MS = 30 * 60_000;
 
@@ -89,7 +86,7 @@ const gb = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
 
 export function deployWaitService(db: Db, deps: DeployWaitDeps) {
   const now = deps.now ?? (() => new Date());
-  const quietRuns = deps.quietRuns ?? DEFAULT_QUIET_RUNS;
+  const quietRuns = deps.quietRuns ?? envQuietRuns();
 
   async function get(): Promise<DeployWait | null> {
     const [row] = await db.select().from(settings).where(eq(settings.key, DEPLOY_WAIT_KEY));
@@ -190,11 +187,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
     get,
 
     /** The soft hold: on while a wait exists. The scheduler caps runs and the merge gates park new checks. */
-    async softHold(): Promise<{ on: false } | { on: true; phase: WaitPhase; maxRuns: number }> {
-      const w = await get();
-      if (!w || now().getTime() - Date.parse(w.approvedAt) > SOFT_HOLD_MAX_MS) return { on: false };
-      return { on: true, phase: w.phase, maxRuns: quietRuns };
-    },
+    softHold: () => softHold(db, now(), quietRuns),
 
     /**
      * The owner approved a server update. If the machine is quiet now it is sent at once (a quiet machine never

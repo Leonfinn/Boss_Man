@@ -4,10 +4,13 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { settings } from "../db/schema.js";
+import { softHold } from "./deploy-wait-hold.js";
 
 export const MERGE_CHECK_LIMIT_KEY = "merge_check_limit";
 export const DEFAULT_MERGE_CHECK_LIMIT = 2;
 export const MAX_MERGE_CHECK_LIMIT = 16;
+/** While a server update's soft hold parks new checks, how often the gate looks again (BOS-420). */
+export const PARKED_RETRY_MS = 30_000;
 
 /** Tickets that jump the queue: owner-marked urgent work, and arch fixes (the gate's own repairs). */
 export function checkPriority(t: { urgent?: boolean | null; title?: string | null }): number {
@@ -30,7 +33,18 @@ export function checkGate(db: Db) {
     return Number.isInteger(n) && n >= 1 ? Math.min(n, MAX_MERGE_CHECK_LIMIT) : DEFAULT_MERGE_CHECK_LIMIT;
   }
 
+  let parked: ReturnType<typeof setTimeout> | null = null;
   async function pump() {
+    // A server update waiting for a quiet machine (BOS-420): checks already running finish, no new one starts.
+    // One timer looks again every 30 s, so the parked checks start soon after the hold lifts.
+    if (queue.some((w) => !w.cancelled) && (await softHold(db).catch(() => ({ on: false as const }))).on) {
+      parked ??= setTimeout(() => {
+        parked = null;
+        void pump();
+      }, PARKED_RETRY_MS);
+      parked.unref?.();
+      return;
+    }
     const max = await limit().catch(() => DEFAULT_MERGE_CHECK_LIMIT);
     while (!aloneRunning && running < max && queue.length) {
       queue.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
@@ -55,6 +69,8 @@ export function checkGate(db: Db) {
     },
     /** What is running and what waits, for tests and status. */
     state: () => ({ running, waiting: queue.filter((w) => !w.cancelled).length }),
+    /** Looks at the queue again now, e.g. when a server update's soft hold lifts (BOS-420). */
+    pump: () => pump(),
     /** Runs `work` once a slot is free; lower priority numbers go first, ties in arrival order. `alone`: nothing else runs beside it. */
     async run<T>(priority: number, alone: boolean, work: () => Promise<T>): Promise<T> {
       await new Promise<void>((resolve) => {

@@ -121,7 +121,7 @@ describe("deploy wait (BOS-420)", () => {
     w.runs = 5;
     const svc = deployWaitService(db, deps);
     expect((await svc.begin({ decisionId: ID, commit: B, fromCommit: A })).phase).toBe("waiting");
-    expect(await svc.softHold()).toEqual({ on: true, phase: "waiting", maxRuns: 3 });
+    expect(await svc.softHold()).toMatchObject({ on: true, phase: "waiting", maxRuns: 3 });
     w.runs = 3;
     expect((await svc.step())?.phase).toBe("sent");
   });

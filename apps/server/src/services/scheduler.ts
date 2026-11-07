@@ -20,6 +20,7 @@ import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
+import { softHold } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -954,11 +955,17 @@ export function schedulerService(
       .onConflictDoNothing();
   }
 
-  /** The all-companies and per-company run limits: the owner's Settings when saved (settings.run_limits), else the defaults. */
+  /**
+   * The all-companies and per-company run limits: the owner's Settings when saved (settings.run_limits), else the defaults.
+   * While a server update waits for a quiet machine, and through its standby window, the all-companies limit is capped
+   * (BOS-420's soft hold): fewer runs start, so memory frees up. Runs already going are never cut off.
+   */
   async function limitsNow() {
     const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
     const stored = lrow?.value as { instance?: number; company?: number } | undefined;
-    return { maxTotal: stored?.instance ?? limits.instance, maxCompany: stored?.company ?? limits.company };
+    const maxTotal = stored?.instance ?? limits.instance;
+    const soft = await softHold(db, now());
+    return { maxTotal: soft.on ? Math.min(maxTotal, soft.maxRuns) : maxTotal, maxCompany: stored?.company ?? limits.company };
   }
 
   const self = {

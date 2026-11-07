@@ -55,6 +55,23 @@ async function setup(limits: { instance: number; company: number }) {
   return { ...built, db, close, A, B, hire, running, queued, end, wake, live, clearWakes };
 }
 
+describe("a server update waiting for a quiet machine caps runs (BOS-420)", () => {
+  it("caps the all-companies limit while the wait is on; runs going are not cut off, and the cap lifts with it", async () => {
+    const c = (ctx = await setup({ instance: 8, company: 8 }));
+    for (const n of ["A1", "A2", "A3"]) await c.running(c.A, n);
+    await c.clearWakes();
+    await c.db.insert(settings).values({ key: "deploy_wait", value: { phase: "waiting", approvedAt: new Date().toISOString() } });
+    const w = await c.queued(c.A, "A4", "check due", 5);
+    expect((await c.serverStatus.status(c.A)).runLimits).toMatchObject({ allCompanies: { limit: 3, running: 3 } });
+    expect(await c.scheduler.tickOnce()).toMatchObject({ launched: 0 });
+    expect(await c.live(c.A)).toBe(3); // nothing was stopped
+    expect((await c.wake(w.id)).status).toBe("queued");
+    await c.db.delete(settings).where(eq(settings.key, "deploy_wait"));
+    expect((await c.serverStatus.status(c.A)).runLimits).toMatchObject({ allCompanies: { limit: 8 } });
+    expect(await c.scheduler.tickOnce()).toMatchObject({ launched: 1 });
+  });
+});
+
 describe("fair share at the all-companies run limit (BOS-582)", () => {
   it("an idle company's wake gets the next free slot ahead of a busy company's card; the card gets the one after", async () => {
     const c = (ctx = await setup({ instance: 4, company: 4 }));
