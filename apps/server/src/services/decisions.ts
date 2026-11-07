@@ -1081,7 +1081,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   async function wakeLadderCeo(companyId: string, row: { id: string }, ctx: { ladder: Ladder } & Record<string, unknown>, ceoId: string, note: string) {
     if (!wake) return;
     // High priority, like an alert: the agent is waiting, and the runner gives up at 10 minutes.
-    const w = (await wake({ agentId: ceoId, ticketId: ctx.ladder.ticketId, reason: "decision", priority: 3, note })) as { status?: string; statusReason?: string | null } | null;
+    const w = (await wake({ agentId: ceoId, ticketId: ctx.ladder.ticketId, reason: "decision", priority: 3, replyLane: true, note })) as { status?: string; statusReason?: string | null } | null;
     if (w?.status !== "dropped") return;
     const at = now().toISOString();
     const why = `the CEO's wake was dropped (${w.statusReason ?? "no reason given"})`;
