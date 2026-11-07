@@ -215,7 +215,8 @@ describe("stale blockers (R21)", () => {
     expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
-    expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+    // The sweep also asked the CEO to hand out work, as the worker had nothing to do (BOS-615).
+    expect(await ctx.db.select().from(wakes).where(ne(wakes.reason, "idle agents"))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
   });
 
   it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {
@@ -330,6 +331,9 @@ describe("stale blockers (R21)", () => {
     };
     await pair("a");
     await pair("b");
+    // The worker is paused so the idle-agents ask to the CEO (BOS-615), whose reads depend on whether the
+    // worker is idle (the done tickets below queue wakes for it), stays out of the count.
+    await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.worker.id));
     ctx.advance(25 * HOUR);
     await ctx.sweep(); // raises both cards, so the measured passes are steady-state
     const two = await measure();
