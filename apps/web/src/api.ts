@@ -1,4 +1,5 @@
 // The browser talks to the server's JSON API on the same origin, with the session cookie.
+import { reportAnswered, reportFailure, reportSlow } from "./server-watch";
 import { sharedGet } from "./shared-get";
 import type { Criterion } from "@boss-man/shared";
 
@@ -34,6 +35,8 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 /** One request, no sharing: what `api` sends for a write, or a path nothing else should join. */
 export async function apiOnce<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   let res: Response;
+  // How long the server took, so a stall that still answers shows the banner (BOS-637).
+  const started = Date.now();
   try {
     res = await fetch(path, {
       method: init.method ?? "GET",
@@ -44,8 +47,12 @@ export async function apiOnce<T>(path: string, init: { method?: string; body?: u
     });
   } catch (err) {
     if ((err as Error).name === "AbortError") throw err;
-    throw new ApiError(0, "Can't reach the Boss Man server.");
+    const went = new ApiError(0, "Can't reach the Boss Man server.");
+    reportFailure(went);
+    throw went;
   }
+  reportAnswered();
+  reportSlow(Date.now() - started);
   const text = await res.text();
   let data: Record<string, unknown> = {};
   try {
@@ -56,7 +63,9 @@ export async function apiOnce<T>(path: string, init: { method?: string; body?: u
   if (!res.ok) {
     // A rejected secret lists what's wrong with it; other errors carry a message.
     const problems = Array.isArray(data.problems) ? (data.problems as string[]).join(" ") : null;
-    throw new ApiError(res.status, problems ?? String(data.message ?? plainStatus(res.status, data.error)));
+    const failed = new ApiError(res.status, problems ?? String(data.message ?? plainStatus(res.status, data.error)));
+    reportFailure(failed);
+    throw failed;
   }
   return data as T;
 }
