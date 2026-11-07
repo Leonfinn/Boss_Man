@@ -65,3 +65,42 @@ describe("weights", () => {
     expect([-1, 0, 1, 2, 5, 10, 30].map(urgencyPoints)).toEqual([10, 8, 6, 6, 3, 1, 0]);
   });
 });
+
+import { orderOwnerCards } from "../src/rank.js";
+
+describe("orderOwnerCards (BOS-551)", () => {
+  const ids = (o: { order: string[] }) => o.order;
+
+  it("keeps the base order when nothing is linked", () => {
+    const r = orderOwnerCards([{ id: "a" }, { id: "b" }, { id: "c" }]);
+    expect(ids(r)).toEqual(["a", "b", "c"]);
+    expect(r.steps).toEqual({ a: 1, b: 2, c: 3 });
+  });
+
+  it("puts a card after the one it says do after", () => {
+    // b must come after a, though the base order has b first.
+    const r = orderOwnerCards([{ id: "b", doAfter: [{ decisionId: "a", label: "A" }] }, { id: "a" }]);
+    expect(ids(r)).toEqual(["a", "b"]);
+    expect(r.steps).toEqual({ a: 1, b: 2 });
+  });
+
+  it("puts a card before the one it says do before", () => {
+    const r = orderOwnerCards([{ id: "b" }, { id: "a", doBefore: [{ decisionId: "b", label: "B" }] }]);
+    expect(ids(r)).toEqual(["a", "b"]);
+  });
+
+  it("ignores links to cards that aren't in the list", () => {
+    const r = orderOwnerCards([{ id: "a", doAfter: [{ decisionId: "gone", label: "Gone" }] }, { id: "b" }]);
+    expect(ids(r)).toEqual(["a", "b"]);
+  });
+
+  it("breaks a cycle rather than looping", () => {
+    const r = orderOwnerCards([
+      { id: "a", doAfter: [{ decisionId: "b", label: "B" }] },
+      { id: "b", doAfter: [{ decisionId: "a", label: "A" }] },
+      { id: "c" },
+    ]);
+    expect(ids(r)).toHaveLength(3);
+    expect(new Set(ids(r))).toEqual(new Set(["a", "b", "c"]));
+  });
+});

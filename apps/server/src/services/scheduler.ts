@@ -83,6 +83,8 @@ export const MISSED_REASON = "missed work";
 export const URGENT_IDLE_REASON = "urgent idle";
 /** A free run slot given to an in-progress ticket nobody is working on (BOS-574, DR-029). */
 export const IDLE_SLOT_REASON = "idle slot";
+/** Free run slots and idle agents with nothing ready: the CEO is asked to hand out work (BOS-615). */
+export const IDLE_AGENTS_REASON = "idle agents";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 /** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
