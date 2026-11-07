@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { AlertKind } from "../src/services/alert-kinds.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, tickets } from "../src/db/schema.js";
+import { agents, decisions, runs, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -46,7 +46,10 @@ afterEach(async () => {
 
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
 async function agentAs(agentId: string) {
-  const token = await issueRunToken(ctx.db, { companyId: ctx.company.id, agentId, runId: randomUUID() });
+  const runId = randomUUID();
+  // A run token works only while its run row is live (BOS-513), so give the made-up run one.
+  await ctx.db.insert(runs).values({ id: runId, companyId: ctx.company.id, agentId, startedAt: new Date() });
+  const token = await issueRunToken(ctx.db, { companyId: ctx.company.id, agentId, runId });
   const c = new Client({ name: "test", version: "0" });
   await c.connect(new StreamableHTTPClientTransport(new URL(`http://${ctx.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
   clients.push(c);
