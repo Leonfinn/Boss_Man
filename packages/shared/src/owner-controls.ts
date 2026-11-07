@@ -15,7 +15,7 @@ export const OWNER_CONTROLS = {
   // browser's own confirm dialog (window.confirm) that many deletes use.
   "Any screen": [
     "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Plan", "Wiki", "Features", "Feedback",
-    "Agents", "Skills", "Runs", "Scrum Master", "Workflow", "Engagements", "Settings",
+    "Agents", "Skills", "Runs", "Merge queue", "Scrum Master", "Workflow", "Engagements", "Settings",
     "Switch company", "Create", "New company", "Close menu", "Menu …", "Turn on browser notifications", "Log out",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
     // The owner's message box (Ticket, Board, Chat, Decisions and Run show it).
