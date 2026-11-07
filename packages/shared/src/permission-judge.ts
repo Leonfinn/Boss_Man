@@ -669,7 +669,8 @@ function shellSegments(c: string, bad?: { v: boolean }): { words: string[]; out:
         while (c[j] === " " || c[j] === "\t") j++;
         // The tag is the whole word with quotes and backslashes removed, as the shell reads it (`E"OF"` is EOF).
         const m = /^(?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"\\])+/.exec(c.slice(j));
-        if (m) pendingTags.push(m[0].replace(/['"\\]/g, ""));
+        // `$'EOF'` and `$"EOF"` are quote removal the shell does and this reader doesn't: fail closed on any `$` in the tag.
+        if (m && !m[0].includes("$")) pendingTags.push(m[0].replace(/['"\\]/g, ""));
         else if (bad) bad.v = true;
         redir = null;
       } else if (op[0] === ">" || op[0] === "&") redir = op.endsWith("&") && /^\s*\d/.test(c.slice(i + 1)) ? null : "out";
@@ -685,22 +686,43 @@ function shellSegments(c: string, bad?: { v: boolean }): { words: string[]; out:
 }
 
 /** A command that unpacks an archive or copies a folder tree in. */
-function extractsFiles(name: string, args: string[]): boolean {
+function extractsFiles(name: string, args: string[], scratchInPlay: boolean): boolean {
   if (name === "tar") return args.some((a, i) => /^-[A-Za-z]*x|^--(?:extract|get)$/.test(a) || (i === 0 && /^[A-Za-z]*x/.test(a)));
   if (name === "unzip") return !args.some((a) => /^-[A-Za-z]*[lvtpZ]/.test(a));
   if (/^(?:7z|7za|7zr|cpio|rsync)$/.test(name)) return true;
   if (name === "cp") return args.some((a) => /^-[A-Za-z]*[rRa]|^--(?:recursive|archive)$/.test(a));
+  if (name === "git") {
+    // git verbs that write files they never name (a patch, a stash, a ref's tree).
+    const rest = args.filter((a) => !a.startsWith("-"));
+    const verb = rest[0];
+    if (verb === "apply" || verb === "am") return true;
+    // Restoring paths from a ref or stash is the agent's own committed work, unless the command also touches scratch or
+    // written files (a ref fetched from /tmp): then it counts as unpacking.
+    if (!scratchInPlay) return false;
+    if (verb === "stash") return rest[1] === "pop" || rest[1] === "apply";
+    if (verb === "restore") return args.some((a) => abbreviates(a, ["source"]) || /^-s/.test(a));
+    if (verb === "checkout" || verb === "cherry-pick" || verb === "merge" || verb === "pull") return true;
+  }
   return false;
+}
+
+/** GNU long options accept any unambiguous prefix (`--to-comm` is `--to-command`): true when `arg` abbreviates one of `names`. */
+function abbreviates(arg: string, names: string[]): boolean {
+  if (!arg.startsWith("--")) return false;
+  const o = arg.slice(2).split("=")[0]!;
+  return o.length >= 2 && names.some((n) => n.startsWith(o));
 }
 
 /** Options on commands from the reader list that run a program of the caller's choosing. */
 function runsProgramOption(name: string, args: string[]): boolean {
   const any = (re: RegExp): boolean => args.some((a) => re.test(a));
-  if (name === "tar") return any(/^-[A-Za-z]*[IF]|^--(?:use-compress-program|to-command|checkpoint-action|info-script|new-volume-script|rmt-command|rsh-command|transform-command)\b/) || args.some((a) => /^[A-Za-z]*[xcrutd][A-Za-z]*[IF]/.test(a));
-  if (name === "sort") return any(/^--compress-program\b/);
-  if (name === "zip" || name === "unzip") return any(/^-TT$|^-[A-Za-z]*TT|^--unzip-command\b/);
-  if (name === "rg") return any(/^--(?:pre|hostname-bin)\b/);
-  if (name === "wget") return any(/^--use-askpass\b|^-e$|^--execute\b/);
+  const abbr = (names: string[]): boolean => args.some((a) => abbreviates(a, names));
+  if (name === "tar") return any(/^-[A-Za-z]*[IF]/) || args.some((a) => /^[A-Za-z]*[xcrutd][A-Za-z]*[IF]/.test(a)) ||
+    abbr(["use-compress-program", "to-command", "checkpoint-action", "info-script", "new-volume-script", "rmt-command", "rsh-command", "transform-command"]);
+  if (name === "sort") return abbr(["compress-program"]);
+  if (name === "zip" || name === "unzip") return any(/^-TT$|^-[A-Za-z]*TT/) || abbr(["unzip-command"]);
+  if (name === "rg") return abbr(["pre", "hostname-bin"]);
+  if (name === "wget") return any(/^-e$/) || abbr(["use-askpass", "execute"]);
   if (name === "less" || name === "more") return any(/^--lesskey|^-k$/);
   return false;
 }
@@ -802,7 +824,7 @@ function usesScratchUnsafely(c: string): boolean {
     // F4: once a command has unpacked an archive or copied a folder in, files it never wrote by name may exist. Only readers
     // and file tools may follow in the same command.
     if (extracted && !(safe.has(sh) && !head.includes("/"))) return true;
-    if (extractsFiles(sh, args)) extracted = true;
+    if (extractsFiles(sh, args, written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) extracted = true;
     // F2: options that make an otherwise harmless tool run a program.
     if (runsProgramOption(sh, args)) return true;
     // F3: xargs builds a command from its input; with a scratch or written path anywhere it is unread code.
