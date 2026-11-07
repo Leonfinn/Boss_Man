@@ -819,6 +819,13 @@ function usesScratchUnsafely(c: string): boolean {
     const flagless = args.filter((a) => !a.startsWith("-"));
     if (/^(?:cp|mv|install|ln)$/.test(head) && flagless.length) written.add(clean(flagless[flagless.length - 1]!));
     if (head === "tee") for (const a of flagless) written.add(clean(a));
+    // Readers on the safe list that still write a file: `sort -o OUT`, `uniq IN OUT`, `xxd -r IN OUT`.
+    if (head === "sort") for (let i = 0; i < args.length; i++) {
+      if (/^(?:-o|--output)$/.test(args[i]!)) written.add(clean(args[i + 1] ?? ""));
+      else if (/^--output=/.test(args[i]!)) written.add(clean(args[i]!.slice(9)));
+      else if (/^-[A-Za-z]*o./.test(args[i]!) && !args[i]!.startsWith("--")) written.add(clean(args[i]!.replace(/^-[A-Za-z]*?o/, "")));
+    }
+    if ((head === "uniq" || (head === "xxd" && args.includes("-r"))) && flagless.length >= 2) written.add(clean(flagless[flagless.length - 1]!));
     for (let i = 0; i < args.length; i++) {
       if ((head === "curl" && /^(?:-o|--output)$/.test(args[i]!)) || (head === "wget" && /^(?:-O|--output-document)$/.test(args[i]!))) written.add(clean(args[i + 1] ?? ""));
       const of = /^of=(.+)$/.exec(args[i]!);
@@ -842,6 +849,24 @@ function usesScratchUnsafely(c: string): boolean {
     return false;
   };
   const isScratch = (w: string): boolean => scratchWord.test(w) || [...scratchVars].some((v) => new RegExp(`\\$\\{?${v}\\b`).test(w));
+  // Names the command wrote, as path parts without their extension (`d/c.py` gives `d`, `c`, `c.py`): an interpreter that
+  // mentions one anywhere (`python3 -c 'import c'`, `node -e "require('./c.js')"`, `python3 -m c`) may load the written code.
+  const writtenNames = new Set<string>();
+  for (const p of written) for (const part of p.split("/")) {
+    if (part === "" || part === "." || part === "..") continue;
+    writtenNames.add(part);
+    writtenNames.add(part.replace(/\.[^.]*$/, ""));
+  }
+  writtenNames.delete("");
+  const named = (text: string): boolean => [...writtenNames].some((n) => new RegExp(`(?<![\\w-])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(text));
+  // Only code that loads a module or script by name counts (`import c`, `from c import`, `require('./c.js')`, `source c`,
+  // `-m c`); reading a written file as data (`readFileSync("/tmp/out.json")`) is left to inlineCodeOk.
+  const mentionsWritten = (text: string): boolean => {
+    const loaders = /(?:^|[^\w.])(?:import|from|require\w*|include\w*|dofile|loadfile|source|use|run_path|import_module)\b[\s(]*['"]?([^\s'");,]*)/g;
+    for (const m of text.matchAll(loaders)) if (named(m[1]!)) return true;
+    for (const m of text.matchAll(/(?:^|[^\w.])import\s+([\w., ]+)/g)) if (named(m[1]!)) return true; // `import os, c`
+    return false;
+  };
   let extracted = false;
   for (const p of parsed) {
     let { head, args } = p;
@@ -886,8 +911,13 @@ function usesScratchUnsafely(c: string): boolean {
     // git's own config, hooks and -C are BOS-378 (Kit); only pnpm/npm/yarn are handled here.
     if (tooling.has(sh) && sh !== "git" && toolingRunsScratch(sh, args, isScratch, isWritten)) return true;
     if (tooling.has(sh) && sh !== "git" && [...written].some((p) => /(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.yml)?|\.pnpmfile\.cjs|package\.json)$/.test(p))) return true;
+    // Only the inline code or module name (the words after -c/-e/-r/-m) is checked here; a written file given as plain data
+    // to a checked-in script (`node scripts/use.js out.json`) is judged below as before.
+    const codeAt = args.findIndex((a) => /^-[A-Za-z]*[cermE]$/.test(a) || a === "--eval");
+    if (written.size > 0 && codeAt >= 0 && /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh)$/.test(sh) && (mentionsWritten(args.slice(codeAt + 1).join(" ")) || (/^-[A-Za-z]*m$/.test(args[codeAt]!) && named(args[codeAt + 1] ?? "")))) return true;
     const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
+      if (written.size > 0 && named(args[dashC + 1] ?? "")) return true; // the inner command may run what the outer one wrote
       if (usesScratchUnsafely(args[dashC + 1] ?? "")) return true;
       continue;
     }
