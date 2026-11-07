@@ -180,6 +180,12 @@ describe("review kinds", () => {
     expect((await c.db.select().from(activity).where(eq(activity.ticketId, c.t.id))).map((a) => a.summary)).toContain("The CEO overruled the security review's changes requested: Out of scope for this ticket.");
   });
 
+  it("lets only the CEO retry a merge, and only for an approved ticket (BOS-684)", async () => {
+    const c = await kinds();
+    expect(await c.call(c.sec.id, { action: "retry_merge" })).toBe("Only your company's CEO can do that.");
+    expect(await c.call(c.ceo.id, { action: "retry_merge" })).toContain("isn't approved yet");
+  });
+
   it("cannot overrule its way past the owner's sign-off", async () => {
     const c = await kinds();
     await c.setPolicy((p) => {

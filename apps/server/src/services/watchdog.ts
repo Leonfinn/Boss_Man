@@ -71,6 +71,11 @@ export type WatchdogDeps = {
   alert: (companyId: string, question: string) => Promise<unknown>;
   /** Boss Man's own alert on the ladder, starting at the CEO (BOS-450). Absent: held-wake alerts are not raised. */
   alertCeo?: (input: AlertInput) => Promise<unknown>;
+  /**
+   * How many of the company's run slots are busy, and its run limit (scheduler.runLimits).
+   * The idle-capacity rules (BOS-659) read both; absent, those rules do nothing.
+   */
+  capacity?: (companyId: string) => Promise<{ busy: number; limit: number }>;
   notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string }) => Promise<unknown>;
   now?: () => Date;
   /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
@@ -93,6 +98,8 @@ const SUGGEST: Record<WatchdogRule, string> = {
   unassigned: "assign it to the obvious role, or to the CEO if none is obvious",
   run_crashed: "rewake the assignee",
   run_ended_unmoved: "rewake the assignee, or nudge them to say why it's stuck",
+  idle_agent: "wake the assignee on the ticket so it carries on",
+  unstarted: "wake the assignee to start it",
   stale_in_progress: "nudge the assignee",
   stale_review: "chase_review",
   stale_blocked: "nudge the assignee to unblock it or say what it waits on",
@@ -332,19 +339,48 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       .innerJoin(tickets, eq(tickets.id, runs.ticketId))
       .where(and(inArray(runs.ticketId, ids), or(isNull(runs.purpose), ne(runs.purpose, "chat")), or(isNull(runs.endedAt), gte(runs.endedAt, tickets.stateChangedAt))));
     const depRows = await db
-      .select({ dep: ticketDependencies, holderState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status, decisionAt: decisions.createdAt })
+      .select({
+        dep: ticketDependencies,
+        holderState: tickets.systemState,
+        holderStateChangedAt: tickets.stateChangedAt,
+        engagementStatus: engagements.status,
+        decisionStatus: decisions.status,
+        decisionCreatedAt: decisions.createdAt,
+        decisionAnsweredAt: decisions.answeredAt,
+      })
       .from(ticketDependencies)
       .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
       .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
       .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
       .where(inArray(ticketDependencies.blockedTicketId, ids));
-    const holds: SnapHold[] = depRows.map(({ dep, holderState, engagementStatus, decisionStatus, decisionAt }) =>
+    const holds: SnapHold[] = depRows.map(({ dep, holderState, engagementStatus, decisionStatus, decisionCreatedAt }) =>
       dep.blockerTicketId
         ? { blockedTicketId: dep.blockedTicketId, kind: "ticket", holderTicketId: dep.blockerTicketId, resolved: holderState === "done" }
         : dep.blockerEngagementId
           ? { blockedTicketId: dep.blockedTicketId, kind: "engagement", resolved: engagementStatus === "signed_off" }
-          : { blockedTicketId: dep.blockedTicketId, kind: "decision", decisionId: dep.blockerDecisionId!, resolved: decisionStatus !== "open", openedAt: decisionAt ?? new Date(0) },
+          : { blockedTicketId: dep.blockedTicketId, kind: "decision", decisionId: dep.blockerDecisionId!, resolved: decisionStatus !== "open", openedAt: decisionCreatedAt ?? new Date(0) },
     );
+    // When each ticket that waits on something had its last blocker freed (BOS-659): the newest answer of a
+    // decision it waits on, or the newest "finished" among the tickets it waits on.
+    const freedAt = new Map<string, Date>();
+    for (const dep of depRows) {
+      const at = dep.dep.blockerDecisionId
+        ? (dep.decisionStatus !== "open" ? (dep.decisionAnsweredAt ?? dep.decisionCreatedAt) : null)
+        : (dep.holderState === "done" ? dep.holderStateChangedAt : null);
+      if (at && (!freedAt.has(dep.dep.blockedTicketId) || at.getTime() > freedAt.get(dep.dep.blockedTicketId)!.getTime())) freedAt.set(dep.dep.blockedTicketId, at);
+    }
+    // When a ticket that had blockers became free of them (BOS-659): its last blocker's answer/finish, floored
+    // by when it was made the ticket it is now, so a later return to ready still starts the clock fresh. Null
+    // unless it actually waited on something that has now finished: ready work with no blocker was never
+    // released. Used by the "released but not started" rule (rule 2).
+    const releasedAt = (r: (typeof rows)[number]): Date | null => {
+      if (r.systemState === "blocked" || r.systemState === "backlog" || r.systemState === "done") return null;
+      const freed = freedAt.get(r.id);
+      if (!freed) return null;
+      let at = freed.getTime();
+      if (r.stateChangedAt && r.stateChangedAt.getTime() > at) at = r.stateChangedAt.getTime();
+      return new Date(at);
+    };
     // Tickets in review whose reviews have all passed: they wait for the merge sweep, so "no movement in review" doesn't apply (BOS-362).
     const mergeWaiting = new Set<string>();
     for (const r of rows) if (r.systemState === "review") {
@@ -362,6 +398,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       awaitingPlan: r.planFirst && !r.planApprovedAt,
       withOwner: withOwner.has(r.id),
       mergeWaiting: mergeWaiting.has(r.id),
+      unblockedAt: releasedAt(r),
       bounces: bounces.get(r.id) ?? 0,
     }));
     return {
@@ -514,6 +551,110 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     }
   }
 
+  /**
+   * Rules 3 and 4 of the idle-capacity rules (BOS-659): the company is under-used while work waits, and
+   * picking the next ticket is a judgement call, so the CEO is told. Rule 3: fewer than (the limit minus
+   * one) slots are busy, and the work that is left is only merges or parked on a booked check. Rule 4: fewer
+   * than (three-quarters, at least 2) slots have been busy for `spareCapacityMinutes` while ready or backlog
+   * tickets wait. One batched wake lists every agent and ticket involved, and it is sent again only once the
+   * condition has cleared and come back, so the CEO isn't woken for the same thing every check.
+   */
+  async function spareCapacity(c: typeof companies.$inferSelect, s: WatchdogSettings, t: Date) {
+    if (!deps.capacity || !deps.alertCeo) return;
+    const { busy, limit } = await deps.capacity(c.id);
+    if (!limit) return;
+    // Rule 3: one slot short of full (limit minus one). Rule 4: three-quarters full, never below 2.
+    const rule3Threshold = Math.max(1, limit - 1);
+    const rule4Threshold = Math.max(2, Math.ceil((limit * 3) / 4));
+    const rule3 = busy < rule3Threshold;
+    const rule4 = busy < rule4Threshold;
+    const room = rule3 || rule4;
+    const body = async () => {
+      const team = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, c.id), isNull(agents.retiredAt)));
+      const names = new Map(team.map((a) => [a.id, a.name]));
+      const live = new Set((await db.select({ agentId: runs.agentId }).from(runs).where(and(eq(runs.companyId, c.id), isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`))).map((r) => r.agentId));
+      const [{ prefix } = { prefix: null }] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, c.id));
+      const open = await db
+        .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState })
+        .from(tickets)
+        .where(and(eq(tickets.companyId, c.id), inArray(tickets.systemState, ["ready", "backlog"])))
+        .orderBy(desc(tickets.urgent), tickets.createdAt);
+      const merging = await db
+        .select({ id: tickets.id, number: tickets.number, title: tickets.title, assigneeAgentId: tickets.assigneeAgentId })
+        .from(tickets)
+        .where(and(eq(tickets.companyId, c.id), eq(tickets.systemState, "review")));
+      // Work parked on a check the agent booked itself (schedule_check) or on a wait with a known end
+      // (blocked_until), not in the open or done lanes: these agents could take other work (BOS-667/BOS-659).
+      const parked = await db
+        .select({ id: tickets.id, number: tickets.number, title: tickets.title, assigneeAgentId: tickets.assigneeAgentId })
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.companyId, c.id),
+            inArray(tickets.systemState, ["in_progress", "blocked", "review"]),
+            isNotNull(tickets.assigneeAgentId),
+            or(isNotNull(tickets.monitorAt), isNotNull(tickets.blockedUntil)),
+          ),
+        );
+      const idle: string[] = [];
+      for (const a of team) if (a.id && !live.has(a.id)) idle.push(names.get(a.id) ?? "an agent");
+      return {
+        idle,
+        open: open.map((x) => `${ticketRef(prefix, x.number) ?? "a ticket"} "${title(x.title)}" (${x.state})`),
+        merging: merging.map((x) => `${ticketRef(prefix, x.number) ?? "a ticket"} (${x.assigneeAgentId ? names.get(x.assigneeAgentId) ?? "an agent" : "nobody"})`),
+        parked: parked.map((x) => `${ticketRef(prefix, x.number) ?? "a ticket"} (${names.get(x.assigneeAgentId!) ?? "an agent"})`),
+      };
+    };
+    // Rule 4 measures how long the company has been below the mark, so a check that finds it low now and
+    // low again later can see the whole span: the last check that found it low is kept on the company.
+    const since = c.watchdogSpareAt;
+    if (!room) {
+      // Busy again clears the stretch. Clear whenever either time is set: rule 3 can alert on its first
+      // check (before `since` is written), and a latch left on would silence the CEO for good.
+      if (since || c.watchdogSpareAlertedAt) await db.update(companies).set({ watchdogSpareAt: null, watchdogSpareAlertedAt: null }).where(eq(companies.id, c.id));
+      return;
+    }
+    const b = await body();
+    // Rule 3: nothing left in the open lanes and the only work is waiting to merge or parked on a booked
+    // check, so the agents holding it could take a new ticket: that choice is the CEO's (BOS-667).
+    const onlyMergesOrParked = b.open.length === 0 && (b.merging.length > 0 || b.parked.length > 0);
+    const lowLongEnough = !!since && t.getTime() - since.getTime() >= s.spareCapacityMinutes * 60_000;
+    const fires = (rule3 && onlyMergesOrParked) || (rule4 && lowLongEnough && (b.open.length > 0 || onlyMergesOrParked));
+    if (!fires) {
+      if (!since) await db.update(companies).set({ watchdogSpareAt: t }).where(eq(companies.id, c.id));
+      return;
+    }
+    // Already told the CEO for this stretch: wait for it to clear first (a fresh stretch resets both times above).
+    if (c.watchdogSpareAlertedAt) return;
+    const lines = [
+      `${busy} of a limit of ${limit} run slots are busy. ${rule3 && onlyMergesOrParked ? "The only work left is waiting to merge or parked on a booked check." : `Fewer than ${rule4Threshold} have been busy for ${s.spareCapacityMinutes} minutes while work waits.`}`,
+      b.idle.length ? `Idle agents (no run going): ${b.idle.join(", ")}.` : "No agent is idle.",
+      b.open.length ? `Ready or backlog work nobody has started:\n${b.open.slice(0, 10).map((x) => `- ${untrusted("board: a ticket", x)}`).join("\n")}` : "No ready or backlog work is unassigned or unstarted.",
+      b.merging.length ? `Waiting to merge: ${b.merging.slice(0, 10).join(", ")}.` : "Nothing is waiting to merge.",
+      b.parked.length ? `Parked on a booked check: ${b.parked.slice(0, 10).join(", ")}.` : "",
+      `Give an idle agent its next ticket (from the plan if there is one) and move it to ready, or start ready work; Boss Man then runs it in a free slot. Server_status tells you the limits and what is running. You are told again only once the company has been busy again and then gone quiet.`,
+    ].filter(Boolean);
+    const summary = `${busy} of ${limit} run slots busy${b.idle.length ? `; idle: ${b.idle.join(", ")}` : ""}${b.open.length ? `; waiting: ${b.open.slice(0, 6).join(", ")}` : ""}`;
+    if (s.recordOnly) {
+      await recordMove({ companyId: c.id, kind: "record_spare_capacity_alert", reason: `spare capacity (${busy}/${limit} busy)`, after: { busy, limit, idle: b.idle.length }, summary: `Record only: would have told the CEO there is spare capacity. ${summary}` });
+      await db.update(companies).set({ watchdogSpareAt: since ?? t, watchdogSpareAlertedAt: t }).where(eq(companies.id, c.id));
+      return;
+    }
+    const boss = await ceo(c.id);
+    if (!boss || boss.paused) return;
+    await deps.alertCeo({
+      companyId: c.id,
+      kind: "spare_capacity",
+      from: "ceo",
+      why: "picking the next ticket is a judgement call for the CEO",
+      question: lines.join("\n"),
+      about: [],
+      dedupeKey: `spare-capacity:${c.id}`,
+    });
+    await db.update(companies).set({ watchdogSpareAt: since ?? t, watchdogSpareAlertedAt: t }).where(eq(companies.id, c.id));
+    await log({ companyId: c.id, kind: "spare_capacity_alert", targetAgentId: boss.id, reason: `spare capacity (${busy}/${limit} busy)`, after: { busy, limit, idle: b.idle.length }, summary: `Told ${boss.name} there is spare capacity: ${summary}`, undoable: false });
+  }
+
   async function sweepCompany(c: typeof companies.$inferSelect) {
     const t = now();
     const s = readWatchdogSettings(c.watchdog);
@@ -521,6 +662,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     await syncFlags(c.id, evaluate(snap, s, t), s);
     await db.update(companies).set({ watchdogLastSweepAt: t }).where(eq(companies.id, c.id));
     await quotaHeldAlerts(c, s, t);
+    await spareCapacity(c, s, t);
 
     // An escalated flag the CEO hasn't cleared within its limit starts over: the Scrum Master gets it again, with fresh snoozes.
     const escalated = await db.select().from(watchdogFlags).where(and(eq(watchdogFlags.companyId, c.id), eq(watchdogFlags.status, "open"), isNotNull(watchdogFlags.escalatedAt)));
