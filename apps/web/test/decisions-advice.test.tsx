@@ -56,6 +56,30 @@ describe("ask the CEO for advice", () => {
     expect(url).toBe("/api/decisions/d1/ask-advice");
   });
 
+  it("follows the CEO's Allow over the rule's Deny: one headline, Allow is the primary button, and the card says why (BOS-328)", () => {
+    render(
+      <Decisions
+        decisions={[
+          decision({
+            kind: "permission",
+            options: ["Allow once", "Deny"],
+            recommendedOption: "Deny",
+            context: { type: "permission", advice: { state: "advised", what: "Runs a benchmark.", needed: "Yes.", recommendation: "allow", why: "Everything stays in the checkout." } },
+          }),
+        ]}
+        companies={[company]}
+        loaded
+        agentsWorking={0}
+        onAnswered={() => {}}
+      />,
+    );
+    expect(document.querySelector(".rec")?.textContent).toContain("Allow once");
+    expect(document.querySelector(".rec")?.textContent).not.toContain("Deny");
+    expect(screen.getByRole("button", { name: "Allow once" }).className).toContain("primary");
+    expect(screen.getByRole("button", { name: "Deny" }).className).not.toContain("primary");
+    expect(screen.getByText(/automatic check suggested Deny, but the CEO/)).toBeTruthy();
+  });
+
   it("shows the CEO's advice on a permission card", () => {
     render(
       <Decisions
