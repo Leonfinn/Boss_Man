@@ -158,7 +158,8 @@ function walk(parts: string[], problems: string[]): Place | null | undefined {
   for (const raw of parts.slice(1)) {
     const n = norm(raw);
     if (!n) break;
-    const child = at.tabs.find((t) => norm(t) === n);
+    // A tab may be named by its first words ("Settings → Reviews" is Reviews and CEO), as cards shorten them.
+    const child = at.tabs.find((t) => norm(t) === n) ?? at.tabs.find((t) => norm(t).startsWith(`${n} `));
     if (child) { at = tab(at, child); continue; }
     if (at.projects) {
       const boardTab = OWNER_TABS.Board.find((t) => norm(t) === n);

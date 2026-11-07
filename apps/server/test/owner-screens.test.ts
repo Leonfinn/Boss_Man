@@ -64,6 +64,9 @@ describe("R8: the screen a step sends the owner to", () => {
       "Open Settings → Reviews and CEO and press Run a retro now.",
       "Open BOS-368 and press Approve and merge.",
       "Open Dashboard → Something new and press Save.",
+      // A tab named by its first word; "Reviews" is also a button on a ticket's page.
+      "Move the review to another agent in Settings → Reviews",
+      "Open Settings → Server and runner → Server: Role reads leader, and Settings → Reviews and CEO should look as expected.",
     ])
       expect(r8([s]), s).toEqual([]);
   });
