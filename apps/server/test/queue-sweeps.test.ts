@@ -6,6 +6,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite, type Db } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
+import { HELD_AGENT } from "../src/services/fair-share.js";
 import { effectiveDueDate, rankDecision, ticketRef, type BlockedTicket } from "@boss-man/shared";
 import { activity, agents, companies, decisions, keyResults, milestones, notifications, objectives, runs, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
@@ -182,6 +183,35 @@ describe("ranked decision queue (R20)", () => {
       expect(rows.find((r) => r.id === hands.id)!.step).toBe(1);
     });
 
+    it("never folds a hands-on card into the waiting group just because its ticket is in progress (BOS-551 follow-up)", async () => {
+      ctx = await setup();
+      // A memory reading the owner must take before a server update that resets it. Its ticket is in
+      // progress (an agent may hold it while the owner's card is open: starting a ticket ignores decision
+      // blockers), so a naive "in progress means waiting" rule would hide it behind the update.
+      const ticket = await ctx.ticket({ title: "Take the memory reading", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."], blocksTicketId: ticket.id });
+      // The question above blocks its ticket; the reading must still keep its buttons.
+      await ctx.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, ticket.id));
+      ctx.advance(HOUR);
+      const update = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Update to ad845180", options: ["Done", "Skip"], recommended: "Done", steps: ["Apply the update."], doAfter: [{ decisionId: measure.id, label: "Read the memory figure" }] });
+      // A separate merge card whose ticket genuinely went back to an agent (in progress).
+      const mergeTicket = await ctx.ticket({ title: "Ship the invoicing page", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: mergeTicket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
+
+      const rows = await ordered();
+      const reading = rows.find((r) => r.id === measure.id)!;
+      const upd = rows.find((r) => r.id === update.id)!;
+      // The reading has answer buttons: it is not in the waiting group, and it is numbered before the update.
+      expect(reading.waiting).toBeUndefined();
+      expect(reading.step).toBe(1);
+      expect(upd.waiting).toBeUndefined();
+      expect(upd.doAfter).toEqual(["Read the memory figure"]);
+      expect(reading.step!).toBeLessThan(upd.step!);
+      // The merge card still waits: it is the only one folded, and it is last.
+      expect(rows.find((r) => r.id === sentBack!.id)!.waiting).toMatch(/merge check failed/i);
+      expect(rows[rows.length - 1]!.id).toBe(sentBack!.id);
+    });
+
     it("orders a card that carries a do-after link even when it needs no hands-on work, but never numbers it", async () => {
       ctx = await setup();
       const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
@@ -346,7 +376,8 @@ describe("stale blockers (R21)", () => {
     expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
-    expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+    // The sweep also asked the CEO to hand out work, as the worker had nothing to do (BOS-615).
+    expect(await ctx.db.select().from(wakes).where(ne(wakes.reason, "idle agents"))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
   });
 
   it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {
@@ -461,6 +492,9 @@ describe("stale blockers (R21)", () => {
     };
     await pair("a");
     await pair("b");
+    // The worker is paused so the idle-agents ask to the CEO (BOS-615), whose reads depend on whether the
+    // worker is idle (the done tickets below queue wakes for it), stays out of the count.
+    await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.worker.id));
     ctx.advance(25 * HOUR);
     await ctx.sweep(); // raises both cards, so the measured passes are steady-state
     const two = await measure();
@@ -926,7 +960,7 @@ describe("the server ends runs it can't reach", () => {
     await ctx.runners.bootSeen(runner!, "boot-2");
     const held = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "engagement", note: "Engagement: the server is back." });
     await ctx.scheduler.tick();
-    expect((await ctx.db.select().from(wakes).where(eq(wakes.id, held.id)))[0]!.statusReason).toBe("at a concurrency limit");
+    expect((await ctx.db.select().from(wakes).where(eq(wakes.id, held.id)))[0]!.statusReason).toBe(HELD_AGENT);
     // Inside the replay window the runner's own "interrupted" reports get their chance first.
     expect((await ctx.sweep()).lostRuns).toBe(0);
     expect((await row(runId)).endedAt).toBeNull();

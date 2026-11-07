@@ -52,7 +52,7 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # docs/09-self-deploy.md lists the same files.
 INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
-NOT_INFRA='^deploy/(penpot|ntfy)\.yml$'
+NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
 RUNNER_PATHS='^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
 
@@ -122,7 +122,9 @@ write_status() { # result message [backup]
   ((DRY)) && { log "[dry-run] status: $1: $2"; return 0; }
   local ended=""
   [[ $1 == running ]] || ended="$(now)"
-  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" >"$OUTBOX/status.json.tmp"
+  local soak=0 # the standby window this host really uses (BOS-401): the server holds the runner update for it
+  if bluegreen_enabled; then soak="$SOAK_SECONDS"; fi
+  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" >"$OUTBOX/status.json.tmp"
   chmod 644 "$OUTBOX/status.json.tmp"
   mv "$OUTBOX/status.json.tmp" "$OUTBOX/status.json"
   [[ $1 == running ]] || cat "$OUTBOX/status.json" >>"$OUTBOX/history.jsonl"
@@ -325,7 +327,9 @@ write_include() { # colour
 		header_up X-Forwarded-For {client_ip}
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC
@@ -336,7 +340,9 @@ INC
 	reverse_proxy server-$1:{args[0]} {
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC
@@ -380,7 +386,7 @@ backup_database() {
   local dir="${BOSSMAN_BACKUP_DIR:-$D/..}" old f
   mkdir -p "$dir"
   BG_BACKUP="$dir/bossman-$(date +%F-%H%M).sql.gz"
-  (umask 077; compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial") || { rm -f "$BG_BACKUP.partial"; return 1; }
+  (set -o pipefail; umask 077; compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial") || { rm -f "$BG_BACKUP.partial"; return 1; }
   { [[ -s $BG_BACKUP.partial ]] && gzip -t "$BG_BACKUP.partial"; } || { rm -f "$BG_BACKUP.partial"; return 1; }
   mv "$BG_BACKUP.partial" "$BG_BACKUP"
   # Same retention as deploy.sh: only bossman-*.sql.gz, newest 14 kept.
@@ -401,16 +407,29 @@ colour_log_tail() { # colour
 switch_back() {
   local ok=1
   log "Switching back from $BG_IDLE to $BG_LIVE."
+  # Never roll back to nothing: with the old colour not running there is nothing to go back to, so the new one is left alone.
+  [[ -n $(compose ps -q "server-$BG_LIVE" 2>/dev/null) ]] || { log "server-$BG_LIVE is not running; leaving server-$BG_IDLE as it is."; return 1; }
   compose kill -s USR1 "server-$BG_IDLE" >>"$LOG" 2>&1 || true
   compose kill -s USR2 "server-$BG_LIVE" >>"$LOG" 2>&1 || ok=0
   if ((ok)); then wait_ready "server-$BG_LIVE" leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
   if ((ok)); then flip_proxy "$BG_LIVE" || ok=0; fi
   if ((ok)); then wait_ready proxy leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
-  # Never roll back to nothing: the new colour is stopped only once the old one answers as the leader.
-  if ((ok)); then compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
-  else log "The old colour $BG_LIVE did not take over; leaving $BG_IDLE running so something still answers."; fi
-  ((ok)) && { g reset --quiet --hard "$BG_PREV" || true; }
+  if ((ok)); then
+    compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+    g reset --quiet --hard "$BG_PREV" || true
+  else
+    # The old colour did not take over: put the new one back in charge and keep it running (the checkout stays on what runs).
+    log "The switch-back to $BG_LIVE failed; keeping server-$BG_IDLE running."
+    flip_proxy "$BG_IDLE" >>"$LOG" 2>&1 || true
+    compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+  fi
   ((ok))
+}
+
+# What to type on the host when both automatic paths failed (generic: the configured checkout, no fixed paths or names).
+recovery_hint() {
+  printf 'Look at the host now. In %s run: docker compose ps. To start the colour that should be live and make it lead: docker compose up -d --no-deps server-%s, then docker compose kill -s USR2 server-%s. If server-%s is running, docker compose kill -s USR2 server-%s makes it lead instead. Log: %s' \
+    "$REPO" "$BG_LIVE" "$BG_LIVE" "$BG_IDLE" "$BG_IDLE" "$LOG"
 }
 
 # After the swap: the proxy answers as the new leader at the new commit, and the portal answers.
@@ -449,7 +468,7 @@ do_deploy_bluegreen() {
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
   BOSSMAN_COMMIT="$COMMIT" compose build "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Building $BG_IDLE failed."; return 1; }
   # Expand-only migrations: the live colour keeps working on the new schema.
-  BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
+  BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
   compose up -d --no-deps --force-recreate "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Starting $BG_IDLE failed."; return 1; }
   # It is a standby because the live colour holds the leader lock; seeing that also shows the lock works.
   wait_ready "server-$BG_IDLE" standby "$COMMIT" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby at ${COMMIT:0:8} within ${BG_READY_SECONDS}s.$(colour_log_tail "$BG_IDLE")"; return 1; }
@@ -466,7 +485,7 @@ do_deploy_bluegreen() {
   [[ -n $why ]] || verify_live "$COMMIT" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "$why Switched back to $BG_LIVE automatically. Backup: $BG_BACKUP"
-    else bg_fail failed "$why The switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "$why The switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
 
@@ -502,7 +521,7 @@ soak_tick() {
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
   rm -f "$f"
   if switch_back; then finish rolled_back "The update to ${commit:0:8} was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the previous version (${prev:0:8}) automatically and is running normally on it."
-  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the host now (docker compose ps; $LOG)."; fi
+  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: $(recovery_hint)"; fi
 }
 
 # By hand, any time (also after the soak window): go back to the other colour, i.e. the previous release.
@@ -544,7 +563,7 @@ do_rollback_bluegreen() {
   [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "Rollback failed ($why); $BG_LIVE is live again. Backup: $BG_BACKUP"
-    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.

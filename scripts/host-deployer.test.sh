@@ -117,6 +117,7 @@ req server "$c1" 11111111-1111-1111-1111-111111111111
 host
 [[ $(status result) == deployed && $(status to_commit) == "$c1" && $(status backup) == /b/x.sql.gz ]] || fail "status after deploy: $(cat "$D/outbox/status.json")"
 has "$STUB_LOG" "deploy.sh --yes --no-runner --commit $c1"
+has "$D/outbox/status.json" '"soak_seconds": "0"' # not blue/green: no standby window to wait for (BOS-401)
 [[ ! -e $D/inbox/request.json ]] || fail "request not consumed"
 [[ $(wc -l <"$D/outbox/history.jsonl") == 1 ]] || fail "history"
 [[ ! -s $T/hook.out ]] || fail "webhook posted on success while off"
@@ -171,7 +172,7 @@ for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-r
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
 # CI files and the Penpot and ntfy add-ons don't touch Boss Man's containers.
-for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml; do
+for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml deploy/ntfy-bluegreen.yml; do
   if echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
 done
 
@@ -278,7 +279,7 @@ case "$a" in
   "ps -q "*) x=${a#ps -q }; x=${x#server-}; [[ -e $W/running.$x ]] && echo cid ;;
   "exec -T db pg_dump"*) echo dump ;;
   "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
-  "run --rm migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
+  "run --rm --no-deps migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
   "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
   "kill -s USR1 server-"*) c=${a##*server-}; echo "signal USR1 $c" >>"$DL"; [[ -n ${FAKE_NO_DEMOTE:-} ]] || echo standby >"$W/role.$c" ;;
@@ -372,6 +373,7 @@ reset_world blue "$cur"; P="$(git -C "$T/src" rev-parse HEAD)"
 bgreq "$b1"; bg
 [[ $(status result) == deployed && $(status to_commit) == "$b1" ]] || fail "bg status: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "green is live"
+has "$D/outbox/status.json" '"soak_seconds": "900"' # the host's own window rides in the status file (BOS-401)
 order "$DL" "pg_dump" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
 hasnt "$DL" "build blue" # only the idle colour is built
 ls "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz >/dev/null 2>&1 || fail "no backup written"
@@ -445,6 +447,17 @@ FAKE_VERIFY_FAIL=green bg
 order "$DL" "signal USR1 blue" "signal USR2 green" "reload now green" "signal USR1 green" "signal USR2 blue" "reload now blue" "stopped green"
 live_is blue; [[ ! -e $D/state/soak ]] || fail "soak recorded for a failed swap"
 has "$T/hook.out" '"result": "rolled_back"'
+
+# 18b. The old colour died and the new one then fails its checks: the switch-back has nothing to go back to, so the new colour is NOT stopped; the alert carries the recovery commands.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+b3b="$(push apps/server/bg3b)"; bgreq "$b3b"; bg
+[[ $(status result) == deployed ]] || fail "setup swap 18b: $(cat "$D/outbox/status.json")"
+: >"$DL"; rm -f "$W/running.blue"
+FAKE_VERIFY_FAIL=green bg
+[[ $(status result) == failed ]] || fail "no old colour: $(cat "$D/outbox/status.json")"
+hasnt "$DL" "stopped green"; [[ -e $W/running.green ]] || fail "the new colour was stopped with nothing to go back to"
+has "$D/outbox/status.json" "docker compose kill -s USR2 server-green"
+has "$T/hook.out" '"result": "failed"'
 
 # 19. A failed smoke test on the idle colour: nobody is demoted, the idle colour is stopped, failure webhook.
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
