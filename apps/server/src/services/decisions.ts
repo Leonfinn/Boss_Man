@@ -126,7 +126,7 @@ export type DeployUpdate = {
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[] }
+  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
@@ -1522,7 +1522,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; setsUp?: Addon; doAfter?: OrderLink[]; doBefore?: OrderLink[] }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; setsUp?: Addon; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -1533,14 +1533,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
-            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}),
+            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
               ...(input.doAfter?.length ? { doAfter: input.doAfter } : {}), ...(input.doBefore?.length ? { doBefore: input.doBefore } : {}),
+              // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
+              ...(input.resetsOnRestart ? { resetsOnRestart: true } : {}),
               // An add-on's setup card closes itself once the add-on is seen working (DR-023 D, BOS-522).
               ...(input.setsUp ? { setsUp: input.setsUp, clearWhen: [{ kind: "addonRunning", addon: input.setsUp }] } : {}),
             },
           })
           .returning();
+        if (input.plan && input.blocksTicketId) await tx.update(tickets).set({ plan: input.plan, lastActivityAt: now() }).where(and(eq(tickets.id, input.blocksTicketId), isNull(tickets.planApprovedAt)));
         if (input.blocksTicketId) {
           // The same guarded writer every other link uses (BOS-86 round 12): a proposer can't block
           // the Security Reviewer's task with a question, on any route.
@@ -1888,6 +1891,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
               title: tickets.title,
               number: tickets.number,
               systemState: tickets.systemState,
+              assigneeAgentId: tickets.assigneeAgentId,
               companyId: tickets.companyId,
               prefix: companies.ticketPrefix,
               dueDate: tickets.dueDate,
@@ -1910,13 +1914,22 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const info = new Map(
         work.map((w) => {
           const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
-          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), companyId: w.companyId, prefix: w.prefix, number: w.number, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null } as const];
+          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), companyId: w.companyId, prefix: w.prefix, number: w.number, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null, systemState: w.systemState, assigneeAgentId: w.assigneeAgentId } as const];
         }),
       );
       // Only live tickets are in a chain; a done one (or a deleted one) is left out of the walk, and so
       // is everything below it: a done ticket never starts a chain, nor is it a hop through one.
       const liveOnly = new Set(work.filter((w) => w.systemState !== "done").map((w) => w.id));
+      // Names of the agents holding the tickets a card is about, so a waiting reason can say who has it.
+      const ticketAssigneeIds = [...new Set(work.map((w) => w.assigneeAgentId).filter((x): x is string => !!x))];
+      const agentNameById = new Map(forNames);
+      if (ticketAssigneeIds.length) {
+        for (const a of await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, ticketAssigneeIds))) agentNameById.set(a.id, a.name);
+      }
 
+      // The ticket each card is about and where it stands, kept off the row so the queue's shape is
+      // unchanged (BOS-551). A card whose ticket is back with an agent has nothing to do yet.
+      const cardTicket = new Map<string, { state: string | null; agent: string | null }>();
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
@@ -1939,6 +1952,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
         const about = aboutIds(d).flatMap((id) => { const r = info.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
+        const aboutTicket = aboutIds(d).map((id) => info.get(id)).find((r) => r && r.companyId === d.companyId);
+        cardTicket.set(d.id, { state: aboutTicket?.systemState ?? null, agent: aboutTicket?.assigneeAgentId ? (agentNameById.get(aboutTicket.assigneeAgentId) ?? null) : null });
         const c = d.context as DecisionContext;
         const push = c.type === "permission" ? c.explain?.push : undefined;
         const pushTicket = push?.ticketId ? info.get(push.ticketId) : undefined;
@@ -1962,30 +1977,49 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return r.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80);
       };
       const contextOf = (r: (typeof sorted)[number]) => r.context as DecisionContext;
+      const linksOf = (c: DecisionContext): { doAfter: OrderLink[]; doBefore: OrderLink[] } =>
+        c.type === "question" ? { doAfter: c.doAfter ?? [], doBefore: c.doBefore ?? [] } : c.type === "owner_todo" || c.type === "self_deploy" ? { doAfter: c.doAfter ?? [], doBefore: [] } : { doAfter: [], doBefore: [] };
+      // A server update restarts Boss Man, the same restart whether or not it is an infra hand-apply
+      // (BOS-551): every self_deploy counts as hands-on so its "Do after" links are shown.
       const handsOn = (r: (typeof sorted)[number]) => {
         const c = contextOf(r);
         if (r.tier !== "owner") return false;
         if (c.type === "owner_todo" || c.type === "owner_setup") return true;
-        if (c.type === "self_deploy" && (c.infra || c.handSteps?.length)) return true;
+        if (c.type === "self_deploy") return true;
         if (c.type === "deploy") return true;
         if (c.type === "question") return !!c.steps?.length;
         return false;
       };
       // Why this card has nothing to do yet: the owner acted and the raising agent is checking it, or its
-      // ticket is back with an agent. A merge/check card that is still the owner's call is not waiting.
+      // ticket is back with an agent (a merge check sent back, a review bounced). A card that is still the
+      // owner's own call, or one that holds a live run, is not waiting.
+      const AGENT_BACK_STATES = new Set(["in_progress"]);
       const waitingOf = (r: (typeof sorted)[number]): { reason: string } | null => {
         if (r.staleAt) return { reason: `The agent is checking whether this is still needed, because you acted since it was written${r.staleReason ? ` (${r.staleReason})` : ""}.` };
+        const c = contextOf(r);
+        // Only a card about a merge or review (or a hands-on ask tied to a ticket) can be waiting on an
+        // agent; a permission card holds the agent rather than waiting on it.
+        const aboutTicket = c.type === "review_loop" || c.type === "risk_review" || c.type === "check_stuck" || c.type === "review_stall" || c.type === "question" || c.type === "owner_todo" || c.type === "owner_setup";
+        const t = cardTicket.get(r.id);
+        if (aboutTicket && t && t.state && AGENT_BACK_STATES.has(t.state)) {
+          const who = t.agent ?? "an agent";
+          const why = c.type === "check_stuck" ? "the merge check failed, so the ticket is back with" : c.type === "review_loop" || c.type === "review_stall" ? "the ticket is back with" : "the ticket is waiting on";
+          return { reason: `Nothing to do yet: ${why} ${who}.` };
+        }
         return null;
       };
       const waitingIds = new Set(sorted.filter((r) => waitingOf(r)).map((r) => r.id));
       const ordered = sorted.filter((r) => !waitingIds.has(r.id));
-      const handsOnCards = ordered.filter((r) => handsOn(r));
-      const orderInput = handsOnCards.map((r) => {
+      // Hands-on cards, plus any card that carries links to another card, are ordered against each other:
+      // a link on a card that needs no hands-on work still says when to do it (BOS-551).
+      const carriesLinks = (r: (typeof sorted)[number]) => { const l = linksOf(contextOf(r)); return l.doAfter.length > 0 || l.doBefore.length > 0; };
+      const orderCards = ordered.filter((r) => r.tier === "owner" && (handsOn(r) || carriesLinks(r)));
+      const orderInput = orderCards.map((r) => {
         const c = contextOf(r);
         const links = (x?: OrderLink[]) => (x ?? []).filter((l) => byId.has(l.decisionId) && !waitingIds.has(l.decisionId)).map((l) => ({ decisionId: l.decisionId, label: l.label || label(l.decisionId) }));
         // A card's stored links carry the label as written when raised; fall back to the live card's first line.
-        const ctxLinks = c.type === "question" ? { doAfter: links(c.doAfter), doBefore: links(c.doBefore) } : c.type === "owner_todo" ? { doAfter: links(c.doAfter), doBefore: [] } : c.type === "self_deploy" ? { doAfter: links(c.doAfter), doBefore: [] } : { doAfter: [], doBefore: [] };
-        return { id: r.id, ...ctxLinks };
+        const l = linksOf(c);
+        return { id: r.id, doAfter: links(l.doAfter), doBefore: links(l.doBefore) };
       });
       const { steps: stepOf } = orderOwnerCards(orderInput);
       const edgeLabels = new Map<string, { after: string[]; before: string[] }>();
@@ -1994,19 +2028,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Hands-on cards come first, in their do-this-next order. Everything else keeps today's newest-first
       // order after them, and the waiting group goes last. A card with no ordering info is never displaced
-      // among its own kind: the ordering helper's tie-break is that same newest-first order.
-      const handsOnIds = new Set(handsOnCards.map((r) => r.id));
-      const handsOnOut = handsOnCards.slice().sort((a, b) => stepOf[a.id]! - stepOf[b.id]!);
-      const restOut = ordered.filter((r) => !handsOnIds.has(r.id));
+      // among its own kind: the ordering helper's tie-break is that same newest-first order. Only hands-on
+      // cards show a step number; a link-only card is ordered but not numbered.
+      const handsOnIds = new Set(orderCards.filter((r) => handsOn(r)).map((r) => r.id));
+      const orderIds = new Set(orderCards.map((r) => r.id));
+      const orderOut = orderCards.slice().sort((a, b) => stepOf[a.id]! - stepOf[b.id]!);
+      const restOut = ordered.filter((r) => !orderIds.has(r.id));
       // The waiting group goes last, newest-first among themselves.
       const waitingOut = sorted.filter((r) => waitingIds.has(r.id));
-      const finalRows = [...handsOnOut, ...restOut, ...waitingOut];
+      const finalRows = [...orderOut, ...restOut, ...waitingOut];
 
       return Promise.all(
         finalRows.map(async (r) => {
           const withRefs = { ...r, refs: refs.get(r.id) ?? {} };
           const w = waitingOf(r);
-          const step = stepOf[r.id] ?? null;
+          const step = handsOnIds.has(r.id) ? (stepOf[r.id] ?? null) : null;
           const e = edgeLabels.get(r.id);
           const ordering = {
             ...(step ? { step } : {}),
@@ -2464,6 +2500,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // The audit says how many repeats this one answer settled (BOS-376).
       if (ctx.type === "permission" && repeatsNow?.length) log(`permission decision ${id} settled ${repeatsNow.length} repeat(s) of the same command`);
+
+      // A plan put through submit_plan (BOS-531): approving the card releases plan-first, like approving ExitPlanMode.
+      if (ctx.type === "question" && ctx.plan && ctx.ticketId && answer === APPROVE_PLAN) await db.update(tickets).set({ planApprovedAt: now() }).where(eq(tickets.id, ctx.ticketId));
 
       let delivered: boolean | null = null;
       let endedHere = false;

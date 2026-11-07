@@ -348,6 +348,18 @@ printf 'REPO=%s\nSOAK_SECONDS=abc\n' "$T/src" >"$D/host.conf"; chmod 600 "$D/hos
 hasnt "$D/outbox/available.json" '"soakSeconds"'
 has "$D/deployer.log" "SOAK_SECONDS is not a whole number of seconds"
 conf 0; : >"$D/inbox/check"; bg
+
+# 14b. BOS-562: a checkout with files the server (user node) can't read is refused before the backup and build; nothing changes.
+reset_world blue "$cur"
+(cd "$T/src" && chmod 600 "$(git ls-files | head -1)")
+bgreq "$b1"; bg --dry-run; has "$T/out" "the real run would stop"; rm -f "$D/inbox/request.json"
+bgreq "$b1"; bg
+has "$D/outbox/status.json" '"result": "failed"'
+has "$D/outbox/status.json" "can't be read by the server"
+[[ "$(git -C "$T/src" rev-parse HEAD)" == "$cur" ]] || fail "moved the checkout despite unreadable files"
+grep -q 'pg_dump' "$STUB_LOG" && fail "backed up despite unreadable files"
+(cd "$T/src" && chmod 644 "$(git ls-files | head -1)")
+reset_world blue "$cur"
 unset COMPOSE_FILE
 bgreq "$b1"; bg --dry-run; has "$T/out" "would run: scripts/deploy.sh --yes --no-runner --commit ${b1:0:8}"; rm -f "$D/inbox/request.json"
 printf "COMPOSE_FILE='docker-compose.yml:deploy/truenas-bluegreen.yml'\n" >"$T/src/.env.tmp"; mv "$T/src/.env.tmp" "$T/src/.env"

@@ -166,6 +166,36 @@ describe("ranked decision queue (R20)", () => {
       expect(rows[0]!.step).toBe(1);
     });
 
+    it("puts a card whose ticket is back with an agent into the waiting group, with the reason", async () => {
+      ctx = await setup();
+      const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      // A merge card whose check failed: the ticket went back to the agent (in progress).
+      const ticket = await ctx.ticket({ title: "Ship the invoicing page", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: ticket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
+
+      const rows = await ordered();
+      const w = rows.find((r) => r.id === sentBack!.id)!;
+      expect(w.waiting).toMatch(/merge check failed/i);
+      expect(w.waiting).toMatch(/Engineer/);
+      // It is last, and the hands-on card keeps its step.
+      expect(rows[rows.length - 1]!.id).toBe(sentBack!.id);
+      expect(rows.find((r) => r.id === hands.id)!.step).toBe(1);
+    });
+
+    it("orders a card that carries a do-after link even when it needs no hands-on work, but never numbers it", async () => {
+      ctx = await setup();
+      const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      ctx.advance(HOUR);
+      // An approval that needs no steps, but must come after the measurement.
+      const approve = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve", doAfter: [{ decisionId: measure.id, label: "Read the memory figure" }] });
+      const rows = (await ordered()).filter((r) => !r.waiting);
+      // The measurement (hands-on) is numbered and comes before the linked approval.
+      expect(rows.find((r) => r.id === measure.id)!.step).toBe(1);
+      expect(rows.find((r) => r.id === approve.id)!.step).toBeUndefined();
+      expect(rows.findIndex((r) => r.id === measure.id)).toBeLessThan(rows.findIndex((r) => r.id === approve.id));
+      expect(rows.find((r) => r.id === approve.id)!.doAfter).toEqual(["Read the memory figure"]);
+    });
+
     it("breaks a cycle rather than looping, still ordering every card once", async () => {
       ctx = await setup();
       const a = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "A", options: ["Done", "Skip"], recommended: "Done", steps: ["Step A."] });
