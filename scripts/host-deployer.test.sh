@@ -611,7 +611,15 @@ at "$sF"; svc_check; has "$D/outbox/available.json" '"pendingServices": ["proxy"
 svc_check; has "$D/outbox/available.json" '"pendingServices": ["proxy"]' # and stays so until the proxy is recreated
 # no deploy path starts, stops or recreates the database or the proxy: the server deploy rolls the colours only (DR-020 B)
 for f in host-deployer.sh rebuild-live.sh deploy.sh; do
-  if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm)\b[^#]*\b(db|proxy)\b' "$here/$f" | grep -vE '^[0-9]+:\s*#|exec -T (db|proxy)|--no-deps migrate|printf|say |echo '; then
+  # Any compose up/run/restart/stop/kill/rm/create/down (also in the hint text) must name only the server colours,
+  # the server or the launcher: every `up` and `run` carries --no-deps, and none names db or proxy. A bare
+  # `up -d` or `restart` therefore fails here.
+  if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm|create|down)\b' "$here/$f" \
+    | grep -vE '^[0-9]+:\s*#|exec -T |rm -f ' \
+    | grep -vE '(up|run)\b.*--no-deps .*(server|launcher|migrate|\$\{svcs\[@\]\})|(stop|kill)\b.*"?server' ; then
+    fail "$f has a compose up/run/restart/stop/kill/rm/create/down that is not limited to the server services"
+  fi
+  if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm|create|down)\b[^#]*\b(db|proxy)\b' "$here/$f" | grep -vE '^[0-9]+:\s*#|exec -T (db|proxy)|--no-deps migrate'; then
     fail "$f starts or recreates db or proxy"
   fi
 done

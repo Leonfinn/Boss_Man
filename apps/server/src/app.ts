@@ -285,7 +285,8 @@ export async function buildApp(opts: AppOptions) {
     // Quiet = no agent run in flight (an owner chat doesn't count) and no merge landing: a few seconds' outage of the database or proxy would cut them short (BOS-487).
     // DR-008's memory-headroom check is not built; this is the part that exists today.
     hostQuiet: async () => {
-      const [live] = await db.select({ n: count() }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`));
+      // A run row left open by a restart must not hold the card back for ever: runs that started over 6 hours ago don't count.
+      const [live] = await db.select({ n: count() }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`, sql`${runsTable.startedAt} > now() - interval '6 hours'`));
       return (live?.n ?? 0) === 0 && review.runningMerges().length === 0;
     } });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");

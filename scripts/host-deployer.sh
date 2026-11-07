@@ -205,8 +205,13 @@ render_hashes() { # commit project
   if ! (set -o pipefail; g archive "$commit" | tar -x -C "$RENDER_DIR") 2>>"$LOG"; then
     log "Service compare: could not unpack ${commit:0:8}."; rm -rf "$RENDER_DIR"; return 1
   fi
+  # The commit may carry its own .env or secrets (even a link to another file): remove them first, so the copy below
+  # can never write through a link to some other file. This folder holds a copy of the host's .env (secrets): it lives
+  # in $STATE, which is root-only, and is removed straight after the render (a run killed in between leaves it until
+  # the next refresh, which starts by removing it).
+  rm -rf "$RENDER_DIR/.env" "$RENDER_DIR/secrets"
   [[ ! -f $REPO/.env ]] || cp "$REPO/.env" "$RENDER_DIR/.env"
-  [[ -e $RENDER_DIR/secrets || ! -d $REPO/secrets ]] || ln -s "$REPO/secrets" "$RENDER_DIR/secrets"
+  [[ ! -d $REPO/secrets ]] || ln -s "$REPO/secrets" "$RENDER_DIR/secrets"
   out="$(cd "$RENDER_DIR" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT=compare timeout 120 docker compose --project-name "$project" config --hash '*' 2>>"$LOG")" || rc=$?
   if ((rc != 0)) || ! grep -qE '^[A-Za-z0-9_.-]+ [0-9a-f]{8,}$' <<<"$out"; then
     # An older Compose has no --hash: hash each service's block of the rendered file instead.
