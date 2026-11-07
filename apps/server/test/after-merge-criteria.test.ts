@@ -1,29 +1,39 @@
 // "On a real host" criteria (DR-024 #5): a check only the live host can settle must not bounce rounds of
 // review. Each test here fails on the old code and passes with the after-merge mark.
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { DEFAULT_REVIEW_POLICY, type RunnerCommand, afterMergeLint,carryFailedOver, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, afterMergeLint, carryFailedOver, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, decisions, reviewRequests, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { landingText } from "../src/services/review.js";
+import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
 
+let server: Awaited<ReturnType<typeof boot>>;
 let ctx: Awaited<ReturnType<typeof setup>>;
 
-async function setup() {
+/** One database and server for the file: opening them is most of a test's cost (BOS-663). */
+async function boot() {
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
-  const clients: Client[] = [];
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  return { built, db, close, base, cookie, companies: 0 };
+}
+
+/** Each test gets its own company, agent and project on that server, so nothing one test makes reaches another. */
+async function setup() {
+  const { built, db, base, cookie } = server;
+  const clients: Client[] = [];
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
-  const co = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
+  // Company names are unique on a server, so each test's company is numbered.
+  const co = (await req("POST", "/api/companies", { name: `App Co ${++server.companies}` })).json() as { company: { id: string }; ceo: { id: string } };
   const dev = (await req("POST", `/api/companies/${co.company.id}/agents`, { name: "Dev" })).json() as { id: string };
   const project = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Customer app" })).json() as { id: string };
   const ticket = async (patch: Record<string, unknown> = {}) =>
@@ -38,7 +48,6 @@ async function setup() {
   return {
     ...built,
     db,
-    close,
     req,
     co,
     dev,
@@ -48,37 +57,16 @@ async function setup() {
     row: async (id: string) => (await db.select().from(tickets).where(eq(tickets.id, id)))[0]!,
     done: async () => {
       await Promise.all(clients.map((c) => c.close()));
-      await built.app.close();
-      await close();
     },
   };
 }
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
 
 /**
- * Plays the company's runner (BOS-663). It answers the requests named in `replies` and refuses any other
- * request at once with an error naming it, so a reply the test lacks fails fast instead of waiting out the
- * request's timeout (an unanswered workspace.diff used to cost each merge test 60 s). Every refused type is
- * kept in the returned list, for the test to show it asked nothing unexpected. Commands without a requestId
- * are one-way notices and are just accepted.
+ * What a merge asks the runner, answered as a clean branch with one commit that merges as `commit`. The
+ * stand-in refuses anything else at once, and each merge test checks nothing was refused (BOS-663).
  */
-function standInRunner(runnerId: string, replies: Partial<Record<RunnerCommand["type"], unknown>>) {
-  const refused: string[] = [];
-  ctx.runners.connect(runnerId, (command) => {
-    const requestId = (command as { requestId?: string }).requestId;
-    if (requestId === undefined) return true;
-    const known = Object.hasOwn(replies, command.type);
-    if (!known) refused.push(command.type);
-    queueMicrotask(() =>
-      ctx.runners.resolveReply(known ? { requestId, ok: true, data: replies[command.type] } : { requestId, ok: false, error: `The test's stand-in runner has no reply for ${command.type}.` }),
-    );
-    return true;
-  });
-  return refused;
-}
-
-/** What a merge asks the runner, answered as a clean branch with one commit that merges as `commit`. */
-const mergeReplies = (commit: string): Partial<Record<RunnerCommand["type"], unknown>> => ({
+const mergeReplies = (commit: string): StandInReplies => ({
   "workspace.diff": { baseCommit: "0".repeat(40), head: "1".repeat(40), commits: [{ sha: "1".repeat(40), subject: "The change" }], files: [{ path: "src/health.ts", added: 3, removed: 0 }], diff: "", truncated: false },
   "workspace.verify": { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 },
   "workspace.merge": { status: "merged", commit },
@@ -89,14 +77,13 @@ const mergeReplies = (commit: string): Partial<Record<RunnerCommand["type"], unk
 const BEFORE = "Health check returns 200";
 const LIVE = { text: "Answers from the owner's Tailscale name on a real host", after: "merge" as const };
 
-beforeEach(async () => {
-  ctx = await setup();
-});
-afterEach(async () => {
-  await ctx.done();
-});
+// BOS-575: BOS-525 merged with "3 fail: timing measured after merge (owner accepted, follow-up ticket)",
+// closed as done, and its measurement went to a bare, unowned hand-made ticket (BOS-542).
+const SLOTS = ["Where the check slot count is set is stated on the ticket", "Slot count is configurable (default 1) and 2 slots run two checks at once, with a test", "A full check with 2 slots running still finishes inside the run limit (timing shown)", "No host-specific values", "check-quick passes"];
+const SLOTS_NOTE = "Owner approved merging with setting off, measuring afterwards. 1 pass; 2 pass; 3 fail: timing measured after merge (owner accepted, follow-up ticket); 4 pass; 5 pass: typechecks pass by hand, merge gate runs tests.";
 
-describe("after-merge criteria", () => {
+// The rules alone: no server or database, so these don't pay for a fresh app each (BOS-663).
+describe("after-merge criteria: the rules", () => {
   it("tells the two kinds apart and reads verdicts by the criterion's words", () => {
     expect(isAfterMerge(LIVE)).toBe(true);
     expect(isAfterMerge(BEFORE)).toBe(false);
@@ -116,6 +103,43 @@ describe("after-merge criteria", () => {
     expect(afterMergeLint([BEFORE])).toBe("");
     // The marked one itself is not warned about.
     expect(afterMergeLint([{ text: "The owner confirms it on a real host", after: "merge" }])).toBe("");
+  });
+
+  it("a criterion still at fail when the work merges is carried over as an after-merge check, and a later pass settles it", () => {
+    expect(carryFailedOver(SLOTS, "1 pass; 2 pass; 3 pass; 4 pass; 5 pass")).toBeNull();
+    const carry = carryFailedOver(SLOTS, SLOTS_NOTE)!;
+    expect(carry.carried).toEqual([SLOTS[2]]);
+    expect(carry.criteria[2]).toEqual({ text: SLOTS[2], after: "merge" });
+    expect(carry.criteria.filter(isAfterMerge)).toHaveLength(1);
+    // Before the fix the merged ticket had nothing left to show (a fail is a verdict), so it closed.
+    expect(unreportedAfterMerge(SLOTS, SLOTS_NOTE)).toEqual([]);
+    expect(unreportedAfterMerge(carry.criteria, carry.note)).toEqual([SLOTS[2]]);
+    // The passes are kept, and the stale fail is gone, so the measurement's pass isn't outvoted.
+    expect(readVerdicts(carry.criteria, carry.note).map((r) => r.verdict)).toEqual(["pass", "pass", null, "pass", "pass"]);
+    const done = `${carry.note}\n3 pass: two checks side by side took 41 and 44 minutes`;
+    expect(unreportedAfterMerge(carry.criteria, done)).toEqual([]);
+    expect(failedAfterMerge(carry.criteria, done)).toEqual([]);
+    expect(failedAfterMerge(carry.criteria, `${carry.note}\n3 fail: 71 minutes, over the limit`)).toEqual([SLOTS[2]]);
+  });
+
+  it("a merge with only before-merge criteria closes the ticket as it always did", async () => {
+    expect(landingText({ outcome: "merged" }, { branch: "main", assignee: "Dev" })).toBe("Merged into main.");
+  });
+});
+
+describe("after-merge criteria", () => {
+  beforeAll(async () => {
+    server = await boot();
+  });
+  afterAll(async () => {
+    await server.built.app.close();
+    await server.close();
+  });
+  beforeEach(async () => {
+    ctx = await setup();
+  });
+  afterEach(async () => {
+    await ctx.done();
   });
 
   it("create_ticket takes both kinds and returns the warn-lint, never refusing", async () => {
@@ -169,7 +193,7 @@ describe("after-merge criteria", () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
     const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-    const refused = standInRunner(reg.runnerId, mergeReplies("c".repeat(40)));
+    const refused = standInRunner(ctx.runners, reg.runnerId,mergeReplies("c".repeat(40)));
     const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Live check", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE] })).json() as { id: string };
     await db.update(tickets).set({ branch: `bossman/${t.id}`, stateNote: "Health check returns 200 pass" }).where(eq(tickets.id, t.id));
     await db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
@@ -194,7 +218,7 @@ describe("after-merge criteria", () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
     const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-    const refused = standInRunner(reg.runnerId, mergeReplies("e".repeat(40)));
+    const refused = standInRunner(ctx.runners, reg.runnerId,mergeReplies("e".repeat(40)));
     const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Owner checks the host", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE] })).json() as { id: string };
     await db.update(tickets).set({ branch: `bossman/${t.id}`, stateNote: "Health check returns 200 pass" }).where(eq(tickets.id, t.id));
     await db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
@@ -232,33 +256,11 @@ describe("after-merge criteria", () => {
     expect(recorded.systemState).toBe("in_progress");
   });
 
-  // BOS-575: BOS-525 merged with "3 fail: timing measured after merge (owner accepted, follow-up ticket)",
-  // closed as done, and its measurement went to a bare, unowned hand-made ticket (BOS-542).
-  const SLOTS = ["Where the check slot count is set is stated on the ticket", "Slot count is configurable (default 1) and 2 slots run two checks at once, with a test", "A full check with 2 slots running still finishes inside the run limit (timing shown)", "No host-specific values", "check-quick passes"];
-  const SLOTS_NOTE = "Owner approved merging with setting off, measuring afterwards. 1 pass; 2 pass; 3 fail: timing measured after merge (owner accepted, follow-up ticket); 4 pass; 5 pass: typechecks pass by hand, merge gate runs tests.";
-
-  it("a criterion still at fail when the work merges is carried over as an after-merge check, and a later pass settles it", () => {
-    expect(carryFailedOver(SLOTS, "1 pass; 2 pass; 3 pass; 4 pass; 5 pass")).toBeNull();
-    const carry = carryFailedOver(SLOTS, SLOTS_NOTE)!;
-    expect(carry.carried).toEqual([SLOTS[2]]);
-    expect(carry.criteria[2]).toEqual({ text: SLOTS[2], after: "merge" });
-    expect(carry.criteria.filter(isAfterMerge)).toHaveLength(1);
-    // Before the fix the merged ticket had nothing left to show (a fail is a verdict), so it closed.
-    expect(unreportedAfterMerge(SLOTS, SLOTS_NOTE)).toEqual([]);
-    expect(unreportedAfterMerge(carry.criteria, carry.note)).toEqual([SLOTS[2]]);
-    // The passes are kept, and the stale fail is gone, so the measurement's pass isn't outvoted.
-    expect(readVerdicts(carry.criteria, carry.note).map((r) => r.verdict)).toEqual(["pass", "pass", null, "pass", "pass"]);
-    const done = `${carry.note}\n3 pass: two checks side by side took 41 and 44 minutes`;
-    expect(unreportedAfterMerge(carry.criteria, done)).toEqual([]);
-    expect(failedAfterMerge(carry.criteria, done)).toEqual([]);
-    expect(failedAfterMerge(carry.criteria, `${carry.note}\n3 fail: 71 minutes, over the limit`)).toEqual([SLOTS[2]]);
-  });
-
   it("a merge with a criterion still at fail keeps the ticket with its assignee and tells the CEO", { timeout: 120_000 }, async () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
     const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-    const refused = standInRunner(reg.runnerId, mergeReplies("a".repeat(40)));
+    const refused = standInRunner(ctx.runners, reg.runnerId,mergeReplies("a".repeat(40)));
     const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Two check slots", assigneeAgentId: dev.id, acceptanceCriteria: SLOTS })).json() as { id: string };
     await db.update(tickets).set({ branch: `bossman/${t.id}`, stateNote: SLOTS_NOTE, systemState: "review" }).where(eq(tickets.id, t.id));
     const r = await ctx.review.landVisible(t.id, "the owner");
@@ -324,15 +326,11 @@ describe("after-merge criteria", () => {
     expect(await ctx.review.followUpFailedChecks(orphan.id, [], "", null)).toBeNull();
   });
 
-  it("a merge with only before-merge criteria closes the ticket as it always did", async () => {
-    expect(landingText({ outcome: "merged" }, { branch: "main", assignee: "Dev" })).toBe("Merged into main.");
-  });
-
   it("the diff checklist a reviewer reads separates the two kinds", async () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
     const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-    standInRunner(reg.runnerId, { "workspace.diff": { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [], files: [], diff: "", truncated: false } });
+    standInRunner(ctx.runners, reg.runnerId,{ "workspace.diff": { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [], files: [], diff: "", truncated: false } });
     const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Live check 2", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE] })).json() as { id: string };
     // The CEO reviews its own company's work unless the policy names another; give it the review.
     await db.update(tickets).set({ stateNote: "Health check returns 200 pass" }).where(eq(tickets.id, t.id));
