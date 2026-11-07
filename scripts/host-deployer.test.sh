@@ -614,6 +614,23 @@ grep -qx blue "$D/state/stopped-by-plan" || fail "planned stop not recorded"
 # ...but stopped with a non-zero exit code, or running when the plan says stopped, is not.
 swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; bg
 [[ $(hget phase) == end && $(hget check_other) == fail ]] || fail "exit 137 after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exit code 137"
+# 31j. A failed item other than the live colour does not keep the window open: the old colour is still stopped at the deadline,
+# the stop is recorded, the end check says degraded, and there is one page that names the way to accept the new state.
+swap; echo 1 >"$W/restarts.proxy"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
+[[ ! -e $D/state/soak ]] || fail "a restarts failure kept the window open"
+grep -qx blue "$D/state/stopped-by-plan" || fail "window end did not record the planned stop"
+[[ $(hget phase) == end && $(hget check_restarts) == fail && $(hget check_other) == pass ]] || fail "window end with a restart: $(cat "$D/outbox/health.json")"
+[[ $(status result) == partial ]] || fail "window end with a restart should page: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "--ack-health"
+live_is green
+# ...and --ack-health accepts the current state: baseline renewed, checklist healthy.
+bg --ack-health; all_pass; [[ $(hget phase) == ack ]] || fail "ack did not re-run the checklist: $(cat "$D/outbox/health.json")"
+# 31k. The same for the database, and an unreadable database start time (a hung or unreachable psql) is a failed db item.
+swap; echo 2026-11-07T09:00:00Z >"$W/start.db"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
+[[ ! -e $D/state/soak ]] || fail "a db failure kept the window open"; [[ $(hget check_db) == fail ]] || fail "db at window end"
+swap; : >"$W/pgstart"; bg
+[[ $(hget check_db) == fail ]] || fail "no psql answer should fail the db item: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "could not read the database"
+rm -f "$W/pgstart"
 # 31i. A swap whose database was recreated mid-deploy is not declared good: switched back.
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
 c="$(push apps/server/hc-db)"; bgreq "$c"

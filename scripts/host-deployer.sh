@@ -30,9 +30,9 @@
 # Without that, nothing under the "Blue/green" heading runs.
 set -euo pipefail
 
-DRY=0 ROLLBACK=0
+DRY=0 ROLLBACK=0 ACK=0
 for arg in "$@"; do
-  case "$arg" in --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; *) echo "Usage: $0 [--dry-run] | --rollback [--dry-run]" >&2; exit 2 ;; esac
+  case "$arg" in --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; --ack-health) ACK=1 ;; *) echo "Usage: $0 [--dry-run] | --rollback [--dry-run] | --ack-health" >&2; exit 2 ;; esac
 done
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron's PATH is minimal
@@ -462,7 +462,8 @@ cstate() { # service
 }
 running_of() { awk '{ print ($1 == "none") ? "absent" : $5 }' <<<"$1"; } # a cstate line: true, false or absent
 colour_role() { jfield role <<<"$(probe "server-$1" 3100 /api/ready 2>/dev/null || true)"; } # colour
-pg_start() { compose exec -T db psql -U bossman -d bossman -Atc 'select pg_postmaster_start_time()' 2>/dev/null | head -1 | tr ' ' '_' || true; }
+# A hung database must not hold the deployer's lock: the connect and the whole call are time-limited, and no answer counts as a failed db item.
+pg_start() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" timeout 15 docker compose exec -T db psql -U bossman -d 'dbname=bossman connect_timeout=5' -Atc 'select pg_postmaster_start_time()' 2>/dev/null | head -1 | tr ' ' '_') || true; }
 
 # What the containers looked like before the deploy: "service id startedAt restarts" lines and one "pg <time>" line.
 # The state folder is root-only; the file is only read with awk, never sourced.
@@ -578,7 +579,7 @@ health_degraded() { # commit prev
   if [[ -f $STATE/last-health-alert && $(cat "$STATE/last-health-alert") == "$sig" ]]; then log "Still degraded (${HEALTH_FAILS# }); already reported."; return 0; fi
   printf '%s\n' "$sig" >"$STATE/last-health-alert"
   REQ_ID="health-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$2" COMMIT="$1"
-  finish partial "Boss Man is answering, but the check after the update to ${1:0:8} found a problem:$HEALTH_DETAIL Nothing was switched back by itself. Look at the host: in $REPO run docker compose ps, then docker compose logs for the service named above. Log: $LOG"
+  finish partial "Boss Man is answering, but the check after the update to ${1:0:8} found a problem:$HEALTH_DETAIL Nothing was switched back by itself. Look at the host: in $REPO run docker compose ps, then docker compose logs for the service named above. When you have looked and the current state is acceptable, run $D/host-deployer.sh --ack-health as root: it records the containers as they are now and re-checks. Log: $LOG"
 }
 
 pre_fail() { # message: undo what happened before the hand-over; the live colour was never touched
@@ -637,6 +638,14 @@ do_deploy_bluegreen() {
   BG_MSG="Deployed ${BG_PREV:0:8} to ${COMMIT:0:8}: $BG_IDLE is live; $BG_LIVE stays up as a standby for $((SOAK_SECONDS / 60)) minutes, and the deployer switches back by itself if the checks fail."
 }
 
+soak_end() { # old commit prev soakfile: time is up and the live colour is fine
+  log "Soak over: stopping the old colour ($1)."
+  if compose stop "server-$1" >>"$LOG" 2>&1; then plan_stopped "$1"; else log "Could not stop server-$1."; fi
+  rm -f "$4"
+  # The end of the window: the same checklist with the old colour now planned to be stopped.
+  if ! stack_check "$2" "$SOAK_CHECK_SECONDS" end stopped; then log "End-of-window check: $VERIFY_WHY"; health_degraded "$2" "$3"; fi
+}
+
 # Runs every tick, before any request: while an old colour soaks, re-check the live one and switch back if it fails;
 # stop the old colour once the time is up.
 soak_tick() {
@@ -649,18 +658,17 @@ soak_tick() {
   [[ $(live_colour || true) == "$new" ]] || { log "The proxy no longer points at $new; ending the soak."; rm -f "$f"; return 0; }
   if stack_check "$commit" "$SOAK_CHECK_SECONDS" soak standby; then
     rm -f "$STATE/last-health-alert"
-    if (($(date +%s) >= deadline)); then
-      log "Soak over: stopping the old colour ($old)."
-      if compose stop "server-$old" >>"$LOG" 2>&1; then plan_stopped "$old"; else log "Could not stop server-$old."; fi
-      rm -f "$f"
-      # The end of the window: the same checklist with the old colour now planned to be stopped.
-      if ! stack_check "$commit" "$SOAK_CHECK_SECONDS" end stopped; then log "End-of-window check: $VERIFY_WHY"; health_degraded "$commit" "$prev"; fi
-    fi
+    if (($(date +%s) >= deadline)); then soak_end "$old" "$commit" "$prev" "$f"; fi
     return 0
   fi
   log "Check failed on $new at ${commit:0:8}: $VERIFY_WHY"
-  # The live colour still answers: something else is wrong, and a switch could make it worse. Report it once; keep the window.
-  if [[ $HC_live == pass ]]; then health_degraded "$commit" "$prev"; return 0; fi
+  # The live colour still answers: something else is wrong, and a switch could make it worse. Report it once. The window
+  # still ends on time (a failed item the person has to look at must not keep a second server running for ever).
+  if [[ $HC_live == pass ]]; then
+    # (health_degraded records and exits, so the end of the window comes first: its own end check pages if the problem remains.)
+    if (($(date +%s) >= deadline)); then soak_end "$old" "$commit" "$prev" "$f"; fi
+    health_degraded "$commit" "$prev"; return 0
+  fi
   BG_LIVE="$old" BG_IDLE="$new" BG_PREV="$prev"
   # The record names the commit that failed (to_commit), as a swap-time rollback does, and the one we are back on (from_commit).
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
@@ -770,6 +778,15 @@ main() {
     write_status "${BG_RESULT:-failed}" "${BG_MSG:-Rollback stopped with an error. See $LOG on the host.}" "$BG_BACKUP"
     post_webhook "${BG_RESULT:-failed}" "${BG_MSG:-Rollback failed.}"
     exit "$rrc"
+  fi
+  if ((ACK)); then
+    bluegreen_enabled || { echo "ERROR: this install does not use blue/green." >&2; exit 1; }
+    ((!DRY)) || { echo "[dry-run] --ack-health would record every container as it is now and re-run the checklist."; exit 0; }
+    local ap=stopped
+    [[ -f $STATE/soak && ! -L $STATE/soak ]] && ap=standby
+    take_baseline; rm -f "$STATE/last-health-alert" "$STATE/planned-db"
+    if stack_check "$(g rev-parse HEAD)" "$SOAK_CHECK_SECONDS" ack "$ap"; then log "Health accepted: baseline renewed; the checklist passes."; exit 0; fi
+    log "Baseline renewed, but the checklist still fails: $VERIFY_WHY"; exit 1
   fi
   recover_interrupted
   if bluegreen_enabled; then soak_tick; fi
