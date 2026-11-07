@@ -30,6 +30,14 @@ describe("an agent session's environment", () => {
     expect(env.GIT_TERMINAL_PROMPT).toBe("0");
   });
 
+  it("is marked as an agent session for every harness, even when a secret tries to clear it (BOS-662)", () => {
+    for (const agentKind of ["claude", "codex", "opencode"] as const) {
+      const m = new SessionManager({ mcpUrl: "http://127.0.0.1:1/mcp", baseEnv: { PATH: "/usr/bin" }, resolveEnv: async () => ({}), emit: () => {} });
+      const env = (m as unknown as { launchEnv: (c: unknown, s: Record<string, string>) => NodeJS.ProcessEnv }).launchEnv({ ...start, agentKind }, { BOSSMAN_AGENT_SESSION: "" });
+      expect(env.BOSSMAN_AGENT_SESSION).toBe("1");
+    }
+  });
+
   it("does not take the runner's own token from the environment it was started with", () => {
     const env = launchEnv({}, { PATH: "/usr/bin", BOSSMAN_RUNNER_TOKEN: "runner-secret", BOSSMAN_RUNNER_TOKEN_FILE: "/run/secrets/runner_token" });
     expect(JSON.stringify(env)).not.toContain("runner-secret");

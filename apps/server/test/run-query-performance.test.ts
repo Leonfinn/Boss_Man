@@ -10,7 +10,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { PGlite } from "@electric-sql/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import * as schema from "../src/db/schema.js";
-import { agents, checkResults, decisions, notifications, nudges, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, checkJobs, checkResults, decisions, notifications, nudges, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { migrationsFolder } from "../src/db/client.js";
 import { runOriginQuery } from "../src/services/runs.js";
 import { mergeQueueQueries } from "../src/services/merge-queue.js";
@@ -275,6 +275,41 @@ describe("the merge queue's reads (BOS-587)", () => {
       expect(plan, text).not.toMatch(/Seq Scan on (public\.)?tickets/);
       expect(plan, text).not.toMatch(/Seq Scan on (public\.)?review_requests/);
     }
+  });
+
+  // BOS-597: in server mode the screen also reads the company's check_jobs for its running and
+  // waiting counts. check_jobs has no company index, so the read filters on the live states and
+  // rides check_jobs_state_queued: it must never be a whole-table scan, nor touch tickets/projects.
+  it("counts a company's live check jobs through the state index, never whole-table", async () => {
+    const c = await setup();
+    const w = await world(c);
+    const N = 3000;
+    const ns = Array.from({ length: N }, (_, n) => n);
+    await c.db.insert(checkJobs).values(
+      ns.map((n) => ({ companyId: w.company.id, projectId: w.project.id, ticketId: w.ticket.id, kind: "merge" as const, scope: "full" as const, commit: `${n}`.padStart(40, "0"), tree: `${n}`.padStart(40, "0"), state: (["queued", "running", "passed", "failed"] as const)[n % 4]!, queuedAt: ts(n) })),
+    );
+    await c.client.exec("analyze");
+
+    const q = c.db
+      .select({
+        running: sql<number>`(count(*) filter (where ${checkJobs.state} = 'running'))::int`.mapWith(Number),
+        waiting: sql<number>`(count(*) filter (where ${checkJobs.state} = 'queued'))::int`.mapWith(Number),
+      })
+      .from(checkJobs)
+      .where(and(eq(checkJobs.companyId, w.company.id), inArray(checkJobs.state, ["queued", "running"])));
+    const { sql: text, params } = q.toSQL();
+    // The two counts share one SQL expression (the same state column), so read them through it, as
+    // the service does, rather than re-reading the driver's single unnamed `count` column.
+    const answer = await q;
+    // With sequential and bitmap scans ruled out, the plan must name the state index, not just any index.
+    await c.client.exec("set enable_seqscan = off; set enable_bitmapscan = off");
+    const plan = (await c.client.query(`explain ${text}`, params)).rows.map((r) => String(Object.values(r as Record<string, unknown>)[0])).join("\n");
+    await c.client.exec("reset enable_seqscan; reset enable_bitmapscan");
+    expect(plan).toMatch(/Index (Only )?Scan using check_jobs_state_queued on check_jobs/);
+    expect(plan).not.toMatch(/Seq Scan on (public\.)?check_jobs/);
+    expect(plan).not.toMatch(/Seq Scan on (public\.)?(tickets|projects)/);
+    // ...and the read still counts only this company's live jobs, one answer per state in four.
+    expect(answer[0]).toMatchObject({ running: N / 4, waiting: N / 4 });
   });
 });
 

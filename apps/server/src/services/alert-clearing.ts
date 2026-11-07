@@ -40,7 +40,9 @@ export type ClearWhen =
    */
   | { kind: "addonRunning"; addon: Addon }
   /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
-  | { kind: "companyRanOk"; companyId: string };
+  | { kind: "companyRanOk"; companyId: string }
+  /** A server-health card (BOS-640): its rule (memory or freezes) has stayed under its level for 30 minutes. */
+  | { kind: "serverCalm"; rule: "memory" | "freezes" };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -83,6 +85,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "addonRunning":
         if ((ADDONS as readonly unknown[]).includes(c.addon)) out.push({ kind: "addonRunning", addon: c.addon as Addon });
         break;
+      case "serverCalm":
+        if (c.rule === "memory" || c.rule === "freezes") out.push({ kind: "serverCalm", rule: c.rule });
+        break;
       default:
         break;
     }
@@ -99,6 +104,8 @@ export type AlertClearingDeps = {
   addons?: () => Promise<AddonFacts>;
   /** Moves a ticket that waited on a closed card back to ready once nothing else holds it, and wakes its assignee. */
   release?: (ticketId: string) => Promise<unknown>;
+  /** Why a server-health rule's card can go (server-health.ts), or null while it can't; without it those cards stay open. */
+  serverCalm?: (rule: "memory" | "freezes") => string | null;
   now?: () => Date;
 };
 
@@ -184,6 +191,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         if (!(since.getTime() > card.createdAt.getTime())) return null;
         return `${ADDON_LABELS[c.addon]} is running (${f.source}, at ${hhmm(since)})`;
       }
+      case "serverCalm":
+        return deps.serverCalm?.(c.rule) ?? null;
       default:
         return null;
     }

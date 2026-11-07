@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { and, eq, getTableName, inArray, ne, sql } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
@@ -8,7 +8,7 @@ import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
 import { HELD_AGENT } from "../src/services/fair-share.js";
 import { effectiveDueDate, rankDecision, ticketRef, type BlockedTicket } from "@boss-man/shared";
-import { activity, agents, companies, decisions, keyResults, milestones, notifications, objectives, runs, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, keyResults, milestones, notifications, objectives, runs, runners, skillProposals, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -237,6 +237,41 @@ describe("ranked decision queue (R20)", () => {
       expect(rows).toHaveLength(2);
       expect(new Set(rows.map((r) => r.step))).toEqual(new Set([1, 2]));
     });
+
+    it("drops do after / do before links to another company's open card (BOS-625)", async () => {
+      ctx = await setup();
+      const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string }; ceo: { id: string } };
+      const foreign = await ctx.decisions.raise({ companyId: other.company.id, agentId: other.ceo.id, question: "Elsewhere's card", options: ["Yes", "No"], recommended: "Yes" });
+      const mine = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "My card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: foreign.id, label: "Elsewhere's card" }], doBefore: [{ decisionId: foreign.id, label: "Elsewhere's card" }] });
+      // The raiser is told which links weren't stored, and why.
+      expect(mine.droppedLinks).toEqual([
+        { decisionId: foreign.id, link: "doAfter", reason: "another company" },
+        { decisionId: foreign.id, link: "doBefore", reason: "another company" },
+      ]);
+      const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, mine.id));
+      const c = row!.context as { doAfter?: unknown[]; doBefore?: unknown[] };
+      expect(c.doAfter ?? []).toEqual([]);
+      expect(c.doBefore ?? []).toEqual([]);
+      // A clean card of my own is still stored and shown, and nothing is reported dropped.
+      const keeps = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Second card", options: ["Done", "Skip"], recommended: "Done", steps: ["Do it."], doAfter: [{ decisionId: mine.id, label: "My card" }] });
+      expect(keeps.droppedLinks).toEqual([]);
+      const [kept] = await ctx.db.select().from(decisions).where(eq(decisions.id, keeps.id));
+      expect((kept!.context as { doAfter?: unknown[] }).doAfter).toEqual([{ decisionId: mine.id, label: "My card" }]);
+    });
+
+    it("drops do after / do before links to an answered card in the same company (BOS-625)", async () => {
+      ctx = await setup();
+      const done = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Answered", options: ["Yes", "No"], recommended: "Yes" });
+      await ctx.req("POST", `/api/decisions/${done.id}/answer`, { answer: "Yes" });
+      const mine = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Late card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: done.id, label: "Answered" }] });
+      // The raiser is told which link wasn't stored, and why; an unknown id is reported too.
+      expect(mine.droppedLinks).toEqual([{ decisionId: done.id, link: "doAfter", reason: "not open" }]);
+      const ghost = randomUUID();
+      const nobody = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ghost card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: ghost, label: "Ghost" }] });
+      expect(nobody.droppedLinks).toEqual([{ decisionId: ghost, link: "doAfter", reason: "unknown" }]);
+      const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, mine.id));
+      expect((row!.context as { doAfter?: unknown[] }).doAfter ?? []).toEqual([]);
+    });
   });
 
   it("links the tickets a card is about and the references in its text, in its own company only", async () => {
@@ -303,6 +338,15 @@ describe("stale blockers (R21)", () => {
     await ctx.req("POST", `/api/tickets/${tls.id}/dependencies`, { ticketId: domain.id });
     await ctx.db.delete(wakes);
     return { domain, tls };
+  }
+
+  /** Makes `ticketId` the open security-review task of a skill proposal (BOS-176). */
+  async function reviewTaskFor(ticketId: string) {
+    const [p] = await ctx.db
+      .insert(skillProposals)
+      .values({ companyId: ctx.company.id, name: "tidy", source: "draft", files: [{ path: "SKILL.md", content: "" }], fileHashes: {}, bundleHash: "b".repeat(64), why: "x", hasScripts: false, reviewRequired: true })
+      .returning({ id: skillProposals.id });
+    await ctx.db.update(skillProposals).set({ status: "in_review", reviewTicketId: ticketId }).where(eq(skillProposals.id, p!.id));
   }
 
   it("flags a blocker idle past the threshold once, and chasing wakes its assignee and restarts the clock", async () => {
@@ -381,6 +425,38 @@ describe("stale blockers (R21)", () => {
     const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: other.ceo.id });
     expect(r.statusCode).toBe(422);
     expect(r.body).toContain("Pick someone from the list");
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.worker.id);
+  });
+
+  it("refuses a Reassign that would move an open skill-review task (BOS-176)", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(ctx.worker.id);
+    await reviewTaskFor(domain.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    // The owner hands the card to the CEO, who then tries to reassign the review task.
+    expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" })).statusCode).toBe(200);
+    const svc = decisionsService(ctx.db, () => true, ctx.clock);
+    const before = await ctx.db.select().from(wakes);
+    await expect(svc.answer(row!.id, "Reassign", { assigneeAgentId: ctx.worker.id, settledBy: { agentId: ctx.ceo.id } })).rejects.toThrow("only the Security Reviewer and the owner");
+    // The refusal changed nothing: the review task keeps its assignee and nobody was woken.
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.worker.id);
+    expect(await ctx.db.select().from(wakes)).toEqual(before);
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect(after!.status).toBe("open");
+  });
+
+  it("lets the owner reassign an open skill-review task from the card, as the guard does", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(null);
+    await reviewTaskFor(domain.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
   });
