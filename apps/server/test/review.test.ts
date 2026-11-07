@@ -794,6 +794,26 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     expect(await state(c)).toMatchObject({ systemState: "review" });
   });
 
+  it("lets the CEO start a fresh merge attempt on an approved ticket the gate refused, and refuses one that isn't approved (BOS-684)", async () => {
+    const c = (ctx = await setup());
+    const asCeo = { byAgentId: c.ceo.id, companyId: c.company.id };
+    // Not approved yet: nothing to retry.
+    await expect(c.review.retryMerge(c.ticket.id, asCeo)).rejects.toMatchObject({ status: 409 });
+    const other = await otherTicket(c, "Permission gate");
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch }] };
+    await c.db.insert(reviewRequests).values({ ticketId: c.ticket.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    expect(await c.review.land(c.ticket.id, "Reviewer")).toMatchObject({ outcome: "carried" });
+    expect((await state(c)).pullRequestNote).toContain("must merge first");
+    // The carried work has merged since: the retry runs the gate again on the runner and lands it.
+    c.answers.carried = { carried: [] };
+    const before = c.sent.filter((x) => x.type === "workspace.carried").length;
+    await c.review.retryMerge(c.ticket.id, asCeo);
+    await vi.waitFor(async () => expect(await state(c)).toMatchObject({ systemState: "done" }));
+    expect(c.sent.filter((x) => x.type === "workspace.carried").length).toBe(before + 1);
+    // A finished ticket can't be retried.
+    await expect(c.review.retryMerge(c.ticket.id, asCeo)).rejects.toMatchObject({ status: 409 });
+  });
+
   it("lands an approved ticket together with the one that holds all of it (fast-forward case, BOS-372)", async () => {
     const c = (ctx = await setup());
     const other = await otherTicket(c, "Inner work");

@@ -1,7 +1,7 @@
 // R46 and R47 against a real bare "origin": merge without a working tree, conflicts,
 // uncommitted work, a moving target, and verify commands.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -140,6 +140,33 @@ describe("verify before done (R47)", () => {
     await ws.ensure(spec);
     const res = await ws.verify(spec, 'echo "lock=$CHECK_ALL_LOCK store=$BOSSMAN_CHECK_STORE"');
     expect(res.output).toContain(`lock=${path.join(root, ".bossman-coord", "queue", "check-all")} store=${path.join(root, ".bossman-coord", "gate", "check-results")}`);
+  });
+
+  it("waits for the slot through the runner's own check-slot.sh, not the branch's queue rules, when the tree takes part in the check line (BOS-614)", async () => {
+    const o = origin();
+    const { spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const slot = path.join(root, "check-slot.sh");
+    writeFileSync(slot, 'echo "shared slot for: $*"; exec "$@"\n');
+    const ws = new Workspaces(root, { ...process.env, BOSSMAN_CHECK_SLOT: slot }, path.join(root, ".bossman-coord"));
+    const w = await ws.ensure(spec);
+    // No scripts/check-all.sh in the tree: the check is not in the line, so it runs as before.
+    const plain = await ws.verify(spec, "echo plain");
+    expect(plain.output).toContain("plain");
+    expect(plain.output).not.toContain("shared slot");
+    mkdirSync(path.join(w.path, "scripts"));
+    writeFileSync(path.join(w.path, "scripts", "check-all.sh"), "# the branch's own copy\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "check script");
+    const res = await ws.verify(spec, 'echo "ran with slot=$BOSSMAN_CHECK_SLOT"; exit 4');
+    expect(res.output).toContain("shared slot for: sh -c");
+    expect(res.output).toContain(`ran with slot=${slot}`);
+    expect(res).toMatchObject({ ok: false, exitCode: 4 });
+    // A runner without the file (an image from before BOS-614): nothing is passed on and nothing is wrapped.
+    const old = new Workspaces(root, { ...process.env, BOSSMAN_CHECK_SLOT: path.join(root, "missing.sh") }, path.join(root, ".bossman-coord"));
+    const before = await old.verify(spec, 'echo "slot=${BOSSMAN_CHECK_SLOT:-unset}"');
+    expect(before.output).toContain("slot=unset");
+    expect(before.output).not.toContain("shared slot");
   });
 
   it("counts the timeout from when a queued check starts, not from when it was queued", async () => {

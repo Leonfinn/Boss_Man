@@ -256,6 +256,57 @@ describe("after-merge criteria", () => {
     expect(recorded.systemState).toBe("in_progress");
   });
 
+  it("reopening a merged ticket for code clears its no-code mark, so review and done ask for a diff again", async () => {
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", branch: null, mergeCommit: "a".repeat(40), noCode: true, stateNote: `${LIVE.text} pass` });
+    // The owner reopens it to do real work: from then on it is a code ticket again.
+    expect((await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "ready" })).statusCode).toBe(200);
+    let now = await ctx.row(t.id);
+    expect(now.systemState).toBe("ready");
+    expect(now.noCode).toBe(false);
+    // Its assignee moving it into work keeps it code; with nothing changed it can't reach review.
+    const c = await ctx.agent(ctx.dev.id);
+    await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Back to it." } });
+    now = await ctx.row(t.id);
+    expect(now.systemState).toBe("in_progress");
+    expect(now.noCode).toBe(false);
+  });
+
+  it("a plain no-code ticket keeps its no-code mark through ready, in_progress and review, and closes on an empty diff", async () => {
+    // Never merged: a research or wiki ticket is no-code for its whole life. Moving it between states
+    // must not clear the flag, or review would send it back for a diff it never has.
+    const t = await ctx.ticket({ title: "Wiki only", assigneeAgentId: ctx.dev.id, systemState: "backlog", noCode: true });
+    const c = await ctx.agent(ctx.dev.id);
+    await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "ready" });
+    expect((await ctx.row(t.id)).noCode).toBe(true);
+    await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Writing the page." } });
+    expect((await ctx.row(t.id)).noCode).toBe(true);
+    const moved = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Page written." } });
+    expect(textOf(moved)).not.toContain("Nothing in the repository changed");
+    expect((await ctx.row(t.id)).noCode).toBe(true);
+    // The owner moving it between code states keeps it no-code too.
+    await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "in_progress" });
+    await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "ready" });
+    expect((await ctx.row(t.id)).noCode).toBe(true);
+  });
+
+  it("a merged no-code ticket whose live check is reported closes as done on the empty diff", { timeout: 120_000 }, async () => {
+    const { db, req, co, dev, project } = ctx;
+    await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
+    const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
+    // The branch still stands at the merge, as it does after the after-merge step: no new commits.
+    const refused = standInRunner(ctx.runners, reg.runnerId, {
+      "workspace.diff": { baseCommit: "b".repeat(40), head: "c".repeat(40), commits: [], files: [], diff: "", truncated: false },
+      "workspace.carried": { carried: [] },
+    });
+    const t = await ctx.ticket({ title: "Live check reported", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "review", mergeCommit: "c".repeat(40), noCode: true, stateNote: `${LIVE.text} pass` });
+    await db.update(tickets).set({ branch: `bossman/${t.id}` }).where(eq(tickets.id, t.id));
+    const r = await ctx.review.landVisible(t.id, "the owner");
+    // The live check is done: this is the after-merge step, so it closes rather than looping back.
+    expect(r.outcome).toBe("done");
+    expect(refused).toEqual([]);
+    expect((await ctx.row(t.id)).systemState).toBe("done");
+  });
+
   it("a merge with a criterion still at fail keeps the ticket with its assignee and tells the CEO", { timeout: 120_000 }, async () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });

@@ -57,6 +57,34 @@ describe("owner chat", () => {
     expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: agent paused");
   });
 
+  it("stays open while an update waits and an agent is still working (BOS-349)", async () => {
+    const c = await setup();
+    // The CEO is busy with its own work, then a runner update starts to drain.
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision" });
+    await c.scheduler.tick();
+    expect(await c.db.select().from(runs).where(eq(runs.companyId, c.company.id))).toHaveLength(1);
+    await c.maintenance.start({ minutes: 30 });
+    // The owner's chat is let through: it starts and answers as normal, even mid-drain.
+    c.sent.length = 0;
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What's still running?" })).statusCode).toBe(201);
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start");
+    expect(start).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true });
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("answering");
+  });
+
+  it("still holds the chat when nothing is working and an update is waiting (BOS-349)", async () => {
+    await (async () => {
+      const c = await setup();
+      await c.maintenance.start({ minutes: 30 });
+      // No agent is working, so the swap can land any moment: the chat waits, exactly as before.
+      expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Are you there?" })).statusCode).toBe(201);
+      await c.scheduler.tick();
+      expect(c.sent.some((x) => x.type === "run.start")).toBe(false);
+      expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: update pending");
+    })();
+  });
+
   it("answers with a board-only run beside the CEO's own work, and the reply lands in the chat", async () => {
     const c = await setup();
     await c.db.delete(wakes);
