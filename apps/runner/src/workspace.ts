@@ -106,6 +106,8 @@ export class Workspaces {
     private readonly baseEnv: NodeJS.ProcessEnv = process.env,
     /** check-all.sh's shared queue folder (checkQueueEnv), so the merge check takes turns with agents' checks. */
     private readonly coordDir?: string,
+    /** The pnpm store a check's install uses (BOS-568), so its packages aren't copied into the root disk's HOME; the gate gets its own, outside the fence's grant. */
+    private readonly pnpmStore?: string,
     /** Fence for server-queued check jobs (BOS-316, security F1): a job runs a commit nobody has reviewed yet. */
     private readonly jobFence?: { level: FenceLevel; pnpmStore?: string },
   ) {}
@@ -607,17 +609,30 @@ export class Workspaces {
   private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void; fence?: { env: Record<string, string>; wrap: (bin: string, args: string[]) => { bin: string; args: string[] } } }): Promise<VerifyResult> {
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
+      // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
+      // A server-queued job (DR-003) takes no lock at all: the server holds the slots (BOSSMAN_CHECK_NO_LOCK).
+      // The shared pnpm store (BOS-568): without it pnpm starts a new one in HOME for every install, on the root disk.
+      // A merge check gets this.pnpmStore (its own gate store); a fenced job gets job.fence.env (the shared store);
+      // a job on a runner that can't fence falls back to the shared job store, never this.pnpmStore (the gate's), so it
+      // doesn't start a store in HOME either (BOS-568 review).
+      const storeEnv = job ? (job.fence ? job.fence.env : this.jobFence?.pnpmStore ? { npm_config_store_dir: this.jobFence.pnpmStore } : {}) : this.pnpmStore ? { npm_config_store_dir: this.pnpmStore } : {};
+      const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1" } : this.coordDir ? checkQueueEnv(this.coordDir, this.baseEnv.BOSSMAN_CHECK_SLOT) : {}), ...storeEnv } as NodeJS.ProcessEnv;
+      // BOS-614: a tree that takes part in the check line (it has scripts/check-all.sh) waits for its slot through the runner's
+      // own check-slot.sh, not through the branch's copy of the queue rules: a branch based on older main brought older rules,
+      // and old and new waiters jammed with both slots free. Inside, the branch's script gets a private lock and goes straight on.
+      // The slot is then held for the whole command (light steps too); that costs a minute, a jammed line cost hours.
+      // Never for a job: its env carries no BOSSMAN_CHECK_SLOT, and the server's slot is already held.
+      const inner = !job && env.BOSSMAN_CHECK_SLOT && existsSync(path.join(dir, "scripts", "check-all.sh")) ? 'bash "$BOSSMAN_CHECK_SLOT" sh -c "$0"' : 'sh -c "$0"';
       // Own process group, so a timeout can take down pnpm, tsc, vitest and their workers, not just the shell.
       // The check starts with default HUP/INT/TERM handling: a server started with those ignored would pass that on, and a shell can't undo it
       // (so check-all's own signal trap and its tests never fire). env --default-signal needs GNU coreutils; without it the command runs as before.
-      const sigScript = 'if env --default-signal=HUP,INT,TERM true 2>/dev/null; then exec env --default-signal=HUP,INT,TERM sh -c "$0"; fi; exec sh -c "$0"';
+      const sigScript = `if env --default-signal=HUP,INT,TERM true 2>/dev/null; then exec env --default-signal=HUP,INT,TERM ${inner}; fi; exec ${inner}`;
       const launch = job?.fence ? job.fence.wrap("sh", ["-c", sigScript, command]) : { bin: "sh", args: ["-c", sigScript, command] };
       const child = spawn(launch.bin, launch.args, {
         cwd: dir,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
-        // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
-        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1", ...job.fence?.env } : this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
+        env,
       });
       const killGroup = (signal: NodeJS.Signals) => {
         try {
@@ -867,6 +882,21 @@ export class Workspaces {
     }
     if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
     return { status: "clean" as const, tree: tried.stdout.split("\n")[0]!, targetSha, branchSha };
+  }
+
+  /**
+   * Whether the ticket's branch still merges into the target (BOS-426): the same merge-tree try as a
+   * merge, but nothing is built or pushed. A branch that is gone here, or a failed git call, throws:
+   * the caller must not read "couldn't tell" as "clean".
+   */
+  async clash(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}): Promise<{ clashes: boolean; files: string[] }> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
+      return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
+    });
   }
 
   /**

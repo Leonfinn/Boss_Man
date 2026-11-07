@@ -27,6 +27,21 @@ SWEEP_TMP_DIR=$T SWEEP_TMP_HOURS=6 scripts/sweep-tmp.sh >"$T.out"; rm -f "$T.out
 [ -e "$T/bossman-check-all.queue" ] || fail "check queue removed"
 [ ! -e "$T/bossman-scratch-11111111-1111-4111-8111-111111111111.tmp" ] || fail "old half-written kept log kept"
 [ -e "$T/scratch-ticket/check-all.log" ] || fail "a kept scratch's log removed"
+
+# A nearly full disk drops the age bar (BOS-568): two hours old goes at once, twenty minutes old still stays.
+mkdir -p "$T/bm-2h" "$T/bm-20m"
+: >"$T/bm-2h/f"; old "$T/bm-2h/f"; touch -d '2 hours ago' "$T/bm-2h"
+: >"$T/bm-20m/f"
+SWEEP_TMP_DIR=$T SWEEP_TMP_HOURS=6 SWEEP_TMP_DRY_RUN=1 scripts/sweep-tmp.sh >"$T.out"
+grep -q "would remove $T/bm-2h" "$T.out" && fail "young scratch listed with plenty of disk"
+SWEEP_TMP_DIR=$T SWEEP_TMP_HOURS=6 SWEEP_TMP_MIN_FREE_PERCENT=99 scripts/sweep-tmp.sh >"$T.out"
+[ ! -e "$T/bm-2h" ] || fail "two-hour scratch kept on a full disk"
+[ -e "$T/bm-20m" ] || fail "20-minute scratch removed on a full disk"
+grep -q "disk low" "$T.out" || fail "the low-disk sweep did not say so"
+rm -f "$T.out"
+
 SWEEP_TMP_DIR=$T SWEEP_TMP_HOURS=x scripts/sweep-tmp.sh 2>/dev/null && fail "bad hours accepted"
+SWEEP_TMP_DIR=$T SWEEP_TMP_MIN_FREE_PERCENT=x scripts/sweep-tmp.sh 2>/dev/null && fail "bad free-space mark accepted"
+SWEEP_TMP_DIR=$T SWEEP_TMP_EMERGENCY_HOURS=x scripts/sweep-tmp.sh 2>/dev/null && fail "bad emergency hours accepted"
 SWEEP_TMP_DIR=/ scripts/sweep-tmp.sh 2>/dev/null && fail "swept /"
 echo "sweep-tmp.test: ok"

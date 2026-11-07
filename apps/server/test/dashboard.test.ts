@@ -4,8 +4,8 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, tickets } from "../src/db/schema.js";
-import { runResult } from "../src/services/dashboard.js";
+import { runners, runs, tickets } from "../src/db/schema.js";
+import { dashboardService, runResult } from "../src/services/dashboard.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -84,6 +84,27 @@ describe("dashboard (R74)", () => {
     await c.emit({ type: "run.cost", runId: second.runId, fundingSourceId: payg.id, costMicrosDelta: 2_500_000, model: "claude-opus-5-5" });
     stats = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats;
     expect(stats).toMatchObject({ monthCostMicros: 2_500_000, monthSubscriptionRuns: 1 });
+  });
+  // BOS-672: the latest run comes from one index read per agent, and the day charts are counted in SQL by UTC day.
+  it("picks each agent's newest run and counts runs on the UTC day they ended", async () => {
+    const c = (ctx = await setup());
+    const now = new Date("2026-11-07T00:30:00Z");
+    const at = (iso: string) => new Date(iso);
+    await c.db.insert(runs).values([
+      { companyId: c.company.id, agentId: c.worker.id, startedAt: at("2026-11-06T23:00:00Z"), endedAt: at("2026-11-06T23:59:59Z"), outcome: "error: boom" },
+      { companyId: c.company.id, agentId: c.worker.id, startedAt: at("2026-11-07T00:00:00Z"), endedAt: at("2026-11-07T00:00:01Z"), outcome: "end_turn" },
+      { companyId: c.company.id, agentId: c.worker.id, startedAt: at("2026-11-05T10:00:00Z"), endedAt: at("2026-11-05T11:00:00Z"), outcome: "interrupted" },
+      // Ended before the 14-day window: not on the chart.
+      { companyId: c.company.id, agentId: c.worker.id, startedAt: at("2026-10-01T10:00:00Z"), endedAt: at("2026-10-01T11:00:00Z"), outcome: "end_turn" },
+    ]);
+    const data = await dashboardService(c.db, { now: () => now }).get(c.company.id);
+    expect(data.agents.find((a) => a.name === "Engineer")!.run).toMatchObject({ result: "succeeded", startedAt: at("2026-11-07T00:00:00Z") });
+    expect(data.runsByDay.slice(-3)).toEqual([
+      { day: "2026-11-05", succeeded: 0, failed: 0, other: 1 },
+      { day: "2026-11-06", succeeded: 0, failed: 1, other: 0 },
+      { day: "2026-11-07", succeeded: 1, failed: 0, other: 0 },
+    ]);
+    expect(data.runsByDay.reduce((n, d) => n + d.succeeded + d.failed + d.other, 0)).toBe(3);
   });
   it("shows a ticket under its state, even when its column was left behind by an older move", async () => {
     const c = (ctx = await setup());

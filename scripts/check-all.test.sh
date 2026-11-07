@@ -10,6 +10,8 @@ unset BOSSMAN_CHECK_CHILD BOSSMAN_CHECK_ATTEMPTS BOSSMAN_CHECK_BUDGET_SECONDS BO
 export BOSSMAN_CHECK_RETRY_SECONDS=0 BOSSMAN_CHECK_STORE=off
 # Also drop the merge gate's and user's settings, which would change what the cases below mean. check-all.sh sets CHILD for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
 unset BOSSMAN_CHECK_CHILD BOSSMAN_MERGE_CHECK BOSSMAN_CHECK_FORCE CHECK_ALL_SLOTS CHECK_ALL_LOCK_WAIT CLAUDECODE BOSSMAN_AGENT_SESSION CHECK_ALL_FORCE
+# The runner's shared check-slot.sh (BOS-614) would stand in for the copy under test here; the cases below test this branch's.
+unset BOSSMAN_CHECK_SLOT BOSSMAN_CHECK_SLOT_HELD CHECK_ALL_PRE_DONE
 # check-all.sh sweeps /tmp before it takes a slot; on a busy runner that outruns the timed holds below (BOS-557). Sweep an empty folder of ours instead.
 mkdir -p "$t/sweep"; export SWEEP_TMP_DIR="$t/sweep"
 runs() { grep -c . "$t/count" 2>/dev/null || true; }
@@ -74,7 +76,7 @@ chmod 755 "$t/scratch.denied"
 # The result store: a pass is kept and reused on identical content, the merge gate never reuses it, failures are not reused.
 # Needs a clean git checkout, so test in a scratch repo holding a copy of the script.
 if command -v git >/dev/null; then
-  repo="$t/repo"; mkdir -p "$repo/scripts"; cp "$here/check-all.sh" "$repo/scripts/"
+  repo="$t/repo"; mkdir -p "$repo/scripts"; cp "$here/check-all.sh" "$here/check-slot.sh" "$repo/scripts/"
   git -C "$repo" init -q; git -C "$repo" add -A
   git -C "$repo" -c user.name=t -c user.email=t@t commit -q -m init
   store="$t/store"
@@ -114,7 +116,20 @@ if command -v flock >/dev/null; then
         CHECK_ALL_SLOT_COMMAND='sleep 2; [ -z "${CHECK_ALL_STARTED_FILE:-}" ] || date +%s >"$CHECK_ALL_STARTED_FILE"' ./scripts/check-all.sh >"$t/out" 2>&1 ) || fail "duration run failed: $(cat "$t/out")"
     d=$(sed -n 's/.*"duration_seconds":\([0-9]*\).*/\1/p' "$store"/*.json | head -1)
     [ "${d:-0}" -ge 2 ] || fail "duration_seconds is ${d:-missing}, want the whole run (>= 2): $(cat "$t/out")"
+    # BOS-674: without scripts/check-threads.mjs beside it (this copy) the budget falls back to 2 instead of failing the run.
+    grep -q "CPU budget 2 threads" "$t/out" || fail "no fallback CPU budget: $(cat "$t/out")"
   fi
+  # BOS-674: one CPU budget reaches what runs in the slot (check-quick's heavy phase, queued vitest runs): set, or this
+  # slot's share as scripts/check-threads.mjs works it out from the slot count in the proof file.
+  budget() { (cd "$here/.." && env -u BOSSMAN_CHECK_THREADS -u GOMAXPROCS -u RAYON_NUM_THREADS -u TOKIO_WORKER_THREADS -u BOSSMAN_CHECK_SLOTS \
+      CHECK_ALL_LOCK="$t/tlock" CHECK_ALL_PAIR_PROOF="$t/tproof" "$@" \
+      CHECK_ALL_SLOT_COMMAND='echo "got $BOSSMAN_CHECK_THREADS $GOMAXPROCS $RAYON_NUM_THREADS $TOKIO_WORKER_THREADS"' ./scripts/check-all.sh 2>&1); }
+  budget BOSSMAN_CHECK_THREADS=3 | grep -qx "got 3 3 3 3" || fail "set budget not passed on: $(budget BOSSMAN_CHECK_THREADS=3)"
+  budget BOSSMAN_CHECK_THREADS=3 GOMAXPROCS=1 | grep -qx "got 3 1 3 3" || fail "a caller's GOMAXPROCS is not kept"
+  echo 3 >"$t/tproof"
+  want=$(env -u BOSSMAN_CHECK_THREADS BOSSMAN_CHECK_SLOTS=3 node "$here/check-threads.mjs")
+  budget | grep -qx "got $want $want $want $want" || fail "3-slot budget is not $want: $(budget)"
+  rm -f "$t/tproof"
   mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
   lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" "$@" ./scripts/check-all.sh 2>&1); }
   # A hold starts counting its seconds only once a waiter has queued behind it (a queue entry newer than the hold),
@@ -435,6 +450,62 @@ if command -v flock >/dev/null; then
   wait "$a" || true
   rm -f "$t"/lock.holder.*
   kill "$mproc" 2>/dev/null || true; wait "$mproc" 2>/dev/null || true
+  echo "A=600s B=640s no OOM" >"$t/proof"
+
+  # BOS-614: one copy of the queue rules. "old.sh" stands for a branch's check-all.sh with older rules: it queues in
+  # $CHECK_ALL_LOCK and waits while anyone else is in that line (the way a pre-BOS-558 copy waited on the merge checks).
+  echo 1 >"$t/proof"; rm -rf "$t/lock.queue" "$t"/lock.holder.*
+  cat >"$t/old.sh" <<'OLD'
+q="$CHECK_ALL_LOCK.queue"; mkdir -p "$q"; me="$q/0-$(date +%s%N)-$$"; printf '/old\n' >"$me"; trap 'rm -f "$me"' EXIT
+while [ -n "$(find "$q" -type f ! -path "$me" | head -1)" ]; do sleep 0.2; done
+exec 7>"$CHECK_ALL_LOCK.slot.1"; flock 7; echo "old copy: ran its checks"
+OLD
+  slot() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" CHECK_ALL_STALL_AFTER=600 "$@" 2>&1); }
+  # Before: the old copy in the shared line with a new-rules waiter behind a busy slot never goes, even once the slot frees.
+  hold 1 3600; h1=$!; sleep 0.3
+  ( lock env CHECK_ALL_STALL_AFTER=600 >"$t/new1.out" ) & nw=$!
+  waitq 1
+  rc=0; out=$(cd "$here/.." && CHECK_ALL_LOCK="$t/lock" timeout 4 bash "$t/old.sh" 2>&1) || rc=$?
+  [ "$rc" = 124 ] || fail "BOS-614 premise: the old copy should wait on the new waiter in a shared line, got rc $rc: $out"
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true; wait "$nw" || true
+  # After: the merge gate wraps the branch's script in check-slot.sh. A new-rules hand-run waiter and the old-rules merge
+  # check share one line with a free slot: both get through in order, well inside the stall window (600 s here).
+  rm -rf "$t/lock.queue"; hold 1 3600; h1=$!; sleep 0.3
+  ( lock env CHECK_ALL_STALL_AFTER=600 >"$t/new2.out"; date +%s%N >"$t/new2.at" ) & nw=$!
+  waitq 1
+  ( slot env BOSSMAN_MERGE_CHECK=1 bash ./scripts/check-slot.sh bash "$t/old.sh" >"$t/oldm.out"; date +%s%N >"$t/oldm.at" ) & om=$!
+  waitq 2; began=$SECONDS
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
+  wait "$om" "$nw" || true
+  [ $((SECONDS - began)) -le 60 ] || fail "BOS-614: the line took $((SECONDS - began)) s to clear"
+  grep -q "old copy: ran its checks" "$t/oldm.out" || fail "BOS-614: the old-rules merge check did not run: $(cat "$t/oldm.out")"
+  grep -q "lock held" "$t/new2.out" || fail "BOS-614: the new-rules waiter did not get a slot: $(cat "$t/new2.out")"
+  [ "$(cat "$t/oldm.at")" -le "$(cat "$t/new2.at")" ] || fail "BOS-614: the hand-run check went ahead of the merge check"
+  ! grep -q "line stood still" "$t/new2.out" "$t/oldm.out" || fail "BOS-614: got through only by the stall rule"
+  [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "BOS-614: queue entries left behind: $(ls "$t/lock.queue")"
+  compgen -G "$t/lock.held.*" >/dev/null && fail "BOS-614: private lock folder left behind"
+  grep -q " end pid=.*kind=merge slot=1 " "$t/lock.slotlog" || fail "BOS-614: no slot-log end line for the wrapped check: $(cat "$t/lock.slotlog")"
+  # check-slot.sh passes the command's exit status on.
+  rc=0; slot env bash ./scripts/check-slot.sh sh -c 'exit 7' >/dev/null || rc=$?
+  [ "$rc" = 7 ] || fail "BOS-614: check-slot.sh lost the command's exit status, got $rc"
+  # The private lock folder is made fresh by mktemp (random name, mode 0700), not a guessable pid-based name.
+  out=$(slot env bash ./scripts/check-slot.sh sh -c 'd=$(dirname "$CHECK_ALL_LOCK"); echo "$(stat -c %a "$d") ${d##*.held.}"') || fail "private folder probe failed: $out"
+  out=$(printf '%s\n' "$out" | tail -n 1)
+  case "$out" in "700 "??????) ;; *) fail "BOS-614: private lock folder should be mode 700 with a random name, got: $out" ;; esac
+  case "${out#700 }" in *[!0-9]*) ;; *) fail "BOS-614: private lock folder name looks pid-based: $out" ;; esac
+  # A new check-all.sh hands its wait to the runner's copy (BOSSMAN_CHECK_SLOT) over the one beside it...
+  printf 'echo shared >>"%s"; exec bash "%s" "$@"\n' "$t/shared.used" "$here/check-slot.sh" >"$t/shared-slot.sh"
+  out=$(lock env BOSSMAN_CHECK_SLOT="$t/shared-slot.sh") || fail "shared slot: expected success, got: $out"
+  grep -q "lock held" <<<"$out" || fail "shared slot: not acquired: $out"
+  [ "$(grep -c . "$t/shared.used" 2>/dev/null)" = 1 ] || fail "shared slot: the runner's copy was not used"
+  # ...falls back to its own when that file is missing...
+  out=$(lock env BOSSMAN_CHECK_SLOT="$t/missing.sh") || fail "missing shared slot: expected success, got: $out"
+  grep -q "lock held" <<<"$out" || fail "missing shared slot: not acquired: $out"
+  # ...and skips the wait only when the held marker names its own lock (a nested check with a lock of its own still queues).
+  hold 1 3600; h1=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_CHECK_SLOT_HELD="$t/elsewhere" BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1) || rc=$?
+  [ "$rc" = 75 ] || fail "held marker for another lock: expected to queue (exit 75), got $rc: $out"
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   echo "A=600s B=640s no OOM" >"$t/proof"
 
   # The retry budget counts from the slot-taken time, not from before the queue wait (P13 Q4). A check that waits

@@ -394,6 +394,21 @@ export class SessionManager {
           );
         return;
       }
+      case "workspace.clash": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.clash({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
       case "workspace.verify":
       case "workspace.merge":
       case "workspace.push":
@@ -492,7 +507,7 @@ export class SessionManager {
     }
     // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
     if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask"));
-    if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir));
+    if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir, base.BOSSMAN_CHECK_SLOT));
     // Kept scratch (BOS-592): proofs and check logs that /tmp loses on every restart. Made here so a command
     // that only wants to write into it never has to, and reported as a warning when it can't be made.
     // Its own session marker, so a check script can tell a run from a shell a person is using (BOS-592).
@@ -509,6 +524,9 @@ export class SessionManager {
         this.opts.log?.(`couldn't make the kept scratch for ticket ${cmd.workspace.ticketId}: ${String((err as Error)?.message ?? err)}`);
       }
     }
+    // Which ticket this run is for, so a check script that can't write the scratch itself (a fenced run) leaves its log
+    // in /tmp under a name the runner moves into the scratch at its next start (BOS-592).
+    if (cmd.workspace) env.BOSSMAN_TICKET = cmd.workspace.ticketId;
     return env;
   }
 

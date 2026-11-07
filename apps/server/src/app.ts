@@ -610,6 +610,7 @@ export async function buildApp(opts: AppOptions) {
     resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
     releaseUnblocked: (ticketId) => scheduler.releaseIfUnblocked(ticketId),
     landingActive: (ticketId) => review.landingActive(ticketId),
+    branchClash: (ticketId) => review.branchClash(ticketId),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),
@@ -621,6 +622,8 @@ export async function buildApp(opts: AppOptions) {
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
     onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
     onFeature: (id) => feedback.syncFeature(id),
+    // The board's "Approved, merging" cards say where their merge is (BOS-667). `review` is built below; this runs per request.
+    runningMerges: () => review.runningMerges(),
     now: opts.now,
   });
   // The CEO's proposed skills (BOS-86): review by the Security Reviewer where required, the owner's decision, then install.
@@ -657,6 +660,11 @@ export async function buildApp(opts: AppOptions) {
     // A trip means the Scrum Master is the problem: straight to the owner.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
     alertCeo: (input) => alerts.raise(input),
+    // The idle-capacity rules (BOS-659): how many of the company's run slots are busy, and its limit.
+    capacity: async (companyId) => {
+      const { company } = await scheduler.runLimits(companyId);
+      return { busy: company.running, limit: company.limit };
+    },
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
     localHour: (t) => Number(formatDate("en-GB", t, { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ })),

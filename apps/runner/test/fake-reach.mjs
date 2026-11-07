@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // A stand-in ACP adapter that first tries to reach outside its fence (BOS-321) and writes what
 // worked to reach.json in its working folder, then answers a session and one prompt.
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
@@ -24,10 +24,21 @@ const reach = {
   wroteQueue: attempt(() => writeFileSync(path.join(path.dirname(env.CHECK_ALL_LOCK), "probe"), "")),
   wroteStore: attempt(() => writeFileSync(path.join(env.BOSSMAN_CHECK_STORE, "forged.json"), '{"status":"pass"}')),
   wroteProof: attempt(() => writeFileSync(env.CHECK_ALL_PAIR_PROOF, "forged")),
+  // The shared pnpm store (BOS-568) is writable, so an agent's install can add a package to it.
+  // The merge gate's own store (BOS-568 review) is outside the fence: an agent must not be able to plant a package there.
+  wroteGateStore: attempt(() => writeFileSync(env.REACH_GATE_STORE, "planted")),
+  wroteSharedStore: (() => {
+    const store = env.npm_config_store_dir;
+    if (!store) return false;
+    const target = path.join(store, "probe-package");
+    if (!attempt(() => writeFileSync(target, "ok"))) return false;
+    attempt(() => unlinkSync(target));
+    return true;
+  })(),
   // The ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the run must be able to keep a proof there, and reach no other
   // ticket's folder on the same disk.
   wroteScratch: attempt(() => writeFileSync(path.join(env.BOSSMAN_SCRATCH, "proof.txt"), "ok")),
-  env: Object.fromEntries(["HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CACHE_HOME", "npm_config_store_dir", "CHECK_ALL_LOCK", "BOSSMAN_CHECK_STORE", "CHECK_ALL_PAIR_PROOF", "BOSSMAN_SCRATCH", "BOSSMAN_AGENT_SESSION", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0"].map((k) => [k, env[k] ?? null])),
+  env: Object.fromEntries(["HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CACHE_HOME", "npm_config_store_dir", "CHECK_ALL_LOCK", "BOSSMAN_CHECK_STORE", "CHECK_ALL_PAIR_PROOF", "BOSSMAN_SCRATCH", "BOSSMAN_TICKET", "BOSSMAN_AGENT_SESSION", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0"].map((k) => [k, env[k] ?? null])),
 };
 writeFileSync(path.join(process.cwd(), "reach.json"), JSON.stringify(reach));
 
