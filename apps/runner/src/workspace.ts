@@ -98,6 +98,16 @@ export function safeGitEnv(extra: Record<string, string> = {}): Record<string, s
   return env;
 }
 
+/**
+ * The git author and committer for a name. An agent's session gets this in its environment (BOS-255):
+ * the worktrees share the repo's own config, where an agent's `git config user.name` lands for every
+ * later run, and environment variables beat any config file.
+ */
+export function gitAuthorEnv(by?: string) {
+  const name = by?.trim().slice(0, 200) || "Boss Man";
+  return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
+}
+
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>();
 
@@ -126,8 +136,7 @@ export class Workspaces {
    * merge) are always Boss Man, since they aren't the agent's work.
    */
   private authorEnv(by?: string) {
-    const name = by?.trim().slice(0, 200) || "Boss Man";
-    return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
+    return gitAuthorEnv(by);
   }
 
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {

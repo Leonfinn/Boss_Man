@@ -16,7 +16,7 @@ import { probeModels } from "./models-probe.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { RepoLockTimeout, type Workspaces } from "./workspace.js";
+import { gitAuthorEnv, RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -551,6 +551,9 @@ export class SessionManager {
     // scripts/vitest-guard.mjs refuse a hand-run full check or whole-suite run when they see it. CLAUDECODE only
     // covers Claude Code. Set last so a granted secret can't override it.
     env.BOSSMAN_AGENT_SESSION = "1";
+    // Commits say who made them (BOS-255). The worktrees share the repo's config, where a user.name an earlier
+    // run set would otherwise be used; env beats config. Set last so a secret can't override it.
+    if (cmd.agentName) Object.assign(env, gitAuthorEnv(cmd.agentName));
     if (cmd.workspace && typeof this.opts.workspaces?.scratchDir === "function") {
       const dir = this.opts.workspaces.scratchDir(cmd.workspace.ticketId);
       try {
