@@ -1,10 +1,13 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
+
+// Hoisted so it is set before review.ts reads it: the landing re-reads its check job row this often.
+vi.hoisted(() => { process.env.BOSSMAN_CHECK_JOB_POLL_MS = "20"; });
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
+import { activity, checkJobs, projects, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
 import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, INFRA_RETRY_ATTEMPTS, LOCK_RETRY_ATTEMPTS, setInfraRetryBase, setLockRetryBase, landingText } from "../src/services/review.js";
 import { supersedeSignoffs } from "../src/services/decisions.js";
 import { MERGE_CHECK_LIMIT_KEY } from "../src/services/check-gate.js";
@@ -27,7 +30,7 @@ const DIFF: WorkspaceDiff = {
   truncated: false,
 };
 
-type Answers = { verify?: unknown; merge?: unknown; diff?: unknown; carried?: unknown; migrations?: unknown; carriedFailures?: number };
+type Answers = { verify?: unknown; merge?: unknown | ((c: { phase?: string }) => unknown); diff?: unknown; carried?: unknown; migrations?: unknown; carriedFailures?: number };
 
 async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean } = {}) {
   const held: Array<() => void> = [];
@@ -53,7 +56,7 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
         if (opts.hold) held.push(reply);
         else queueMicrotask(reply);
       }
-      if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.merge }));
+      if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: typeof answers.merge === "function" ? (answers.merge as (c: unknown) => unknown)(c) : answers.merge }));
       if (c.type === "workspace.carried") {
         const a = answers.carried as { error?: string } | undefined;
         // carriedFailures: the runner is busy and answers with an error that many times first.
@@ -288,6 +291,70 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(w).toMatchObject({ reason: "verify failed", agentId: c.worker.id });
     expect(w!.note).toContain("`pnpm test` exited with code 1");
     expect(w!.note).toContain("expected 1000 got 100");
+  });
+
+describe("server-owned check queue (BOS-316)", () => {
+    const approve = (c: Awaited<ReturnType<typeof setup>>) => approveAndWait(c.req, c.ticket.id);
+    const state = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+    const prepared = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40) };
+    const mergeAnswers = (c: { phase?: string }) => (c.phase === "prepare" ? prepared : { status: "merged", commit: prepared.commit });
+    // Plays the dispatcher: ends the first queued/running merge job with the given state.
+    const finishJob = async (c: Awaited<ReturnType<typeof setup>>, patch: Record<string, unknown>) => {
+      for (let i = 0; i < 40; i++) {
+        const [row] = await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+        if (row) { await c.db.update(checkJobs).set({ endedAt: new Date(), ...patch }).where(eq(checkJobs.id, row.id)); return row; }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error("no job was queued");
+    };
+    const on = async (c: Awaited<ReturnType<typeof setup>>) => {
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      await c.db.insert(settings).values({ key: "check_queue_mode", value: "server" });
+    };
+
+    it("queues a merge job for the prepared tree, waits for it, then pushes that commit and marks main green", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const res = approve(c);
+      const job = await finishJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
+      expect(job).toMatchObject({ kind: "merge", scope: "full", commit: prepared.commit, tree: prepared.tree });
+      expect(c.sent.some((x) => x.type === "workspace.verify")).toBe(false);
+      expect(c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase)).toEqual(["prepare", "finish"]);
+      const [p] = await c.db.select().from(projects).where(eq(projects.id, c.project.id));
+      expect(p!.mainState).toBe("green");
+      expect((await state(c)).systemState).toBe("done");
+    });
+
+    it("sends the ticket back with the log when the job fails, and pushes nothing", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const res = approve(c);
+      await finishJob(c, { state: "failed", exitCode: 1, logTail: "expected 1 got 2" });
+      expect((await res).json()).toMatchObject({ outcome: "verify_failed" });
+      expect(c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase)).toEqual(["prepare"]);
+      expect((await state(c)).systemState).toBe("in_progress");
+    });
+
+    it("raises the stuck card with the recorded reason when the job is stuck", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const res = approve(c);
+      await finishJob(c, { state: "stuck", reason: "The runner went away." });
+      expect((await res).json()).toMatchObject({ outcome: "check_stuck" });
+      expect(c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase)).toEqual(["prepare"]);
+      expect((await state(c)).systemState).toBe("review");
+    });
+
+    it("tries again with a fresh merge when main moved to a different tree", async () => {
+      let finishes = 0;
+      const c = (ctx = await setup({ answers: { merge: (m: { phase?: string }) => (m.phase === "prepare" ? prepared : ++finishes === 1 ? { status: "main_moved" } : { status: "merged", commit: prepared.commit }) } }));
+      await on(c);
+      const res = approve(c);
+      await finishJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
+      expect(c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase)).toEqual(["prepare", "finish", "prepare", "finish"]);
+    });
   });
 
   describe("checking the merged result (BOS-313)", () => {

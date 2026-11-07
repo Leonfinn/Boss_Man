@@ -92,6 +92,14 @@ if command -v flock >/dev/null; then
   hold() { local st="$t/stamp.$1.$RANDOM"; : >"$st"; ( exec 8>"$t/lock.slot.$1"; flock 8; for _ in $(seq 1500); do [ -n "$(find "$t/lock.queue" -type f -newer "$st" 2>/dev/null | head -1)" ] && break; sleep 0.1; done; exec sleep "$2" ) & }
   waitq() { for _ in $(seq 1500); do [ "$(find "$t/lock.queue" -type f 2>/dev/null | wc -l)" -ge "$1" ] && return 0; sleep 0.1; done; return 1; }
 
+  # Server-queued job (DR-003): no lock files are touched even while a slot is held, and it does not wait.
+  hold 1 3; holder=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_CHECK_NO_LOCK=1 BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1) || rc=$?
+  [ "$rc" = 0 ] || fail "no-lock mode: expected exit 0 with a busy slot, got $rc: $out"
+  grep -q "no lock files" <<<"$out" || fail "no-lock mode: not announced: $out"
+  [ ! -e "$t/lock.queue" ] || [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "no-lock mode: queue entry written"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
 
