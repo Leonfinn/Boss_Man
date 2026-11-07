@@ -572,8 +572,10 @@ export class Workspaces {
         stdio: ["ignore", "pipe", "pipe"],
         // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
         // The shared pnpm store (BOS-568): without it pnpm starts a new one in HOME for every install, on the root disk.
-        // A server-queued job is fenced and gets its own gate store instead (job.fence.env, BOS-316).
-        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1", ...job.fence?.env } : { ...(this.pnpmStore ? { npm_config_store_dir: this.pnpmStore } : {}), ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) }) } as NodeJS.ProcessEnv,
+        // A merge check gets this.pnpmStore (its own gate store); a fenced job gets job.fence.env (the shared store);
+        // a job on a runner that can't fence falls back to the shared job store, never this.pnpmStore (the gate's), so it
+        // doesn't start a store in HOME either (BOS-568 review).
+        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1", ...(job.fence ? job.fence.env : this.jobFence?.pnpmStore ? { npm_config_store_dir: this.jobFence.pnpmStore } : {}) } : { ...(this.pnpmStore ? { npm_config_store_dir: this.pnpmStore } : {}), ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) }) } as NodeJS.ProcessEnv,
       });
       const killGroup = (signal: NodeJS.Signals) => {
         try {

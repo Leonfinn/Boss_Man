@@ -57,9 +57,10 @@ assertSeparateStore(storeDir, gateStore);
 mkdirSync(gateStore, { recursive: true });
 // The runner's own installs use the shared store too, so the runner's ~1.3 GB isn't in a second store on the root disk.
 Object.assign(env, storeEnv(storeDir));
-// Server-queued check jobs run a commit nobody has reviewed, so they fence with their own gate store, kept apart
-// from the shared one agents can write (BOS-316, BOS-568).
-const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, storeDir, { level: sandbox.level, pnpmStore: gateStore });
+// The 4th argument is the unfenced merge gate's store, so it gets its own (gateStore); agents can write the
+// shared store, and a poisoned package there must not run in the gate as the runner's user. Server-queued check
+// jobs are fenced like agents, so they use the shared store (BOS-316, BOS-568).
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, gateStore, { level: sandbox.level, pnpmStore: storeDir });
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
