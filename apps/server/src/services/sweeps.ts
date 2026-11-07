@@ -597,7 +597,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    */
   async function approvedUnmerged() {
     const stuck = await db
-      .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId, urgent: tickets.urgent })
+      .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId, urgent: tickets.urgent, refusal: tickets.pullRequestNote })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
       .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false)));
@@ -664,7 +664,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         raised++;
         continue;
       }
-      raised += (await raiseMergeStuck(db, ticket, "it was approved, then nothing merged it; the server may have restarted part-way")).length;
+      // A stored refusal (BOS-684, the carried-work gate) is the reason; otherwise the merge simply never finished.
+      // Either way the CEO can answer "Run the check again" on the card.
+      const why = ticket.refusal ? `the merge was refused and the sweep's one retry is used up: ${ticket.refusal.replace(/\.$/, "")}` : "it was approved, then nothing merged it; the server may have restarted part-way";
+      raised += (await raiseMergeStuck(db, ticket, why)).length;
     }
     return raised;
   }

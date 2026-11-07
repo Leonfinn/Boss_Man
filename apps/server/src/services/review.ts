@@ -766,6 +766,26 @@ export function reviewService(
     },
 
     /**
+     * The CEO starts a fresh merge attempt on an approved ticket the gate refused (BOS-684), the same retry the sweep
+     * makes once per server: the whole gate runs again on the connected runner. Only an approved ticket still in review;
+     * it never skips the checks (that stays the owner's), and an open sign-off card still holds it (startLanding).
+     */
+    async retryMerge(ticketId: string, input: { byAgentId: string; companyId: string; causedByRunId?: string | null }) {
+      const { t } = await ticketWithRepo(ticketId, input.companyId);
+      if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
+      if (t.systemState !== "review") throw new ReviewError(409, "That ticket isn't in review, so there is no merge to retry.");
+      const rows = await latestRows(db, ticketId);
+      if (!rows.length || evaluate(rows) !== "passed") throw new ReviewError(409, "That ticket isn't approved yet: every review must pass before a merge can be retried.");
+      // Refused before anything is cleared or recorded, so a no-op press leaves the ticket as it was.
+      if (landings.get(ticketId)?.state === "running" && !(await landingStale(ticketId))) throw new ReviewError(409, "This ticket is already being checked and merged.");
+      if (await ownerSignoffOpen(ticketId)) throw new ReviewError(409, "The owner's sign-off is open on this ticket; nothing can merge until it is answered.");
+      await record(db, { companyId: t.companyId, agentId: input.byAgentId, ticketId, kind: "merge_retried", summary: "The CEO started the merge again." });
+      // An older merge card no longer describes the state of the ticket: this attempt will raise its own if it fails.
+      await clearMergeCards(db, ticketId, { by: "system", note: "Replaced by a new merge attempt the CEO started.", at: new Date().toISOString() });
+      return this.startLanding(ticketId, "the CEO (retrying the merge)", input.causedByRunId);
+    },
+
+    /**
      * The owner's (or CEO's) "move these checks to after the merge" on a stuck-review card (BOS-422): the named criteria become
      * after-merge ones, the changes-requested reviews that only failed them are overruled, and the ticket goes on through review.
      * Owner sign-off still applies, as it does after an overrule.
