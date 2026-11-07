@@ -490,6 +490,21 @@ describe("scheduler", () => {
       expect(summaries[0]!.question).toContain("Stuck");
     });
 
+    it("does not release again a ticket moved back to backlog on purpose", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${held.id}/dependencies`, { ticketId: x.id });
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(held.id)).toBe("ready");
+      await ctx.req("PATCH", `/api/tickets/${held.id}`, { state: "backlog" });
+      await ctx.req("POST", "/api/sweep");
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+    });
+
     it("leaves a plain backlog ticket and one waiting on an open decision alone", async () => {
       ctx = await setup();
       const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
