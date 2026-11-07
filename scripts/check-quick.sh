@@ -71,7 +71,7 @@ if [ -n "$tree" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -z "${CHECK_QUICK_RE
     echo "PASS  reused: this exact tree ($tree) already passed check-quick against $base at ${prev%% *} (coverage=$cov); not running it again (CHECK_QUICK_RERUN=1 runs it anyway)"
     quick_log quick-reuse "$cov"
     echo "check-quick: all steps passed (the merge gate still runs the full check)"
-    exit 0
+    return 0
   fi
 fi
 
@@ -122,7 +122,7 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     # shellcheck disable=SC2086  # one argument per file; paths have no spaces
     step "tests related to $name changes" pnpm --filter "$name" exec vitest related --run $files
   done
-  finish "$failed"
+  return "$failed"
 fi
 
 if [ -n "${BOSSMAN_FULL_CHECK_NEXT:-}" ]; then
@@ -130,9 +130,9 @@ if [ -n "${BOSSMAN_FULL_CHECK_NEXT:-}" ]; then
   # tickets (BOS-665). It repeats everything below (typecheck, tests, ShellCheck, web build), so only the cheap steps above
   # run here, and a broken merge or migration still fails before the long check starts.
   echo "SKIP  typecheck, related tests, ShellCheck, web build: the full check runs next (BOSSMAN_FULL_CHECK_NEXT)"
-  if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; exit 1; fi
+  if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
   echo "check-quick: cheap steps passed; the full check runs the rest"
-  exit 0
+  return 0
 fi
 
 need_slot=0
@@ -157,12 +157,12 @@ fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
 if has '^apps/web/|^packages/shared/'; then step "build web" pnpm --filter @boss-man/web build; fi
 
-if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; finish 1; fi
-if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; finish 75; fi
+if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
+if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; return 75; fi
 echo "check-quick: all steps passed (the merge gate still runs the full check)"
 # Recorded only when the files are still exactly the tree the run started on (nothing edited while it ran).
 [ -z "$tree" ] || [ "$(clean_tree)" != "$tree" ] || quick_log quick-pass "$([ "$partial" = 1 ] && echo partial || echo all)"
-finish 0
+return 0
 }
 
 # One tee for the whole outer run (which is what the kept log holds), or a plain run when there is nowhere to keep it.
