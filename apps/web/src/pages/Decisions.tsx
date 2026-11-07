@@ -913,6 +913,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     )}
                     {d.context?.steps && d.context.steps.length > 0 && (
                       <div>
+                        {/* How the host commands were proven (R11, DR-024 C): one line above the steps. */}
+                        {d.context.lint?.proof && (
+                          <p className="banner" data-proof={d.context.lint.proof.rehearsed ? "rehearsed" : "not-rehearsed"} style={d.context.lint.proof.rehearsed ? { background: "var(--green-soft)", color: "var(--green-ink)" } : undefined}>
+                            {d.context.lint.proof.rehearsed ? `Tried on a test machine at ${d.context.lint.proof.commit.slice(0, 7)} (${d.context.lint.proof.script}).` : `First time on a real machine: ${d.context.lint.proof.part}`}
+                          </p>
+                        )}
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.steps.map((s, i) => (
