@@ -3,7 +3,7 @@
 // available.json, status.json), raises an owner decision when main has moved, and on approval
 // writes one small request file (inbox) that the host script validates and acts on.
 import { randomBytes } from "node:crypto";
-import { readFile, rename, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -50,6 +50,22 @@ const Status = z.object({
   soak_seconds: z.union([z.number(), z.string()]).optional(),
 });
 export type DeployStatus = z.infer<typeof Status>;
+
+/** What the host deployer says about its memory every tick (outbox/headroom.json, BOS-420). Every field but the time is optional. */
+const Headroom = z.object({
+  version: z.literal(1),
+  writtenAt: z.string(),
+  totalMb: z.number().int().nonnegative().optional(),
+  availableMb: z.number().int().nonnegative().optional(),
+  swapTotalMb: z.number().int().nonnegative().optional(),
+  swapUsedMb: z.number().int().nonnegative().optional(),
+  needMb: z.number().int().nonnegative().optional(),
+  needFrom: z.string().max(32).optional(),
+  /** The host is leaving a request in its inbox (its memory floor). */
+  holding: z.string().max(64).optional(),
+  lastUpdate: z.object({ commit: z.string(), lowMb: z.number(), lowAt: z.string(), swapPeakMb: z.number() }).optional(),
+});
+export type Headroom = z.infer<typeof Headroom>;
 
 const short = (sha: string) => sha.slice(0, 8);
 /** A folder the host reported, if it is safe to put in a command the owner pastes; otherwise null (never guessed). */
@@ -567,10 +583,43 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed" && s.to_commit === ctx.commit) throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
     },
 
-    /** Hands the approved request to the host: written beside its final name, then renamed, so the host never reads half a file. // leader-only */
-    async send(ctx: SelfDeployContext, decisionId: string) {
+    /** The host's memory report (BOS-420); null when there is none (an older deployer) or it can't be read. */
+    headroom: () => (dir ? readJson(path.join(dir, "outbox", "headroom.json"), Headroom) : Promise.resolve(null)),
+
+    /** When the current server update's standby window (its trial) ends, if one is running. */
+    async trialUntil(): Promise<string | null> {
+      return (await inTrial())?.after ?? null;
+    },
+
+    /** Whether a runner update card is open (the drain hands over to it after a server update). */
+    async runnerCardOpen(): Promise<boolean> {
+      return (await openFor("runner")).length > 0;
+    },
+
+    /**
+     * Takes back a request the host hasn't picked up yet (the owner cancelled a waiting update, BOS-420).
+     * Only our own request, by its id. False when there is none, or the host already took it.
+     */
+    async takeBack(decisionId: string): Promise<boolean> {
+      if (!inboxFile) return false;
+      const raw = await readFile(inboxFile, "utf8").catch(() => "");
+      let id: unknown;
+      try {
+        id = (JSON.parse(raw) as { id?: unknown }).id;
+      } catch {
+        return false;
+      }
+      if (id !== decisionId) return false;
+      return rm(inboxFile).then(() => true, () => false);
+    },
+
+    /**
+     * Hands the approved request to the host: written beside its final name, then renamed, so the host never reads half a file. // leader-only
+     * `override`: the owner chose "Update now anyway", so the host's memory floor doesn't hold it (BOS-420). An older host ignores the field.
+     */
+    async send(ctx: Pick<SelfDeployContext, "target" | "commit">, decisionId: string, opts: { override?: boolean } = {}) {
       const [o] = await db.select({ id: owners.id }).from(owners).limit(1);
-      const body = { id: decisionId, target: ctx.target, commit: ctx.commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner" };
+      const body = { id: decisionId, target: ctx.target, commit: ctx.commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner", ...(opts.override ? { quiet: "override" } : {}) };
       const tmp = `${inboxFile}.${randomBytes(4).toString("hex")}.tmp`;
       await writeFile(tmp, `${JSON.stringify(body)}\n`, { mode: 0o640 });
       await rename(tmp, inboxFile!);
