@@ -101,6 +101,8 @@ export const OWNER_CONTROLS = {
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Save", "Check with Claude", "Check", "Remove", "Add tool server", "Edit", "Delete", "Add", "Cancel",
     "Open …", "Switch off", "Switch back on", "Switch on",
+    // This host: confirm a fact only the owner can give.
+    "Confirm",
     "Test on the past 48 hours", "Run a retro now", "Test", "Start a new chapter", "Deploy latest",
     "Build and update runners", "Cancel the update", "Update runners (finish runs first)", "Check name",
     "Import as a new company", "Run the setup wizard", "Reset to defaults",
