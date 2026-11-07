@@ -1,5 +1,5 @@
 {
-  "id": "6acbdac7-c318-4638-ae47-10f7207bf816",
+  "id": "d7462dda-c6f5-4053-83e3-9847dcd0cde0",
   "prevId": "e95fdc0c-229b-4d19-954b-e8bc22ccb8b2",
   "version": "7",
   "dialect": "postgresql",
@@ -1120,6 +1120,27 @@
           "columns": [
             {
               "expression": "ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "check_results_company_at": {
+          "name": "check_results_company_at",
+          "columns": [
+            {
+              "expression": "company_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -8247,36 +8268,6 @@
         "blocked_until_reason": {
           "name": "blocked_until_reason",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "progress_head": {
-          "name": "progress_head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "progress_at": {
-          "name": "progress_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ceo_plan": {
-          "name": "ceo_plan",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ceo_plan_deadline": {
-          "name": "ceo_plan_deadline",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ceo_plan_alerted_at": {
-          "name": "ceo_plan_alerted_at",
-          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

@@ -46,6 +46,8 @@ const Status = z.object({
   started: z.string(),
   ended: z.string(),
   backup: z.string().default(""),
+  // The host's own standby window in seconds (BOS-401). The shell writes every value as a string; an older host omits it.
+  soak_seconds: z.union([z.number(), z.string()]).optional(),
 });
 export type DeployStatus = z.infer<typeof Status>;
 
@@ -352,13 +354,19 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   // host.conf, so an older or single-server host (no value) falls back to the old 900 s.
   const RUNNER_DUE = "self_deploy_runner_due";
   const LAST_SERVER = "self_deploy_last_server";
+  /** `offer`: the runner needs updating once the window is over; without it the hold only blocks (a row from before BOS-401 is an offer). */
+  type RunnerDue = { commit: string; fromCommit: string; after: string; offer?: boolean };
   const DEFAULT_SOAK_SECONDS = 900;
   const TRIAL_MARGIN_SECONDS = 120;
-  type RunnerDue = { commit: string; fromCommit: string; after: string };
   type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };
-  const soakSeconds = (a: Available | null) => a?.soakSeconds ?? DEFAULT_SOAK_SECONDS;
-  const trialMs = (a: Available | null) => (soakSeconds(a) + TRIAL_MARGIN_SECONDS) * 1000;
-  /** The trial length in words: the host's own setting, so the message never claims a length it isn't running. */
+  /** The window for this deploy: what the host wrote into status.json for it (BOS-401), else the length it publishes in available.json (BOS-384), else 900. */
+  const statusSoak = (s?: DeployStatus | null) => {
+    const raw = s?.soak_seconds;
+    const n = typeof raw === "string" ? (raw.trim() === "" ? NaN : Number(raw)) : raw;
+    return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 86400 ? Math.floor(n) : null;
+  };
+  const soakSeconds = (a: Available | null, s?: DeployStatus | null) => statusSoak(s) ?? a?.soakSeconds ?? DEFAULT_SOAK_SECONDS;
+  const trialMs = (a: Available | null, s?: DeployStatus | null) => (soakSeconds(a, s) + TRIAL_MARGIN_SECONDS) * 1000;
   const trialWords = (seconds: number) => {
     const min = Math.round(seconds / 60);
     if (seconds === DEFAULT_SOAK_SECONDS) return "15-minute";
@@ -387,6 +395,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const due = await getSetting<RunnerDue>(RUNNER_DUE);
     if (!due || Date.now() < Date.parse(due.after)) return;
     await putSetting(RUNNER_DUE, null);
+    if (due.offer === false) return;
     const last = await getSetting<LastServer>(LAST_SERVER);
     if (last?.result === "deployed" && last.to === due.commit && a?.deployed === due.commit) await raise("runner", due.commit, due.fromCommit, a);
     else deps.log?.(`self-deploy: runner update for ${short(due.commit)} dropped; the server is not on it after its trial`);
@@ -422,14 +431,18 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         for (const o of await openFor("runner")) await withdrawOpen(o.id);
       }
     }
+    // Every way a server update can end "deployed" starts a standby window (deploy latest, hand-apply and a rollback have no self_deploy decision), so the hold is set here, not on the decision path.
+    if (s.target === "server" && s.result === "deployed") {
+      const ended = Date.parse(s.ended);
+      const old = await getSetting<RunnerDue>(RUNNER_DUE);
+      const wants = ctx?.type === "self_deploy" && !!ctx.runnerChanged;
+      // A newer server update inside the window must not drop the older commit's runner change: keep its range and its offer.
+      const held = old && old.offer !== false;
+      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held } satisfies RunnerDue);
+    }
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
       await record(db, { companyId: d.companyId, kind: "self_deploy", summary: `${title}. ${s.message}` });
-      // The server is deployed; the runners are a separate question, held until the server's trial is over.
-      if (s.target === "server" && s.result === "deployed" && ctx.runnerChanged) {
-        const ended = Date.parse(s.ended);
-        await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a)).toISOString() } satisfies RunnerDue);
-      }
     }
     await saveSeen(key);
   }

@@ -886,7 +886,7 @@ export const checkResults = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     detail: text("detail"),
   },
-  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at)],
+  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at), index("check_results_company_at").on(t.companyId, t.at)],
 );
 
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
