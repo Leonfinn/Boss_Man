@@ -34,7 +34,7 @@ import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { AGE_STEP_MS, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
+import { agedRank, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
 export type Limits = {
@@ -907,6 +907,9 @@ export function schedulerService(
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
       prompt: chapter?.prompt ?? wakePrompt,
       mcpToken,
+      // Every run gets the Boss Man tools; a runner that can't reach them stops the run loudly
+      // rather than let it work blind (BOS-552). An older runner ignores it and behaves as before.
+      mcpRequired: true,
       ...(chapter?.resumeSessionId ? { resumeSessionId: chapter.resumeSessionId } : !chapter && previous?.acpSessionId ? { resumeSessionId: previous.acpSessionId } : {}),
       ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
       ...(skillSet.length ? { skills: skillSet } : {}),
@@ -1386,16 +1389,16 @@ export function schedulerService(
         .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t), like(wakes.statusReason, QUOTA_HOLD_LIKE)))))
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
       if (queue.length === 0) return result;
-      // Priority order, but a wake Boss Man scheduled gains 1 for every 15 minutes it has waited, so a
-      // low-priority watch can't wait for ever behind a full house (DR-002). The stored priority, and
-      // so the quota hold, is untouched. Someone-is-waiting wakes go first. The sort is stable, so
-      // equal ranks stay oldest first.
+      // Priority order, but a wake Boss Man scheduled or an agent started gains 1 for every 15 minutes
+      // it has waited, up to a cap, so neither a low-priority watch nor an engagement or nudge can wait
+      // for ever behind a full house of newer work (DR-002, DR-031). The stored priority, and so the
+      // quota hold, is untouched. Someone-is-waiting wakes go first. Equal ranks go oldest first.
       // A wake for an urgent ticket gains 1 more, within its class (BOS-346): the ticket's flag counts, not only the reason.
       const queuedTicketIds = [...new Set(queue.flatMap((w) => (w.ticketId ? [w.ticketId] : [])))];
       const urgentIds = new Set(queuedTicketIds.length ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.urgent, true), inArray(tickets.id, queuedTicketIds)))).map((r) => r.id) : []);
-      const rank = (w: (typeof queue)[number]) => w.priority + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0) + (wakeClassOf(w) === "scheduled" ? Math.floor((t.getTime() - w.createdAt.getTime()) / AGE_STEP_MS) : 0);
+      const rank = (w: (typeof queue)[number]) => agedRank(w.priority, wakeClassOf(w), t.getTime() - w.createdAt.getTime()) + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0);
       const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
-      queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a));
+      queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a) || a.createdAt.getTime() - b.createdAt.getTime());
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
