@@ -230,7 +230,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
           companyId: null,
           level: "note",
           title: `Update to ${short(w.commit)} is waiting for a quiet machine`,
-          body: `It starts by itself once ${q.why.join("; ")} clears. Meanwhile new merge checks wait and at most ${quietRuns} runs go at once. If it is still waiting after ${WAIT_MINUTES} minutes you will be asked.`,
+          body: `Right now ${q.why.join("; ")}. It starts by itself once the machine is quiet. Meanwhile new merge checks wait and at most ${quietRuns} runs go at once. If it is still waiting after ${WAIT_MINUTES} minutes you will be asked.`,
           link: "#/settings",
         });
       return { ...w, quiet: q };
