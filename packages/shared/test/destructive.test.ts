@@ -639,3 +639,30 @@ describe("forms Freddy found after BOS-116 (BOS-393)", () => {
     expect(evaluatePermission(exec(c), []).outcome).toBe("allow");
   });
 });
+
+describe("do-nothing sed -i (BOS-680)", () => {
+  it.each([
+    "sed -i 's/a/b/' /dev/null; git status",
+    "sed -i -e 's/a/b/' /dev/null; git status",
+    "sed -n -i 's/a/b/' /dev/null && git log -1",
+    "sed --in-place 's/a/b/' /dev/null; ls",
+    "sed -i 's/a/b/'; ls",
+  ])("reads %j as changing nothing", (c) => {
+    expect(destroys(c)).toBe(false);
+  });
+  it.each([
+    "sed -i 's/a/b/w out.txt' /dev/null",
+    "sed -i 's/a/b/gw /etc/x' /dev/null",
+    "sed -i 'w out.txt' /dev/null",
+    "sed -i 's/a/b/e' /dev/null",
+    "sed -i '1e rm -rf x' /dev/null",
+    "sed -i -f script.sed /dev/null",
+    "sed -i --file=script.sed /dev/null",
+    "sed -i 's/a/b/' /dev/null /etc/hosts",
+    "sed -i 's/a/b/' /dev/null ../x",
+    "echo /dev/null | xargs sed -i 's/a/b/'",
+    "sudo sed -i 's/a/b/' /dev/null",
+  ])("still flags %j", (c) => {
+    expect(destroys(c)).toBe(true);
+  });
+});

@@ -4,9 +4,9 @@
 // its own card, not overruling a person. Agent-raised questions have no conditions and are left to
 // a person, except an add-on's setup card (raise_decision with setsUp, DR-023 D, BOS-522), which goes
 // once that add-on is seen working.
-import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { decisions, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
@@ -17,6 +17,12 @@ export type ClearWhen =
   | { kind: "agentRanOk"; agentId: string }
   | { kind: "ticketDone"; ticketId: string }
   | { kind: "ticketLeft"; ticketId: string; state: string }
+  /**
+   * A roadmap feature that had no open ticket now has one (BOS-595): the work for it is underway, so
+   * the CEO's card has done its job. A sub-task alone doesn't count: it belongs to a parent already
+   * counted, so this looks at top-level tickets only.
+   */
+  | { kind: "featureHasTicket"; featureId: string }
   /** Start-failure cards name the wake that failed: the runner must be connected and that wake must have started (BOS-475 E). */
   | { kind: "runnerConnected"; companyId: string; wakeId?: string }
   /** Usage-limit cards: the account has room again (the same test as the scheduler's account pick). */
@@ -38,7 +44,9 @@ export type ClearWhen =
    * the next push fails, so a card raised to fix one that has just broken would close at once on the old
    * reading (the BOS-469 lesson). A request through the edge or a push that went through since then proves it.
    */
-  | { kind: "addonRunning"; addon: Addon };
+  | { kind: "addonRunning"; addon: Addon }
+  /** A server-health card (BOS-640): its rule (memory or freezes) has stayed under its level for 30 minutes. */
+  | { kind: "serverCalm"; rule: "memory" | "freezes" };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -63,6 +71,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "ticketLeft":
         if (typeof c.ticketId === "string" && typeof c.state === "string") out.push({ kind: "ticketLeft", ticketId: c.ticketId, state: c.state });
         break;
+      case "featureHasTicket":
+        if (typeof c.featureId === "string") out.push({ kind: "featureHasTicket", featureId: c.featureId });
+        break;
       case "runnerConnected":
         if (typeof c.companyId === "string") out.push({ kind: "runnerConnected", companyId: c.companyId, ...(typeof c.wakeId === "string" ? { wakeId: c.wakeId } : {}) });
         break;
@@ -77,6 +88,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "addonRunning":
         if ((ADDONS as readonly unknown[]).includes(c.addon)) out.push({ kind: "addonRunning", addon: c.addon as Addon });
+        break;
+      case "serverCalm":
+        if (c.rule === "memory" || c.rule === "freezes") out.push({ kind: "serverCalm", rule: c.rule });
         break;
       default:
         break;
@@ -94,6 +108,8 @@ export type AlertClearingDeps = {
   addons?: () => Promise<AddonFacts>;
   /** Moves a ticket that waited on a closed card back to ready once nothing else holds it, and wakes its assignee. */
   release?: (ticketId: string) => Promise<unknown>;
+  /** Why a server-health rule's card can go (server-health.ts), or null while it can't; without it those cards stay open. */
+  serverCalm?: (rule: "memory" | "freezes") => string | null;
   now?: () => Date;
 };
 
@@ -135,6 +151,16 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         if (!t) return "the ticket is no longer on record";
         return t.state !== c.state ? `the ticket "${t.title}" is ${t.state === "done" ? "finished" : `now ${t.state.replace("_", " ")}`}` : null;
       }
+      case "featureHasTicket": {
+        const [f] = await db.select({ title: features.title }).from(features).where(eq(features.id, c.featureId));
+        if (!f) return "the feature is no longer on record";
+        const [t] = await db
+          .select({ id: tickets.id })
+          .from(tickets)
+          .where(and(eq(tickets.featureId, c.featureId), isNull(tickets.parentTicketId), ne(tickets.systemState, "done")))
+          .limit(1);
+        return t ? `"${f.title}" now has an open ticket` : null;
+      }
       case "runnerConnected": {
         const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, c.companyId));
         if (!runner || !deps.isConnected(runner.id)) return null;
@@ -167,6 +193,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         if (!(since.getTime() > card.createdAt.getTime())) return null;
         return `${ADDON_LABELS[c.addon]} is running (${f.source}, at ${hhmm(since)})`;
       }
+      case "serverCalm":
+        return deps.serverCalm?.(c.rule) ?? null;
       default:
         return null;
     }

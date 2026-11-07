@@ -5,13 +5,13 @@
 import { randomBytes } from "node:crypto";
 import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { sh, step, type HostFacts } from "./steps.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
@@ -52,6 +52,8 @@ const Status = z.object({
 export type DeployStatus = z.infer<typeof Status>;
 
 const short = (sha: string) => sha.slice(0, 8);
+/** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213): the ticket id, or null for any other commit. */
+const mergedTicket = (subject: string) => subject.match(/^Merge ".*" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i)?.[1]!.toLowerCase() ?? null;
 /** A folder the host reported, if it is safe to put in a command the owner pastes; otherwise null (never guessed). */
 const folder = (p: string | undefined) => (p && /^\/[\w.+@/-]+$/.test(p) && !p.split("/").includes("..") ? p.replace(/\/+$/, "") : null);
 const isSha = (s: string) => /^[0-9a-f]{7,64}$/.test(s);
@@ -60,7 +62,7 @@ const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed:
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -121,11 +123,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   async function updateFor(commit: string, fromCommit: string, a: Available | null, extras: { handBecause?: string; handFiles?: string[]; handEffect?: DeployUpdate["handEffect"]; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean; risks: string[] }): Promise<DeployUpdate | undefined> {
     const commits = a?.commits ?? [];
     if (!commits.length) return undefined;
-    const entries = commits.flatMap((c) => {
-      if (!c.subject) return [];
-      const m = c.subject.match(/^Merge ".*" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i);
-      return [{ subject: c.subject, ticketId: m ? m[1]!.toLowerCase() : null }];
-    });
+    const entries = commits.flatMap((c) => (c.subject ? [{ subject: c.subject, ticketId: mergedTicket(c.subject) }] : []));
     const wanted = [...new Set(entries.flatMap((e) => (e.ticketId ? [e.ticketId] : [])))];
     const rows = wanted.length
       ? await db
@@ -166,6 +164,41 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     };
   }
 
+  /**
+   * The merged tickets in the range that fix a live problem (BOS-639): only those whose "fixes live" marker
+   * was set by hand, never guessed from priority. `repeat` when every one of them was already on an earlier
+   * deploy card (open, withdrawn or answered): main moving on raises a new card, and that must not page
+   * the owner again for the same fix.
+   */
+  async function urgentFor(a: Available | null): Promise<DeployUrgent | undefined> {
+    const ids = [...new Set((a?.commits ?? []).flatMap((c) => { const id = c.subject ? mergedTicket(c.subject) : null; return id ? [id] : []; }))];
+    if (!ids.length) return undefined;
+    const rows = await db
+      .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix, fixesLive: tickets.fixesLive })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(inArray(tickets.id, ids), isNotNull(tickets.fixesLive)));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    // In the range's own order; a ticket without a reference (another install's numbering) can't be named, so it is left out.
+    const fixes: LiveFix[] = ids.flatMap((id) => {
+      const r = byId.get(id);
+      const ref = r ? ticketRef(r.prefix, r.number) : null;
+      const symptom = r?.fixesLive?.trim();
+      return r && ref && symptom ? [{ ticketId: r.id, ref, symptom }] : [];
+    });
+    if (!fixes.length) return undefined;
+    let repeat = true;
+    for (const f of fixes) {
+      const [earlier] = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(sql`${decisions.context}->>'type' = 'self_deploy'`, sql`${decisions.context}->'urgent'->'fixes' @> ${JSON.stringify([{ ticketId: f.ticketId }])}::jsonb`))
+        .limit(1);
+      if (!earlier) repeat = false;
+    }
+    return { heading: fixesLiveHeading(fixes), fixes, ...(repeat ? { repeat } : {}) };
+  }
+
   async function openFor(target: string) {
     return db
       .select()
@@ -187,11 +220,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const changed = new Set([...(a?.infraPaths ?? []), ...(a?.paths ?? [])]);
     const hostDeployerChanged = changed.has("scripts/host-deployer.sh");
     const launcherChanged = [...changed].some((p) => p.startsWith("apps/launcher/"));
-    const src = folder(a?.srcDir);
-    const deployer = folder(a?.deployerDir);
+    // BOS-419: what the update file doesn't say comes from the settings record (the host's own report, kept with
+    // its source). The update file still wins, since it is written at the same moment as the update.
+    const rec = await deps.facts?.().catch(() => ({} as Record<string, string>)) ?? {};
+    const src = folder(a?.srcDir ?? rec["paths.src"]);
+    const deployer = folder(a?.deployerDir ?? rec["paths.deployer"]);
     const shaOk = isSha(commit) && isSha(fromCommit);
-    const bg = a?.bluegreen;
-    const colour = a?.liveColour === "blue" || a?.liveColour === "green" ? a.liveColour : null;
+    const bg = a?.bluegreen ?? (rec["compose.bluegreen"] === "true" ? true : rec["compose.bluegreen"] === "false" ? false : undefined);
+    const liveColour = a?.liveColour ?? rec["compose.liveColour"];
+    const colour = liveColour === "blue" || liveColour === "green" ? liveColour : null;
     // The machine's recorded name (BOS-427): every command's block says "on <host>, as root". Without it the
     // card can't say where a command runs, so no command is shown (never a guessed name).
     const host = (await deps.hosts?.())?.[0]?.name ?? null;
@@ -316,14 +353,38 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       ...(target === "server" ? { needsRunnerUpdate: !!a?.runnerChanged } : {}),
       risks,
     });
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}) };
+    // Only the server update carries the fix: the runner card that may follow it is unchanged (BOS-639).
+    const urgent = target === "server" ? await urgentFor(a) : undefined;
+    // (BOS-551) A server update restarts Boss Man, which resets anything a reading on the owner's queue
+    // would measure. Point the update card at the open owner cards a restart would disturb: a card the
+    // raising agent marked `resetsOnRestart`, and a hand-apply to-do that isn't itself a server or runner
+    // update. Unrelated setup cards are left out so the "Do after" list is not noise.
+    const doAfter = target === "server"
+      ? (await db
+          .select({ id: decisions.id, question: decisions.question, context: decisions.context })
+          .from(decisions)
+          .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner"))))
+          .filter((r) => {
+            const c = r.context as DecisionContext;
+            if (c.type === "self_deploy" || c.type === "deploy") return false;
+            if (c.type === "question") return !!c.steps?.length && c.resetsOnRestart === true;
+            if (c.type === "owner_todo") return !c.target;
+            return false;
+          })
+          .slice(0, 10)
+          .map((r) => ({ decisionId: r.id, label: r.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80) }))
+      : [];
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}), ...(urgent ? { urgent } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
+    // The heading is the card's first paragraph, so the card, its phone push and the CEO's view all lead with it.
+    const lead = urgent ? `${urgent.heading}.\n\n` : "";
     const question =
-      target === "runner"
+      lead +
+      (target === "runner"
         ? `Update the runners to ${short(commit)}?\n\nThis rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
           ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue until it's applied or you mark it done.`
-          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`;
+          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`);
     // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
     // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).
     const options = infra ? [APPROVE_HAND_APPLY, NOT_NOW] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];

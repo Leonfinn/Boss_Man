@@ -19,7 +19,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { CANCEL_RUN, checkAsk } from "./decisions.js";
+import { adviceOf, CANCEL_RUN, checkAsk } from "./decisions.js";
 import type { HostFacts } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { type AlertCause, type AlertKind, type AlertRung, isAlertKind, kindCeiling, kindRow, kindStart } from "./alert-kinds.js";
@@ -99,7 +99,7 @@ export type AlertInput = {
 /** The first part of a raise's cause key, e.g. "start-fail" from "start-fail:<agent>:<wake>". */
 const keyPrefix = (key: string | undefined) => (key ?? "").split(":")[0] ?? "";
 
-type Notify = (agentId: string, input: { ticketId?: string | null; reason: string; note?: string | null; priority?: number }) => Promise<{ id: string; status: string; statusReason?: string | null }>;
+type Notify = (agentId: string, input: { ticketId?: string | null; reason: string; note?: string | null; priority?: number; replyLane?: boolean }) => Promise<{ id: string; status: string; statusReason?: string | null }>;
 
 /**
  * The condition for a raise that didn't give one, where its cause key says exactly what would
@@ -301,9 +301,12 @@ export function alertLadder(
       if (rung === "owner") {
         const next = hop("owner", reason);
         const tried = (extra.triedFirst as string | undefined) ?? (ladder.hops.length ? `Boss Man tried the team first: ${ladder.hops.map((h) => `${LABEL[h.to]} (${h.why})`).join(", then ")}. Neither could settle it.` : undefined);
+        // The card carries the CEO's advice down to the owner (BOS-233): what it's needed for and what a
+        // Deny stops. When the handover ran out the card says so, so the owner knows why the advice may lag.
+        const handoverRanOut = !!extra.handoverRanOut;
         const moved = await db
           .update(decisions)
-          .set({ tier: "owner", forAgentId: null, context: { ...(d.context as object), ...extra, ...(tried ? { triedFirst: tried } : {}), ladder: next } })
+          .set({ tier: "owner", forAgentId: null, context: { ...(d.context as object), ...extra, ...(tried ? { triedFirst: tried } : {}), ...(handoverRanOut ? { handoverRanOut: { at: now().toISOString() } } : {}), ladder: next } })
           .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
           .returning({ id: decisions.id });
         if (!moved.length) return null;
@@ -326,7 +329,7 @@ export function alertLadder(
       if (!moved.length) return null;
       // High priority: the owner would otherwise have been told now, quiet hours or not.
       // Every card waiting on the CEO shares one ticketless "decision" wake (or the CEO's live run), so a busy CEO is woken once for all of them (BOS-180).
-      const w = await deps.notify(h.agent.id, rung === "ceo" ? { ticketId: null, reason: "decision", priority: 3, note: note(rung, d, next, minutes) } : { ticketId: ladder.ticketId, reason: ALERT_REASON, priority: 3, note: note(rung, d, next, minutes) });
+      const w = await deps.notify(h.agent.id, rung === "ceo" ? { ticketId: null, reason: "decision", priority: 3, replyLane: true, note: note(rung, d, next, minutes) } : { ticketId: ladder.ticketId, reason: ALERT_REASON, priority: 3, note: note(rung, d, next, minutes) });
       if (w.status === "dropped") {
         reason = `${LABEL[rung]} was skipped: its wake was dropped (${w.statusReason ?? "no reason given"})`;
         if (rung === "ceo" && ladder.topRung !== undefined && ladder.topRung !== "owner") {
@@ -405,7 +408,7 @@ export function alertLadder(
       .returning({ id: decisions.id });
     if (!moved) return false;
     // High priority, as a hand-over: it waited for the CEO, so quiet hours must not delay it further.
-    const w = await deps.notify(ceo.id, { ticketId: null, reason: "decision", priority: 3, note: note("ceo", d, next, minutes) });
+    const w = await deps.notify(ceo.id, { ticketId: null, reason: "decision", priority: 3, replyLane: true, note: note("ceo", d, next, minutes) });
     await log(d.companyId, { kind: "alert_hop", ticketId: ladder.ticketId, targetAgentId: ceo.id, decisionId: d.id, reason: "the CEO can take it again", summary: `Alert handed to ${ceo.name}: the CEO can take it again` });
     return w.status !== "dropped";
   }
@@ -431,7 +434,7 @@ export function alertLadder(
     /** Raises one of Boss Man's own alerts on the ladder. Null when the dedupe key says it's already open. */
     async raise(input: AlertInput): Promise<{ id: string; rung: Rung } | null> {
       const kindId: AlertKind | undefined = isAlertKind(input.kind) ? input.kind : undefined;
-      const cause: AlertCause = { ...input.cause, agents: input.cause?.agents?.length ? input.cause.agents : input.about };
+      const cause: AlertCause = { ...input.cause, companyId: input.companyId, agents: input.cause?.agents?.length ? input.cause.agents : input.about };
       const row = kindRow(kindId, input.from);
       const start = kindStart(input.from);
       const ceiling = kindCeiling(kindId, input.from);
@@ -517,7 +520,27 @@ export function alertLadder(
           continue;
         }
         if ((await dueAt(d.companyId, ladder, minutes)) > now().getTime()) continue;
-        if (await place(d, ladder, RUNGS[RUNGS.indexOf(ladder.rung) + 1]!, `${LABEL[ladder.rung]} didn't settle it within ${minutes} minutes`)) moved++;
+        // A permission card whose CEO handover ran out still reaches the owner, but it says so, and the
+        // CEO is woken again to add the advice (BOS-233 item 2). The card marks the event itself.
+        const ranOut = ladder.rung === "ceo" && d.kind === "permission" && !(d.context as { advice?: { state?: string } }).advice?.state;
+        const to = await place(d, ladder, RUNGS[RUNGS.indexOf(ladder.rung) + 1]!, `${LABEL[ladder.rung]} didn't settle it within ${minutes} minutes`, ranOut ? { handoverRanOut: true } : {});
+        if (!to) continue;
+        moved++;
+        if (ranOut && to === "owner") {
+          const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+          if (ceo) {
+            await deps.notify(ceo.id, {
+              ticketId: null,
+              reason: "decision",
+              priority: 2,
+              note: [
+                `A permission request reached the owner without your advice because the handover ran out (decision ${d.id}).`,
+                untrusted("Boss Man alert", d.question),
+                "Add the advice now with the decisions tool (action advise, outcome advice): what it's needed for (which ticket, what step) and what wouldn't get done if the owner denies it. The owner can still answer it either way.",
+              ].join("\n").slice(0, 4000),
+            });
+          }
+        }
       }
       return { moved };
     },
@@ -590,16 +613,29 @@ export function alertLadder(
     },
 
     /** The CEO can't settle it: it goes to the owner with what was tried and the steps (the raise_decision rules). */
-    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; steps?: string[]; ownerMustDo?: boolean; lintOverride?: string; setsUp?: Addon }) {
+    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; steps?: string[]; ownerMustDo?: boolean; lintOverride?: string; setsUp?: Addon; adviceNeeded?: string; adviceDeny?: string }) {
       const [ceo] = await db.select().from(agents).where(and(eq(agents.id, ceoId), eq(agents.companyId, companyId), eq(agents.role, "ceo")));
       if (!ceo) throw new WatchdogError(403, "Only the CEO passes alerts to the owner.");
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
-      const ask = checkAsk({ ...input, byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      // The card's own options are buttons the owner sees, so R7 accepts "press <option>" (BOS-421).
+      const ask = checkAsk({ ...input, options: d.options as string[], byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
+      // Every permission card that reaches the owner carries the CEO's advice (BOS-233 item 2): what it's
+      // needed for and what wouldn't get done if the owner denies it. Start from any advice the CEO already
+      // added (BOS-636), so the recommendation and why given earlier aren't lost when the card is escalated;
+      // the fields passed here win over the earlier ones.
+      let advice: Record<string, unknown> | null = null;
+      if (d.kind === "permission") {
+        const neededFor = (input.adviceNeeded ?? "").trim();
+        const denyStops = (input.adviceDeny ?? "").trim();
+        if (neededFor.length < 10 || denyStops.length < 10) throw new WatchdogError(422, "A permission card needs the CEO's advice before it goes to the owner: adviceNeeded (what it's needed for: which ticket, what step) and adviceDeny (what wouldn't get done if the owner denies it).");
+        const earlier = adviceOf(d.context);
+        advice = { ...earlier, state: "advised", at: now().toISOString(), what: neededFor, denyStops };
+      }
       // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
       // card may reach the owner (DR-017 A), so the ceiling doesn't apply to a deliberate escalation.
-      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), ...(ask.lint ? { lint: ask.lint } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
+      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), ...(ask.lint ? { lint: ask.lint } : {}), ...(advice ? { advice } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
       return { id: d.id };
     },
   };

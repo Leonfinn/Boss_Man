@@ -663,7 +663,9 @@ cat > $D/proxy/active.caddy <<'EOF'
 	reverse_proxy server-blue:{args[0]} {
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 EOF
@@ -738,7 +740,7 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
 
 **Before you run anything here that updates the checkout (`git merge`, `git checkout`, `git pull`), type `umask 022` in your root shell.** A root shell with `umask 077` writes every file git changes as mode 600. The server runs as user `node` in its container and the image copies file permissions as they are on disk, so it crashes at start with `EACCES: permission denied, open '/app/...'`, and a rollback with the same umask fails the same way (6 Nov outage, BOS-562). `scripts/rebuild-live.sh`, `scripts/deploy.sh` and the host deployer now check this before the backup and build: if any git-tracked file is unreadable by others, or its folder can't be read and searched, they stop, change nothing, list up to 10 paths and print the fix (`git ls-files -z | xargs -0 chmod go+r`, then `chmod go+rx` on the folders). Only tracked files are touched: `.env`, `secrets/` and the data folder stay private. If the new colour never answers, the STOPPED message ends with the last 20 lines of its container log.
 
-`scripts/rebuild-live.sh` does all of the steps below in one go: it backs up, builds the colour the proxy points at, migrates, recreates it, sends SIGUSR2, and waits until `/api/ready` shows it leading at the new commit. It stops at the first failure and says which step. The steps by hand, for reference (the examples say blue):
+`scripts/rebuild-live.sh` does all of the steps below in one go: it backs up, builds the colour the proxy points at, migrates, recreates it, sends SIGUSR2, and waits until `/api/ready` shows it leading at the new commit. It stops at the first failure and says which step. It first takes the host deployer's lock (`$BOSSMAN_DEPLOYER/lock`): if a deploy or switch-back is running it waits up to 120 s (`REBUILD_LOCK_WAIT_SECONDS`), then stops having changed nothing and says what holds the lock; run it again once the deployer is idle. It also refuses, changing nothing, while an update's trial window is running (`state/soak` exists): the deployer would switch a hand rebuild back, so wait until the window ends. The steps by hand, for reference (the examples say blue):
 
 1. Back up the database:
 ```sh
@@ -782,7 +784,9 @@ cat > $D/proxy/active.caddy.new <<'INC'
 		header_up X-Forwarded-For {client_ip}
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC

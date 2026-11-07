@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, ApiError, type Agent, type Company, type FundingSource, type Project } from "../api";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
@@ -1127,6 +1127,8 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "silentSteerMinutes", label: "Ask a silent run for a status after", unit: "minutes" },
   { key: "silentFlagMinutes", label: "Flag a silent run to the Scrum Master after", unit: "minutes" },
   { key: "unprovenHours", label: "Flag an unproven cause ('likely') after", unit: "hours" },
+  { key: "idleAgentMinutes", label: "Re-wake an agent whose in-progress work has no run for", unit: "minutes" },
+  { key: "spareCapacityMinutes", label: "Tell the CEO the company is under-used after", unit: "minutes" },
 ];
 
 /** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */
@@ -1532,6 +1534,62 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
           <option value="off">Off: use the older text rules</option>
         </select>
       </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null } | null; sandboxCheckedAt?: string | null };
+
+/** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
+function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const act = useAction();
+  const status = usePoll((signal) => api<FenceStatus>(`/api/companies/${company.id}/runner`, { signal }), 30_000, `fence-${company.id}`);
+  const mode = company.fenceMode ?? "off";
+  const sb = status.data?.sandbox ?? null;
+  const hostLine = !status.data?.registered
+    ? "This company has no runner yet."
+    : !sb
+      ? "This host hasn't reported its fence level yet. It reports each time the runner starts."
+      : sb.level === "unavailable"
+        ? "This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). Agents run as before."
+        : `This host fences agents ${sb.level === "full" ? "fully" : "partly"}${sb.missing.length ? ` (not covered: ${sb.missing.join(", ")})` : ""}.${sb.probe === false ? " Its self-test did not see a write outside the agent's folders refused." : ""} Last checked ${status.data?.sandboxCheckedAt ? when(status.data.sandboxCheckedAt) : "never"}.`;
+  return (
+    <Section id="fence-h" title="Agent fence">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
+      </p>
+      <p style={{ fontSize: 14 }}>{hostLine}</p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="fence-mode">Fence</label>
+        <select
+          id="fence-mode"
+          value={mode}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { fenceMode: e.target.value } });
+              onChanged();
+              return "Saved. It applies to runs that start from now on.";
+            })
+          }
+        >
+          <option value="off">Off: agents run as before</option>
+          <option value="watch">Watch: agents run inside the fence and every refusal is logged</option>
+          <option value="enforce" disabled>
+            Enforce: not available yet (waiting for a security fix, BOS-323)
+          </option>
+        </select>
+      </div>
+      <details style={{ marginTop: 10 }}>
+        <summary>Setting up a host</summary>
+        <ul style={{ fontSize: 14 }}>
+          <li>The fence needs a Linux kernel with Landlock (5.13 or newer, and 6.x for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
+          <li>The runner tests the fence each time it starts. If this page says "can't fence", update the host's kernel, or check that the container's security profile doesn't block Landlock, then restart the runner.</li>
+          <li>A fenced agent has its own temporary folder for each run and can't write to the shared /tmp. A skill that hard-codes /tmp needs to use the folder in $TMPDIR instead.</li>
+          <li>Start with Watch on one company, look at the permission log after a few days, and fix what it shows before anything stricter.</li>
+        </ul>
+      </details>
       {act.view}
     </Section>
   );
@@ -2010,6 +2068,74 @@ type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; c
 const ROLE_NOTE = { leader: "", standby: " (another copy is in charge; changes here are refused)", single: " (no leader lock)" };
 
 /** This copy of the server ("leader" runs the work, "standby" only serves reads; docs/09-self-deploy.md) and, when blue/green is on, both colours. */
+type HostFactsView = {
+  hostName: string | null;
+  reportedAt: string | null;
+  ownerFacts: string[];
+  facts: Record<string, { value: string; source: "host" | "owner"; at: string; conflict?: { confirmed: string; reported: string } }>;
+};
+const OWNER_FACT_LABELS: Record<string, string> = {
+  "network.publicAddress": "Address you reach Boss Man at from outside",
+  "repo.deployKeyAdded": "Deploy key added to the code host (yes or no)",
+};
+
+/** Settings → This host (BOS-419): what the host deployer reported, and the facts only the owner can confirm. */
+export function ThisHost() {
+  const facts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 30_000, "host-facts");
+  const act = useAction();
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const d = facts.data;
+  if (!d) return null;
+  const keys = Object.keys(d.facts).sort();
+  const save = (key: string) =>
+    act.run(async () => {
+      await api("/api/host-facts", { method: "PUT", body: { key, value: draft[key] ?? "" } });
+      facts.reload();
+      return "Saved.";
+    });
+  return (
+    <Section id="this-host-h" title="This host">
+      <p className="muted" style={{ fontSize: 14 }}>
+        {d.reportedAt
+          ? `What the host${d.hostName ? ` ${d.hostName}` : ""} last told Boss Man about itself, ${when(d.reportedAt)}. Agents' cards use these facts, so a card can't be raised while one it needs is missing.`
+          : "The host hasn't reported yet. Once its deployer runs, its facts show up here."}
+      </p>
+      {keys.length > 0 && (
+        <dl data-testid="host-facts" style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 16px", fontSize: 14 }}>
+          {keys.map((k) => {
+            const f = d.facts[k]!;
+            return (
+              <Fragment key={k}>
+                <dt className="mono">{k}</dt>
+                <dd>
+                  <span className="mono">{f.value}</span> <span className="muted">({f.source === "host" ? "reported by the host" : "confirmed by you"})</span>
+                  {f.conflict && (
+                    <span className="error" role="alert">
+                      {" "}
+                      You confirmed "{f.conflict.confirmed}" but the host reports "{f.conflict.reported}". The host's value is used.
+                    </span>
+                  )}
+                </dd>
+              </Fragment>
+            );
+          })}
+        </dl>
+      )}
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Facts only you can give</h3>
+      {d.ownerFacts.map((k) => (
+        <div key={k} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <label htmlFor={`hf-${k}`}>{OWNER_FACT_LABELS[k] ?? k}</label>
+          <input id={`hf-${k}`} className="mono" maxLength={500} placeholder={d.facts[k]?.value ?? ""} value={draft[k] ?? ""} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} />
+          <button type="button" className="btn" disabled={act.busy || !(draft[k] ?? "").trim() || d.facts[k]?.source === "host"} onClick={() => void save(k)}>
+            Confirm
+          </button>
+        </div>
+      ))}
+      {act.view}
+    </Section>
+  );
+}
+
 function ServerPanel() {
   const h = usePoll((signal) => api<Health>("/api/health", { signal }), 10_000, "server-role");
   const bg = usePoll((signal) => api<BlueGreen>("/api/bluegreen", { signal }), 10_000, "bluegreen");
@@ -2299,6 +2425,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
           <>
             <ServerPanel />
             <SelfDeploy go={go} />
+            <ThisHost />
             <RunLimits />
           </>
         )}
@@ -2350,6 +2477,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <AdviceTimeout company={company} onChanged={onChanged} />
             <StandingRules company={company} onChanged={onChanged} />
             <PermissionJudgeSetting company={company} onChanged={onChanged} />
+            <FenceSetting company={company} onChanged={onChanged} />
             <SecondOpinionSetting company={company} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />
