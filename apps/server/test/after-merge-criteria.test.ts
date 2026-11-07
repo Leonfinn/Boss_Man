@@ -248,7 +248,7 @@ describe("after-merge criteria", () => {
     expect((await ctx.row(t.id)).noCode).toBe(true);
   });
 
-  it("a no-code ticket sent back after its merge, reopened for code, does not close on the live check's empty diff", { timeout: 120_000 }, async () => {
+  it("a merged no-code ticket whose live check is reported closes as done on the empty diff", { timeout: 120_000 }, async () => {
     const { db, req, co, dev, project } = ctx;
     await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
     const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
@@ -259,15 +259,12 @@ describe("after-merge criteria", () => {
       if (command.type === "workspace.carried") queueMicrotask(() => ctx.runners.resolveReply({ requestId: (command as { requestId: string }).requestId, ok: true, data: { carried: [] } }));
       return true;
     });
-    const t = await ctx.ticket({ title: "Reopened for code", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "review", mergeCommit: "c".repeat(40), noCode: true, stateNote: `${LIVE.text} pass` });
+    const t = await ctx.ticket({ title: "Live check reported", assigneeAgentId: dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "review", mergeCommit: "c".repeat(40), noCode: true, stateNote: `${LIVE.text} pass` });
     await db.update(tickets).set({ branch: `bossman/${t.id}` }).where(eq(tickets.id, t.id));
     const r = await ctx.review.landVisible(t.id, "the owner");
-    // Not closed as an after-merge step: sent back to make the change instead of closing on the empty
-    // diff. The mark is only cleared once a real commit lands (see the reopen test above), so it stays
-    // set here, but the send-back keeps the ticket from being done without one.
-    expect(r.outcome).toBe("empty");
-    const after = await ctx.row(t.id);
-    expect(after.systemState).toBe("in_progress");
+    // The live check is done: this is the after-merge step, so it closes rather than looping back.
+    expect(r.outcome).toBe("done");
+    expect((await ctx.row(t.id)).systemState).toBe("done");
   });
 
   // BOS-575: BOS-525 merged with "3 fail: timing measured after merge (owner accepted, follow-up ticket)",

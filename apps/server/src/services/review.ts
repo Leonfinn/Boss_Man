@@ -442,15 +442,6 @@ export function reviewService(
     return { outcome: "merged" as const, delivered: null, detail: { commit, ...(left ? { afterMerge: left } : {}), ...(carry ? { carried: carry.carried } : {}) } };
   }
 
-  /**
-   * True when a merged, no-code ticket's branch shows no commit after the merge: the after-merge step is done,
-   * and a ticket reopened for real code (BOS-532) has nothing new to review yet. The diff read must have
-   * seen the branch (a runner that couldn't say never blocks the close).
-   */
-  function reopenedForCode(t: typeof tickets.$inferSelect, changed: WorkspaceDiff | null): boolean {
-    return !!changed && !!t.noCode && !!t.mergeCommit && !afterMergeLeft(t) && (changed.head === t.mergeCommit || !changed.head);
-  }
-
   /** Checks the merged ticket now has to show: its after-merge criteria still without a pass or fail. */
   function afterMergeLeft(t: typeof tickets.$inferSelect): string[] | null {
     const left = unreportedAfterMerge(t.acceptanceCriteria, t.stateNote);
@@ -1171,12 +1162,9 @@ export function reviewService(
         }
         // Nothing to merge, but a live check still can't be made before the change is live (DR-024 #5): keep it to show.
         if (afterMergeLeft(t)) return closeAfterMerge(t, null, causedByRunId);
-        // Already merged with nothing after it: the after-merge step, done now. A ticket reopened for real
-        // code (BOS-532) must not close on that step's empty diff: it goes back for the change instead.
-        if (await reopenedForCode(t, changed)) {
-          const delivered = await sendBack(`The live check is recorded and this ticket was reopened for more work, but its branch has no new commits yet: ${NOTHING_CHANGED} Then move the ticket back to review.`, "reopened, nothing changed");
-          return { outcome: "empty", delivered };
-        }
+        // The live check is reported, so this is the after-merge step: close the ticket. A merged ticket
+        // reopened for real code (BOS-532) is already a code ticket: its mark was cleared when it was moved
+        // back to ready or in_progress, or when a new commit landed (above), so it is sent back earlier.
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
         return { outcome: "done", delivered: null, detail: { note: "Nothing in the repository changed, so there was nothing to check or merge." } };
       }
