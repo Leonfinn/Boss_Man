@@ -869,7 +869,8 @@ function usesScratchUnsafely(c: string): boolean {
     if (head === "") continue;
     // A command word that is a variable or backtick may expand to a file the command wrote (`X=c; $X`): unread code.
     // Any `$` or backtick anywhere in the word counts (`./$X`, `./"$X"`, `$(echo ./c)`), not just at its start.
-    if (/[$\x60]/.test(head) && (written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) return true;
+    // Globs and brace lists (`./c*`, `./[c]`, `./{c,d}`) are not plain literals either; `[` and `[[` are the test builtin.
+    if ((/[$\x60]/.test(head) || (head !== "[" && head !== "[[" && /[*?[{]/.test(head))) && (written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) return true;
     const sh = head.replace(/^.*\//, "");
     // F4: once a command has unpacked an archive or copied a folder in, files it never wrote by name may exist. Only readers
     // and file tools may follow in the same command.
