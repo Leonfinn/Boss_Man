@@ -342,11 +342,16 @@ need_memory() { # sets NEED_MB (free memory an update needs) and NEED_FROM (wher
 }
 
 # The floor: true when this request must stay in the inbox for now. Only a fixed string is looked for here; the
-# request is checked properly once it is taken. A host that can't read its memory never holds.
+# request is checked properly once it is taken. A host that can't read its memory never holds. Only a server update
+# is held: Boss Man waits for a quiet host, asks the owner after 30 minutes and can send "Update now" only for those.
+# A runner update has none of that (it drains runs itself), so holding it here would leave it stuck with no card.
 held_for_memory() { # request file
+  local body
   [[ -f $1 && ! -L $1 && -n $MEM_AVAIL && -n $NEED_MB ]] || return 1
   ((MEM_AVAIL < NEED_MB)) || return 1
-  if [[ $(head -c 4096 "$1" | LC_ALL=C tr -d ' \t\r\n') == *'"quiet":"override"'* ]]; then
+  body="$(head -c 4096 "$1" | LC_ALL=C tr -d ' \t\r\n')"
+  [[ $body == *'"target":"server"'* ]] || return 1
+  if [[ $body == *'"quiet":"override"'* ]]; then
     log "Only $MEM_AVAIL MB free and an update needs $NEED_MB MB, but the owner chose to update now: taking the request."
     return 1
   fi

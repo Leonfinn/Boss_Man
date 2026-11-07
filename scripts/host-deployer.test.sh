@@ -301,6 +301,12 @@ rm -f "$D/state/last-server"; c4b="$(push apps/server/c4b)"; mv "$T/meminfo" "$T
 [[ $(status to_commit) == "$c4b" ]] || fail "no memory numbers held a request: $(cat "$D/outbox/status.json")"
 hasnt "$D/outbox/headroom.json" '"availableMb"'
 mv "$T/meminfo.off" "$T/meminfo"
+# Only a server update is held (Freddy, BOS-420): a runner update has no wait, card or "Update now", so the floor must
+# not leave it stuck in the inbox. Below the floor it is taken as before.
+rm -f "$D/state/last-runner"; meminfo 33554432 2097152; req runner "$(git -C "$T/src" rev-parse HEAD)"; host
+[[ ! -e $D/inbox/request.json && $(status target) == runner && $(status result) == deployed ]] || fail "a runner update was held by the memory floor: $(cat "$D/outbox/status.json")"
+hasnt "$D/outbox/headroom.json" '"holding"'
+meminfo
 
 # 13. The config file must be private; the runner-path rule matches deploy.sh.
 chmod 644 "$D/host.conf"
