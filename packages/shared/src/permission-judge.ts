@@ -173,7 +173,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // tar and unzip, must be placed too.
   for (const t of toolTargets(forTargets)) addTarget(t);
   // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
-  if (!inlineCodeOk(c, writeOk)) return result("outside");
+  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
@@ -514,6 +514,73 @@ function variableCommandWord(c: string, inner = false): boolean {
     const piped = i >= 2 && (parts[i - 1] === "|" || parts[i - 1] === "|&");
     // Any option, a redirect or heredoc into it, or a pipe: deny. Over-denial is fine.
     if (piped || /</.test(seg) || words.slice(at + 1).some((t) => t.startsWith("-"))) return true;
+  }
+  return false;
+}
+
+/**
+ * True when an interpreter or shell runs code the judge can't read: a script file that is in /tmp, outside the agent's own
+ * folder, named by a variable, `~` or `..`, or written earlier in the same command; or code that arrives on stdin from a file,
+ * a process substitution or a pipe other than echo/printf. Checked-in scripts in the agent's own folder (`node scripts/x.js`)
+ * are fine. Allow-list: anything not recognised as such a script is true (Deny).
+ */
+function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
+  const interp = "python[\\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh|g?awk|mawk|sh|bash|zsh|dash|ksh";
+  // Only where a command word stands: at the start, after a separator, `then`/`do`, or a wrapper (env, nohup, timeout N, ...).
+  const wrap = "(?:\\b(?:then|do|else|exec|env|nohup|time|sudo|xargs|command|nice|setsid|stdbuf)\\s+|\\btimeout\\s+)";
+  const re = new RegExp(`(?:^|[;&|(\\n{]\\s*|${wrap})(?:(?:-\\S+|\\d+\\w*|\\w+=\\S*)\\s+)*(?:[\\w./-]*/)?(${interp})(?![\\w./-])((?:[^;&|\\n'"]|'[^']*'|"[^"]*")*)`, "g");
+  const unq = (t: string): string => t.replace(/^['"]+|['"]+$/g, "");
+  const risky = (p: string, relOk: boolean): boolean => {
+    p = unq(p);
+    if (p === "" || p === "-") return false;
+    if (/\$|\x60|^~|\.\./.test(p) || /^\/tmp(\/|$)/.test(p)) return true;
+    if (p.startsWith("/")) return !inOwn(p);
+    return !relOk;
+  };
+  const writeOp = />|\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\bdd\b|\bcurl\b|\bwget\b|\btouch\b|\bsed\b|\bpatch\b|\bgit\s+(?:apply|checkout|restore|am)\b|\bunzip\b|\btar\b/;
+  // A relative path lands wherever the last `cd` went.
+  let relOk = true;
+  for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) {
+    const d = m[1] ?? "";
+    if (!dirOk(d, inOwn) || (/^[/~$]/.test(d) && !inOwn(d))) relOk = false;
+  }
+  const writtenElsewhere = (p: string, at: number, len: number): boolean => {
+    const rest = c.slice(0, at) + " " + c.slice(at + len);
+    const base = unq(p).replace(/^.*\//, "");
+    return writeOp.test(rest) && (rest.includes(unq(p)) || (base !== "" && rest.includes(base)));
+  };
+  // `source x` / `. x` runs a file in the shell.
+  for (const m of c.matchAll(/(?:^|[;&|(\n]\s*)(?:source|\.)\s+(\S+)/g)) if (risky(m[1]!, relOk) || writtenElsewhere(m[1]!, m.index!, m[0]!.length)) return true;
+  for (const m of c.matchAll(re)) {
+    const name = m[1]!;
+    const args = m[2]!;
+    const toks = args.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+    const awk = /awk$/.test(name);
+    // Inline code (-c / -e ...) is read by inlineCodeOk; an awk program is inline unless it has -f.
+    let inline = awk && !toks.includes("-f");
+    for (const t of toks) {
+      if (!t.startsWith("-") || t === "-") break;
+      // `-r` is a module to preload for node and ruby, not code.
+      if (/^-[A-Za-z]*[ceEp]$/.test(t) || (/^-[A-Za-z]*r$/.test(t) && /^(?:php|Rscript|lua)$/.test(name)) || /^--(?:eval|command|print)\b/.test(t)) { inline = true; break; }
+    }
+    if (inline) continue;
+    // Words that name the script: everything up to the first one that looks like a script file, else all of them.
+    // Redirect targets (`> file`, `2> file`) are not the script.
+    const words = toks.filter((t, i) => !/^<|^>|^\d*>/.test(t) && !/^\d*>>?$|^&>$/.test(toks[i - 1] ?? ""));
+    const extAt = words.findIndex((t) => /\.(?:[cm]?js|ts|py|pl|rb|php|lua|a?sh|bash|R|awk)['"]?$/i.test(t));
+    const named = (extAt >= 0 ? words.slice(0, extAt + 1) : words).filter((t) => t !== "-");
+    const candidates = named.flatMap((t) => (t.startsWith("-") ? (t.includes("=") ? [t.slice(t.indexOf("=") + 1)] : []) : [t]));
+    const hasScript = named.some((t) => !t.startsWith("-"));
+    if (/<\(/.test(args)) return true;
+    for (const p of candidates) if (risky(p, relOk) || writtenElsewhere(p, m.index!, m[0]!.length)) return true;
+    if (hasScript) continue;
+    // No script file: the code comes from stdin.
+    for (const r of args.matchAll(/(?<![<\d])<(?![<(])\s*(\S+)/g)) if (risky(r[1]!, relOk) || writtenElsewhere(r[1]!, m.index!, m[0]!.length)) return true;
+    const before = c.slice(0, m.index!).replace(/(?:\b(?:env|exec|command|nohup|time|sudo|xargs|timeout\s+\d+\w*)\s+|\w+=\S*\s+)*$/, "");
+    if (/^\|/.test(m[0]!) || /\|&?\s*$/.test(before)) {
+      const prev = before.replace(/\|&?\s*$/, "").split(/&&|\|\||[;&|\n]/).pop() ?? "";
+      if (!/^\s*(?:echo|printf)\s/.test(prev) || /\$\(|\x60|</.test(prev)) return true;
+    }
   }
   return false;
 }

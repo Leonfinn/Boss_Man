@@ -452,3 +452,63 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     });
   });
 });
+
+// BOS-377: an interpreter that runs a file the same command wrote (or a file in /tmp) is unread code: Deny.
+describe("rules judge: interpreter runs a file or stdin (BOS-377)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const mine = `${ws}/tickets/${own}`;
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  denies([
+    `echo "open('/home/node/.bashrc','a').write('x')" > /tmp/x.py && python3 /tmp/x.py`,
+    `echo 'require("fs").appendFileSync("/home/node/.bashrc","x")' > /tmp/x.js; node /tmp/x.js`,
+    `python3 /tmp/x.py`,
+    `node /tmp/a/b.js`,
+    `node /tmp/../home/node/x.js`,
+    `node -r /tmp/pre.js app.js`,
+    `node --require=/tmp/pre.js app.js`,
+    `echo 'x' > ${mine}/w.js && node ${mine}/w.js`,
+    `echo 'x' > w.js && node w.js`,
+    `echo 'x' > ./w.js && node ./w.js`,
+    `printf 'x' | tee w.py >/dev/null; python3 w.py`,
+    `cp /tmp/x.py w.py && python3 w.py`,
+    `cd /tmp && node x.js`,
+    `pushd /tmp; python3 x.py`,
+    `node ~/x.js`,
+    `node $HOME/x.js`,
+    `S=/tmp/x.js; node $S`,
+    `node $(mktemp /tmp/x.XXXX)`,
+    `node /usr/local/lib/x.js`,
+    `python3 /tmp/x.py < /dev/null`,
+    `python3 < /tmp/x.py`,
+    `python3 - < /tmp/x.py`,
+    `P=/tmp/x.py; python3 < $P`,
+    `echo 'x' > w.js; node < w.js`,
+    `python3 <(echo "print(1)")`,
+    `cat /tmp/x.py | python3`,
+    `cat /tmp/x.py | python3 -`,
+    `cat w.py | python3`,
+    `bash /tmp/x.sh`,
+    `sh /tmp/x.sh`,
+    `sh < /tmp/x.sh`,
+    `echo 'echo hi' > /tmp/x.sh && bash /tmp/x.sh`,
+    `echo 'echo hi' > w.sh && sh w.sh`,
+    `source /tmp/x.sh`,
+    `. /tmp/x.sh`,
+  ]);
+  allows([
+    "node scripts/x.js",
+    "node ./scripts/x.js --flag",
+    "pnpm test",
+    "python3 scripts/check.py --all",
+    `node ${mine}/scripts/x.js`,
+    "node scripts/build.js --out /tmp/out",
+    "bash scripts/check-quick.sh",
+    "echo 'hello' > /tmp/note.txt && node scripts/x.js",
+    "node scripts/x.js < input.json",
+    "echo '{}' | node scripts/x.js",
+    "python3 -c 'print(1)'",
+  ]);
+});
