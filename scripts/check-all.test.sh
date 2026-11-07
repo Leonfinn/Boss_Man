@@ -342,9 +342,17 @@ if command -v flock >/dev/null; then
   for _ in $(seq 300); do grep -q "lock held" "$t/aged.out" 2>/dev/null && break; sleep 0.2; done
   grep -q "lock held" "$t/aged.out" || fail "ageing: an aged hand-run check was not served ahead of a merge check: $(cat "$t/aged.out")"
   wait "$a" || true
-  # Slot log: the hold above left a start and an end line naming the folder.
-  grep -q " start pid=.*kind=hand slot=1 folder=" "$t/lock.slotlog" || fail "slot log: no start line: $(cat "$t/lock.slotlog" 2>&1)"
-  grep -q " end pid=.*kind=hand slot=1 folder=$(cd "$here/.." && pwd -P)\$" "$t/lock.slotlog" || fail "slot log: no end line: $(cat "$t/lock.slotlog" 2>&1)"
+  # Slot log: the hold above left a start and an end line naming the check kind, the checked tree (BOS-666) and the folder.
+  # The tree is this checkout's, with "-dirty" when it has uncommitted changes (as it may while the tests are written).
+  stree="$(git -C "$here/.." rev-parse 'HEAD^{tree}')"
+  grep -Eq " start pid=.*kind=hand slot=1 check=full tree=$stree(-dirty)? folder=" "$t/lock.slotlog" || fail "slot log: no start line: $(cat "$t/lock.slotlog" 2>&1)"
+  grep -Eq " end pid=.*kind=hand slot=1 check=full tree=$stree(-dirty)? folder=$(cd "$here/.." && pwd -P)\$" "$t/lock.slotlog" || fail "slot log: no end line: $(cat "$t/lock.slotlog" 2>&1)"
+  # check-quick.sh names its slot hold check=quick; an unknown kind falls back to full.
+  rm -rf "$t/lock.queue" "$t/lock.slotlog"; mkdir -p "$t/lock.queue"  # drop the stand-in merge entry, or these holds wait behind it
+  lock env CHECK_ALL_CHECK_KIND=quick >/dev/null || fail "quick-kind hold failed"
+  grep -Eq " start pid=.* check=quick tree=$stree(-dirty)? folder=" "$t/lock.slotlog" || fail "slot log: no check=quick line: $(cat "$t/lock.slotlog" 2>&1)"
+  rm -f "$t/lock.slotlog"; lock env 'CHECK_ALL_CHECK_KIND=x y' >/dev/null || fail "odd-kind hold failed"
+  grep -Eq " start pid=.* check=full tree=" "$t/lock.slotlog" || fail "slot log: odd kind not replaced by full: $(cat "$t/lock.slotlog" 2>&1)"
   # One place per folder: a newer check from the same folder replaces the older one, which leaves saying so.
   rm -rf "$t/lock.queue"; hold 1 3600; h1=$!; sleep 0.3
   ( r=0; lock env >"$t/old.out" 2>&1 || r=$?; echo "$r" >"$t/old.rc" ) & o=$!

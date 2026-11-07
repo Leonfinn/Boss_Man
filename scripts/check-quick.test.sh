@@ -31,7 +31,9 @@ if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "boom"; exit 1
 S
 chmod +x "$t/bin/pnpm" "$t/bin/node"
 unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED CHECK_QUICK_BROAD_FILES CHECK_ALL_FORCE
-export PATH="$t/bin:$PATH" LOG="$t/log" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_PAIR_PROOF="$t/proof" CHECK_ALL_QUEUE_REPORT=1
+unset CHECK_ALL_SLOT_LOG
+# Most cases re-run one tree with different settings, so they switch off reuse; the reuse cases below set CHECK_QUICK_RERUN= .
+export PATH="$t/bin:$PATH" LOG="$t/log" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_PAIR_PROOF="$t/proof" CHECK_ALL_QUEUE_REPORT=1 CHECK_QUICK_RERUN=1
 
 g() { git -C "$repo" -c user.name=t -c user.email=t@t "$@"; }
 g init -q -b main; echo a >"$repo/README"; g add -A; g commit -q -m init
@@ -178,6 +180,59 @@ g checkout -q -B few origin/main
 many=(); for i in $(seq 1 15); do many+=("apps/server/src/m$i.ts"); done; commit "${many[@]}"
 run 0 "15 files is not broad" env
 logged "vitest related" "15 files"
+
+# Reuse (BOS-666): a pass on a clean tree is written to the slot log; the next run of the same tree and base reuses it.
+sl="$t/lock.slotlog"; npass() { grep -c " quick-pass " "$sl" || true; }
+g checkout -q -B reuse origin/main; commit apps/web/src/r.ts
+rm -f "$sl"; tr1="$(g rev-parse 'HEAD^{tree}')"; b1="$(g rev-parse origin/main)"
+run 0 "reuse: first run" CHECK_QUICK_RERUN=
+logged "pnpm --filter @boss-man/web typecheck" "reuse: first run runs"
+grep -Eq "^[0-9TZ:-]+ quick-pass pid=[0-9]+ kind=hand check=quick tree=$tr1 base=$b1 coverage=all folder=" "$sl" || fail "reuse: no quick-pass line: $(cat "$sl" 2>&1)"
+if command -v flock >/dev/null; then
+  grep -Eq " start pid=[0-9]+ kind=hand slot=1 check=quick tree=$tr1 folder=" "$sl" || fail "reuse: slot hold not named check=quick tree=: $(cat "$sl")"
+fi
+run 0 "reuse: same tree" CHECK_QUICK_RERUN=
+notlogged "pnpm" "reuse: same tree ran again"
+grep -q "^PASS  reused: this exact tree ($tr1) already passed" "$t/out" || fail "reuse: no reused line: $(cat "$t/out")"
+grep -q "^check-quick: all steps passed" "$t/out" || fail "reuse: no summary: $(cat "$t/out")"
+grep -Eq " quick-reuse pid=[0-9]+ kind=hand check=quick tree=$tr1 base=$b1 coverage=all " "$sl" || fail "reuse: not counted: $(cat "$sl")"
+[ "$(npass)" = 1 ] || fail "reuse: a reuse wrote a second pass line: $(cat "$sl")"
+# CHECK_QUICK_RERUN=1 runs anyway, and a failure records no pass.
+run 1 "reuse: rerun" FAIL_ON=typecheck
+[ "$(npass)" = 1 ] || fail "reuse: a failed run recorded a pass: $(cat "$sl")"
+# The merge gate never reuses.
+run 0 "reuse: merge gate" CHECK_QUICK_RERUN= BOSSMAN_MERGE_CHECK=1
+logged "pnpm --filter @boss-man/web typecheck" "reuse: merge gate reused a pass"
+# Another base commit runs again, even with the same files (here a second commit with origin/main's tree).
+g update-ref refs/heads/base2 "$(g commit-tree -p origin/main -m same-files 'origin/main^{tree}')"
+run 0 "reuse: other base" CHECK_QUICK_RERUN= BASE=base2
+logged "pnpm --filter @boss-man/web typecheck" "reuse: other base reused"
+# An uncommitted change runs again and records nothing; so does an untracked file.
+echo x >>"$repo/apps/web/src/r.ts"; n0="$(npass)"
+run 0 "reuse: dirty" CHECK_QUICK_RERUN=
+logged "pnpm --filter @boss-man/web typecheck" "reuse: dirty tree reused"
+[ "$(npass)" = "$n0" ] || fail "reuse: a dirty tree recorded a pass: $(cat "$sl")"
+if command -v flock >/dev/null; then tail -n 1 "$sl" | grep -q " check=quick tree=$tr1-dirty folder=" || fail "reuse: dirty hold not marked: $(tail -n 2 "$sl")"; fi
+g checkout -q -- apps/web/src/r.ts; echo y >"$repo/apps/web/src/new.ts"
+run 0 "reuse: untracked" CHECK_QUICK_RERUN=
+logged "pnpm --filter @boss-man/web typecheck" "reuse: untracked file reused"
+rm -f "$repo/apps/web/src/new.ts"
+# A new commit (any change to the tree) runs again.
+commit apps/web/src/r.ts
+run 0 "reuse: changed tree" CHECK_QUICK_RERUN=
+logged "pnpm --filter @boss-man/web typecheck" "reuse: changed tree reused"
+# A pass that skipped a broad test list (coverage=partial) is reused by a plain run, never by CHECK_QUICK_FORCE_RELATED=1.
+g checkout -q -B reuse-broad origin/main; commit apps/server/src/mcp.ts
+run 0 "reuse: broad first" CHECK_QUICK_RERUN=
+grep -q " quick-pass .* tree=$(g rev-parse 'HEAD^{tree}') .* coverage=partial " "$sl" || fail "reuse: partial not recorded: $(cat "$sl")"
+run 0 "reuse: broad again" CHECK_QUICK_RERUN=
+notlogged "pnpm" "reuse: broad pass not reused"
+run 0 "reuse: forced after partial" CHECK_QUICK_RERUN= CHECK_QUICK_FORCE_RELATED=1
+logged "vitest related --run src/mcp.ts" "reuse: forced run reused a partial pass"
+run 0 "reuse: plain after forced" CHECK_QUICK_RERUN=
+notlogged "pnpm" "reuse: full pass not reused"
+run 0 "reuse: forced after forced" CHECK_QUICK_RERUN= CHECK_QUICK_FORCE_RELATED=1
+notlogged "pnpm" "reuse: forced run did not reuse a coverage=all pass"
 
 # A branch that conflicts with the base
 g checkout -q main; echo main >"$repo/README"; g add -A; g commit -q -m m; g update-ref refs/remotes/origin/main HEAD
