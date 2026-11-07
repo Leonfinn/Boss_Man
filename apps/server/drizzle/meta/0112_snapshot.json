@@ -1,5 +1,5 @@
 {
-  "id": "b44ba8a6-3095-4ad1-a524-0f65bdc42149",
+  "id": "a93cac06-54cc-43ee-8a03-9d64b57148ae",
   "prevId": "cbf940bf-e22d-4f45-9b93-6b93ff755ee8",
   "version": "7",
   "dialect": "postgresql",
@@ -1568,7 +1568,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2}'::jsonb"
+          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2,\"idleAgentMinutes\":15,\"spareCapacityMinutes\":20}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -1584,6 +1584,18 @@
         },
         "watchdog_last_sweep_at": {
           "name": "watchdog_last_sweep_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "watchdog_spare_at": {
+          "name": "watchdog_spare_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "watchdog_spare_alerted_at": {
+          "name": "watchdog_spare_alerted_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -5169,24 +5181,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_by": {
-          "name": "created_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "source_decision_id": {
-          "name": "source_decision_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -5202,19 +5196,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "policy_rules_source_decision_id_decisions_id_fk": {
-          "name": "policy_rules_source_decision_id_decisions_id_fk",
-          "tableFrom": "policy_rules",
-          "tableTo": "decisions",
-          "columnsFrom": [
-            "source_decision_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

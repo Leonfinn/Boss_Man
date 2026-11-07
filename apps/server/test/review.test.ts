@@ -819,7 +819,7 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
     await c.db.update(tickets).set({ systemState: "review", pullRequestNote: null }).where(eq(tickets.id, c.ticket.id));
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
-    expect(c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command)).toEqual(["pnpm test", "pnpm test:e2e"]);
+    expect(c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command)).toEqual(["export BOSSMAN_FULL_CHECK_NEXT=1; pnpm test", "pnpm test:e2e"]);
   });
 
   it("never lands a carried ticket that isn't approved, even when this branch holds all of it (BOS-372)", async () => {
