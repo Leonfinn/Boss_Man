@@ -474,7 +474,9 @@ write_include() { # colour
 		header_up X-Forwarded-For {client_ip}
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC
@@ -485,7 +487,9 @@ INC
 	reverse_proxy server-$1:{args[0]} {
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC

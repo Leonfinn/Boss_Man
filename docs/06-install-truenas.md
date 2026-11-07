@@ -663,7 +663,9 @@ cat > $D/proxy/active.caddy <<'EOF'
 	reverse_proxy server-blue:{args[0]} {
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 EOF
@@ -782,7 +784,9 @@ cat > $D/proxy/active.caddy.new <<'INC'
 		header_up X-Forwarded-For {client_ip}
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC

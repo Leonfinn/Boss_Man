@@ -595,6 +595,7 @@ export async function buildApp(opts: AppOptions) {
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
     resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
+    releaseUnblocked: (ticketId) => scheduler.releaseIfUnblocked(ticketId),
     landingActive: (ticketId) => review.landingActive(ticketId),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
@@ -748,6 +749,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
       await work.updateTicket(ticketId, { state: "done", outcome: "cancelled", overLimit: true });
     },
+    moveAfterMerge: (ticketId, criteria) => review.moveAfterMerge(ticketId, criteria),
     raiseCap: async (ticketId) => {
       const [t] = await db.select({ cap: tickets.costCapMicros, projectCap: projects.ticketCostCapMicros }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, ticketId));
       const cap = t?.cap ?? t?.projectCap;

@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
+import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -424,6 +424,102 @@ describe("scheduler", () => {
     const board = (await ctx.req("GET", `/api/projects/${ctx.project.id}/board`)).json();
     const tlsCard = board.columns.flatMap((c: { tickets: Array<{ id: string; systemState: string }> }) => c.tickets).find((c: { id: string }) => c.id === tls.id);
     expect(tlsCard.systemState).toBe("ready");
+  });
+
+  describe("backlog tickets waiting on others (BOS-603)", () => {
+    const mk = async (title: string, extra: Record<string, unknown> = {}) => (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title, ...extra })).json();
+    const stateOf = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!.systemState;
+    const unblockedWakes = async (ticketId: string) => (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === ticketId && w.reason === "unblocked");
+
+    it("wakes a backlog ticket when its blocker is done", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const waiting = await mk("Waiting", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: x.id });
+      expect(await stateOf(waiting.id)).toBe("backlog");
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(waiting.id)).toBe("ready");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(1);
+    });
+
+    it("waits for both blockers", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const a = await mk("A");
+      const b = await mk("B");
+      const waiting = await mk("Waiting", { assigneeAgentId: worker.id });
+      for (const x of [a, b]) await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: x.id });
+      await ctx.req("PATCH", `/api/tickets/${a.id}`, { state: "done" });
+      expect(await stateOf(waiting.id)).toBe("backlog");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(0);
+      await ctx.req("PATCH", `/api/tickets/${b.id}`, { state: "done" });
+      expect(await stateOf(waiting.id)).toBe("ready");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(1);
+    });
+
+    it("raises one notice, not a wake, when nobody is assigned", async () => {
+      ctx = await setup();
+      const x = await mk("X");
+      const waiting = await mk("Orphan");
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: x.id });
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      const notices = () => ctx.db.select().from(decisions).then((rows) => rows.filter((d) => d.dedupeKey === `unblocked-unassigned:${waiting.id}`));
+      expect(await notices()).toHaveLength(1);
+      expect(await unblockedWakes(waiting.id)).toHaveLength(0);
+      await ctx.req("POST", "/api/sweep");
+      expect(await notices()).toHaveLength(1);
+    });
+
+    it("the sweep releases an already-stuck ticket exactly once", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const stuck = await mk("Stuck", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${stuck.id}/dependencies`, { ticketId: x.id });
+      // The blocker finished while the old code ignored backlog tickets: set it done directly.
+      await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, x.id));
+      await ctx.db.delete(wakes);
+      expect(((await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number } }).releasedUnblocked.released).toBe(1);
+      expect(await stateOf(stuck.id)).toBe("ready");
+      expect(await unblockedWakes(stuck.id)).toHaveLength(1);
+      expect(((await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number } }).releasedUnblocked.released).toBe(0);
+      expect(await unblockedWakes(stuck.id)).toHaveLength(1);
+      const summaries = (await ctx.db.select().from(decisions)).filter((d) => d.dedupeKey === `unblocked-catchup:${ctx.company.id}`);
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]!.question).toContain("Stuck");
+    });
+
+    it("does not release again a ticket moved back to backlog on purpose", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${held.id}/dependencies`, { ticketId: x.id });
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(held.id)).toBe("ready");
+      await ctx.req("PATCH", `/api/tickets/${held.id}`, { state: "backlog" });
+      await ctx.req("POST", "/api/sweep");
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+    });
+
+    it("leaves a plain backlog ticket and one waiting on an open decision alone", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const plain = await mk("Plain", { assigneeAgentId: worker.id });
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      const [card] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.company.id, kind: "question", question: "Which way?", options: ["A", "B"], recommendedOption: "A", context: { type: "question" } })
+        .returning();
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: held.id, blockerDecisionId: card!.id });
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(plain.id)).toBe("backlog");
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(0);
+    });
   });
 
   it("ignores an unknown agent", async () => {
