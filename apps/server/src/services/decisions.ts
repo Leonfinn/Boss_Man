@@ -651,6 +651,8 @@ export type Advice = {
   what?: string;
   /** advised: whether the ticket actually needs it, in plain words. */
   needed?: string;
+  /** advised: what wouldn't get done if the owner denies it, in plain words (BOS-233). */
+  denyStops?: string;
   /** advised: the CEO's recommendation, shown on the card. */
   recommendation?: "allow" | "deny";
   /** advised: why the CEO recommends it. */
@@ -2132,32 +2134,45 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * blocked onto it and closes the original without an answer; "handled" settles it (never an owner-only kind).
      * Returns null when the owner answered first.
      */
-    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; lint?: CardLint } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what: string; needed: string; recommendation: "allow" | "deny"; why: string }) {
+    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; lint?: CardLint } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
       const via = input.runId ? ` (CEO run ${input.runId})` : "";
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId)));
       if (!d) throw new AnswerError("No decision with that id.");
       if (d.status !== "open") return null;
       const advice = adviceOf(d.context);
-      if (advice?.state !== "asking") throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
       const at = now().toISOString();
       if (input.outcome === "advice") {
-        // Only a command the owner has been asked to allow makes sense here: the advice says what it does
-        // and whether to allow it, and stays on the card while the owner decides.
-        if (d.kind !== "permission" || (d.context as { type?: string }).type !== "permission") throw new AnswerError("Advice in these words is for a permission request. For other cards use reissue or handled.");
-        const what = input.what.trim();
-        const needed = input.needed.trim();
+        // Advice on a permission request is for the owner's queue whatever the rung: the CEO may add it
+        // unasked (BOS-233 item 3), and on a CEO-rung card it travels down when the card does, without
+        // settling it. A permission request the CEO raised itself goes to the owner as before.
+        const permission = d.kind === "permission" && (d.context as { type?: string }).type === "permission";
+        if (permission) {
+          if (d.raisedByAgentId && d.raisedByAgentId === input.agentId) throw new AnswerError("That's the CEO's own permission request; its advice would be on its own request. Leave it for the owner.");
+        } else if (advice?.state !== "asking") {
+          // On any other card advice answers the owner's question, so it needs the owner to have asked.
+          throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
+        }
+        const what = (input.what ?? "").trim();
+        const needed = (input.needed ?? "").trim();
         const why = input.why.trim();
-        if (what.length < 10 || needed.length < 5 || why.length < 10) throw new AnswerError("Say what the command does, whether the ticket needs it, and why, in short plain sentences.");
+        if (why.length < 10) throw new AnswerError("Say why, in a short plain sentence: the owner reads it on the card.");
+        if (permission && (what.length < 10 || needed.length < 5)) throw new AnswerError("Say what the command does and whether the ticket needs it, in short plain sentences.");
+        // A permission card shows the advice block (what it does / whether it's needed / the recommendation).
+        // Any other card only carries a plain note answering the owner's question.
+        const nextAdvice: Advice = permission
+          ? { ...advice, state: "advised", at, what, needed, recommendation: input.recommendation, why }
+          : { state: "advised", at, note: advice?.note, originalQuestion: advice?.originalQuestion, summary: why, why };
         const [done] = await db
           .update(decisions)
-          .set({ context: { ...(d.context as object), advice: { ...advice, state: "advised", at, what, needed, recommendation: input.recommendation, why } } })
-          .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' = 'asking'`))
+          .set({ context: { ...(d.context as object), advice: nextAdvice } })
+          .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), permission ? undefined : sql`${decisions.context}->'advice'->>'state' = 'asking'`))
           .returning({ id: decisions.id });
         if (!done) return null;
         const held = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
-        await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held[0]?.ticketId, kind: "decision_advised", summary: `CEO advised ${input.recommendation === "allow" ? "Allow" : "Deny"} on "${d.question}": ${why}${via}`, at: now() });
+        await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held[0]?.ticketId, kind: "decision_advised", summary: permission ? `CEO advised ${input.recommendation === "allow" ? "Allow" : "Deny"} on "${d.question}": ${why}${via}` : `CEO advised on "${d.question}": ${why}${via}`, at: now() });
         return { outcome: "advice" as const, id: d.id };
       }
+      if (advice?.state !== "asking") throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
       if (input.outcome === "reissue") {
         if (d.kind === "permission") throw new AnswerError("A permission request has its command and options already. Use outcome advice to tell the owner what it does and whether to allow it.");
         // The CEO proposed this skill, so it must not get to reword the card the owner decides on (BOS-168).
