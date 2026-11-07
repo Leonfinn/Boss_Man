@@ -11,7 +11,7 @@ import { z } from "zod";
 import { AGENT_TEMPLATES, FEATURE_STATUSES, FUNDING_PROVIDERS, HARNESSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, tickets as ticketsTable, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
@@ -28,7 +28,7 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -39,6 +39,7 @@ import { AgentError, type agentsService } from "./services/agents.js";
 import { describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
 import { resolveReviewer, securityReviewers } from "./services/review-policy.js";
 import { latestRows } from "./services/review-kinds.js";
+import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
 import type { alertLadder } from "./services/alert-ladder.js";
@@ -82,6 +83,11 @@ async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: str
     .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), or(eq(ticketDependencies.blockedTicketId, ticketId), scope.agentId ? eq(decisionsTable.raisedByAgentId, scope.agentId) : sql`false`)))
     .limit(1);
   if (covering.length) return null;
+  // A ticket owed the owner's sign-off whose card is missing: Boss Man raises the card itself rather than leave
+  // the warning in the agent's run (BOS-503). Agents can't see decision state, so they couldn't act on it.
+  const [t] = await db.select().from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+  const restored = t ? await restoreSignoffCard(db, t, "an agent's reply asked the owner to review it") : null;
+  if (restored) return `This ticket passed every review and waits on the owner's sign-off, but its card was missing, so Boss Man raised it (card ${restored}). It is in the owner's Decisions and the board's Your review lane; you don't need to raise one.`;
   return "This reply asks the owner to do something, but no open decision covers it — the owner doesn't watch tickets, so this won't reach their queue or the Your review lane. Call raise_decision with blocksTicketId set to this ticket, with what you tried first and the steps they need. The reply is still posted.";
 }
 /** A lossless cap: at most n chars of s from offset; when there's more, says how much and how to get it. */
@@ -1028,11 +1034,15 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
                   // Merge state, server-built (DR-014): an open sign-off card can sit beside a merge already running, so say which.
                   const mergeTicket = ctx.type === "risk_review" || ctx.type === "check_stuck" ? (r.context as { ticketId?: string }).ticketId : undefined;
                   const merge = mergeTicket ? await review.mergeState(mergeTicket) : null;
+                  // Where the sign-off stands, worked out from the reviews and the recorded sign-off (BOS-503, DR-021).
+                  const [signoffTicket] = ctx.type === "risk_review" && mergeTicket ? await db.select().from(ticketsTable).where(eq(ticketsTable.id, mergeTicket)) : [];
+                  const signoff = signoffTicket ? signoffLine(await signoffState(db, signoffTicket)) : null;
                   return [
                     `${r.id}: ${ctx.tempCleanup ? "TEMP-FILE CLEANUP: " : ctx.workingCopy ? "WORKING-COPY CLEANUP: " : ""}[${r.kind}/${r.tier}]`,
                     `Question: ${untrusted("decision card", r.question)}`,
                     `Ticket: ${tickets.join(", ") || "none"} · Raised by: ${r.agentName ?? "Boss Man"} · Age: ${ago(r.createdAt)} · Score: ${Math.round(r.score)}`,
                     ...(merge ? [`Merge state: ${merge}`] : []),
+                    ...(signoff ? [signoff] : []),
                     ...(r.reasons?.length ? [`Why it ranks here: ${r.reasons.join("; ")}`] : []),
                     `Options: ${(r.options as string[]).join(" | ") || "none"} (recommended: ${r.recommendedOption ?? "none"})`,
                     ...(ctx.explain?.command ? [`Command: ${untrusted("decision card command", ctx.explain.command)}`] : []),
@@ -1243,7 +1253,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1365,14 +1375,19 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const pics = await db.select({ id: ticketImages.id, name: ticketImages.name, caption: ticketImages.caption }).from(ticketImages).where(and(eq(ticketImages.ticketId, ticketId), eq(ticketImages.companyId, scope.companyId), sql`${ticketImages.type} like 'image/%'`)).orderBy(asc(ticketImages.createdAt));
       const t = row.t;
       const note = stateNoteLine(t, new Date());
-      // One page covers the whole thing, description through conversation, so a long owner message is
-      // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
+      // The sign-off in plain words, from the decisions themselves (BOS-503): agents can't see decision state otherwise.
+      const signoff = t.systemState === "review" ? signoffLine(await signoffState(db, t)) : null;
+      const signoffLog = await signoffHistory(db, ticketId);
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
+      // One page covers the whole thing, description through conversation, so a long owner message is
+      // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const head = [
         `# ${t.title}`,
         `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
         ...(note ? [note] : []),
+        ...(signoff ? [signoff] : []),
+        ...(signoffLog ? [signoffLog] : []),
         ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
         ...(ciLine ? [ciLine] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
@@ -2035,7 +2050,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       if (missing.length)
         return fail(
           state === "done"
-            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket): their answer records the check's pass or fail, so you can close it once they have.`
+            ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket): their answer records the check's pass or fail, so you can close it once they have. A fail still closes this ticket: Boss Man opens the follow-up for it, assigned to this ticket's assignee.`
             : `This ticket has acceptance criteria to report before it merges, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".${withCriteria.criteria.some(isAfterMerge) ? " The after-merge criteria don't need a verdict at review." : ""}`,
         );
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
@@ -2074,6 +2089,16 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       }
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}${until ? ` (until ${until.toISOString().slice(0, 16).replace("T", " ")} UTC${blocked_reason?.trim() ? `: ${blocked_reason.trim()}` : ""})` : ""}`, at });
       await noteRunTicket(ticketId);
+      // A live check that failed doesn't hold the merged ticket open: Boss Man opens a filled-in, owned
+      // follow-up for it (DR-009 #5, BOS-575), so nobody files a bare title by hand. A cancel makes none.
+      const failedLive = state === "done" && !sameState && (outcome ?? "completed") === "completed" ? failedAfterMerge(withCriteria.criteria, reported) : [];
+      let followUp = "";
+      if (failedLive.length) {
+        const f = await review.followUpFailedChecks(ticketId, failedLive, reported ?? "", scope.agentId).catch(() => null);
+        followUp = f
+          ? `\n\nAn after-merge check failed, so Boss Man opened the follow-up ${f.ref} (#/tickets/${f.id}) "${f.title}", assigned to ${f.assignee ?? "the CEO"}, and told the CEO. Don't create another one.`
+          : `\n\nAn after-merge check failed, but Boss Man couldn't open its follow-up ticket. Create it with create_ticket: a description of what failed, a risk and an assignee, and this ticket's link.`;
+      }
       const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(moved?.featureId);
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
@@ -2086,7 +2111,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // have nothing for them to do, and the developer is the only one who knows.
       const [setupNow] = state === "review" && !sameState ? await db.select({ ownerSetup: tickets.ownerSetup }).from(tickets).where(eq(tickets.id, ticketId)) : [];
       const setupHint = state === "review" && !sameState && !setupNow?.ownerSetup?.trim() ? "\n\nIf the owner has to do anything once this is live (a setting, a secret, a button), add the steps in plain words by button path with set_ticket_state ownerSetup." : "";
-      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${warn}${setupHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
+      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${warn}${setupHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 
@@ -2715,7 +2740,9 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       ? await db
           .select({ companyId: runTokens.companyId, agentId: runTokens.agentId, runId: runTokens.runId })
           .from(runTokens)
-          .where(and(eq(runTokens.tokenHash, hashToken(token)), gt(runTokens.expiresAt, new Date())))
+          // A token works only while its own run is live (BOS-513): a copy left in a file stops working when the run ends. A token whose run row is missing is refused too (inner join).
+          .innerJoin(runsTable, eq(runsTable.id, runTokens.runId))
+          .where(and(eq(runTokens.tokenHash, hashToken(token)), gt(runTokens.expiresAt, new Date()), isNull(runsTable.endedAt)))
       : [];
     if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });
 

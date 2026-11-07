@@ -1,6 +1,6 @@
 {
-  "id": "1a057897-ecdd-44a5-bba6-f0211dabdcd3",
-  "prevId": "b1c0bb86-89d5-4413-8c93-1a76eebad4c4",
+  "id": "d7462dda-c6f5-4053-83e3-9847dcd0cde0",
+  "prevId": "e95fdc0c-229b-4d19-954b-e8bc22ccb8b2",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1716,6 +1716,27 @@
         "decisions_status": {
           "name": "decisions_status",
           "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "decisions_company_status": {
+          "name": "decisions_company_status",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
             {
               "expression": "status",
               "isExpression": false,
