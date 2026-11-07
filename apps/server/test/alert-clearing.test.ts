@@ -140,7 +140,7 @@ describe("one closer for Boss Man's own cards (DR-016, BOS-470)", () => {
         options: ["Got it"],
         recommendedOption: "Got it",
         tier: "owner",
-        dedupeKey: `account:${source!.id}:account_limit`,
+        dedupeKey: `account:${ctx.company.id}:${source!.id}:account_limit`,
         context: { type: "question", decisionsKind: "alert:account_limit", clearWhen: [{ kind: "accountRanOk", fundingSourceId: source!.id }] },
       })
       .returning();

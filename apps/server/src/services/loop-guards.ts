@@ -118,7 +118,7 @@ export function loopGuards(
         } else {
           await db
             .insert(decisions)
-            .values({ companyId: input.companyId, kind: "question", question, options: ["Got it"], recommendedOption: "Got it", tier: "owner", dedupeKey: `account:${outage.fundingSourceId}:account_limit`, context: { type: "question", decisionsKind: "alert:account_limit", clearWhen: [{ kind: "limitReset", fundingSourceId: outage.fundingSourceId }], items: [{ question, at: now().toISOString() }] } })
+            .values({ companyId: input.companyId, kind: "question", question, options: ["Got it"], recommendedOption: "Got it", tier: "owner", dedupeKey: `account:${input.companyId}:${outage.fundingSourceId}:account_limit`, context: { type: "question", decisionsKind: "alert:account_limit", clearWhen: [{ kind: "limitReset", fundingSourceId: outage.fundingSourceId }], items: [{ question, at: now().toISOString() }] } })
             .onConflictDoNothing();
         }
         return { count: n, circular: true };
