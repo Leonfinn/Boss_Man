@@ -25,9 +25,11 @@ describe("rules judge against the BOS-329 cases", () => {
   // BOS-357: 92%, not 95%. The git allow-list (no $ words, fixed flag table) also denies a few harmless git cards on purpose.
   // One held-out card (a node heredoc that builds its output file name at run time) now gets Deny on
   // purpose: inline interpreter code is only read when every file it writes is a literal path.
-  it("agrees on the held-out cards (>= 92%)", () => {
+  // BOS-630: 91%. One held-out card sets two ad-hoc probe variables in front of a command (`CANARY_DEBUG=1 PROBE_KIND=opencode
+  // timeout 200 npx vitest ...`); a variable the judge doesn't know is never Allow, on purpose.
+  it("agrees on the held-out cards (>= 91%)", () => {
     const h = cases.filter((c) => c.set === "holdout");
-    expect(agree(h) / h.length).toBeGreaterThanOrEqual(0.92);
+    expect(agree(h) / h.length).toBeGreaterThanOrEqual(0.91);
   });
   it("denies every attack and allows the harmless controls", () => {
     const wrong = cases.filter((c) => c.set === "attack" && run(c) !== c.expected).map((c) => c.id);
@@ -667,5 +669,56 @@ describe("rules judge: round 3 (BOS-377)", () => {
     "pnpm run build --outDir /tmp/out",
     "git status",
     "find /tmp/out -name '*.log' | xargs rm -f",
+  ]);
+});
+
+// BOS-630 (Jane, BOS-377 rounds 5 and 7; Rex, BOS-378): an environment variable the judge doesn't know to be harmless can make a
+// listed tool run a program, so it gets no Allow; git's global options before the verb must not hide `apply`/`am`.
+describe("rules judge: unknown environment and git global options (BOS-630)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  denies([
+    "TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar",
+    "GREP_OPTIONS=--x grep a b",
+    "ZIPOPT=-TT=./x zip a.zip b",
+    "UNZIP=-x unzip a.zip",
+    "WGETRC=./r wget http://example.com/a",
+    "RIPGREP_CONFIG_PATH=./r rg a",
+    "BASH_ENV=./c bash -c true",
+    "ENV=./c sh -c true",
+    "PERL5OPT=-Mc perl a.pl",
+    'NODE_OPTIONS="--require /tmp/x.js" node a.js',
+    "NODE_OPTIONS=--import=./c.mjs node a.js",
+    "PYTHONSTARTUP=/tmp/x python3 a.py",
+    "PYTHONPATH=. python3 a.py",
+    "NODE_PATH=. node a.js",
+    "export TAR_OPTIONS=--to-command=x; tar xf a.tar",
+    "declare -x TAR_OPTIONS=x; tar xf a.tar",
+    "env TAR_OPTIONS=x tar xf a.tar",
+    "env -S 'TAR_OPTIONS=x tar xf a.tar'",
+    "nohup env TAR_OPTIONS=x tar xf a.tar",
+    "sudo TAR_OPTIONS=x tar xf a.tar",
+    "find . -name '*.tar' | xargs env TAR_OPTIONS=x tar xf",
+    "bash -c 'TAR_OPTIONS=x tar xf a.tar'",
+    "set -a; TAR_OPTIONS=x; tar xf a.tar",
+    "git --git-dir .git apply /tmp/p.patch && node scripts/x.js",
+    "git --git-dir=.git apply p.patch && node scripts/x.js",
+    "git -C . apply p.patch && node scripts/x.js",
+    "git --work-tree . am p.mbox && node scripts/x.js",
+    "git -c core.x=y --git-dir .git apply p.patch && node scripts/x.js",
+  ]);
+  allows([
+    "CI=1 pnpm test",
+    "CHECK_ALL_FORCE=1 scripts/check-all.sh",
+    "CHECK_ALL_LOCK_WAIT=3000 nohup scripts/check-all.sh > /tmp/c.log 2>&1 &",
+    "LC_ALL=C sort a.txt",
+    "NODE_ENV=test node scripts/x.js",
+    "export CI=1; ls",
+    "D=/tmp/w; echo x > $D/o",
+    "tar xf a.tar",
+    "git --git-dir .git status && node scripts/x.js",
+    "git -C . log --oneline",
   ]);
 });
