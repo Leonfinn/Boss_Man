@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
+import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
 import { companies, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
@@ -34,8 +35,7 @@ async function setup(opts: { deployer?: boolean } = {}) {
   const logQuery = { logQuery: (sql: string) => made.push(sql) };
   const { db, close } = await openPglite(undefined, logQuery);
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, deployerDir: opts.deployer === false ? undefined : dir });
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   await req("POST", "/api/companies", { name: "App Co" });
   // The poller skips a pass when a file keeps its size and mtime (BOS-414), and a file system stamps mtime

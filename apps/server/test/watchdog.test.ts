@@ -7,6 +7,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, companies, decisions, notifications, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { signedInOwner } from "./helpers/owner-session.js";
 import { readWatchdogSettings } from "@boss-man/shared";
 import { WATCHDOG_ESCALATE_REASON, WATCHDOG_REASON } from "../src/services/watchdog.js";
 
@@ -21,8 +22,7 @@ async function setup() {
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: () => clock });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const co = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
   const companyId = co.company.id;
