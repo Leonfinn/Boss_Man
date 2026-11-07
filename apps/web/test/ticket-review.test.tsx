@@ -121,14 +121,14 @@ describe("Approve and merge settles the owner's sign-off (BOS-471)", () => {
     expect(calls).toEqual(["/api/tickets/t1/approve-merge"]);
   });
 
-  it("says it signed off and merged when the answer's own landing already finished", async () => {
+  it("says it signed off and merged when the background merge already finished", async () => {
     const at = new Date().toISOString();
     const ticket = { id: "t1", title: "Fix typo", systemState: "review", risk: "high", repoUrl: "https://github.com/Leonfinn/customer-app.git", defaultBranch: "main", branch: "bm/fix-typo", landing: "merge", verifyCommand: "pnpm test", ownerSignoff: true, signoffWaiting: true, projectId: "p1", project: "App", companyId: "c1", assignee: "Engineer", assigneeAgentId: "a1", createdAt: at, lastActivityAt: at };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
-        // The sign-off's own answer ran the merge before it returned, so the route hands back no landing.
-        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST") return json({ outcome: "landing", signoffAnswered: true, landing: null });
+        // The background merge started by the sign-off's answer finished before the route read its state back.
+        if (url === "/api/tickets/t1/approve-merge" && init?.method === "POST") return json({ outcome: "landing", signoffAnswered: true, landing: { state: "finished", outcome: "merged", text: "Merged bm/fix-typo into main.", url: null, finishedAt: at } });
         if (url === "/api/tickets/t1") return json(ticket);
         if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
         if (url.includes("/features")) return json({ features: [] });
