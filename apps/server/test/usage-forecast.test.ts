@@ -100,6 +100,23 @@ describe("limit estimate and daily use (R78)", () => {
     expect((await c.req("GET", `/api/funding-sources/${c.sub.id}/status?tz=Not%2FAZone`)).statusCode).toBe(200);
   });
 
+  // BOS-643: daily() built a date formatter per row per day; a busy week (~8,000 runs) froze the
+  // server for 3-4 s on every quota reading. Today's code takes ~3 s here; the fix takes milliseconds.
+  it("adds up a busy week quickly", async () => {
+    const c = (ctx = await setup());
+    const agent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", fundingSourceId: c.sub.id })).json() as { id: string };
+    const now = new Date("2026-10-16T12:00:00Z");
+    const rows = Array.from({ length: 6000 }, (_, i) => ({ companyId: c.company.id, agentId: agent.id, startedAt: new Date(now.getTime() - (i % 7) * 86_400_000 - i * 1000), inputTokens: 10, outputTokens: 1 }));
+    for (let i = 0; i < rows.length; i += 1000) await c.db.insert(runs).values(rows.slice(i, i + 1000));
+    await c.funding.daily(c.sub.id, now, "Europe/London"); // warm up the query
+    const t = performance.now();
+    const daily = await c.funding.daily(c.sub.id, now, "Europe/London");
+    const ms = performance.now() - t;
+    expect(daily.reduce((n, d) => n + d.runs, 0)).toBe(6000);
+    expect(daily.reduce((n, d) => n + d.inputTokens, 0)).toBe(60_000);
+    expect(ms).toBeLessThan(750);
+  });
+
   it("tells the owner once per window when the limit runs out before it resets", async () => {
     const c = (ctx = await setup());
     const reg = (await c.req("POST", `/api/companies/${c.company.id}/runner`)).json() as { runnerId: string };
