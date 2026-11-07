@@ -145,6 +145,10 @@ const outcomeOf = (row: typeof wakes.$inferSelect, merged = false): WakeResult =
 /** A message the owner didn't send via a run counts as the owner's; one an agent sent is agent-started. */
 const wakeClassOf = (w: { reason: string; causedByRunId?: string | null }): WakeClass => (fromOwner(w) ? "waiting" : w.reason === "message" ? "agent" : wakeClass(w.reason));
 
+/** Runs still going that are real work, not the owner's chat or the CEO's reply lane (BOS-349). */
+const liveWorkRuns = async (db: Db) =>
+  (await db.select({ id: runs.id }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`))).length;
+
 /** Boss Man's own alerts go up the alert ladder (BOS-64): the Scrum Master, then the CEO, then the owner. */
 type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "companyId" | "question">) => Promise<unknown>;
 
@@ -1443,10 +1447,19 @@ export function schedulerService(
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
+      // The owner's chat (and the CEO's reply) is the exception (BOS-349): while at least one work run is still
+      // going, the update cannot apply anyway, so chatting costs no delay. Once no work run is left the update
+      // may swap at any moment, so chats are held too, exactly as before.
+      let pass = queue;
       if (await getHold(db)) {
-        const unmarked = queue.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
+        const work = await liveWorkRuns(db);
+        // While work runs are still going, only chat and reply wakes go on to launch; every other wake is held.
+        const through = work > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];
+        pass = through;
+        const held = queue.filter((w) => !through.includes(w));
+        const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
         if (unmarked.length) await db.update(wakes).set({ status: "queued", statusReason: HOLD_REASON }).where(inArray(wakes.id, unmarked));
-        return { ...result, waiting: queue.length };
+        if (through.length === 0) return { ...result, waiting: queue.length };
       }
 
       const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
@@ -1486,7 +1499,7 @@ export function schedulerService(
 
       // Fair share (BOS-582, DR-032): a company with no work run going has its best wake looked at
       // first, so a busy company's steady stream of wakes can't hold it off the server for ever.
-      for (const w of fairOrder(queue, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || x.reason === CEO_REPLY_REASON)) {
+      for (const w of fairOrder(pass, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || x.reason === CEO_REPLY_REASON)) {
         const defer = async (reason: string, notBefore: Date | null) => {
           // A quota-held wake is looked at again every pass (BOS-449); only write when something changed.
           if (w.status === "deferred" && w.statusReason === reason && (w.notBefore?.getTime() ?? null) === (notBefore?.getTime() ?? null)) {
