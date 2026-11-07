@@ -381,6 +381,20 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   decisionsSvc.setMaintenanceHook(maintenance);
+  // Every runner restart, with its reason, in the owner's feed (BOS-594). Planned ones are quiet notes; a crash
+  // or out-of-memory restart is a flag, since runs were cut off with no warning and it may recur.
+  runners.onRestart((runner, last) =>
+    notes
+      .notify({
+        companyId: runner.companyId,
+        agentId: null,
+        level: last.reason === "crash or out of memory" ? "flag" : "note",
+        title: `Runner restarted: ${last.reason}`,
+        body: `${last.detail}${last.reason === "crash or out of memory" ? " Runs that were going are resumed by crash recovery. If this repeats, raise the runner's memory (BOSSMAN_RUNNER_MEMORY) or ask Infrastructure to look at Settings → Server and runner." : ""}`,
+        link: "#/settings",
+      })
+      .catch((err) => app.log.warn({ err }, "runner restart notice failed")),
+  );
   // Settings → Runner leads with the live state and keeps a past problem only as history (BOS-465).
   const runnerReport = runnerReportService(db, maintenance, {
     isConnected: (id) => runners.isConnected(id),
