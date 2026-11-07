@@ -139,6 +139,20 @@ REBUILD_LOCK_WAIT_SECONDS=20 run green || fail "didn't go on once the lock was f
 grep -q "Waiting up to 20s" "$T/out" || fail "didn't say it was waiting"
 logged "compose build server-green" || fail "didn't build after the lock was freed"
 wait "$hold_pid" 2>/dev/null || true
+# A running trial window (state/soak) is refused with the lock held: nothing is touched; once the file is gone it goes ahead.
+mkdir -p "$T/deployer/state"
+h40="$(printf 'a%.0s' $(seq 1 40))"
+printf 'old=blue new=green deadline=%s commit=%s prev=%s\n' "$(($(date +%s) + 900))" "$h40" "$h40" >"$T/deployer/state/soak"
+before="$(ls "$T/backups")"
+run green && fail "rebuilt during a trial window"
+grep -q "STOPPED: an update's trial window is running until" "$T/out" || fail "didn't say a trial window is running"
+grep -q "Nothing was changed" "$T/out" || fail "didn't say nothing was changed"
+grep -Eq "about 1[45] min" "$T/out" || fail "didn't say how long to wait"
+[[ ! -s $FAKE_LOG ]] || fail "touched docker during a trial window"
+[[ "$(ls "$T/backups")" == "$before" ]] || fail "made a backup during a trial window"
+rm -f "$T/deployer/state/soak"
+run green || fail "didn't go ahead once the trial window was gone"
+logged "compose build server-green" || fail "didn't build after the trial window ended"
 # While the script runs it holds the lock: a build that blocks lets us try the deployer's own flock -n.
 cat >"$T/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
