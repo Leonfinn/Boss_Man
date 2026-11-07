@@ -43,6 +43,8 @@ export type ServerStatusDeps = {
   addons?: () => Promise<AddonFacts>;
   /** Where this process's memory sits, server-wide like commit (memory-sampler.ts, BOS-410). */
   memory?: Pick<MemorySampler, "status">;
+  /** The run limits in force and the work runs going, across all companies and in this one (scheduler.runLimits, BOS-582). Absent: null. */
+  runLimits?: (companyId: string) => Promise<unknown>;
   commit: string;
   startedAt: Date;
   now?: () => Date;
@@ -215,6 +217,9 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           mainTip: short(available?.tip),
           checkedAt: available?.checkedAt ?? null,
         },
+        // The all-companies and per-company run limits and how many work runs each has going (BOS-582).
+        // A wake held "at a concurrency limit: all companies" waits for the first; "this company" for the second.
+        runLimits: deps.runLimits ? await deps.runLimits(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
         migration: await latestMigration(db),
         runner: runner
