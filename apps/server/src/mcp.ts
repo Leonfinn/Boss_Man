@@ -548,7 +548,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, doAfter, doBefore, resetsOnRestart }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       const [me] = lintOverride !== undefined && scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
-      const ask = checkAsk({ triedFirst, ownerMustDo, steps, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp });
+      const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp });
       if (ask.error) return fail(ask.error);
       steps = ask.steps ?? steps; // {{host.…}} filled in
       if (blocksTicketId) {
@@ -1182,7 +1182,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           let r;
           if (input.outcome === "reissue") {
             if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
-            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp });
+            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp });
             if (ask.error) return fail(ask.error);
             const reissueSteps = ask.steps ?? input.steps;
             r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, lint: ask.lint });
