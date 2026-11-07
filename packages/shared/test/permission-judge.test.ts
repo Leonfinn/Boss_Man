@@ -669,3 +669,66 @@ describe("rules judge: round 3 (BOS-377)", () => {
     "find /tmp/out -name '*.log' | xargs rm -f",
   ]);
 });
+
+// BOS-631 (Jane round 8, Rex round 8 code review): a command writes a file and then loads it; fixed by kind.
+describe("BOS-631: a file the command wrote (or a /tmp path) must not be loaded by the same command", () => {
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd);
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  denies([
+    // 1. sort -o at the end of a flag cluster, the file name is the next word
+    "sort -uo c.py /tmp/f; python3 c.py",
+    "sort -ro c.sh /tmp/f; bash c.sh",
+    "sort -u -o c.js /tmp/f; node c.js",
+    // 2. joined -m, and -p / -pe
+    "echo 'print(1)' > c.py; python3 -mc",
+    "echo x > c.js; node -p 'require(\"./c.js\")'",
+    "echo x > c.js; node -pe 'require(\"./c.js\")'",
+    // 3. a dotted loader
+    "echo x > c.py; python3 -c 'import runpy; runpy.run_path(\"c.py\")'",
+    "echo x > c.py; python3 -c 'import importlib; importlib.import_module(\"c\")'",
+    // 4. perl and ruby loaders
+    "echo 'print 1' > c.pl; perl -e 'do \"./c.pl\"'",
+    "echo 1 > C.pm; perl -I. -MC -e 1",
+    "echo 1 > C.pm; perl -I. -MC",
+    "echo 'puts 1' > c.rb; ruby -e 'load \"c.rb\"'",
+    "echo 'puts 1' > c.rb; ruby -e 'require_relative \"c\"'",
+    // 5. a double-quoted bash -c
+    "echo x > c.py; bash -c \"python3 c.py\"",
+    "echo x > c.sh; sh -c \"sh c.sh\"",
+    // Rex: code that builds the path of the file it loads
+    "echo x > c.js; node -e \"require(['.','c.js'].join('/'))\"",
+    "echo x > c.py; python3 -c \"__import__('' + 'c')\"",
+    "echo x > c.py; python3 -c \"exec(open('c.' + 'py').read())\"",
+    "echo x > c.py; python3 -c 'eval(compile(open(\"c.py\").read(), \"c\", \"exec\"))'",
+    "echo x > c.js; node -e \"eval(require('fs').readFileSync('c'+'.js','utf8'))\"",
+    "echo x > c.pl; perl -e 'require \"./\" . \"c.pl\"'",
+    "echo x > c.sh; bash -c \". ./c.sh\"",
+    "echo x > c.py; python3 - <<'E'\nimport c\nE",
+    "echo x > c.py; python3 <<'E'\nexec(open('c.py').read())\nE",
+    "ls /tmp; python3 -c \"exec(open('/tmp/x.py').read())\"",
+    "ls /tmp/q; node -e \"require('/tmp/' + 'x.js')\"",
+    // other readers on the list that write a file, then run it
+    "tree -o c.sh /tmp/f; bash c.sh",
+    "xxd /tmp/f c.py; python3 c.py",
+    "zip c.py /tmp/f; python3 c.py",
+    "tar -cf c.py /tmp/f; python3 c.py",
+    "sed -n 'w c.py' /tmp/f; python3 c.py",
+    "sed 's/a/b/w c.py' /tmp/f; python3 c.py",
+    // -r / -m with the written file as the next word
+    "echo x > c.js; node -r ./c.js -e 1",
+    "echo x > c.py; python3 -m c",
+    "echo x > c.js; node --require ./c.js -e 1",
+  ]);
+  allows([
+    "echo x > out.json; node scripts/use.js out.json",
+    "node scripts/gen.js > out.json; cat out.json; node scripts/use.js out.json",
+    "echo x > out.json; python3 tools/y.py out.json",
+    "echo x > out.txt; pnpm test",
+    "sort /tmp/a.txt | uniq",
+    "sort -u /tmp/a.txt",
+    "python3 -c 'print(1)'",
+    "node -e 'console.log(1)'",
+    "echo x > c.py; python3 tools/y.py",
+  ]);
+});
