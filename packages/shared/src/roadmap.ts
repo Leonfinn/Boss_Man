@@ -42,17 +42,30 @@ export function timeZoneOr(tz: string | null | undefined, fallback = "Europe/Lon
 
 // One formatter per zone: building an Intl.DateTimeFormat costs ~70 µs, formatting with one ~1 µs,
 // and per-row callers (funding's daily use) froze the server for seconds (BOS-643). Only zones
-// Intl accepts get here (an unknown one throws before it's cached), so the map stays small.
+// Intl accepts get here (an unknown one throws before it's cached). Intl also accepts any casing
+// ("europe/LONDON") and offsets, so the map is keyed by the spelling for the fast lookup, shares one
+// formatter per resolved zone name, and is emptied when it reaches DAY_FORMATS_MAX spellings
+// (Jane measured 50,000 spellings at ~1.4 GB uncapped). A real server sees a handful of zones.
+const DAY_FORMATS_MAX = 256;
 const dayFormats = new Map<string, Intl.DateTimeFormat>();
 
 /** Today's date, YYYY-MM-DD, in the given time zone. */
 export function dateIn(now: Date, timeZone: string): string {
   let f = dayFormats.get(timeZone);
   if (!f) {
-    f = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+    const made = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+    const resolved = made.resolvedOptions().timeZone;
+    f = dayFormats.get(resolved) ?? made;
+    if (dayFormats.size + 2 > DAY_FORMATS_MAX) dayFormats.clear();
+    dayFormats.set(resolved, f);
     dayFormats.set(timeZone, f);
   }
   return f.format(now);
+}
+
+/** How many zone spellings dateIn has cached; for tests of the cap. */
+export function dateInCacheSize(): number {
+  return dayFormats.size;
 }
 
 /**
