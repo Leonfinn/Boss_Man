@@ -380,7 +380,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
           const x = (await stepsOf(c, { ...layout, ...change })) as { handSteps?: string[]; rollback?: string; check?: string };
           const all = [...x.handSteps!, ...(x.rollback ? [x.rollback] : []), ...(x.check ? [x.check] : [])];
           const where = JSON.stringify({ layout, change });
-          expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse, where).toEqual([]);
+          // R11 (DR-024) is an agent's claim about rehearsal, checked when an agent raises a card (checkAsk); these
+          // cards are Boss Man's own and never go through it, so only the other rules apply.
+          expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11"), where).toEqual([]);
           expect(all.join("\n"), where).not.toMatch(/docs\/0\d/);
           // Every git the server writes runs in the umask subshell (DR-028), never after a bare umask; so does
           // deploy.sh, which runs git checkout/merge itself (the lint can't see inside a script).

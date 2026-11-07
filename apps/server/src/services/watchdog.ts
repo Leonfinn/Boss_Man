@@ -1297,13 +1297,13 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       companyId: string,
       agentId: string,
       runId: string,
-      input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; reason: string; stillNeeded?: string },
+      input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; reason: string; stillNeeded?: string; proof?: string },
     ) {
       const reason = oneLine(input.reason);
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
-      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
