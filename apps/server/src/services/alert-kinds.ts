@@ -29,6 +29,11 @@ export type AlertRung = "scrum_master" | "ceo" | "owner";
 /** What a raise says about itself, when it doesn't bring its own condition or cause key. */
 export type AlertCause = {
   /**
+   * The company the alert is about. The ladder sets it from the raise (BOS-498); a key built here that is
+   * unique across companies must carry it.
+   */
+  companyId?: string;
+  /**
    * The funding source the alert is about, for account outages (one card per account, DR-017 B).
    * `auth` is set for a credential/credit failure, which closes only on a clean run (not on "room again").
    */
@@ -105,7 +110,9 @@ export const ALERT_KINDS = {
   // owner, one card per account, naming the agents instead of one card per run.
   account_limit: {
     topRung: "owner",
-    groupBy: (c) => (c.account ? `account:${c.account.fundingSourceId}:account_limit` : null),
+    // The key names the company too (BOS-498): the dedupe key is unique across companies, so without it one
+    // company's open card on a shared funding source would swallow another company's raise.
+    groupBy: (c) => (c.companyId && c.account ? `account:${c.companyId}:${c.account.fundingSourceId}:account_limit` : null),
     title: (c, n) =>
       `${c.account?.name ?? "An account"}: ${n} run${n === 1 ? "" : "s"} failed on ${c.account?.window ?? "a usage limit or auth error"}${c.agents?.length ? ` (${c.agents.length} agent${c.agents.length === 1 ? "" : "s"})` : ""}`,
     // A usage limit lifts when the account has room again; an auth or credit failure does not, because
