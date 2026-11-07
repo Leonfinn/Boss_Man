@@ -3,12 +3,14 @@
 set -euo pipefail
 # The merge gate runs this with BOSSMAN_MERGE_CHECK set; the cases below set it themselves where they need it.
 unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED
+# Test this branch's slot wait, not the runner's shared check-slot.sh (BOS-614).
+unset BOSSMAN_CHECK_SLOT BOSSMAN_CHECK_SLOT_HELD CHECK_ALL_PRE_DONE
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; holder=""; trap '[ -z "$holder" ] || kill "$holder" 2>/dev/null; rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
-cp "$here/check-quick.sh" "$here/check-all.sh" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$repo/scripts/"
 cat >"$repo/scripts/check-shell.sh" <<'S'
 #!/usr/bin/env bash
 echo "check-shell" >>"$LOG"
