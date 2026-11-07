@@ -16,7 +16,7 @@ export async function runnerSocketRoutes(
   app: FastifyInstance,
   runners: Runners,
   secrets: ReturnType<typeof secretsService>,
-  opts: { heartbeatMs?: number; isLeader?: () => boolean } = {},
+  opts: { heartbeatMs?: number; isLeader?: () => boolean; checks?: Pick<ReturnType<typeof import("../services/check-dispatcher.js").checkDispatcher>, "onHello" | "onDone" | "onProgress"> } = {},
 ) {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
 
@@ -96,6 +96,7 @@ export async function runnerSocketRoutes(
               // The runs the runner really has: any other open run of this runner is closed after a short wait (BOS-583).
               if (msg.liveRuns) runners.reconcileLater(runner, msg.liveRuns);
               if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "re-sending verdicts failed"));
+              await opts.checks?.onHello(runner.id, msg.checkJobs).catch((err) => app.log.error({ err, runnerId: runner.id }, "check queue hello failed"));
             });
             return;
           case "event":
@@ -114,6 +115,12 @@ export async function runnerSocketRoutes(
               .finally(() => {
                 ingestWaiting--;
               });
+            return;
+          case "check.progress":
+            queue = queue.then(() => opts.checks?.onProgress(msg)).catch((err) => app.log.warn({ err, runnerId: runner.id }, "check progress failed"));
+            return;
+          case "check.done":
+            queue = queue.then(() => opts.checks?.onDone(runner.id, msg)).catch((err) => app.log.error({ err, runnerId: runner.id }, "check result failed"));
             return;
           case "reply":
             runners.resolveReply(msg);
