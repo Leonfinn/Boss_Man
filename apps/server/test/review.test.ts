@@ -27,7 +27,7 @@ beforeAll(async () => {
 afterEach(async () => {
   // A fake-runner reply still held open would let a landing run on into the next test's emptied tables.
   ctx?.held.splice(0).forEach((release) => release());
-  if (ctx) await new Promise((resolve) => setTimeout(resolve, 25));
+  if (ctx) await new Promise((resolve) => setTimeout(resolve, 50));
   ctx = undefined;
 });
 afterAll(async () => {
