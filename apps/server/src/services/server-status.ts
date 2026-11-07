@@ -11,6 +11,7 @@ import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
 import type { AddonFacts } from "./addons.js";
 import type { BlueGreen } from "./bluegreen.js";
+import { checkQueue } from "./check-queue.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
 import type { StallSummary } from "./stall-monitor.js";
@@ -217,6 +218,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // A wake held "at a concurrency limit: all companies" waits for the first; "this company" for the second.
         runLimits: deps.runLimits ? await deps.runLimits(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
+        // The check queue (DR-003): what runs, who waits and at which place, the last results, and whether main is red.
+        checks: await checkQueue(db).status(companyId, at),
         migration: await latestMigration(db),
         runner: runner
           ? {

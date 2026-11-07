@@ -99,7 +99,7 @@ export type AlertInput = {
 /** The first part of a raise's cause key, e.g. "start-fail" from "start-fail:<agent>:<wake>". */
 const keyPrefix = (key: string | undefined) => (key ?? "").split(":")[0] ?? "";
 
-type Notify = (agentId: string, input: { ticketId?: string | null; reason: string; note?: string | null; priority?: number }) => Promise<{ id: string; status: string; statusReason?: string | null }>;
+type Notify = (agentId: string, input: { ticketId?: string | null; reason: string; note?: string | null; priority?: number; replyLane?: boolean }) => Promise<{ id: string; status: string; statusReason?: string | null }>;
 
 /**
  * The condition for a raise that didn't give one, where its cause key says exactly what would
@@ -326,7 +326,7 @@ export function alertLadder(
       if (!moved.length) return null;
       // High priority: the owner would otherwise have been told now, quiet hours or not.
       // Every card waiting on the CEO shares one ticketless "decision" wake (or the CEO's live run), so a busy CEO is woken once for all of them (BOS-180).
-      const w = await deps.notify(h.agent.id, rung === "ceo" ? { ticketId: null, reason: "decision", priority: 3, note: note(rung, d, next, minutes) } : { ticketId: ladder.ticketId, reason: ALERT_REASON, priority: 3, note: note(rung, d, next, minutes) });
+      const w = await deps.notify(h.agent.id, rung === "ceo" ? { ticketId: null, reason: "decision", priority: 3, replyLane: true, note: note(rung, d, next, minutes) } : { ticketId: ladder.ticketId, reason: ALERT_REASON, priority: 3, note: note(rung, d, next, minutes) });
       if (w.status === "dropped") {
         reason = `${LABEL[rung]} was skipped: its wake was dropped (${w.statusReason ?? "no reason given"})`;
         if (rung === "ceo" && ladder.topRung !== undefined && ladder.topRung !== "owner") {
@@ -405,7 +405,7 @@ export function alertLadder(
       .returning({ id: decisions.id });
     if (!moved) return false;
     // High priority, as a hand-over: it waited for the CEO, so quiet hours must not delay it further.
-    const w = await deps.notify(ceo.id, { ticketId: null, reason: "decision", priority: 3, note: note("ceo", d, next, minutes) });
+    const w = await deps.notify(ceo.id, { ticketId: null, reason: "decision", priority: 3, replyLane: true, note: note("ceo", d, next, minutes) });
     await log(d.companyId, { kind: "alert_hop", ticketId: ladder.ticketId, targetAgentId: ceo.id, decisionId: d.id, reason: "the CEO can take it again", summary: `Alert handed to ${ceo.name}: the CEO can take it again` });
     return w.status !== "dropped";
   }
@@ -431,7 +431,7 @@ export function alertLadder(
     /** Raises one of Boss Man's own alerts on the ladder. Null when the dedupe key says it's already open. */
     async raise(input: AlertInput): Promise<{ id: string; rung: Rung } | null> {
       const kindId: AlertKind | undefined = isAlertKind(input.kind) ? input.kind : undefined;
-      const cause: AlertCause = { ...input.cause, agents: input.cause?.agents?.length ? input.cause.agents : input.about };
+      const cause: AlertCause = { ...input.cause, companyId: input.companyId, agents: input.cause?.agents?.length ? input.cause.agents : input.about };
       const row = kindRow(kindId, input.from);
       const start = kindStart(input.from);
       const ceiling = kindCeiling(kindId, input.from);
