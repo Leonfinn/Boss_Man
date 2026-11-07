@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
+const OTHER_RUNNER = "00000000-0000-4000-8000-000000000001";
 
 // One database for the whole file (each test uses its own company); the queue is global, so tests clear it first.
 const shared = openPglite();
@@ -146,8 +147,8 @@ describe("check queue", () => {
     const s = await setup();
     await s.req({ tree: "a" });
     const running = (await s.q.claimNext(null))[0]!;
-    expect(await s.q.complete(running.id, { commit: running.commit, exitCode: 0, logTail: "", runnerId: "another-runner" })).toBeNull();
-    await s.q.progress(running.id, "another-runner", "forged");
+    expect(await s.q.complete(running.id, { commit: running.commit, exitCode: 0, logTail: "", runnerId: OTHER_RUNNER })).toBeNull();
+    await s.q.progress(running.id, OTHER_RUNNER, "forged");
     expect((await s.q.claimNext(null)).length).toBe(0); // still running, not finished by the other runner
     expect(await s.q.complete(running.id, { commit: "someone-elses", exitCode: 0, logTail: "", runnerId: null })).toBeNull();
     expect((await s.q.complete(running.id, { commit: running.commit, exitCode: 0, logTail: "", runnerId: null }))?.state).toBe("passed");
