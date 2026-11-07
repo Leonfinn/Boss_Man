@@ -185,3 +185,63 @@ describe("the indexes the BOS-407 migration adds", () => {
     }
   });
 });
+
+// The decisions table's per-poll reads (BOS-546). Every hot one names the company as well as the
+// status: the Dashboard's waiting count, the brief's "Needs you" list and the queue. `decisions_status`
+// alone served them until BOS-546, when decisions became the biggest full-scan source left after
+// BOS-407. More than one company is seeded, so a plan that ignored company_id would show up.
+describe("the indexes behind the decisions reads (BOS-546)", () => {
+  /** A company with a CEO, plus one other company with its own CEO. */
+  async function twoCompanies(c: NonNullable<typeof ctx>) {
+    const [main] = await c.db.insert(schema.companies).values({ name: "App Co" }).returning();
+    const [other] = await c.db.insert(schema.companies).values({ name: "Other Co" }).returning();
+    await c.db.insert(agents).values([
+      { companyId: main!.id, name: "CEO", role: "ceo", agentKind: "claude" },
+      { companyId: other!.id, name: "Other CEO", role: "ceo", agentKind: "claude" },
+    ]);
+    return { main: main!, other: other! };
+  }
+
+  it("is in the schema as built, and both open-status reads reach for it", async () => {
+    const c = await setup();
+    const { main, other } = await twoCompanies(c);
+    // Enough rows, and mostly settled ones, that a sequential scan is the wrong plan and a look at
+    // status alone would still have to filter away most of what it found.
+    const N = 600;
+    const ns = Array.from({ length: N }, (_, n) => n);
+    await c.db.insert(decisions).values(
+      ns.map((n) => ({
+        companyId: n % 7 === 0 ? other.id : main.id,
+        kind: "question" as const,
+        question: `Q${n}`,
+        recommendedOption: "A",
+        tier: n % 3 === 0 ? ("owner" as const) : ("ceo" as const),
+        status: n % 20 === 0 ? ("open" as const) : ("answered" as const),
+      })),
+    );
+    await c.client.exec("analyze");
+
+    const [{ indexdef } = { indexdef: "" }] = (await c.client.query("select indexdef from pg_indexes where indexname = $1", ["decisions_company_status"])).rows as Array<{ indexdef: string }>;
+    expect(indexdef).toContain("ON public.decisions USING btree (company_id, status)");
+
+    // The Dashboard's waiting count and the brief's "Needs you" list, as the services write them.
+    const waiting = c.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, main.id), eq(decisions.status, "open"), eq(decisions.tier, "owner")));
+    const needs = c.db.select().from(decisions).where(and(eq(decisions.companyId, main.id), eq(decisions.tier, "ceo"), eq(decisions.status, "open"))).orderBy(decisions.createdAt);
+    const queue = c.db.select().from(decisions).where(and(eq(decisions.companyId, main.id), eq(decisions.status, "open")));
+
+    for (const [label, q] of [["waiting", waiting], ["needs", needs], ["queue", queue]] as const) {
+      const { sql: text, params } = q.toSQL();
+      // With sequential scans ruled out as the reason (PGlite has no cost to weigh here) the plan
+      // must still name the composite index; the status-only `decisions_status` still exists in the
+      // schema, but the planner picks the composite because it also covers company_id.
+      const plan = (await c.client.query(`explain ${text}`, params)).rows.map((r) => String(Object.values(r as Record<string, unknown>)[0])).join("\n");
+      expect(plan, label).toMatch(/decisions_company_status/);
+      expect(plan, label).not.toMatch(/Seq Scan on decisions/);
+      // ...and the read still returns rows for the main company (the index changed the plan, not the answer).
+      expect((await c.client.query(text, params)).rows.length, label).toBeGreaterThan(0);
+    }
+  });
+});

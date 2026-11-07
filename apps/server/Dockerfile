@@ -56,6 +56,8 @@ COPY --from=bundle /app/apps/server/dist apps/server/dist
 RUN mkdir -p /run/launcher && chown node:node /run/launcher
 
 USER node
+# BOS-562: the build fails if the server could not read a file it was given (a checkout made under umask 077 has mode 600 files).
+RUN bad="$(find /app \( ! -type l ! -readable \) -o \( -type d ! -executable \) 2>/dev/null | head -10)"; [ -z "$bad" ] || { echo "Files user node cannot read (fix the checkout: chmod go+r on tracked files):"; echo "$bad"; exit 1; }
 WORKDIR /app/apps/server
 # The commit this image was built from, shown by /api/health (docker build --build-arg BOSSMAN_COMMIT=<sha>).
 ARG BOSSMAN_COMMIT=dev

@@ -4,7 +4,7 @@ name: CI
 # which already passed scripts/check-all.sh on the owner's machine, so each job runs only for what that
 # can't cover (see "changes"); both run nightly and on demand as a backstop.
 on:
-  # bossman/** pushes run only host-steps (DR-024); the other jobs skip them. No paths-ignore here: a guide under docs/ is a host-steps trigger,
+  # bossman/** pushes run only host-steps (DR-024) and web-browser (BOS-601); the other jobs skip them. No paths-ignore here: a guide under docs/ is a host-steps trigger,
   # and the changes job turns a docs-only push to main into all-false.
   push:
     branches: [main, "bossman/**"]
@@ -27,6 +27,7 @@ jobs:
       check: ${{ steps.f.outputs.check }}
       images: ${{ steps.f.outputs.images }}
       hoststeps: ${{ steps.f.outputs.hoststeps }}
+      web: ${{ steps.f.outputs.web }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,7 +38,7 @@ jobs:
         run: |
           # Anything but a push to main, or a push whose base we can't see, runs everything.
           if [ "$GITHUB_EVENT_NAME" != push ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            printf 'check=true\nimages=true\nhoststeps=true\n' >>"$GITHUB_OUTPUT"; exit 0
+            printf 'check=true\nimages=true\nhoststeps=true\nweb=true\n' >>"$GITHUB_OUTPUT"; exit 0
           fi
           files="$(git diff --name-only "$BEFORE" "$GITHUB_SHA")"
           # hoststeps: the owner-procedure rehearsals (scripts/rehearse/, DR-024).
@@ -46,6 +47,45 @@ jobs:
           echo "check=$(grep -qE '^(apps/server/src/leader\.ts|apps/server/src/db/|apps/server/drizzle/|apps/server/test/leader\.test\.ts|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/)' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
           # images: Docker builds and container tests, which the runner can't do (it has no Docker socket).
           echo "images=$(grep -qE '(^|/)Dockerfile|^docker-compose|^deploy/|^scripts/|^skills/|^pnpm-lock\.yaml|^\.github/workflows/' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
+          # web: the web suite in a real browser (rendered-layout tests skip without one).
+          echo "web=$(grep -qE '^(apps/web/|packages/shared/|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/)' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
+
+  # The web suite with a real browser, so rendered-layout tests (e.g. sidebar-layout.test.ts, BOS-599)
+  # run instead of skipping. Runs on bossman/** too, so a layout regression shows before merge. It
+  # fails if any web test skipped: a missing or broken browser must not pass as green.
+  web-browser:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Same pin as the runner image's webkit add-on (apps/runner/Dockerfile); the tests resolve the
+      # global install through NODE_PATH, as on the runner.
+      PLAYWRIGHT_VERSION: 1.64.1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @boss-man/web...
+      - name: Playwright and a Chromium
+        run: |
+          npm install -g --no-audit --no-fund "playwright@${PLAYWRIGHT_VERSION}"
+          echo "NODE_PATH=$(npm root -g)" >>"$GITHUB_ENV"
+          # The tests try /usr/bin/chromium, chromium-browser and google-chrome first (ubuntu-latest
+          # ships Chrome); Playwright's own Chromium is the fallback when none is there.
+          if [ -x /usr/bin/google-chrome ]; then /usr/bin/google-chrome --version; else playwright install --with-deps chromium; fi
+      - name: Web tests in a real browser, none skipped
+        run: |
+          pnpm --filter @boss-man/web exec vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/web-tests.json"
+          node -e '
+            const r = require(process.argv[1]);
+            const skipped = r.testResults.flatMap((f) => f.assertionResults.filter((t) => t.status !== "passed" && t.status !== "failed").map((t) => `${f.name}: ${t.fullName}`));
+            console.log(`web tests: ${r.numPassedTests} passed, ${skipped.length} skipped`);
+            if (skipped.length || r.numPassedTests === 0) { console.error(skipped.join("\n")); process.exit(1); }
+          ' "$RUNNER_TEMP/web-tests.json"
 
   check:
     needs: changes
