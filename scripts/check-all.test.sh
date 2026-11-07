@@ -350,7 +350,7 @@ if command -v flock >/dev/null; then
   rm -rf "$t/lock.queue" "$t/mc.out"; hold 1 3600; h1=$!; sleep 0.3
   ( lock env BOSSMAN_MERGE_CHECK=1 >"$t/mc.out" 2>&1 ) & mc=$!
   for _ in $(seq 300); do ls "$t/lock.queue"/0-* >/dev/null 2>&1 && grep -q "waiting for a free check slot" "$t/mc.out" 2>/dev/null && break; sleep 0.2; done
-  mqe=$(ls "$t/lock.queue" | grep '^0-' | head -n 1); [ -n "$mqe" ] || fail "merge marker: merge check never queued: $(cat "$t/mc.out")"
+  mqe=""; for mqf in "$t"/lock.queue/0-*; do [ -e "$mqf" ] && mqe=${mqf##*/} && break; done; [ -n "$mqe" ] || fail "merge marker: merge check never queued: $(cat "$t/mc.out")"
   : >"$t/lock.replaced.${mqe##*-}"
   sleep 3
   kill -0 "$mc" 2>/dev/null || fail "merge marker: a merge check left the line on a replaced marker: $(cat "$t/mc.out")"
