@@ -64,6 +64,20 @@ describe("evaluatePermission defaults", () => {
     expect(evaluatePermission(exec("git push origin feature"), []).outcome).toBe("owner");
   });
 
+  it("pins today's routing for a read-only dd read and an unrecognised command (BOS-233)", () => {
+    // The owner's recorded decision: a plain `dd if=` read (no `of=`) stays with the owner, with a Deny
+    // recommendation, because it matches the destructive list. Unrecognised commands are allowed by the
+    // "Other shell commands" default, as on main. Item 1 (which would send both to the CEO) is frozen, so
+    // this pins the current behaviour so a later change can't move it silently.
+    for (const c of ["dd if=/dev/zero of=/dev/null bs=1M count=1", "dd if=/dev/zero"]) {
+      expect(evaluatePermission(exec(c), []), c).toMatchObject({ outcome: "owner", rule: "Destructive commands go to the owner" });
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    }
+    for (const c of ["frobnicate --do-thing", "mytool --frob"]) {
+      expect(evaluatePermission(exec(c), []), c).toMatchObject({ outcome: "allow", rule: "Other shell commands" });
+    }
+  });
+
   it("allows ordinary work and workspace edits", () => {
     expect(evaluatePermission(exec("echo spike > spike.txt"), []).outcome).toBe("allow");
     expect(evaluatePermission({ title: "Edit src/a.ts", kind: "edit", rawInput: {} }, []).outcome).toBe("allow");

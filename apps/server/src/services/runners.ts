@@ -6,6 +6,7 @@ import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerComman
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { redact } from "./error-buffer.js";
 import { costEvents, decisions, engagements, notifications, runnerEventAttempts, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
@@ -177,6 +178,24 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   }
 
   /**
+   * A short, safe description of a failed apply for the activity log (BOS-605): only the SQLSTATE
+   * code and the constraint name, never the SQL or its parameter values, which can carry another
+   * company's data. Walked through drizzle's wrapped cause, like isPermanentApplyError. Kept to
+   * about 200 characters.
+   */
+  function safeApplyError(err: unknown): string {
+    let code: string | undefined;
+    let constraint: string | undefined;
+    for (let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | null, i = 0; e && i < 3; e = e.cause as { code?: unknown; constraint?: unknown; cause?: unknown } | null, i++) {
+      if (code === undefined && typeof e.code === "string") code = e.code;
+      if (constraint === undefined && typeof e.constraint === "string") constraint = e.constraint;
+    }
+    const parts = [code ? `code ${code}` : null, constraint ? `constraint ${constraint}` : null].filter(Boolean);
+    const text = redact(parts.length ? parts.join(", ") : "error of unknown type").replace(/\s+/g, " ").trim();
+    return text.slice(0, 200);
+  }
+
+  /**
    * Applies one newly stored event inside `tx`, so the event insert and its effects commit together
    * and a transient failure rolls the insert back for the runner's resend (BOS-584). Returns the work
    * that must run after the commit because it talks to the outside world (the permission hook may send
@@ -339,7 +358,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         const permanent = isPermanentApplyError(err);
         const tried = permanent ? 1 : await bumpAttempt(runner.id, entry.seq);
         if (!permanent && tried < MAX_APPLY_ATTEMPTS) throw err;
-        const skipped = (err as Error).message;
+        const skipped = safeApplyError(err);
         // Keep the event without its effects, mark it and ack it so the stream moves on: the insert
         // and the activity row commit together, and the tries are cleared once it has landed.
         await db.transaction(async (tx) => {
