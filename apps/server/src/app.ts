@@ -85,6 +85,7 @@ import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.
 import { createMemorySampler } from "./services/memory-sampler.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
+import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { NotifySettings, notificationsService } from "./services/notifications.js";
@@ -503,6 +504,13 @@ export async function buildApp(opts: AppOptions) {
     // What each agent kind offers, for the model picker (R60).
     if (event.type === "runner.models") void models.record(runner.companyId, event.agentKind, event.models).catch((err) => app.log.error({ err, companyId: runner.companyId }, "model list failed"));
     if (event.type === "runner.sandbox") void runners.recordSandbox(runner.id, event.report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err, companyId: runner.companyId }, "sandbox report failed"));
+    if (event.type === "runner.opencode_vacuum_cut") {
+      const { type: _type, ...cut } = event;
+      void opencodeVacuumAlerts({ alert: (input) => alerts.raise(input) })
+        .onCut(runner, cut, (opts.now ?? (() => new Date()))())
+        .then(() => notes.syncDecisions())
+        .catch((err) => app.log.error({ err, companyId: runner.companyId }, "OpenCode VACUUM alert failed"));
+    }
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
       void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err, companyId: runner.companyId }, "disk report handling failed"));

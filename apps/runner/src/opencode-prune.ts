@@ -9,8 +9,14 @@
 // when no OpenCode run is live (new ones are held meanwhile, because OpenCode gives up on a lock
 // after 5 s), the database is switched to incremental auto-vacuum with one full VACUUM. After that
 // every pass returns the freed pages in small `incremental_vacuum` steps, each a short write that
-// live runs wait out. All SQLite work runs in a worker thread so a long VACUUM can't stall the
+// live runs wait out. All SQLite work runs in a child process so a long VACUUM can't stall the
 // runner's connection to the server.
+//
+// The hold has a cap (BOS-622, 30 minutes by default): past it the child is killed, the hold is
+// released, the log says so and the server gets one CEO alert. A worker thread could not be stopped
+// there (terminate waits for SQLite's native call to return); a killed process can. SQLite undoes
+// the half-done VACUUM the next time the file is opened (its WAL frames were never committed), so
+// the database is as it was. That database's VACUUM is not tried again for a day.
 //
 // Backup first: before the first delete in each database, the runner copies it (VACUUM INTO) into
 // its own folder, checks the copy (integrity_check, session count) and writes a marker. If that
@@ -19,11 +25,10 @@
 // Agent homes are the agent's (BOS-321 treats agents as untrusted), so OpenCode is never started
 // inside one: it runs from a runner-owned empty folder (OpenCode loads project plugins from the
 // folders above its cwd) with only the base environment, and links in an agent home are refused.
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { Worker } from "node:worker_threads";
 import { BASE_ENV_KEYS } from "./session-manager.js";
 
 export interface OpencodePruneOptions {
@@ -59,6 +64,19 @@ export interface OpencodePruneOptions {
   /** Pages per incremental_vacuum step (default 2000, 8 MB at 4 KB pages) and steps per pass (default 64). */
   stepPages?: number;
   maxSteps?: number;
+  /** The longest the one-off VACUUM may hold OpenCode runs (default 30 minutes) before it is killed. */
+  vacuumTimeoutMs?: number;
+  /** Told once each time a VACUUM is killed at the cap (main.ts turns it into a CEO alert). */
+  onVacuumCut?: (cut: VacuumCut) => void;
+}
+
+export interface VacuumCut {
+  /** How long OpenCode runs were held. */
+  heldMs: number;
+  /** The database file's size when the VACUUM started. */
+  bytes: number;
+  /** True for a fenced agent's own database, false for the runner's. */
+  agentHome: boolean;
 }
 
 export interface OpencodePruneResult {
@@ -80,9 +98,18 @@ interface BackupReport {
   bytes: number;
 }
 
+/** Start of every child job: its input from argv, its report (or the error that stopped it) as one JSON line on stdout. */
+const CHILD_PRELUDE = `
+const workerData = JSON.parse(process.argv[1]);
+const parentPort = { postMessage: (m) => process.stdout.write(JSON.stringify(m) + "\\n") };
+process.on("uncaughtException", (err) => {
+  process.stdout.write(JSON.stringify({ __error: String((err && err.message) || err) }) + "\\n");
+  process.exit(1);
+});
+`;
+
 /** Copies a database with VACUUM INTO and checks the copy opens, passes integrity_check and has every session. */
-const BACKUP_WORKER = `
-const { parentPort, workerData } = require("node:worker_threads");
+const BACKUP_WORKER = `${CHILD_PRELUDE}
 const { DatabaseSync } = require("node:sqlite");
 const { file, copy } = workerData;
 const one = (db, sql) => Object.values(db.prepare(sql).get())[0];
@@ -115,9 +142,8 @@ interface VacuumReport {
   bytes: number;
 }
 
-// Runs in a worker thread (node:sqlite is synchronous). Pragmas only: nothing here depends on OpenCode's schema.
-const VACUUM_WORKER = `
-const { parentPort, workerData } = require("node:worker_threads");
+// Runs in a child process (node:sqlite is synchronous). Pragmas only: nothing here depends on OpenCode's schema.
+const VACUUM_WORKER = `${CHILD_PRELUDE}
 const { DatabaseSync } = require("node:sqlite");
 const { file, convert, stepPages, maxSteps } = workerData;
 const db = new DatabaseSync(file);
@@ -150,18 +176,50 @@ try {
 }
 `;
 
-function inWorker<T>(source: string, workerData: Record<string, unknown>): Promise<T> {
+/** Thrown when a child ran past its time limit and was killed. */
+export class SqliteChildTimeout extends Error {}
+
+/**
+ * Runs a SQLite job in its own node process and resolves with the JSON line it prints. With
+ * timeoutMs, the process is killed (SIGKILL) at that point and this rejects with SqliteChildTimeout
+ * only once it has exited, so its locks are gone by then. The child gets no runner settings.
+ */
+function inChild<T>(source: string, data: Record<string, unknown>, timeoutMs?: number): Promise<T> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(source, { eval: true, workerData, stderr: true });
-    let report: T | null = null;
-    worker.once("message", (m: T) => (report = m));
-    worker.once("error", reject);
-    worker.once("exit", (code) => (report ? resolve(report) : reject(new Error(`the SQLite worker exited with code ${code}`))));
+    const env: NodeJS.ProcessEnv = {};
+    for (const k of ["TMPDIR", "SQLITE_TMPDIR"]) if (process.env[k]) env[k] = process.env[k];
+    const child = spawn(process.execPath, ["--no-warnings", "-e", source, JSON.stringify(data)], { env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (b: Buffer) => (stdout = (stdout + b.toString()).slice(-64 * 1024)));
+    child.stderr.on("data", (b: Buffer) => (stderr = (stderr + b.toString()).slice(-4096)));
+    let timedOut = false;
+    const timer = timeoutMs === undefined ? null : setTimeout(() => ((timedOut = true), child.kill("SIGKILL")), timeoutMs);
+    child.once("error", (err) => {
+      if (timer) clearTimeout(timer);
+      reject(err);
+    });
+    child.once("close", (code, signal) => {
+      if (timer) clearTimeout(timer);
+      if (timedOut) return reject(new SqliteChildTimeout(`killed after ${Math.round((timeoutMs ?? 0) / 1000)} s`));
+      const line = stdout.trim().split("\n").at(-1) ?? "";
+      let parsed: (T & { __error?: unknown }) | null = null;
+      try {
+        parsed = line ? (JSON.parse(line) as T & { __error?: unknown }) : null;
+      } catch {
+        /* not a report */
+      }
+      if (parsed && typeof parsed.__error === "string") return reject(new Error(parsed.__error));
+      if (code === 0 && parsed) return resolve(parsed);
+      reject(new Error(`the SQLite process exited with ${signal ?? `code ${code}`}: ${stderr.trim().split("\n").slice(-3).join(" ").slice(0, 300)}`));
+    });
   });
 }
 
-const vacuumInWorker = (file: string, convert: boolean, stepPages: number, maxSteps: number) =>
-  inWorker<VacuumReport>(VACUUM_WORKER, { file, convert, stepPages, maxSteps });
+const vacuumInChild = (file: string, convert: boolean, stepPages: number, maxSteps: number, timeoutMs?: number) =>
+  inChild<VacuumReport>(VACUUM_WORKER, { file, convert, stepPages, maxSteps }, timeoutMs);
+
+export const DEFAULT_VACUUM_TIMEOUT_MS = 30 * 60_000;
 
 const defaultFreeBytes = (dir: string) => {
   const s = statfsSync(dir);
@@ -270,7 +328,7 @@ async function ensureBackup(dataHome: string, file: string, dir: string, opts: O
   rmSync(copy, { force: true }); // VACUUM INTO refuses to overwrite: this is a half copy from a crash
   let report: BackupReport;
   try {
-    report = await inWorker<BackupReport>(BACKUP_WORKER, { file, copy });
+    report = await inChild<BackupReport>(BACKUP_WORKER, { file, copy });
   } catch (err) {
     report = { ok: false, why: String((err as Error)?.message ?? err), sessions: 0, bytes: 0 };
   }
@@ -370,19 +428,25 @@ export async function pruneOpencodeSessions(opts: OpencodePruneOptions): Promise
         log(`OpenCode session prune: couldn't delete ${id}: ${r.stderr.trim().slice(0, 300)}`);
       }
     }
-    await reclaim(db.file, opts, result, log);
+    const agentHome = !!opts.agentsRoot && !path.relative(opts.agentsRoot, dataHome).startsWith("..");
+    await reclaim(db.file, path.join(backupDir, `${backupKey(dataHome)}.vacuum-cut`), agentHome, opts, now, result, log);
   }
   return result;
 }
 
+/** After a VACUUM was killed at the cap, it isn't tried on that database again for this long. */
+const VACUUM_RETRY_MS = DAY;
+
 /** Gives freed pages back to the disk: small steps on a converted database, the one-off conversion when OpenCode is idle. */
-async function reclaim(file: string, opts: OpencodePruneOptions, result: OpencodePruneResult, log: (m: string) => void) {
+async function reclaim(file: string, cutPath: string, agentHome: boolean, opts: OpencodePruneOptions, now: number, result: OpencodePruneResult, log: (m: string) => void) {
   const stepPages = Math.max(1, Math.floor(opts.stepPages ?? 2000));
   const maxSteps = Math.max(1, Math.floor(opts.maxSteps ?? 64));
   try {
-    const r = await vacuumInWorker(file, false, stepPages, maxSteps);
+    const r = await vacuumInChild(file, false, stepPages, maxSteps);
     result.reclaimedBytes += Math.max(0, r.freedBytes);
     if (r.mode !== 0 || !opts.whileOpencodeIdle) return;
+    const cutAt = existsSync(cutPath) ? Number(readFileSync(cutPath, "utf8")) || 0 : 0;
+    if (cutAt && now - cutAt < VACUUM_RETRY_MS) return; // killed at the cap less than a day ago
     const size = statSync(file).size;
     const free = (opts.freeBytes ?? defaultFreeBytes)(path.dirname(file));
     // VACUUM writes a compacted copy to a temp file and back through the WAL: up to twice the file.
@@ -392,8 +456,22 @@ async function reclaim(file: string, opts: OpencodePruneOptions, result: Opencod
       return;
     }
     const started = Date.now();
-    const done = await opts.whileOpencodeIdle(() => vacuumInWorker(file, true, stepPages, maxSteps));
+    const cap = opts.vacuumTimeoutMs ?? DEFAULT_VACUUM_TIMEOUT_MS;
+    let done: VacuumReport | null;
+    try {
+      done = await opts.whileOpencodeIdle(() => vacuumInChild(file, true, stepPages, maxSteps, cap));
+    } catch (err) {
+      if (!(err instanceof SqliteChildTimeout)) throw err;
+      // The child has exited, so the hold is released and its locks are gone; SQLite rolls the VACUUM back.
+      const heldMs = Date.now() - started;
+      writeFileSync(cutPath, String(now));
+      result.failed++;
+      log(`OpenCode session prune: stopped the VACUUM of ${file} after ${Math.round(heldMs / 1000)} s (the cap is ${Math.round(cap / 60_000)} min) and let OpenCode runs go again; SQLite undoes the half-done VACUUM, so the database is unchanged. Not trying it again for a day`);
+      opts.onVacuumCut?.({ heldMs, bytes: size, agentHome });
+      return;
+    }
     if (!done) return; // an OpenCode run is live: try again next pass
+    rmSync(cutPath, { force: true });
     result.reclaimedBytes += Math.max(0, done.freedBytes);
     if (done.converted) result.converted++;
     log(`OpenCode session prune: switched ${file} to incremental vacuum in ${Math.round((Date.now() - started) / 1000)} s (${gib(size)} -> ${gib(done.bytes)})`);

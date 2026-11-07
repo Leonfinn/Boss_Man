@@ -265,17 +265,24 @@ export class SessionManager {
   /**
    * Runs fn while no OpenCode run is live, holding new OpenCode runs and model probes until it
    * settles (the OpenCode database's one-off VACUUM, BOS-616). Resolves null, without running fn,
-   * when an OpenCode run is live or another hold is on.
+   * when an OpenCode run is live or another hold is on. With maxHoldMs the hold is let go at that
+   * point even if fn hasn't settled (BOS-622: a backstop; the prune kills its VACUUM before then).
    */
-  async whileOpencodeIdle<T>(fn: () => Promise<T>): Promise<T | null> {
+  async whileOpencodeIdle<T>(fn: () => Promise<T>, maxHoldMs?: number): Promise<T | null> {
     if (this.opencodeHeld || [...this.runs.values()].some((r) => r.agentKind === "opencode")) return null;
     let release = () => {};
-    this.opencodeHeld = new Promise<void>((r) => (release = r));
+    const held = new Promise<void>((r) => (release = r));
+    this.opencodeHeld = held;
+    const letGo = () => {
+      if (this.opencodeHeld === held) this.opencodeHeld = null;
+      release();
+    };
+    const backstop = maxHoldMs === undefined ? null : setTimeout(letGo, maxHoldMs);
     try {
       return await fn();
     } finally {
-      this.opencodeHeld = null;
-      release();
+      if (backstop) clearTimeout(backstop);
+      letGo();
     }
   }
 

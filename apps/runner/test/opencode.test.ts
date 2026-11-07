@@ -110,6 +110,31 @@ describe("opencode agent kind", () => {
     // Idle again: the next hold runs.
     expect(await manager.whileOpencodeIdle(async () => "again")).toBe("again");
   });
+
+  it("lets a held OpenCode run go at the hold's backstop, even if the job never settles (BOS-622)", async () => {
+    const dump = path.join(mkdtempSync(path.join(tmpdir(), "bm-oc-")), "dump.json");
+    const order: string[] = [];
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const manager = new SessionManager({
+      mcpUrl: "http://127.0.0.1:9/mcp",
+      baseEnv: { PATH: process.env.PATH },
+      adapterBins: { opencode: fake },
+      resolveEnv: async () => ({ DUMP: dump }),
+      emit: (e) => {
+        if (e.type === "run.started") order.push("started");
+        if (e.type === "run.ended") done();
+      },
+    });
+    let finish!: () => void;
+    const stuck = manager.whileOpencodeIdle(() => new Promise<string>((r) => (finish = () => r("late"))), 300);
+    manager.handle({ type: "run.start", runId: "r4", agentId: "a1", agentKind: "opencode", model: null, cwd: mkdtempSync(path.join(tmpdir(), "bm-oc-ws-")), prompt: "hi", mcpToken: "t" } as never);
+    await ended; // started and finished while the job was still stuck
+    expect(order).toEqual(["started"]);
+    finish();
+    expect(await stuck).toBe("late");
+    manager.shutdown();
+  });
 });
 
 // Real binary: OPENCODE_BIN=/path/to/opencode pnpm test. Offline; the key is a dummy that only makes the provider appear.

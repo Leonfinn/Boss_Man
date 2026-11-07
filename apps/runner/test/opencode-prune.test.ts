@@ -1,5 +1,6 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -264,6 +265,115 @@ describe("OpenCode session prune (BOS-616)", () => {
     await pruneOpencodeSessions({ keepDays: 14, dataHomes: [main], stateDir, bin, now: NOW, env, stepPages: 100_000 });
     expect(Object.values(db.prepare("pragma freelist_count").get()!)[0]).toBe(0);
     db.close();
+  });
+
+  it("kills a VACUUM that holds OpenCode runs past its cap, lets them go, says so once, and waits a day (BOS-622)", async () => {
+    const { root, bin, stateDir } = setup();
+    const main = dataHome(root, "main", {});
+    const file = path.join(main, "opencode", "opencode.db");
+    const db = new DatabaseSync(file);
+    db.exec("pragma journal_mode = wal; create table event (id integer primary key, data blob not null)");
+    db.exec("with recursive c(i) as (select 0 union all select i + 1 from c where i < 999) insert into event select i, randomblob(8192) from c");
+    db.exec("delete from event where id % 4 != 0; pragma wal_checkpoint(TRUNCATE)");
+    const one = (sql: string) => Object.values(db.prepare(sql).get()!)[0];
+    const before = { pages: one("pragma page_count"), rows: one("select count(*) from event"), sum: one("select sum(length(data)) from event") };
+    // A stall: another writer holds the lock, so the VACUUM sits in SQLite's busy wait (native code, 10 s).
+    const blocker = new DatabaseSync(file);
+    blocker.exec("begin immediate");
+    const held: string[] = [];
+    const idle = async <T,>(fn: () => Promise<T>) => {
+      held.push("on");
+      try {
+        return await fn();
+      } finally {
+        held.push("off");
+      }
+    };
+    const cuts: Array<{ heldMs: number; bytes: number; agentHome: boolean }> = [];
+    const logs: string[] = [];
+    const opts = { keepDays: 14, dataHomes: [main], stateDir, bin, now: NOW, env: { PATH: process.env.PATH }, whileOpencodeIdle: idle, freeBytes: () => 1024 ** 4, vacuumTimeoutMs: 1500, onVacuumCut: (c: (typeof cuts)[number]) => cuts.push(c), log: (m: string) => logs.push(m) };
+
+    const t0 = Date.now();
+    const r = await pruneOpencodeSessions(opts);
+    const took = Date.now() - t0;
+    expect(r).toMatchObject({ converted: 0, failed: 1 });
+    expect(held).toEqual(["on", "off"]); // released
+    expect(took).toBeLessThan(5000); // at the cap, not after the 10 s busy wait
+    expect(cuts).toHaveLength(1);
+    expect(cuts[0]!.heldMs).toBeGreaterThanOrEqual(1500);
+    expect(cuts[0]).toMatchObject({ agentHome: false, bytes: statSync(file).size });
+    expect(logs.join("\n")).toMatch(/stopped the VACUUM of .*opencode\.db after \d+ s \(the cap is 0 min\) and let OpenCode runs go again.*Not trying it again for a day/);
+    blocker.exec("rollback");
+    blocker.close();
+    // Nothing changed: same mode, pages and data, and the file passes its check.
+    expect([one("pragma auto_vacuum"), one("pragma page_count"), one("select count(*) from event"), one("select sum(length(data)) from event"), one("pragma integrity_check")]).toEqual([0, before.pages, before.rows, before.sum, "ok"]);
+
+    // Within a day it isn't tried again (no hold at all); after a day it is, and goes through.
+    expect(await pruneOpencodeSessions({ ...opts, now: NOW + DAY - 1 })).toMatchObject({ converted: 0, failed: 0 });
+    expect(held).toEqual(["on", "off"]);
+    expect(await pruneOpencodeSessions({ ...opts, now: NOW + DAY + 1 })).toMatchObject({ converted: 1, failed: 0 });
+    expect(held).toEqual(["on", "off", "on", "off"]);
+    expect(cuts).toHaveLength(1);
+    db.close();
+    const fresh = new DatabaseSync(file, { readOnly: true }); // a connection keeps the auto_vacuum it opened with
+    expect(Object.values(fresh.prepare("pragma auto_vacuum").get()!)[0]).toBe(2);
+    expect(Object.values(fresh.prepare("select count(*) from event").get()!)[0]).toBe(before.rows);
+    fresh.close();
+    expect(backups(stateDir).filter((n) => n.endsWith(".vacuum-cut"))).toEqual([]);
+  });
+
+  it("an interrupted VACUUM is rolled back: a database killed mid-VACUUM is intact and can be vacuumed later (BOS-622)", async () => {
+    const { root, bin, stateDir } = setup();
+    const main = dataHome(root, "main", {});
+    const file = path.join(main, "opencode", "opencode.db");
+    // Made-up data only: 2000 rows of 64 KB in a WAL database, three quarters deleted.
+    const db = new DatabaseSync(file);
+    db.exec("pragma journal_mode = wal; create table event (id integer primary key, data blob not null)");
+    db.exec("with recursive c(i) as (select 0 union all select i + 1 from c where i < 1999) insert into event select i, randomblob(65536) from c");
+    db.exec("delete from event where id % 4 != 0; pragma wal_checkpoint(TRUNCATE)");
+    const one = (sql: string) => Object.values(db.prepare(sql).get()!)[0];
+    const digest = () => one("select group_concat(id || ':' || hex(substr(data, 1, 8)) || ':' || length(data), ',') from (select * from event order by id)");
+    const before = { pages: one("pragma page_count"), rows: one("select count(*) from event"), digest: digest() };
+    db.close();
+
+    // The same steps as the prune's VACUUM, in a process killed once the VACUUM has written into the WAL.
+    const src = `const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]); db.exec("pragma auto_vacuum = 2"); process.stdout.write("go\\n"); db.exec("vacuum"); process.stdout.write("done\\n");`;
+    const child = spawn(process.execPath, ["--no-warnings", "-e", src, file], { stdio: ["ignore", "pipe", "inherit"] });
+    let out = "";
+    child.stdout.on("data", (b: Buffer) => (out += b.toString()));
+    const wal = `${file}-wal`;
+    const killedAt = await new Promise<number>((resolve, reject) => {
+      const poll = setInterval(() => {
+        const size = statSync(wal, { throwIfNoEntry: false })?.size ?? 0;
+        if (out.includes("go") && size > 2 * 1024 ** 2) {
+          clearInterval(poll);
+          child.kill("SIGKILL");
+          resolve(size);
+        }
+        if (out.includes("done")) {
+          clearInterval(poll);
+          reject(new Error("the VACUUM finished before it could be interrupted: make the test database bigger"));
+        }
+      }, 2);
+    });
+    const [, signal] = (await once(child, "close")) as [number | null, string | null];
+    expect(signal).toBe("SIGKILL");
+    expect(out).not.toContain("done");
+    expect(killedAt).toBeGreaterThan(2 * 1024 ** 2); // it was killed with VACUUM pages already in the WAL
+
+    const after = new DatabaseSync(file);
+    const get = (sql: string) => Object.values(after.prepare(sql).get()!)[0];
+    expect([get("pragma integrity_check"), get("pragma auto_vacuum"), get("pragma page_count"), get("select count(*) from event")]).toEqual(["ok", 0, before.pages, before.rows]);
+    expect(get("select group_concat(id || ':' || hex(substr(data, 1, 8)) || ':' || length(data), ',') from (select * from event order by id)")).toBe(before.digest);
+    after.close();
+
+    // And the prune's own VACUUM then goes through on it.
+    const r = await pruneOpencodeSessions({ keepDays: 14, dataHomes: [main], stateDir, bin, now: NOW, env: { PATH: process.env.PATH }, whileOpencodeIdle: (fn) => fn(), freeBytes: () => 1024 ** 4 });
+    expect(r).toMatchObject({ converted: 1, failed: 0 });
+    const done = new DatabaseSync(file, { readOnly: true });
+    expect([Object.values(done.prepare("pragma integrity_check").get()!)[0], Object.values(done.prepare("select count(*) from event").get()!)[0]]).toEqual(["ok", before.rows]);
+    expect(Number(Object.values(done.prepare("pragma page_count").get()!)[0])).toBeLessThan(Number(before.pages) / 2);
+    done.close();
   });
 
   it("reads the retention setting, falling back to 14 days", () => {

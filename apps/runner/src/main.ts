@@ -6,7 +6,7 @@ import { checkClaude } from "./claude-check.js";
 import { applyCheckSlots, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
-import { keepDaysFrom, opencodeDataHomes, pruneOpencodeSessions } from "./opencode-prune.js";
+import { DEFAULT_VACUUM_TIMEOUT_MS, keepDaysFrom, opencodeDataHomes, pruneOpencodeSessions } from "./opencode-prune.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
 import { safeRunnerToken } from "./token.js";
@@ -121,7 +121,9 @@ const pruneOpencode = async () => {
       agentsRoot,
       stateDir: path.join(dataDir, "opencode-prune"),
       activeSessionIds: () => sessions.activeSessionIds(),
-      whileOpencodeIdle: (fn) => sessions.whileOpencodeIdle(fn),
+      // The prune kills its VACUUM at 30 minutes (BOS-622); the hold lets go 5 minutes later whatever happens.
+      whileOpencodeIdle: (fn) => sessions.whileOpencodeIdle(fn, DEFAULT_VACUUM_TIMEOUT_MS + 5 * 60_000),
+      onVacuumCut: (cut) => connection.emit({ type: "runner.opencode_vacuum_cut", heldSeconds: Math.round(cut.heldMs / 1000), bytes: cut.bytes, agentHome: cut.agentHome }),
       log,
     });
     if (r.deleted || r.failed || r.reclaimedBytes > 0)
