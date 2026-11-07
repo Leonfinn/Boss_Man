@@ -325,11 +325,11 @@ if command -v flock >/dev/null; then
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
   rc=0; out=$(lock env CHECK_ALL_AGE_AFTER=3600 CHECK_ALL_LOCK_WAIT=2) || rc=$?
   [ "$rc" = 75 ] || fail "ageing: a young hand-run check should wait behind a merge check, got rc $rc: $out"
-  # Aged hand-run check: it is first in line, and takes the slot the moment the holder lets go.
+  # Aged hand-run check with a merge check that queued after it: it is first in line, and takes the slot the moment the holder lets go.
   rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
-  : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
   ( lock env CHECK_ALL_AGE_AFTER=2 >"$t/aged.out" 2>&1 ) & a=$!
-  waitq 2; sleep 3; ! grep -q "lock held" "$t/aged.out" || fail "ageing: took a busy slot"
+  waitq 1; sleep 3; ! grep -q "lock held" "$t/aged.out" || fail "ageing: took a busy slot"
+  : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   for _ in $(seq 300); do grep -q "lock held" "$t/aged.out" 2>/dev/null && break; sleep 0.2; done
   grep -q "lock held" "$t/aged.out" || fail "ageing: an aged hand-run check was not served ahead of a merge check: $(cat "$t/aged.out")"
@@ -350,6 +350,44 @@ if command -v flock >/dev/null; then
   for _ in $(seq 300); do grep -q "lock held" "$t/new.out" 2>/dev/null && break; sleep 0.2; done
   grep -q "lock held" "$t/new.out" || fail "replace: the newer check never got the slot: $(cat "$t/new.out")"
   wait "$n" "$o" || true
+  # Only hand-run entries are ever replaced: a "replaced" marker for a waiting merge check's pid must not bounce it.
+  rm -rf "$t/lock.queue" "$t/mc.out"; hold 1 3600; h1=$!; sleep 0.3
+  ( lock env BOSSMAN_MERGE_CHECK=1 >"$t/mc.out" 2>&1 ) & mc=$!
+  for _ in $(seq 300); do ls "$t/lock.queue"/0-* >/dev/null 2>&1 && grep -q "waiting for a free check slot" "$t/mc.out" 2>/dev/null && break; sleep 0.2; done
+  mqe=""; for mqf in "$t"/lock.queue/0-*; do [ -e "$mqf" ] && mqe=${mqf##*/} && break; done; [ -n "$mqe" ] || fail "merge marker: merge check never queued: $(cat "$t/mc.out")"
+  : >"$t/lock.replaced.${mqe##*-}"
+  sleep 3
+  kill -0 "$mc" 2>/dev/null || fail "merge marker: a merge check left the line on a replaced marker: $(cat "$t/mc.out")"
+  ! grep -q "replaced by a newer check" "$t/mc.out" || fail "merge marker: merge check was replaced: $(cat "$t/mc.out")"
+  pkill -P "$mc" 2>/dev/null || true; kill "$mc" 2>/dev/null || true; wait "$mc" 2>/dev/null || true
+  rm -f "$t"/lock.replaced.*
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
+  # BOS-613 (a): an aged hand-run entry never beats an OLDER merge check. The merge entry is queued first, the hand-run check
+  # ages past CHECK_ALL_AGE_AFTER behind it; when the slot frees it must still wait (today's code let it jump the merge check).
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"; hold 1 3600; h1=$!; sleep 0.3
+  : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
+  ( lock env CHECK_ALL_AGE_AFTER=1 CHECK_ALL_LOCK_WAIT=8 >"$t/older.out" 2>&1 ) & a=$!
+  waitq 2; sleep 3
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
+  sleep 3
+  ! grep -q "lock held" "$t/older.out" || fail "BOS-613 (a): an aged hand-run check went ahead of an older merge check: $(cat "$t/older.out")"
+  wait "$a" || true
+  # BOS-613 (b): two slots, a merge check waiting, one hand-run check running: a second hand-run check waits, even aged and
+  # even though it queued before the merge check. Once the running hand-run check ends the cap lifts and it goes.
+  echo 2 >"$t/proof"; rm -rf "$t/lock.queue" "$t"/lock.holder.*
+  hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
+  echo "$h1 $(date +%s) hand" >"$t/lock.holder.1"
+  ( lock env CHECK_ALL_AGE_AFTER=1 >"$t/cap.out" 2>&1 ) & a=$!
+  waitq 1; sleep 3
+  : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
+  kill "$h2" 2>/dev/null || true; wait "$h2" 2>/dev/null || true
+  sleep 3
+  ! grep -q "lock held" "$t/cap.out" || fail "BOS-613 (b): a second hand-run check took a slot while a merge check waited: $(cat "$t/cap.out")"
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
+  for _ in $(seq 300); do grep -q "lock held" "$t/cap.out" 2>/dev/null && break; sleep 0.2; done
+  grep -q "lock held" "$t/cap.out" || fail "BOS-613 (b): the cap did not lift when the running hand-run check ended: $(cat "$t/cap.out")"
+  wait "$a" || true
+  rm -f "$t"/lock.holder.*
   kill "$mproc" 2>/dev/null || true; wait "$mproc" 2>/dev/null || true
   echo "A=600s B=640s no OOM" >"$t/proof"
 
