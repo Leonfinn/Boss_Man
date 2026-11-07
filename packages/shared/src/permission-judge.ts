@@ -253,6 +253,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || unknownLauncherBeforeInterpreter(c)) return result("outside");
   if (nestedCodeUnread(c, inOwn, writeOk)) return result("outside");
   if (disguisedInterpreter(c)) return result("outside");
+  if (stdinToInterpreter(c)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
@@ -726,22 +727,112 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
  * above. Bounded so nested `sh -c 'sh -c …'` strings can't recurse forever.
  */
 function nestedCodeUnread(c: string, inOwn: (p: string) => boolean, writeOk: (t: string) => boolean, depth = 0): boolean {
-  if (depth > 3) return false;
-  // A command string given to a shell or interpreter with -c, or to `env -S` / `doas`/`sudo`/`su`/`busybox …`. The string
-  // is captured whole (quotes kept). The word before it is a launcher the judge already unwraps elsewhere.
-  const NESTED_LAUNCHER = /(?:^|[;&|(\n]\s*)(?:(?:[\w./-]*\/)?(?:sh|bash|zsh|dash|ksh|su|doas|sudo|busybox|chroot|nsenter|unshare|script|env))\b((?:[^;&|\n'"]|'[^']*'|"[^"]*")*)/g;
-  for (const m of c.matchAll(NESTED_LAUNCHER)) {
-    const words = shellWords(m[1]!);
-    let at = -1;
+  if (depth > 4) return true; // too deeply nested to read: no Allow
+  const SHELL = /^(?:sh|bash|zsh|dash|ksh)$/;
+  const INTERP = /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh)$/;
+  // Words that only wrap another program: skipped to reach the real command word (allow-list — anything else before a
+  // shell/interpreter with a command string is an unknown launcher and gets no Allow).
+  const WRAP = /^(?:then|do|else|exec|env|nohup|time|sudo|doas|xargs|command|nice|setsid|stdbuf|timeout|sup|su|doas|busybox|localhost|flock|ionice|chrt|chroot|nsenter|unshare|script|\{|\}|\(|\)|!)$/;
+  const base = (w: string): string => w.replace(/^.*\//, "").replace(/^['"]+|['"]+$/g, "");
+  // The inner string to judge, from a `-c` (shell/python), `-m` (python), `-S`/`--split-string` (env) or `-e`-style flag.
+  const inlineString = (words: string[], name: string): string | null => {
     for (let i = 0; i < words.length; i++) {
-      if (words[i]!.startsWith("-") && !words[i]!.startsWith("--") && /c|S/.test(words[i]!.slice(1))) { at = i; break; }
-      if (!words[i]!.startsWith("-")) break;
+      const w = words[i]!;
+      // env -S '…', env --split-string='…', env -S'…'
+      if (base(name) === "env" && (w === "-S" || /^--split-string=/.test(w))) {
+        if (w === "-S") return words[i + 1] ?? null;
+        return w.slice("--split-string=".length);
+      }
+      if (base(name) === "env" && /^-S\S/.test(w)) return w.slice(2);
+      if (!w.startsWith("-") || w === "-") break;
+      const short = /^-([A-Za-z]+)$/.exec(w);
+      if (short) {
+        const flags = short[1]!;
+        if (SHELL.test(base(name)) && flags.includes("c")) return words[i + 1] ?? null;
+        if (/^python[\d.]*$/.test(base(name)) && /[cm]/.test(flags)) return words[i + 1] ?? null;
+      }
     }
-    if (at < 0 || at + 1 >= words.length) continue;
-    const inner = words[at + 1]!;
-    if (inner.trim() === "") continue;
-    if (runsUnreadFile(inner, inOwn) || !inlineCodeOk(inner, writeOk) || unknownLauncherBeforeInterpreter(inner)) return true;
+    return null;
+  };
+  for (const seg of c.split(/&&|\|\||[;&|\n]+/)) {
+    const toks = (seg.trim().match(/(?:\$\([^)]*\)|`[^`]*`|'[^']*'|"[^"]*"|\S)+/g) ?? []).map((t) => t.replace(/^[({]+(?=.)/, (m) => m));
+    // `find … -exec sh -c '…' \;` / `-execdir` / `-ok`: judge the word after -exec as its own segment.
+    for (let i = 0; i < toks.length; i++) {
+      if (/^-(?:exec|execdir|ok|okdir)$/.test(toks[i]!) && toks[i + 1] !== undefined) {
+        const rest = toks.slice(i + 1).join(" ").replace(/\s*\\?;?\s*$/, "");
+        if (runsUnreadFile(rest, inOwn) || disguisedInterpreter(rest) || nestedCodeUnread(rest, inOwn, writeOk, depth + 1)) return true;
+      }
+    }
+    // `env … -S '…'` / `env --split-string='…'`: env is a wrapper, but its split-string is a command to read, even after
+    // other wrapper words or env options.
+    const envAt = toks.findIndex((t) => /(?:^|\/)env$/.test(base(t)));
+    if (envAt >= 0) {
+      const inner = inlineString(toks.slice(envAt + 1), "env");
+      if (inner !== null) {
+        const body = inner.replace(/^(['"])([\s\S]*)\1$/, "$2").trim();
+        if (body !== "" && !body.startsWith("-") && (runsUnreadFile(body, inOwn) || !inlineCodeOk(body, writeOk) || unknownLauncherBeforeInterpreter(body) || disguisedInterpreter(body) || nestedCodeUnread(body, inOwn, writeOk, depth + 1))) return true;
+      }
+    }
+    // `su -c '…'`, `doas -c '…'`, `sudo -c '…'`, `busybox sh -c '…'`: the -c string is a command the judge must read.
+    for (let k = 0; k < toks.length; k++) {
+      if (!/^(?:su|doas|sudo|busybox|chroot|chrt|flock|ionice|nsenter|unshare)$/.test(base(toks[k]!))) continue;
+      const body = inlineString(toks.slice(k + 1), "sh");
+      if (body === null) continue;
+      const t = body.replace(/^(['"])([\s\S]*)\1$/, "$2").trim();
+      if (t !== "" && !t.startsWith("-") && (runsUnreadFile(t, inOwn) || !inlineCodeOk(t, writeOk) || unknownLauncherBeforeInterpreter(t) || disguisedInterpreter(t) || nestedCodeUnread(t, inOwn, writeOk, depth + 1))) return true;
+    }
+    // Walk the command words, skipping wrappers, to any shell/interpreter and its command string.
+    let i = 0;
+    while (i < toks.length && (/^[A-Za-z_]\w*=/.test(toks[i]!) || /^[({!]+$/.test(toks[i]!) || WRAP.test(base(toks[i]!)))) {
+      // `env -i`, `timeout 5`, `xargs -0`: consume an option or number that belongs to the wrapper.
+      i++;
+      while (i < toks.length && (/^-\S*$/.test(toks[i]!) || /^\d+[a-z]*$/.test(toks[i]!) || /^\w+=\S*$/.test(toks[i]!))) i++;
+    }
+    const head = toks[i];
+    if (head === undefined) continue;
+    const name = base(head);
+    if (!SHELL.test(name) && !INTERP.test(name) && !/^env$/.test(name)) continue;
+    const raw = inlineString(toks.slice(i + 1), name);
+    if (raw === null) continue;
+    // Drop the one layer of quotes the shell used to group the string; the inner text is then read as if typed plainly.
+    const inner = raw.replace(/^(['"])([\s\S]*)\1$/, "$2").trim();
+    if (inner === "") continue;
+    if (inner.startsWith("-")) continue; // the string is flags for the interpreter, not a command
+    if (runsUnreadFile(inner, inOwn) || !inlineCodeOk(inner, writeOk) || unknownLauncherBeforeInterpreter(inner) || disguisedInterpreter(inner)) return true;
     if (nestedCodeUnread(inner, inOwn, writeOk, depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when code arrives at a shell or interpreter on stdin, which the judge can't read: a pipe into `bash`/`sh`/`python3`/
+ * `node` with no script argument (`echo … | bash`, `… | sh -s`, `… | python3 -`), or a here-string `<<<`. A pipe into one
+ * that names a checked-in script is left to runsUnreadFile (BOS-378, Rex round 13).
+ */
+function stdinToInterpreter(c: string): boolean {
+  const SHELL = /^(?:sh|bash|zsh|dash|ksh)$/;
+  const INTERP = /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun)$/;
+  const WRAP = /^(?:then|do|else|exec|env|nohup|time|sudo|doas|xargs|command|nice|setsid|stdbuf|timeout|su|busybox|flock|ionice|chrt|chroot|nsenter|unshare|script|\{|\}|\(|\)|!)$/;
+  const base = (w: string): string => w.replace(/^.*\//, "").replace(/^['"]+|['"]+$/g, "");
+  if (/(?:^|[\s;|&])<<<(?!<)\s*\S/.test(c)) return true;
+  // Split into pipeline stages; a stage that reads the previous stage's output into a bare shell/interpreter runs code the
+  // judge can't see. Only the stage's own command word and arguments are read, never any earlier command.
+  const stages = c.split(/\|&?/);
+  for (let s = 1; s < stages.length; s++) {
+    const toks = (stages[s]!.trim().match(/(?:\$\([^)]*\)|`[^`]*`|'[^']*'|"[^"]*"|\S)+/g) ?? []) as string[];
+    let i = 0;
+    while (i < toks.length && (/^[A-Za-z_]\w*=/.test(toks[i]!) || WRAP.test(base(toks[i]!)))) {
+      i++;
+      while (i < toks.length && (/^-\S*$/.test(toks[i]!) || /^\d+[a-z]*$/.test(toks[i]!) || /^\w+=\S*$/.test(toks[i]!))) i++;
+    }
+    const head = toks[i];
+    if (head === undefined) continue;
+    const name = base(head);
+    if (!SHELL.test(name) && !INTERP.test(name)) continue;
+    // A plain word after the interpreter is a script file (read by runsUnreadFile); only flags mean code comes from stdin.
+    const args = toks.slice(i + 1).filter((w) => !/^\d*[<>]|^\d*>>?$|^&>/.test(w) && !/^-?\d+$/.test(w));
+    if (args.some((w) => !w.startsWith("-"))) continue;
+    return true;
   }
   return false;
 }

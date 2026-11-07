@@ -671,4 +671,31 @@ describe("rules judge: a script run from inside a -c/-S string, a disguised opti
     // A plain checked-in script is still Allow.
     allows(["node scripts/x.js", "bash scripts/check-quick.sh"]);
   });
+
+  describe("4. a wrapper word before the shell, any env -S spelling, find -exec, and stdin into a shell (Rex round 13)", () => {
+    denies([
+      // a wrapper before the shell: the -c string is found wherever it appears, not only at the start
+      "nohup bash -c 'bash /tmp/x'",
+      "timeout 5 bash -c 'bash /tmp/x'",
+      "setsid bash -c 'bash /tmp/x'",
+      "env bash -c 'node /tmp/x.js'",
+      "env -i bash -c 'node /tmp/x.js'",
+      "{ bash -c 'bash /tmp/x'; }",
+      // every env -S spelling
+      "env --split-string='node /tmp/x.js'",
+      "env -S'node /tmp/x.js'",
+      // an option inside the hidden command is judged too
+      "bash -c 'bash -e /tmp/x'",
+      "env -S 'bash -e /tmp/x'",
+      // find -exec / -execdir run a command the judge must read
+      "find . -exec sh -c 'bash /tmp/x' \\;",
+      "find . -execdir node /tmp/x.js \\;",
+      // code piped or written to a bare shell/interpreter's stdin
+      "echo 'bash /tmp/x' | bash",
+      "cat /tmp/x.sh | sh -s",
+      "python3 - <<< 'open(\"/tmp/x\",\"w\")'",
+    ]);
+    // Everyday wrapped commands and checked-in scripts still Allow.
+    allows(["nohup bash scripts/check-all.sh &", "timeout 600 bash scripts/check-all.sh", "find . -name '*.ts' -print", "bash -c 'echo hi'"]);
+  });
 });
