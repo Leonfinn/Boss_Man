@@ -105,6 +105,8 @@ export class Workspaces {
     private readonly baseEnv: NodeJS.ProcessEnv = process.env,
     /** check-all.sh's shared queue folder (checkQueueEnv), so the merge check takes turns with agents' checks. */
     private readonly coordDir?: string,
+    /** The pnpm store a check's install uses (BOS-568), so its packages aren't copied into the root disk's HOME; the gate gets its own, outside the fence's grant. */
+    private readonly pnpmStore?: string,
     /** Fence for server-queued check jobs (BOS-316, security F1): a job runs a commit nobody has reviewed yet. */
     private readonly jobFence?: { level: FenceLevel; pnpmStore?: string },
   ) {}
@@ -600,7 +602,12 @@ export class Workspaces {
     return new Promise<VerifyResult>((resolve) => {
       // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
       // A server-queued job (DR-003) takes no lock at all: the server holds the slots (BOSSMAN_CHECK_NO_LOCK).
-      const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1", ...job.fence?.env } : this.coordDir ? checkQueueEnv(this.coordDir, this.baseEnv.BOSSMAN_CHECK_SLOT) : {}) } as NodeJS.ProcessEnv;
+      // The shared pnpm store (BOS-568): without it pnpm starts a new one in HOME for every install, on the root disk.
+      // A merge check gets this.pnpmStore (its own gate store); a fenced job gets job.fence.env (the shared store);
+      // a job on a runner that can't fence falls back to the shared job store, never this.pnpmStore (the gate's), so it
+      // doesn't start a store in HOME either (BOS-568 review).
+      const storeEnv = job ? (job.fence ? job.fence.env : this.jobFence?.pnpmStore ? { npm_config_store_dir: this.jobFence.pnpmStore } : {}) : this.pnpmStore ? { npm_config_store_dir: this.pnpmStore } : {};
+      const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1" } : this.coordDir ? checkQueueEnv(this.coordDir, this.baseEnv.BOSSMAN_CHECK_SLOT) : {}), ...storeEnv } as NodeJS.ProcessEnv;
       // BOS-614: a tree that takes part in the check line (it has scripts/check-all.sh) waits for its slot through the runner's
       // own check-slot.sh, not through the branch's copy of the queue rules: a branch based on older main brought older rules,
       // and old and new waiters jammed with both slots free. Inside, the branch's script gets a private lock and goes straight on.
