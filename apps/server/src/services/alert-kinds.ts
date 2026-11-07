@@ -157,6 +157,13 @@ export const ALERT_KINDS = {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
   },
+  // watchdog.ts spareCapacity (BOS-659): the company is under-used while work waits, and picking the
+  // next ticket is a judgement call. Stops at the CEO; one card per company folds the stretches together.
+  spare_capacity: {
+    topRung: "ceo",
+    groupBy: (c) => (c.companyId ? `spare-capacity:${c.companyId}` : null),
+    title: (_c, n) => `Spare capacity: ${n} checks found the company under-used while work waits`,
+  },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
     topRung: "ceo",

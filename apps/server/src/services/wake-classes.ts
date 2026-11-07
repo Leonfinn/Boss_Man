@@ -30,6 +30,7 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "urgent idle": "scheduled",
   "idle slot": "scheduled",
   "idle agents": "scheduled",
+  "spare capacity": "scheduled",
   "status check": "scheduled",
   resume: "scheduled",
   watchdog: "scheduled",

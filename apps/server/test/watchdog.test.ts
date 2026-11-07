@@ -34,13 +34,22 @@ async function setup() {
   const ago = (minutes: number) => new Date(clock.getTime() - minutes * 60_000);
   const ticket = async (patch: Partial<typeof tickets.$inferInsert> = {}) =>
     (await db.insert(tickets).values({ companyId, projectId: project.id, title: "Add rate limiting", systemState: "in_progress", assigneeAgentId: dev.id, stateChangedAt: ago(10), ...patch }).returning())[0]!;
+  // An in-progress ticket that a run moved there and then stalled: the long "no movement" rules apply, not the
+  // idle-capacity one (BOS-659), which owns a ticket nothing has ever run since it moved. The run sits exactly at
+  // the state change, so the whole age since then is unexplained and it is not "ended without moving".
+  const stalled = async (patch: Partial<typeof tickets.$inferInsert> = {}) => {
+    const t = await ticket(patch);
+    const at = t.stateChangedAt;
+    await db.insert(runs).values({ companyId, agentId: dev.id, ticketId: t.id, startedAt: at, endedAt: at, outcome: "end_turn" });
+    return t;
+  };
   const switchOn = async (extra: Record<string, unknown> = {}) => {
     const r = await req("PATCH", `/api/companies/${companyId}/watchdog`, { scrumMasterAgentId: sm.id, enabled: true, ...extra });
     expect(r.statusCode).toBe(200);
     return r.json();
   };
   const smWakes = () => db.select().from(wakes).where(and(eq(wakes.agentId, sm.id), eq(wakes.reason, WATCHDOG_REASON)));
-  return { ...built, db, close, base, req, companyId, sm, dev, ceo: ceo!, project, advance, ago, ticket, switchOn, smWakes, now: () => clock };
+  return { ...built, db, close, base, req, companyId, sm, dev, ceo: ceo!, project, advance, ago, ticket, stalled, switchOn, smWakes, now: () => clock };
 }
 
 beforeEach(async () => {
@@ -111,7 +120,7 @@ describe("the watchdog sweep (BOS-58)", () => {
     expect(w!.note).toContain('"Design the filter bar"');
     expect(w!.note).toContain("nobody is assigned");
     expect(w!.note).toContain('"Fix login"');
-    expect(w!.note).toContain("no movement in progress");
+    expect(w!.note).toContain("no run for 15 minutes");
     expect(w!.note).not.toContain("Fresh");
     // No model ran: the only thing it did was queue one wake.
     expect(await ctx.db.select().from(runs)).toHaveLength(0);
@@ -257,7 +266,7 @@ describe("the watchdog sweep (BOS-58)", () => {
 describe("the Scrum Master's actions (BOS-58)", () => {
   /** A ticket the watchdog has flagged and handed to the Scrum Master. */
   const handed = async (patch: Partial<typeof tickets.$inferInsert> = {}) => {
-    const t = await ctx.ticket({ stateChangedAt: ctx.ago(130), ...patch });
+    const t = await ctx.stalled({ stateChangedAt: ctx.ago(130), ...patch });
     await ctx.watchdog.run();
     await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
     return t;
@@ -345,7 +354,7 @@ describe("the Scrum Master's actions (BOS-58)", () => {
 
   it("snoozes up to 48 h, refuses a third snooze in a row, and hands a twice-snoozed flag to the CEO", async () => {
     await ctx.switchOn();
-    const t = await ctx.ticket({ title: "Slow burner", stateChangedAt: ctx.ago(130) });
+    const t = await ctx.stalled({ title: "Slow burner", stateChangedAt: ctx.ago(130) });
     await ctx.watchdog.run();
     const [f] = await ctx.db.select().from(watchdogFlags);
     expect(isError(await call({ action: "snooze", flagId: f!.id, hours: 49, reason: "too long" }))).toBe(true);
@@ -546,7 +555,7 @@ describe("the hourly cap (BOS-58)", () => {
 
   it("G6 (BOS-78): switching the watchdog off in Settings stops the next sweep acting on an already-flagged ticket, and switching it on resumes", async () => {
     await ctx.switchOn();
-    const t = await ctx.ticket({ title: "Stuck for a while", stateChangedAt: ctx.ago(130) });
+    const t = await ctx.stalled({ title: "Stuck for a while", stateChangedAt: ctx.ago(130) });
     // 1. On, with a due stuck ticket: the sweep acts (one wake, one open flag).
     await ctx.watchdog.run();
     expect(await ctx.smWakes()).toHaveLength(1);
@@ -626,14 +635,14 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
 
   it("a ticket stuck for hours is handed on after the limit, then twice that, then four times, not every limit", async () => {
     await ctx.switchOn({ inProgressHours: 1 });
-    await ctx.ticket({ stateChangedAt: ctx.ago(60) });
+    await ctx.stalled({ stateChangedAt: ctx.ago(60) });
     // Without back-off this would be woken at 0, 60, 120, 180 and 240.
     expect(await sweepFor(300)).toEqual([0, 60, 180]);
   });
 
   it("starts over when the ticket gets a comment between hand-offs", async () => {
     await ctx.switchOn({ inProgressHours: 1 });
-    const t = await ctx.ticket({ stateChangedAt: ctx.ago(60) });
+    const t = await ctx.stalled({ stateChangedAt: ctx.ago(60) });
     await ctx.watchdog.run();
     await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
     ctx.advance(30);
@@ -645,7 +654,7 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
 
   it("still gives a flag to the CEO after two snoozes, however far the back-off has gone", async () => {
     await ctx.switchOn({ inProgressHours: 1 });
-    const t = await ctx.ticket({ stateChangedAt: ctx.ago(60) });
+    const t = await ctx.stalled({ stateChangedAt: ctx.ago(60) });
     await ctx.watchdog.run();
     await ctx.db.update(watchdogFlags).set({ snoozeCount: 2, backoffSteps: 5, dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, t.id));
     await ctx.watchdog.run();
@@ -655,7 +664,7 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
 
   it("never flags a ticket whose assignee has a check scheduled for later, and flags it again once there is none", async () => {
     await ctx.switchOn({ inProgressHours: 1 });
-    const t = await ctx.ticket({ stateChangedAt: ctx.ago(600), monitorAt: new Date(ctx.now().getTime() + 2 * H), monitorNote: "CI" });
+    const t = await ctx.stalled({ stateChangedAt: ctx.ago(600), monitorAt: new Date(ctx.now().getTime() + 2 * H), monitorNote: "CI" });
     await ctx.watchdog.run();
     expect(await ctx.db.select().from(watchdogFlags)).toHaveLength(0);
     expect(await ctx.smWakes()).toHaveLength(0);
@@ -666,7 +675,7 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
 
   it("the backtest gives an idle ticket at most two hand-offs in four hours", async () => {
     await ctx.switchOn({ inProgressHours: 1 });
-    const t = await ctx.ticket({ stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });
+    const t = await ctx.stalled({ stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });
     const bt = await ctx.watchdog.backtest(ctx.companyId, 1);
     const flags = bt.flags.filter((f) => f.ticketId === t.id);
     expect(flags).toHaveLength(1);
@@ -702,7 +711,7 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
 
 describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
   const handed = async (patch: Partial<typeof tickets.$inferInsert> = {}) => {
-    const t = await ctx.ticket({ stateChangedAt: ctx.ago(130), ...patch });
+    const t = await ctx.stalled({ stateChangedAt: ctx.ago(130), ...patch });
     await ctx.watchdog.run();
     await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
     return t;
@@ -753,7 +762,7 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.dev.id));
     await ctx.db.update(wakes).set({ statusReason: "agent paused" }).where(eq(wakes.agentId, ctx.dev.id));
     await ctx.watchdog.run();
-    expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["stale_in_progress"]);
+    expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["idle_agent"]);
   });
 
   describe("work held by the subscription usage limit (BOS-450)", () => {
@@ -767,7 +776,7 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
       const t = await ctx.ticket({ stateChangedAt: ctx.ago(600) });
       await held(t.id, 5);
       await ctx.watchdog.run();
-      expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["stale_in_progress"]);
+      expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["idle_agent"]);
     });
 
     it("one alert to the CEO once a wake has been held an hour, naming agent, ticket, window and held time; none before", async () => {
@@ -938,7 +947,7 @@ describe("open issues and the timeline (BOS-199)", () => {
     const issues = res.json() as Array<{ ticketId: string; warning: string; holder: string; done: unknown[]; nextText: string }>;
     expect(issues).toHaveLength(1);
     expect(issues[0]).toMatchObject({ ticketId: t.id, holder: "scrum_master" });
-    expect(issues[0]!.warning).toContain("no movement in progress");
+    expect(issues[0]!.warning).toContain("no run for 15 minutes");
     expect(issues[0]!.nextText).toBe("Checks again");
     expect((await ctx.watchdog.status(ctx.companyId)).openFlags).toBe(issues.length);
 
@@ -1075,9 +1084,9 @@ describe("record-only mode (BOS-166)", () => {
       const t = await ctx.ticket({ title: `Held ${i}`, systemState: "blocked", stateChangedAt: ctx.ago(5) });
       await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: big!.id });
     }
-    // A flag snoozed twice: the auto-escalation to the CEO.
+    // A flag snoozed twice: the auto-escalation to the CEO. It never had a run, so the idle rule owns it.
     const snoozed = await ctx.ticket({ title: "Twice snoozed", stateChangedAt: ctx.ago(600) });
-    await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: snoozed.id, rule: "stale_in_progress", dueAt: ctx.now(), snoozeCount: 2, detail: { idleMs: 600 * 60_000 } });
+    await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: snoozed.id, rule: "idle_agent", dueAt: ctx.now(), snoozeCount: 2, detail: { idleMs: 600 * 60_000 } });
     ctx.advance(2);
     await ctx.watchdog.run();
     ctx.advance(2);

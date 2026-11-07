@@ -1127,6 +1127,8 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "silentSteerMinutes", label: "Ask a silent run for a status after", unit: "minutes" },
   { key: "silentFlagMinutes", label: "Flag a silent run to the Scrum Master after", unit: "minutes" },
   { key: "unprovenHours", label: "Flag an unproven cause ('likely') after", unit: "hours" },
+  { key: "idleAgentMinutes", label: "Re-wake an agent whose in-progress work has no run for", unit: "minutes" },
+  { key: "spareCapacityMinutes", label: "Tell the CEO the company is under-used after", unit: "minutes" },
 ];
 
 /** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */
