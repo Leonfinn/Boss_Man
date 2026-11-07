@@ -70,6 +70,8 @@ export type StallMonitor = {
   requestStarted(key: object, route: string): void;
   requestEnded(key: object): void;
   summary(): StallSummary;
+  /** What the server was doing over the last `windowMs`: oldest open requests, and routes that finished in it (BOS-410 memory jumps). */
+  activity(windowMs: number): { inFlight: number; oldest: { route: string; ageMs: number }[]; finished: Record<string, { count: number; maxMs: number }> };
 };
 
 export type StallMonitorOptions = {
@@ -128,6 +130,8 @@ export function createStallMonitor(opts: StallMonitorOptions = {}): StallMonitor
   // lost on restart, harmless because it only lists this process's own requests in flight (diagnostics, never shared state).
   const open = new Map<object, { route: string; startedAt: number }>();
   const recent: Stall[] = [];
+  // The last 200 finished requests (route pattern, end time, duration), so a memory jump can name what just ran.
+  const finished: { route: string; endedAt: number; ms: number }[] = [];
   const gcTotals: StallSummary["gc"] = {};
   // GC pauses of the last minute, in performance.now() time, to sum into a stall that just ended.
   let gcs: { start: number; end: number; kind: string }[] = [];
@@ -268,7 +272,27 @@ export function createStallMonitor(opts: StallMonitorOptions = {}): StallMonitor
       open.set(key, { route, startedAt: performance.now() });
     },
     requestEnded(key) {
+      const r = open.get(key);
       open.delete(key);
+      if (!r) return;
+      const endedAt = performance.now();
+      finished.push({ route: r.route, endedAt, ms: Math.round(endedAt - r.startedAt) });
+      if (finished.length > 200) finished.shift();
+    },
+    activity(windowMs) {
+      const now = performance.now();
+      const oldest = [...open.values()]
+        .sort((a, b) => a.startedAt - b.startedAt)
+        .slice(0, 5)
+        .map((r) => ({ route: r.route, ageMs: Math.round(now - r.startedAt) }));
+      const finishedByRoute: Record<string, { count: number; maxMs: number }> = {};
+      for (const f of finished) {
+        if (f.endedAt < now - windowMs) continue;
+        const t = (finishedByRoute[f.route] ??= { count: 0, maxMs: 0 });
+        t.count++;
+        t.maxMs = Math.max(t.maxMs, f.ms);
+      }
+      return { inFlight: open.size, oldest, finished: finishedByRoute };
     },
     summary() {
       const hourAgo = Date.now() - 3_600_000;

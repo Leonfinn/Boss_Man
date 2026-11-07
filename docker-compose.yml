@@ -112,8 +112,11 @@ services:
       BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_TRUSTED_PROXIES:-}
       # The feedback portal alone, on its own port: the only port that may ever face the internet.
       BOSSMAN_PORTAL_PORT: "3101"
-      # The portal's address as people reach it, for the share link, e.g. http://192.168.68.67:3111.
+      # The portal's address as people reach it, for the share link, e.g. http://<host-ip>:3111.
       BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
+      # JS heap cap in MiB (BOS-410). The live heap measured 89-100 MiB; 1536 leaves ~15x headroom. Raise it in .env if
+      # the memory log ("memory" lines, heapUsed) ever nears it. Keep it below BOSSMAN_SERVER_MEMORY when that is set.
+      NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
       # The stall profiler (BOS-602): 0 turns it off. Empty = on (the server checks only for "0").
       BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
     secrets:
