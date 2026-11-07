@@ -59,6 +59,8 @@ export type MaintenanceDeps = {
   notify: (n: NotifyInput) => Promise<unknown>;
   /** Sends a message into every run still going, so agents wrap up instead of looking for more work. */
   tellRunning?: (text: string) => Promise<unknown>;
+  /** The hold has lifted: wake the agents who ended their runs for it, as WRAP_UP promised (BOS-574). */
+  afterHold?: (since: Date) => Promise<unknown>;
   /** The deployer folder; update-runner.sh drops inbox/drain.json there to ask for a drain. */
   dir?: string;
   drainMinutes?: number;
@@ -94,6 +96,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
     await withdrawQuestion();
     await deps.notify({ companyId: null, level, title, body, link: "#/settings" });
+    // The agents that wrapped up for the update are woken again, as they were told they would be (BOS-574).
+    if (h && deps.afterHold) await deps.afterHold(new Date(h.since)).catch((err) => deps.log?.(`waking agents after the update failed: ${(err as Error).message}`));
     // Held wakes were only waiting; one pass starts them.
     await deps.tick();
   }
