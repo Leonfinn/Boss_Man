@@ -143,16 +143,23 @@ describe("board lanes", () => {
     expect(puts[0]).toEqual(["/api/projects/p1/columns", [{ name: "Soon", systemState: "ready", wipLimit: null }, { name: "In progress", systemState: "in_progress", wipLimit: 3 }]]);
   });
 
-  it("splits review into agent review and your review, and flags what waits on the owner", async () => {
-    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low" }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" }), card({ id: "t7", title: "Nobody else can review", waitingOnOwner: true, noReviewer: true })] });
+  it("splits review into awaiting review, approved and merging, and your review, and flags what waits on the owner", async () => {
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low", reviewStage: "awaiting_review" }), card({ id: "t8", title: "Approved, in the merge line", reviewStage: "merging", mergeNote: "Waiting for a check slot." }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" }), card({ id: "t7", title: "Nobody else can review", waitingOnOwner: true, noReviewer: true })] });
     withColumns([]);
     render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
     const strip = await screen.findByRole("link", { name: /2 tasks are waiting on you/ });
     expect(strip.textContent).toContain("Needs your sign-off");
     expect(strip.getAttribute("href")).toBe("#your-review");
-    const agent = screen.getByRole("region", { name: "Agent review" });
+    const agent = screen.getByRole("region", { name: "Awaiting review" });
     expect(within(agent).getByText("Agent still reviewing")).toBeTruthy();
     expect(within(agent).queryByText("Needs your sign-off")).toBeNull();
+    // BOS-667: approved work only waiting to merge is in its own lane, not counted as awaiting review.
+    expect(within(agent).queryByText("Approved, in the merge line")).toBeNull();
+    const merging = screen.getByRole("region", { name: "Approved, merging" });
+    expect(within(merging).getByText("Approved, in the merge line")).toBeTruthy();
+    expect(within(merging).getByText("Waiting for a check slot.")).toBeTruthy();
+    expect(within(merging).getByRole("link", { name: "See the merge queue" }).getAttribute("href")).toBe("#/merge-queue/c1");
+    expect(within(merging).queryByText("Agent still reviewing")).toBeNull();
     const mine = screen.getByRole("region", { name: "Your review" });
     expect(mine.id).toBe("your-review");
     expect(within(mine).getByText("Senior Developer approved. Needs your sign-off to merge.")).toBeTruthy();

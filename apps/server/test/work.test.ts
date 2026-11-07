@@ -104,6 +104,32 @@ describe("tickets waiting on the owner", () => {
     expect(((await cards()) as typeof by).find((x) => x.title === "Needs you")?.waitingOnOwner).toBe(false);
   });
 
+  it("tells review tickets still with a reviewer apart from approved ones that only wait to merge, on the board and the dashboard (BOS-667)", async () => {
+    const { company: c, ceo } = await company("Merge Co");
+    const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "Site" })).json();
+    const make = async (title: string) => (await req("POST", `/api/projects/${p.id}/tickets`, { title, state: "review", risk: "low" })).json() as { id: string };
+    const pending = await make("Still with a reviewer");
+    await t.db.insert(reviewRequests).values({ ticketId: pending.id, kind: "code", reviewerAgentId: ceo.id, round: 1 });
+    // Sent back once, then approved in round 2: only the newest round counts.
+    const approved = await make("Approved, waiting to merge");
+    await t.db.insert(reviewRequests).values([
+      { ticketId: approved.id, kind: "code", reviewerAgentId: ceo.id, round: 1, status: "changes_requested" },
+      { ticketId: approved.id, kind: "code", reviewerAgentId: ceo.id, round: 2, status: "approved" },
+    ]);
+    // Approved in round 1, back in review for round 2: with its reviewer again.
+    const reopened = await make("Back for another round");
+    await t.db.insert(reviewRequests).values([
+      { ticketId: reopened.id, kind: "code", reviewerAgentId: ceo.id, round: 1, status: "approved" },
+      { ticketId: reopened.id, kind: "code", reviewerAgentId: ceo.id, round: 2 },
+    ]);
+    const cards = (await req("GET", `/api/projects/${p.id}/board`)).json().columns.flatMap((x: { tickets: unknown[] }) => x.tickets) as Array<{ title: string; reviewStage: string | null; mergeNote: string | null; waitingOnOwner: boolean }>;
+    expect(cards.find((x) => x.title === "Still with a reviewer")).toMatchObject({ reviewStage: "awaiting_review", mergeNote: null, waitingOnOwner: false });
+    expect(cards.find((x) => x.title === "Approved, waiting to merge")).toMatchObject({ reviewStage: "merging", mergeNote: "Waiting to be checked and merged.", waitingOnOwner: false });
+    expect(cards.find((x) => x.title === "Back for another round")).toMatchObject({ reviewStage: "awaiting_review" });
+    const stats = (await req("GET", `/api/companies/${c.id}/dashboard`)).json().stats;
+    expect(stats).toMatchObject({ inReview: 3, awaitingReview: 2, approvedToMerge: 1 });
+  });
+
   it("flags a ticket in any column that waits on an owner question, but not one the CEO is asked", async () => {
     const { company: c } = await company("Ask Co");
     const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "Site" })).json();
