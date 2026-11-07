@@ -84,7 +84,8 @@ import { applyPackage, ImportError, previewPackage, readPackage } from "./servic
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
-import { createMemorySampler } from "./services/memory-sampler.js";
+import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
+import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
@@ -376,6 +377,8 @@ export async function buildApp(opts: AppOptions) {
   const memory = createMemorySampler({
     everyMs: Number(process.env.BOSSMAN_MEMORY_LOG_MS ?? 0) || undefined,
     log: (sample) => app.log.info({ memory: sample }, "memory"),
+    // What the off-heap part is made of (BOS-410 step 2: 15 GiB native with a 100 MiB heap on 5 Nov).
+    native: () => readNativeDetail(),
     extra: () => {
       let sockets = 0;
       let socketBuffered = 0;
@@ -384,6 +387,12 @@ export async function buildApp(opts: AppOptions) {
         socketBuffered += c.bufferedAmount;
       }
       return { sockets, socketBufferedKiB: Math.round(socketBuffered / 1024), runnerEventsWaiting: runnerIngestWaiting() };
+    },
+    // Catch the moment of a burst (5 Nov: 2-3 GiB to 15 GiB in one go) and what was running then.
+    jump: {
+      read: readRssAndPeak,
+      context: (windowMs) => stalls.activity(windowMs),
+      log: (line) => app.log.warn({ memoryJump: line }, "memory jump"),
     },
   });
   const serverStatus = serverStatusService(db, {
