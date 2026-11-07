@@ -667,10 +667,10 @@ function shellSegments(c: string, bad?: { v: boolean }): { words: string[]; out:
       if (op === "<<" || op === "<<-") {
         let j = i + 1;
         while (c[j] === " " || c[j] === "\t") j++;
-        // The tag is the whole word with quotes and backslashes removed, as the shell reads it (`E"OF"` is EOF).
-        const m = /^(?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"\\])+/.exec(c.slice(j));
-        // `$'EOF'` and `$"EOF"` are quote removal the shell does and this reader doesn't: fail closed on any `$` in the tag.
-        if (m && !m[0].includes("$")) pendingTags.push(m[0].replace(/['"\\]/g, ""));
+        // Allow-list: only a plain word (`EOF`) or a fully quoted plain word (`'EOF'`, `"EOF"`) is a tag this reader knows how to
+        // match. Anything else (`$'EOF'`, `E"OF"`, `\EOF`, a tag with punctuation) fails closed.
+        const m = /^(?:(\w+)|'(\w+)'|"(\w+)")(?=[\s;&|<>()]|$)/.exec(c.slice(j));
+        if (m) pendingTags.push((m[1] ?? m[2] ?? m[3])!);
         else if (bad) bad.v = true;
         redir = null;
       } else if (op[0] === ">" || op[0] === "&") redir = op.endsWith("&") && /^\s*\d/.test(c.slice(i + 1)) ? null : "out";
@@ -713,17 +713,57 @@ function abbreviates(arg: string, names: string[]): boolean {
   return o.length >= 2 && names.some((n) => n.startsWith(o));
 }
 
+/**
+ * Allow-list of options for tools that can run a program through some option (BOS-377 round 5). Only the options named here
+ * are known safe; any other option, any abbreviation of a long option and any unknown flag is unsafe (fail closed).
+ * `flags` are short options without a value, `valued` are short options that take a value (the rest of a cluster is the value),
+ * `long` are exact long option names (value after `=` is fine). `oldStyle` allows tar's `xf` first word.
+ */
+interface OptionList { flags: string; valued: string; long: string[]; oldStyle?: boolean }
+const SAFE_OPTIONS: Record<string, OptionList> = {
+  tar: { flags: "cxtrufvzjJapkOhPmSwl", valued: "fCTX", oldStyle: true,
+    long: ["create", "extract", "get", "list", "file", "directory", "gzip", "bzip2", "xz", "verbose", "preserve-permissions", "keep-old-files",
+      "strip-components", "exclude", "to-stdout", "files-from", "absolute-names", "no-same-owner", "same-owner", "overwrite", "one-top-level", "auto-compress"] },
+  sort: { flags: "bcdfghiMnRrsuVzm", valued: "oktSTy",
+    long: ["reverse", "unique", "numeric-sort", "ignore-case", "key", "field-separator", "output", "stable", "version-sort", "human-numeric-sort", "check",
+      "merge", "buffer-size", "temporary-directory", "zero-terminated", "ignore-leading-blanks", "dictionary-order", "general-numeric-sort", "month-sort", "parallel"] },
+  unzip: { flags: "oqnjlvtpufaLCXKMs", valued: "dx", long: [] },
+  zip: { flags: "rqjymgDXkuSv0123456789", valued: "bix", long: ["recurse-paths", "quiet", "junk-paths", "exclude", "include", "move", "update", "freshen", "delete"] },
+  rg: { flags: "iIsSwxvcnNHhlLoqrujUaz", valued: "efgtTABCmMjdE",
+    long: ["ignore-case", "smart-case", "case-sensitive", "word-regexp", "line-regexp", "invert-match", "count", "files-with-matches", "files-without-match",
+      "line-number", "no-line-number", "with-filename", "no-filename", "only-matching", "quiet", "glob", "type", "type-not", "hidden", "no-ignore", "max-count",
+      "context", "after-context", "before-context", "fixed-strings", "regexp", "files", "color", "json", "heading", "no-heading", "follow", "max-depth", "sort", "stats"] },
+  wget: { flags: "qvcNrkSxpEKbnd", valued: "OPoiTtwlUQARDIXBa",
+    long: ["output-document", "directory-prefix", "output-file", "quiet", "no-verbose", "verbose", "continue", "timeout", "tries", "no-check-certificate",
+      "content-disposition", "max-redirect", "header", "user-agent", "no-clobber", "timestamping", "recursive", "level", "no-parent", "post-data", "post-file", "method"] },
+};
+
+/** True when an option in `args` is not on the tool's allow-list. */
+function hasUnlistedOption(list: OptionList, args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") return false;
+    if (a.startsWith("--")) {
+      if (!list.long.includes(a.slice(2).split("=")[0]!)) return true;
+      continue;
+    }
+    let cluster: string | null = null;
+    if (a.startsWith("-") && a.length > 1) cluster = a.slice(1);
+    else if (list.oldStyle && i === 0) cluster = a;
+    if (cluster === null) continue;
+    for (const ch of cluster) {
+      if (list.valued.includes(ch)) break; // the rest of the word (or the next word) is its value
+      if (!list.flags.includes(ch)) return true;
+    }
+  }
+  return false;
+}
+
 /** Options on commands from the reader list that run a program of the caller's choosing. */
 function runsProgramOption(name: string, args: string[]): boolean {
-  const any = (re: RegExp): boolean => args.some((a) => re.test(a));
-  const abbr = (names: string[]): boolean => args.some((a) => abbreviates(a, names));
-  if (name === "tar") return any(/^-[A-Za-z]*[IF]/) || args.some((a) => /^[A-Za-z]*[xcrutd][A-Za-z]*[IF]/.test(a)) ||
-    abbr(["use-compress-program", "to-command", "checkpoint-action", "info-script", "new-volume-script", "rmt-command", "rsh-command", "transform-command"]);
-  if (name === "sort") return abbr(["compress-program"]);
-  if (name === "zip" || name === "unzip") return any(/^-TT$|^-[A-Za-z]*TT/) || abbr(["unzip-command"]);
-  if (name === "rg") return abbr(["pre", "hostname-bin"]);
-  if (name === "wget") return any(/^-e$/) || abbr(["use-askpass", "execute"]);
-  if (name === "less" || name === "more") return any(/^--lesskey|^-k$/);
+  const list = SAFE_OPTIONS[name];
+  if (list) return hasUnlistedOption(list, args);
+  if (name === "less" || name === "more") return args.some((a) => /^--lesskey|^-k$/.test(a));
   return false;
 }
 
