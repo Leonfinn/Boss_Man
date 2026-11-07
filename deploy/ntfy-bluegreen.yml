@@ -1,0 +1,20 @@
+# ntfy on a blue/green install (BOS-549). Add it as a SECOND -f file to the ntfy project, after deploy/ntfy.yml:
+#   docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml -f deploy/ntfy-bluegreen.yml --profile ntfy up -d
+# Like deploy/ntfy.yml it is its own Compose project and is never added to COMPOSE_FILE.
+#
+# Why: with blue/green the two colours sit on the "front" network (with Caddy), not on "edge", so they can't
+# reach http://ntfy:80 over edge. This puts ntfy on "front" too, under the same name "ntfy". "front" is internal
+# (no internet) and holds only Caddy, the two colours and now ntfy; no runner, no Tailscale, no database.
+# ntfy gets a dynamic address from the front range, never the Caddy address the colours trust (BOSSMAN_FRONT_PROXY_IP).
+# Optional: NTFY_FRONT_NETWORK (default boss-man_front, the "front" network of deploy/truenas-bluegreen.yml;
+# set it only if Boss Man runs under another Compose project name: <project>_front).
+services:
+  ntfy:
+    networks:
+      front:
+        aliases: [ntfy]
+
+networks:
+  front:
+    external: true
+    name: ${NTFY_FRONT_NETWORK:-boss-man_front}
