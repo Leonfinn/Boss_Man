@@ -889,12 +889,13 @@ export class Workspaces {
    * Where a ticket's branch really started (BOS-687). The recorded base is where the runner created
    * the branch, normally a main commit. A branch the agent then moved onto another ticket's work
    * before committing anything of its own (`git reset --hard <sha>`, `git switch -C`) started
-   * there: the branch's reflog shows the move ahead of its first commit. That point is recorded as
-   * the base, so the stack's lower tickets aren't refused for commits their descendants hold.
+   * there: the branch's reflog shows the move ahead of its first commit. That point is used for this
+   * check only, never written back: the recorded base also drives the review diff and the agent can
+   * shape the reflog. It counts only when the ticket being checked holds that commit.
    * A merge or fast-forward is not a start: that shape stays reported (BOS-369). Without a reflog
    * (a branch older than reflogs here) the recorded base stands.
    */
-  private async realBase(repo: string, b: { ticketId: string; branch: string }): Promise<string> {
+  private async realBase(repo: string, b: { ticketId: string; branch: string }, holders: string[]): Promise<string> {
     const key = `bossman.ticket-${b.ticketId}.base`;
     const recorded = await this.git(["config", "--get", key], { cwd: repo }).catch(() => "");
     if (!recorded) return "";
@@ -909,11 +910,17 @@ export class Workspaces {
       if (/^reset: moving to|^branch: Reset to|^checkout: moving/.test(text) && sha) start = sha;
     }
     if (!start || start === recorded) return recorded;
-    // Only when the new start sits on top of the recorded base (it descends from it).
+    // Only when the new start sits on top of the recorded base (it descends from it), and only when
+    // the ticket being checked really holds it: then the commits it shields are ones that ticket has.
+    // The reflog is the agent's to shape, so a start the checked ticket doesn't hold is ignored.
     const above = (await this.gitCode(["merge-base", "--is-ancestor", recorded, start], { cwd: repo })).code === 0;
     if (!above) return recorded;
-    await this.git(["config", key, start], { cwd: repo });
-    return start;
+    // A deeper stack (C on B on A, checking A) has C start at B's tip, which B holds: another open
+    // ticket's branch counts too, never the branch being judged.
+    for (const holder of holders) {
+      if ((await this.gitCode(["merge-base", "--is-ancestor", start, `refs/heads/${holder}`], { cwd: repo })).code === 0) return start;
+    }
+    return recorded;
   }
 
   /**
@@ -963,7 +970,7 @@ export class Workspaces {
           // (B's own, or one B has only because this ticket took it) is still reported (BOS-369), and so is a branch with no
           // recorded base, since the gate has to fail safe.
           if (!contained) {
-            const base = await this.realBase(repo, b);
+            const base = await this.realBase(repo, b, [branchFor(spec.ticketId), ...branches.map((o) => o.branch).filter((n) => n !== b.branch)]);
             if (base) {
               let allBelowBase = true;
               for (const sha of bLine.filter((s) => mine.has(s))) {

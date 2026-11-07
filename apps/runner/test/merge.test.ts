@@ -328,8 +328,32 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     git(repo, "push", "-q", "origin", `refs/heads/${B.branch}:refs/heads/main`);
     // C last.
     expect(await ws.carried({ ...spec, ticketId: cId }, "main", [A, B])).toEqual({ carried: [] });
-    // The start point was recorded where the branch really started.
-    expect(git(repo, "config", "--get", `bossman.ticket-${bId}.base`)).toBe(git(repo, "rev-parse", `bossman/${ids.t}`));
+    // The recorded base (which the review diff reads) is never rewritten: it stays where the runner made the branch.
+    expect(git(repo, "config", "--get", `bossman.ticket-${bId}.base`)).not.toBe(git(repo, "rev-parse", `bossman/${ids.t}`));
+  });
+
+  it("is not fooled by a branch moved onto a hidden commit the checked ticket doesn't hold (BOS-687, security)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const repo = ws.repoDir(ids.project);
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    const recordedBefore = git(repo, "config", "--get", `bossman.ticket-${bId}.base`);
+    // Hidden commit X on top of A's tip, built off the branch, then the branch is moved onto it, then one harmless commit.
+    git(b.path, "checkout", "-q", "--detach", `bossman/${ids.t}`);
+    writeFileSync(path.join(b.path, "payload.txt"), "unreviewed\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "hidden");
+    const x = git(b.path, "rev-parse", "HEAD");
+    git(b.path, "checkout", "-q", `bossman/${bId}`);
+    git(b.path, "reset", "-q", "--hard", x);
+    writeFileSync(path.join(b.path, "b.txt"), "b\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "harmless");
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    // A's check still reports B, and B's base (the review diff's start) did not move.
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [{ ...hit }] });
+    expect(git(repo, "config", "--get", `bossman.ticket-${bId}.base`)).toBe(recordedBefore);
   });
 
   it("leaves a plain ticket off main with its main base (BOS-687)", async () => {
