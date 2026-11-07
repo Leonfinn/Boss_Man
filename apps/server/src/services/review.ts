@@ -549,14 +549,16 @@ export function reviewService(
     },
 
     /**
-     * Whether the ticket's new migration numbers are free (BOS-219). At review time it also looks at
-     * the other open tickets in its project, so the agent hears early. The check that counts, just
-     * before the merge, compares only against the default branch: once one ticket has merged, the
-     * next must not be sent back because a branch it clashes with is still open, or two clashing
-     * tickets would keep bouncing each other. An offline runner or an unreadable branch gives
-     * "couldn't say", which never holds a ticket up.
+     * Whether the ticket's new migration numbers are free (BOS-219). The review-time warning
+     * (withOthers false) compares only against the default branch: a clash with another open
+     * branch isn't the agent's to fix, since that branch may never merge, and advising a rename
+     * against it caused renumber churn and gaps on main (DR-037). The check that counts, just
+     * before the merge, uses the same comparison: once one ticket has merged, the next must not
+     * be sent back because a branch it clashes with is still open, or two clashing tickets would
+     * keep bouncing each other. An offline runner or an unreadable branch gives "couldn't say",
+     * which never holds a ticket up.
      */
-    async migrations(ticketId: string, companyId?: string, withOthers = true): Promise<MigrationsResult> {
+    async migrations(ticketId: string, companyId?: string, withOthers = false): Promise<MigrationsResult> {
       const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId, companyId);
       if (!repoUrl || t.noCode) return { needed: null, reason: "This ticket has no code of its own to check." };
       const others = !withOthers
