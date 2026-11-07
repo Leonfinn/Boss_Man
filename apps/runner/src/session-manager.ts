@@ -405,7 +405,14 @@ export class SessionManager {
           return;
         }
         const spec = { projectId: command.projectId, ticketId: command.ticketId };
-        (command.range === "last_turn" ? this.opts.workspaces.lastTurnDiff(spec) : this.opts.workspaces.diff(spec)).then(
+        const ws = this.opts.workspaces;
+        // A base diff with a default branch needs origin fetched: the merge secrets give that fetch its credential.
+        const work = command.range === "last_turn"
+          ? ws.lastTurnDiff(spec)
+          : command.baseRef
+            ? (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({})).then((secrets) => ws.diff(spec, undefined, command.baseRef, secrets))
+            : ws.diff(spec);
+        work.then(
           (data) => reply(command.requestId, { ok: true, data }),
           (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err) }),
         );

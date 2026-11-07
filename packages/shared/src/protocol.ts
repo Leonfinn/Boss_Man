@@ -160,8 +160,14 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   }),
   /** The ticket is finished with its worktree: save any uncommitted work and free it (R38). */
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
-  /** Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. */
-  z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, range: z.enum(["base", "last_turn"]).optional() }),
+  /**
+   * Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. With
+   * `baseRef` (the project's default branch) the runner measures them from the merge-base of its
+   * recorded base and a freshly fetched origin/<baseRef>, so a branch that has merged main since it
+   * started shows only its own changes (BOS-694). Without it, or when origin can't be reached, the
+   * recorded base stands.
+   */
+  z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, range: z.enum(["base", "last_turn"]).optional(), baseRef: z.string().min(1).max(200).optional() }),
   /** Reads one file of a ticket's work: its worktree if it has one here, else its branch (R77). */
   z.object({ type: z.literal("workspace.file"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, path: z.string().min(1).max(500) }),
   /** An image (a screenshot) from the ticket's working folder, to attach to the ticket; the reply carries it as base64. */
