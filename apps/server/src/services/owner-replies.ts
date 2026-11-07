@@ -8,6 +8,7 @@
 // the owner's wake class; at ten minutes the CEO is asked to answer on the target's behalf (the
 // Scrum Master when the CEO is the target). The message is never dropped, and nothing goes to the
 // owner: the ticket shows the message's state under it.
+import { formatDate } from "@boss-man/shared";
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, ownerReplies, runs, ticketMessages, tickets, wakes } from "../db/schema.js";
@@ -24,7 +25,7 @@ const plainWhen = (d: Date, now: Date) => {
   const day = (x: Date) => x.toISOString().slice(0, 10);
   if (day(d) === day(now)) return `today at ${hhmm}`;
   if (day(d) === day(new Date(now.getTime() + 86_400_000))) return `tomorrow at ${hhmm}`;
-  return `on ${d.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" })} at ${hhmm}`;
+  return `on ${formatDate("en-GB", d, { day: "numeric", month: "short", timeZone: "UTC" })} at ${hhmm}`;
 };
 
 const ago = (ms: number) => (ms >= 3_600_000 ? `${Math.max(1, Math.floor(ms / 3_600_000))} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);

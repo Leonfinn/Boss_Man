@@ -4,6 +4,7 @@ import {
   creditStatus,
   dateIn,
   forecastQuota,
+  formatDate,
   parseClaudeRateLimit,
   parseCodexRateLimits,
   parseSyntheticQuota,
@@ -239,7 +240,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     const paid = await db.select({ name: agents.name, company: companies.name }).from(agents).innerJoin(companies, eq(companies.id, agents.companyId)).where(and(eq(agents.fundingSourceId, source.id), sql`${agents.retiredAt} is null`)).orderBy(agents.name);
     const when = (iso: string | null) =>
       iso
-        ? `${new Date(iso).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone })} at ${new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone })}`
+        ? `${formatDate("en-GB", new Date(iso), { weekday: "short", day: "numeric", month: "short", timeZone })} at ${formatDate("en-GB", new Date(iso), { hour: "2-digit", minute: "2-digit", timeZone })}`
         : "Synthetic doesn't say";
     // The card says "about X% used": the stored count is the percentage rounded to 0.01 points.
     const usedPercent = Math.floor(percent);
