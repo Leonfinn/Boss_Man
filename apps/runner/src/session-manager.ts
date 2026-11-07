@@ -683,8 +683,13 @@ export class SessionManager {
             }
           }
         };
-        if (spec.review) cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
-        else {
+        if (spec.review) {
+          cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
+          // BOS-693: the reviewer can run the ticket's tests in place, from the shared store. Outside the repo lock,
+          // and a failed install never stops the review: the reviewer can still read the work, or install by hand.
+          const deps = await workspaces.installReviewDeps(spec);
+          if (!deps.installed && deps.detail !== "not a pnpm project") emit({ type: "runner.log", level: "warn", message: `Run ${cmd.runId}: couldn't install the review copy's packages (${deps.detail}).` });
+        } else {
           const ws = await withLockRetry(() => workspaces.ensure(spec, secrets));
           cmd = { ...cmd, cwd: ws.path };
           emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
