@@ -75,3 +75,64 @@ describe("hostFactsService", () => {
     expect(await hostFactsService({ dir: bad }).hosts()).toEqual([]);
   });
 });
+
+// BOS-419 slice 2: the settings record, owner confirmation and the add-on merge.
+import { openPglite } from "../src/db/client.js";
+import { mergeHostAddons, unknownAddons } from "../src/services/addons.js";
+import { flattenHostRecord } from "../src/services/host-facts.js";
+
+const REPORT = {
+  version: 1, name: "box1", writtenAt: "2026-11-07T08:00:00Z", ownership: [],
+  repo: { origin: "ssh", originHost: "github.com", embeddedCredentials: false, probe: "ok", probedAt: "2026-11-07T07:30:00Z" },
+  paths: { install: "/opt/bm", src: "/opt/bm/src", deployer: "/opt/bm/deployer" },
+  compose: { files: ["docker-compose.yml"], bluegreen: true, liveColour: "blue" },
+  network: { addresses: ["192.168.1.5"], ports: { BOSSMAN_HOST_PORT: "3100" } },
+  memory: { totalKb: 8000000, availableKb: 4000000 },
+  addons: { tailscale: "running", ntfy: "not_set_up", penpot: "stopped" },
+  checks: { restart_counts: { max: 0 } },
+};
+
+describe("host facts settings record (BOS-419)", () => {
+  it("flattens the allowlisted fields and ignores a malformed section", async () => {
+    const dir = await withHost({ ...REPORT, memory: { totalKb: "lots" } });
+    const r = (await hostFactsService({ dir }).read())!;
+    const flat = flattenHostRecord(r);
+    expect(flat["repo.origin"]).toBe("ssh");
+    expect(flat["network.port.BOSSMAN_HOST_PORT"]).toBe("3100");
+    expect(flat["compose.liveColour"]).toBe("blue");
+    expect(flat["check.restart_counts.max"]).toBe("0");
+    expect(flat["memory.totalKb"]).toBeUndefined();
+    expect(await hostFactsService({ dir }).hosts()).toHaveLength(1);
+  });
+
+  it("stores facts with their source, keeps an owner fact, records a conflict, and drops what the host stops reporting", async () => {
+    const { db, close } = await openPglite();
+    const dir = await withHost(REPORT);
+    const svc = hostFactsService({ dir, db, now: () => new Date("2026-11-07T08:01:00Z") });
+    const rec = await svc.sync();
+    expect(rec.facts["compose.liveColour"]).toEqual({ value: "blue", source: "host", at: "2026-11-07T08:00:00Z" });
+    expect(await svc.value("memory.totalKb")).toBe("8000000");
+    expect(await svc.value("nope")).toBeNull();
+
+    await svc.confirm("network.publicAddress", "box.example.com");
+    await expect(svc.confirm("compose.liveColour", "green")).rejects.toThrow(/host reports/);
+    expect((await svc.sync()).facts["network.publicAddress"]).toMatchObject({ value: "box.example.com", source: "owner" });
+
+    // The host starts reporting that key with a different value: host wins, the disagreement is kept.
+    await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ ...REPORT, network: { addresses: [], ports: {} }, extra: 1 }));
+    const after = await svc.sync();
+    expect(after.facts["network.port.BOSSMAN_HOST_PORT"]).toBeUndefined();
+    expect(after.facts["network.publicAddress"]?.source).toBe("owner");
+    await close();
+  });
+
+  it("merges host add-on states with the server's own, keeping the worse", () => {
+    const own = unknownAddons("test");
+    own.ntfy = { state: "running", since: null, source: "x" };
+    own.tailscale = { state: "stopped", since: null, source: "x" };
+    const m = mergeHostAddons(own, { tailscale: "running", ntfy: "stopped", penpot: "running", bogus: "running" }, "t");
+    expect(m.tailscale.state).toBe("stopped");
+    expect(m.ntfy.state).toBe("stopped");
+    expect(m.penpot.state).toBe("running");
+  });
+});

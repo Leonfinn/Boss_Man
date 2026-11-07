@@ -32,7 +32,7 @@ import { getHold, maintenanceService } from "./services/maintenance.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
-import { addonsService, unknownAddons } from "./services/addons.js";
+import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { createPermissionLog } from "./services/permission-log.js";
@@ -254,7 +254,12 @@ export async function buildApp(opts: AppOptions) {
   // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
   // card reads it through addonFacts, and a failed read is "unknown" for all (warnings only), never a refused card.
   const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), now: opts.now });
-  const addonFacts = () => addonsSvc.facts().catch(() => unknownAddons("Boss Man couldn't read the add-on state just now"));
+  // The host deployer's add-on report (BOS-419) is merged in; the worse state wins when the two disagree.
+  const addonFacts = async () => {
+    const own = await addonsSvc.facts().catch(() => unknownAddons("Boss Man couldn't read the add-on state just now"));
+    const reported = await hostFacts.reportedAddons().catch(() => ({}));
+    return mergeHostAddons(own, reported, new Date().toISOString());
+  };
   // The socket peer, not req.ip: the edge is the hop itself, and X-Forwarded-For is the client's to set.
   app.addHook("onRequest", async (req) => addonsSvc.noteRequest(req.socket.remoteAddress));
   const leader = opts.leader ?? createLeader();
@@ -280,7 +285,7 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
-  const hostFacts = hostFactsService({ dir: opts.deployerDir, log: (m) => app.log.warn(m) });
+  const hostFacts = hostFactsService({ dir: opts.deployerDir, db, now: opts.now, log: (m) => app.log.warn(m) });
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), log: (m) => app.log.warn(m) });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
