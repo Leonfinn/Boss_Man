@@ -145,6 +145,10 @@ const outcomeOf = (row: typeof wakes.$inferSelect, merged = false): WakeResult =
 /** A message the owner didn't send via a run counts as the owner's; one an agent sent is agent-started. */
 const wakeClassOf = (w: { reason: string; causedByRunId?: string | null }): WakeClass => (fromOwner(w) ? "waiting" : w.reason === "message" ? "agent" : wakeClass(w.reason));
 
+/** Runs still going that are real work, not the owner's chat or the CEO's reply lane (BOS-349). */
+const liveWorkRuns = async (db: Db) =>
+  (await db.select({ id: runs.id }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`))).length;
+
 /** Boss Man's own alerts go up the alert ladder (BOS-64): the Scrum Master, then the CEO, then the owner. */
 type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "companyId" | "question">) => Promise<unknown>;
 
@@ -997,8 +1001,32 @@ export function schedulerService(
       if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
       const { maxTotal, maxCompany } = await limitsNow();
       const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
-      const live = await db.select({ companyId: runs.companyId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
-      const waiting = await db.select({ companyId: wakes.companyId }).from(wakes).where(and(inArray(wakes.status, ["queued", "deferred"]), ne(wakes.reason, CHAT_REASON), ne(wakes.reason, CEO_REPLY_REASON)));
+      const live = await db.select({ companyId: runs.companyId, agentId: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
+      // Only wakes that would take a slot of their own (BOS-667). A wake held until later (quiet hours, a
+      // retry time) or by the quota can't start now, and a wake whose agent already has its runs going
+      // starts only in the slot that run frees, so neither stands in for a slot that is in use. Counting
+      // them let the idle-slot sweep see a full house while slots sat empty (7 Nov, 5 of 10 slots).
+      const t = now();
+      const queue = await db
+        .select({ companyId: wakes.companyId, agentId: wakes.agentId })
+        .from(wakes)
+        .where(
+          and(
+            or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)), sql`coalesce(${wakes.statusReason}, '') not like ${QUOTA_HOLD_LIKE}`)),
+            sql`coalesce(${wakes.statusReason}, '') <> 'agent paused'`,
+            ne(wakes.reason, CHAT_REASON),
+            ne(wakes.reason, CEO_REPLY_REASON),
+          ),
+        );
+      const room = new Map<string, number>();
+      for (const r of live) if (r.agentId) room.set(r.agentId, (room.get(r.agentId) ?? limits.agent) - 1);
+      const waiting: typeof queue = [];
+      for (const w of queue) {
+        const left = room.get(w.agentId) ?? limits.agent;
+        if (left <= 0) continue;
+        room.set(w.agentId, left - 1);
+        waiting.push(w);
+      }
       const total = live.length + waiting.length;
       const mine = live.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
       // A company with nothing running or waiting still gets one, however full other companies'
@@ -1445,10 +1473,19 @@ export function schedulerService(
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
+      // The owner's chat (and the CEO's reply) is the exception (BOS-349): while at least one work run is still
+      // going, the update cannot apply anyway, so chatting costs no delay. Once no work run is left the update
+      // may swap at any moment, so chats are held too, exactly as before.
+      let pass = queue;
       if (await getHold(db)) {
-        const unmarked = queue.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
+        const work = await liveWorkRuns(db);
+        // While work runs are still going, only chat and reply wakes go on to launch; every other wake is held.
+        const through = work > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];
+        pass = through;
+        const held = queue.filter((w) => !through.includes(w));
+        const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
         if (unmarked.length) await db.update(wakes).set({ status: "queued", statusReason: HOLD_REASON }).where(inArray(wakes.id, unmarked));
-        return { ...result, waiting: queue.length };
+        if (through.length === 0) return { ...result, waiting: queue.length };
       }
 
       const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
@@ -1488,7 +1525,7 @@ export function schedulerService(
 
       // Fair share (BOS-582, DR-032): a company with no work run going has its best wake looked at
       // first, so a busy company's steady stream of wakes can't hold it off the server for ever.
-      for (const w of fairOrder(queue, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || x.reason === CEO_REPLY_REASON)) {
+      for (const w of fairOrder(pass, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || x.reason === CEO_REPLY_REASON)) {
         const defer = async (reason: string, notBefore: Date | null) => {
           // A quota-held wake is looked at again every pass (BOS-449); only write when something changed.
           if (w.status === "deferred" && w.statusReason === reason && (w.notBefore?.getTime() ?? null) === (notBefore?.getTime() ?? null)) {

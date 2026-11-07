@@ -766,6 +766,26 @@ export function reviewService(
     },
 
     /**
+     * The CEO starts a fresh merge attempt on an approved ticket the gate refused (BOS-684), the same retry the sweep
+     * makes once per server: the whole gate runs again on the connected runner. Only an approved ticket still in review;
+     * it never skips the checks (that stays the owner's), and an open sign-off card still holds it (startLanding).
+     */
+    async retryMerge(ticketId: string, input: { byAgentId: string; companyId: string; causedByRunId?: string | null }) {
+      const { t } = await ticketWithRepo(ticketId, input.companyId);
+      if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
+      if (t.systemState !== "review") throw new ReviewError(409, "That ticket isn't in review, so there is no merge to retry.");
+      const rows = await latestRows(db, ticketId);
+      if (!rows.length || evaluate(rows) !== "passed") throw new ReviewError(409, "That ticket isn't approved yet: every review must pass before a merge can be retried.");
+      // Refused before anything is cleared or recorded, so a no-op press leaves the ticket as it was.
+      if (landings.get(ticketId)?.state === "running" && !(await landingStale(ticketId))) throw new ReviewError(409, "This ticket is already being checked and merged.");
+      if (await ownerSignoffOpen(ticketId)) throw new ReviewError(409, "The owner's sign-off is open on this ticket; nothing can merge until it is answered.");
+      await record(db, { companyId: t.companyId, agentId: input.byAgentId, ticketId, kind: "merge_retried", summary: "The CEO started the merge again." });
+      // An older merge card no longer describes the state of the ticket: this attempt will raise its own if it fails.
+      await clearMergeCards(db, ticketId, { by: "system", note: "Replaced by a new merge attempt the CEO started.", at: new Date().toISOString() });
+      return this.startLanding(ticketId, "the CEO (retrying the merge)", input.causedByRunId);
+    },
+
+    /**
      * The owner's (or CEO's) "move these checks to after the merge" on a stuck-review card (BOS-422): the named criteria become
      * after-merge ones, the changes-requested reviews that only failed them are overruled, and the ticket goes on through review.
      * Owner sign-off still applies, as it does after an overrule.
@@ -866,6 +886,25 @@ export function reviewService(
     /** True while a merge for this ticket has said it is alive within the merge window (a check or lock wait under way). */
     landingActive(ticketId: string): boolean {
       return Date.now() - (landingBeat.get(ticketId) ?? 0) <= MERGE_MISSED_AFTER_MS;
+    },
+
+    /**
+     * The files this ticket's branch would clash with on the default branch, or null when that can't be
+     * told (no repo, no connected runner, an older runner, or a failed check). Null means "carry on as
+     * if it merges": a check that can't answer never holds a reviewer back (BOS-426).
+     */
+    async branchClash(ticketId: string): Promise<string[] | null> {
+      try {
+        const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
+        if (!repoUrl || !t.branch) return null;
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+        if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "clash-check")) return null;
+        const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 15_000);
+        if (typeof r?.clashes !== "boolean") return null;
+        return r.clashes ? (r.files ?? []) : [];
+      } catch {
+        return null;
+      }
     },
 
     /** Claims the ticket's merge marker, so the page shows the merge from its first moment. */
@@ -1179,18 +1218,31 @@ export function reviewService(
 
       // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
       // merge, and running the check anyway could send the ticket back for a failure it can't fix.
-      const changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+      let changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+      // A ticket sent back after its merge as no-code, then reopened for real work (BOS-532): a commit on its
+      // branch now is that work. Clear the stale no-code mark and read the diff again (a diff read over the
+      // old commit may show nothing), so the review checks code and the branch merges like any other.
+      let noCode = t.noCode;
+      if (noCode && changed?.commits.length) {
+        await db.update(tickets).set({ noCode: false }).where(eq(tickets.id, ticketId));
+        await record(db, { companyId: t.companyId, ticketId, kind: "reopened", summary: "Reopened for code: its branch has new commits again, so it is no longer a no-code ticket." });
+        noCode = false;
+        changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+      }
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.
       await this.requireSignoff(t, changed ? changed.head : t.branch ? "" : null);
       if ((changed && !changed.commits.length && !changed.files.length) || (!changed && !t.branch)) {
         // Only a ticket marked "no code" closes on an empty diff; any other is sent back, not closed.
-        if (!t.noCode) {
+        if (!noCode) {
           const delivered = await sendBack(`The review was approved, but the ticket can't be closed: ${NOTHING_CHANGED} Then move the ticket back to review.`, "nothing changed");
           return { outcome: "empty", delivered };
         }
         // Nothing to merge, but a live check still can't be made before the change is live (DR-024 #5): keep it to show.
         if (afterMergeLeft(t)) return closeAfterMerge(t, null, causedByRunId);
+        // The live check is reported, so this is the after-merge step: close the ticket. A merged ticket
+        // reopened for real code (BOS-532) is already a code ticket: its mark was cleared when it was moved
+        // back to ready or in_progress, or when a new commit landed (above), so it is sent back earlier.
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
         return { outcome: "done", delivered: null, detail: { note: "Nothing in the repository changed, so there was nothing to check or merge." } };
       }
