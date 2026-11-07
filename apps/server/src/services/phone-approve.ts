@@ -28,8 +28,10 @@ export const SUMMARY_MAX = 120;
  * Context keys whose mere presence makes a card ineligible (rule 1). setsUp/clearWhen (BOS-522) mark
  * an add-on setup card: an owner to-do that closes itself, never a plain choice to approve blind.
  * plan (BOS-531) marks a submit_plan card: approving it signs off a ticket's plan ("never plans").
+ * doAfter (BOS-551) says another owner card must be done first: a lock-screen tap would skip that order.
+ * doBefore and resetsOnRestart only order other cards around this one, so they don't block Approve.
  */
-export const RULE1_KEYS = ["steps", "ownerMustDo", "ticketId", "stillNeeded", "advice", "ladder", "setsUp", "clearWhen", "plan"] as const;
+export const RULE1_KEYS = ["steps", "ownerMustDo", "ticketId", "stillNeeded", "advice", "ladder", "setsUp", "clearWhen", "plan", "doAfter"] as const;
 
 /**
  * Text as the phone shows it (rules 2 and N4): the stored text with control and format characters

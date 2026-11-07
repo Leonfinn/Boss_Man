@@ -12,6 +12,7 @@ import {
   unreportedAfterMerge,
   ruleFor,
   rankDecision,
+  orderOwnerCards,
   ticketRef,
   recommendedVerdict,
   isJudgeable,
@@ -24,6 +25,7 @@ import {
   WORKING_COPY_RULE,
   cleanupScope,
   type BlockedTicket,
+  type OrderLink,
   alwaysChoices,
   explainPermission,
   type AlwaysChoice,
@@ -125,7 +127,7 @@ export type DeployUpdate = {
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string }
+  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
@@ -139,7 +141,7 @@ export type DecisionContext =
    * commit differs, the hand-apply reached the host (BOS-122). `lastFailure` keeps the owner's note from
    * "A step failed" on the card.
    */
-  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; ownerMustDo?: true; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate }
+  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; ownerMustDo?: true; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate; /** Owner cards that must be done first, because this update restarts the server (BOS-551). */ doAfter?: OrderLink[] }
   /**
    * The owner's setup steps for a ticket, raised by Boss Man once the ticket's change is live (DR-011).
    * `ticketId` links it back; `commit` is the live commit it was raised on, so a later switch-back to
@@ -147,10 +149,10 @@ export type DecisionContext =
    */
   | { type: "owner_setup"; ticketId: string; steps: string[]; commit: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
-  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; result?: { result: string; message: string; at: string } }
+  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[] }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
-  | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
+  | { type: "review_loop"; ticketId: string; message: string; reviewer: string; /** The failed checks the "move to after the merge" choice would move (BOS-422). */ movable?: string[] }
   /** A review woken this round again and again with no verdict (BOS-404, BOS-426): the CEO acts on it. */
   | { type: "review_stall"; ticketId: string; reviewId: string; reviewerAgentId: string; kind: string }
   | { type: "ticket_cap"; ticketId: string }
@@ -202,6 +204,8 @@ export const APPROVE_PLAN = "Approve plan";
 export const KEEP_PLANNING = "Keep planning";
 export const APPROVE_MERGE = "Approve and merge";
 export const SEND_IT_BACK = "Send it back";
+/** The stuck-review card's third choice (BOS-422): offered when the reviewers fail only checks that need the live work. */
+export const MOVE_AFTER_MERGE = "Move these checks to after the merge";
 export const CHECK_AGAIN = "Run the check again";
 export const CHECK_SEND_BACK = "Send it back to the agent";
 export const CHECK_SKIP = "Merge without the check";
@@ -387,7 +391,7 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[] },
 ) {
   const [row] = await db
     .insert(decisions)
@@ -400,7 +404,7 @@ export async function raiseOwnerTodo(
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
-      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ownerMustDo: true, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}) } satisfies DecisionContext,
+      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ownerMustDo: true, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}), ...(t.doAfter?.length ? { doAfter: t.doAfter } : {}) } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
@@ -712,6 +716,8 @@ type DeployHook = (deployId: string, approved: boolean) => Promise<unknown>;
 export type LoopHooks = {
   sendBack(ticketId: string, text: string, reviewer: string): Promise<unknown>;
   stopTicket(ticketId: string): Promise<unknown>;
+  /** Marks the named criteria "after the merge" and clears the failed reviews that only failed them (BOS-422). */
+  moveAfterMerge(ticketId: string, criteria: string[]): Promise<unknown>;
   raiseCap(ticketId: string): Promise<unknown>;
   /** Merges an approved ticket once the owner has signed off on it (R48); `merge.markDone` finishes a ticket with nothing to merge. */
   land(ticketId: string, reviewer: string, merge?: AnswerExtra["merge"]): Promise<unknown>;
@@ -1521,7 +1527,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -1533,6 +1539,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
             context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
+              // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
+              ...(input.doAfter?.length ? { doAfter: input.doAfter } : {}), ...(input.doBefore?.length ? { doBefore: input.doBefore } : {}),
+              // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
+              ...(input.resetsOnRestart ? { resetsOnRestart: true } : {}),
               // An add-on's setup card closes itself once the add-on is seen working (DR-023 D, BOS-522).
               ...(input.setsUp ? { setsUp: input.setsUp, clearWhen: [{ kind: "addonRunning", addon: input.setsUp }] } : {}),
             },
@@ -1886,6 +1896,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
               title: tickets.title,
               number: tickets.number,
               systemState: tickets.systemState,
+              assigneeAgentId: tickets.assigneeAgentId,
               companyId: tickets.companyId,
               prefix: companies.ticketPrefix,
               dueDate: tickets.dueDate,
@@ -1908,13 +1919,22 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const info = new Map(
         work.map((w) => {
           const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
-          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), companyId: w.companyId, prefix: w.prefix, number: w.number, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null } as const];
+          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), companyId: w.companyId, prefix: w.prefix, number: w.number, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null, systemState: w.systemState, assigneeAgentId: w.assigneeAgentId } as const];
         }),
       );
       // Only live tickets are in a chain; a done one (or a deleted one) is left out of the walk, and so
       // is everything below it: a done ticket never starts a chain, nor is it a hop through one.
       const liveOnly = new Set(work.filter((w) => w.systemState !== "done").map((w) => w.id));
+      // Names of the agents holding the tickets a card is about, so a waiting reason can say who has it.
+      const ticketAssigneeIds = [...new Set(work.map((w) => w.assigneeAgentId).filter((x): x is string => !!x))];
+      const agentNameById = new Map(forNames);
+      if (ticketAssigneeIds.length) {
+        for (const a of await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, ticketAssigneeIds))) agentNameById.set(a.id, a.name);
+      }
 
+      // The ticket each card is about and where it stands, kept off the row so the queue's shape is
+      // unchanged (BOS-551). A card whose ticket is back with an agent has nothing to do yet.
+      const cardTicket = new Map<string, { state: string | null; agent: string | null }>();
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
@@ -1937,6 +1957,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
         const about = aboutIds(d).flatMap((id) => { const r = info.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
+        const aboutTicket = aboutIds(d).map((id) => info.get(id)).find((r) => r && r.companyId === d.companyId);
+        cardTicket.set(d.id, { state: aboutTicket?.systemState ?? null, agent: aboutTicket?.assigneeAgentId ? (agentNameById.get(aboutTicket.assigneeAgentId) ?? null) : null });
         const c = d.context as DecisionContext;
         const push = c.type === "permission" ? c.explain?.push : undefined;
         const pushTicket = push?.ticketId ? info.get(push.ticketId) : undefined;
@@ -1948,10 +1970,97 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
       // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164).
       const sorted = rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+      // (BOS-551) Do-this-next ordering and the "waiting on an agent" group. Only cards that need the
+      // owner's hands are numbered and ordered against each other; everything else keeps the newest-first
+      // order and is never skipped. A card whose ticket is back with an agent (the owner acted and the
+      // agent is confirming, or a merge/check card sent back) goes to the bottom group with its reason.
+      const byId = new Map(sorted.map((r) => [r.id, r]));
+      const label = (id: string) => {
+        const r = byId.get(id);
+        if (!r) return "";
+        return r.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80);
+      };
+      const contextOf = (r: (typeof sorted)[number]) => r.context as DecisionContext;
+      const linksOf = (c: DecisionContext): { doAfter: OrderLink[]; doBefore: OrderLink[] } =>
+        c.type === "question" ? { doAfter: c.doAfter ?? [], doBefore: c.doBefore ?? [] } : c.type === "owner_todo" || c.type === "self_deploy" ? { doAfter: c.doAfter ?? [], doBefore: [] } : { doAfter: [], doBefore: [] };
+      // A server update restarts Boss Man, the same restart whether or not it is an infra hand-apply
+      // (BOS-551): every self_deploy counts as hands-on so its "Do after" links are shown.
+      const handsOn = (r: (typeof sorted)[number]) => {
+        const c = contextOf(r);
+        if (r.tier !== "owner") return false;
+        if (c.type === "owner_todo" || c.type === "owner_setup") return true;
+        if (c.type === "self_deploy") return true;
+        if (c.type === "deploy") return true;
+        if (c.type === "question") return !!c.steps?.length;
+        return false;
+      };
+      // Why this card has nothing to do yet: the owner acted and the raising agent is checking it, or its
+      // ticket is back with an agent (a merge check sent back, a review bounced). A card that is still the
+      // owner's own call, or one that holds a live run, is not waiting.
+      const AGENT_BACK_STATES = new Set(["in_progress"]);
+      // Only a merge/review card can be waiting on the agent because its ticket is back with one. A
+      // question, to-do or setup card is the owner's own live ask: it must keep its answer buttons even
+      // when its ticket reads "in progress" (an agent may hold the ticket while the owner's card is
+      // open, because starting a ticket ignores decision blockers; BOS-551 follow-up). Folding it here
+      // would hide a reading behind a server update that resets it. An agent re-checking such a card
+      // after the owner acted is already how `staleAt` folds it, so nothing is lost.
+      const aboutTicket = (c: DecisionContext) => c.type === "review_loop" || c.type === "risk_review" || c.type === "check_stuck" || c.type === "review_stall";
+      const waitingOf = (r: (typeof sorted)[number]): { reason: string } | null => {
+        if (r.staleAt) return { reason: `The agent is checking whether this is still needed, because you acted since it was written${r.staleReason ? ` (${r.staleReason})` : ""}.` };
+        const c = contextOf(r);
+        const t = cardTicket.get(r.id);
+        if (aboutTicket(c) && t && t.state && AGENT_BACK_STATES.has(t.state)) {
+          const who = t.agent ?? "an agent";
+          const why = c.type === "check_stuck" ? "the merge check failed, so the ticket is back with" : "the ticket is back with";
+          return { reason: `Nothing to do yet: ${why} ${who}.` };
+        }
+        return null;
+      };
+      const waitingIds = new Set(sorted.filter((r) => waitingOf(r)).map((r) => r.id));
+      const ordered = sorted.filter((r) => !waitingIds.has(r.id));
+      // Hands-on cards, plus any card that carries links to another card, are ordered against each other:
+      // a link on a card that needs no hands-on work still says when to do it (BOS-551).
+      const carriesLinks = (r: (typeof sorted)[number]) => { const l = linksOf(contextOf(r)); return l.doAfter.length > 0 || l.doBefore.length > 0; };
+      const orderCards = ordered.filter((r) => r.tier === "owner" && (handsOn(r) || carriesLinks(r)));
+      const orderInput = orderCards.map((r) => {
+        const c = contextOf(r);
+        const links = (x?: OrderLink[]) => (x ?? []).filter((l) => byId.has(l.decisionId) && !waitingIds.has(l.decisionId)).map((l) => ({ decisionId: l.decisionId, label: l.label || label(l.decisionId) }));
+        // A card's stored links carry the label as written when raised; fall back to the live card's first line.
+        const l = linksOf(c);
+        return { id: r.id, doAfter: links(l.doAfter), doBefore: links(l.doBefore) };
+      });
+      const { steps: stepOf } = orderOwnerCards(orderInput);
+      const edgeLabels = new Map<string, { after: string[]; before: string[] }>();
+      for (const o of orderInput) {
+        edgeLabels.set(o.id, { after: o.doAfter.map((l) => l.label || label(l.decisionId)), before: o.doBefore.map((l) => l.label || label(l.decisionId)) });
+      }
+      // Hands-on cards come first, in their do-this-next order. Everything else keeps today's newest-first
+      // order after them, and the waiting group goes last. A card with no ordering info is never displaced
+      // among its own kind: the ordering helper's tie-break is that same newest-first order. Only hands-on
+      // cards show a step number; a link-only card is ordered but not numbered.
+      const handsOnIds = new Set(orderCards.filter((r) => handsOn(r)).map((r) => r.id));
+      const orderIds = new Set(orderCards.map((r) => r.id));
+      const orderOut = orderCards.slice().sort((a, b) => stepOf[a.id]! - stepOf[b.id]!);
+      const restOut = ordered.filter((r) => !orderIds.has(r.id));
+      // The waiting group goes last, newest-first among themselves.
+      const waitingOut = sorted.filter((r) => waitingIds.has(r.id));
+      const finalRows = [...orderOut, ...restOut, ...waitingOut];
+
       return Promise.all(
-        sorted.map(async (r) => {
+        finalRows.map(async (r) => {
           const withRefs = { ...r, refs: refs.get(r.id) ?? {} };
-          return (r.context as DecisionContext).type === "stalled_run" ? { ...withRefs, evidence: await stallEvidence((r.context as { runId: string }).runId) } : withRefs;
+          const w = waitingOf(r);
+          const step = handsOnIds.has(r.id) ? (stepOf[r.id] ?? null) : null;
+          const e = edgeLabels.get(r.id);
+          const ordering = {
+            ...(step ? { step } : {}),
+            ...(w ? { waiting: w.reason } : {}),
+            ...(e && e.after.length ? { doAfter: e.after } : {}),
+            ...(e && e.before.length ? { doBefore: e.before } : {}),
+          };
+          const withOrdering = { ...withRefs, ...ordering };
+          return (r.context as DecisionContext).type === "stalled_run" ? { ...withOrdering, evidence: await stallEvidence((r.context as { runId: string }).runId) } : withOrdering;
         }),
       );
     },
@@ -2482,6 +2591,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             commit: ctx.commit,
             fromCommit: ctx.fromCommit,
             update: ctx.update,
+            doAfter: ctx.doAfter,
           });
         } else if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
           try {
@@ -2558,6 +2668,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // Free the ticket from this decision first, so the action below sets its final state.
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         if (answer === "Stop work on it") await loopHooks?.stopTicket(ctx.ticketId);
+        else if (ctx.type === "review_loop" && answer === MOVE_AFTER_MERGE && ctx.movable?.length) await loopHooks?.moveAfterMerge(ctx.ticketId, ctx.movable);
         else if (ctx.type === "review_loop") await loopHooks?.sendBack(ctx.ticketId, ctx.message, ctx.reviewer);
         else await loopHooks?.raiseCap(ctx.ticketId);
       } else if (ctx.type === "project_cap") {

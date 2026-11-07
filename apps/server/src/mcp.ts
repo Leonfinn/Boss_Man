@@ -2,6 +2,7 @@
 // per-run bearer token that pins it to one company and agent, so an agent can only see and
 // change its own company's work. The tool set is kept small (R36); descriptions say when
 // to use each tool so Claude Code's tool search finds them.
+import { checkRequestService, CheckRequestError } from "./services/check-request.js";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
@@ -142,6 +143,8 @@ type Services = {
   alerts: ReturnType<typeof alertLadder>;
   retro: ReturnType<typeof retroService>;
   serverStatus: ReturnType<typeof serverStatusService>;
+  /** request_check (DR-003, BOS-316); absent where the queue is not wired. */
+  checkRequests?: ReturnType<typeof checkRequestService>;
   /** What each host recorded about itself (BOS-427), for the owner-card lint's R6. */
   hostFacts: ReturnType<typeof hostFactsService>;
   /** Add-on facts for server_status and the card lint's R9 (addons.ts, DR-023). Absent: R9 is not checked. */
@@ -191,7 +194,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
  * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, addons }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, addons, checkRequests }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -428,6 +431,27 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   );
 
   server.registerTool(
+    "request_check",
+    {
+      description:
+        "Ask for a check of your ticket to be run for you by the runner, outside your session, so it survives the end of your run and nobody can stop it. ticketId; scope quick (default: the 2-5 minute check of what your branch changed) or full (only after the merge gate has bounced the ticket twice, or for a change to check-all.sh or the test setup). Commit first: the check runs on your latest commit. It queues behind merge checks. You are woken with the result: end your turn or do other work, and do not poll or run your own loop. Only the ticket's assignee can use it while the ticket is in progress or in review. The merge gate runs the one full check itself.",
+      inputSchema: { ticketId: z.string().uuid(), scope: z.enum(["quick", "full"]).optional() },
+    },
+    async ({ ticketId, scope: checkScope }) => {
+      if (!scope.agentId) return fail("Only an agent can ask for a check.");
+      if (!checkRequests) return fail("The check queue is not available on this server.");
+      try {
+        const msg = await checkRequests.request({ companyId: scope.companyId, agentId: scope.agentId, ticketId, scope: checkScope });
+        await noteRunTicket(ticketId);
+        return text(msg);
+      } catch (err) {
+        if (err instanceof CheckRequestError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
     "clear_check",
     {
       description: "Cancel the check you scheduled on a ticket with schedule_check, for when what you were waiting on has resolved. Only the ticket's assignee can use it.",
@@ -490,7 +514,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "raise_decision",
     {
-      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety and unfilled tokens. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again. approveSummary (optional, one line, up to 120 characters, plain text) says what choosing your recommended option does, e.g. \"Use deSEC for DNS on the website\": with it, the owner's phone notification can offer an Approve button that answers with your recommended option. Approve is offered only on a plain question with 2 to 4 options and no blocksTicketId, steps, ownerMustDo, stillNeeded or setsUp, so write the summary so it can be approved without opening the card.",
+      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety and unfilled tokens. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again. approveSummary (optional, one line, up to 120 characters, plain text) says what choosing your recommended option does, e.g. \"Use deSEC for DNS on the website\": with it, the owner's phone notification can offer an Approve button that answers with your recommended option. Approve is offered only on a plain question with 2 to 4 options and no blocksTicketId, steps, ownerMustDo, stillNeeded, setsUp or doAfter, so write the summary so it can be approved without opening the card.",
+      // Ordering (BOS-551): when this card must come before or after another owner card, pass doAfter/doBefore
+      // (the other card's id and a short label) so the owner's queue numbers them and says which to do first.
       inputSchema: {
         question: z.string().min(1).max(1000),
         options: z.array(z.string().min(1).max(200)).min(2).max(6),
@@ -503,9 +529,15 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         lintOverride: z.string().max(500).optional(),
         setsUp: z.enum(ADDONS).optional(),
         approveSummary: z.string().max(SUMMARY_MAX).optional(),
+        // Ordering against other owner cards (BOS-551): the ids of the cards this one must be done after or before, each with a short label.
+        doAfter: z.array(z.object({ decisionId: z.string().uuid(), label: z.string().min(1).max(120) })).max(10).optional(),
+        doBefore: z.array(z.object({ decisionId: z.string().uuid(), label: z.string().min(1).max(120) })).max(10).optional(),
+        // A restart of the server resets what this card measures (a memory reading, say), so the next
+        // update card lists it to do first (BOS-551).
+        resetsOnRestart: z.boolean().optional(),
       },
     },
-    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, approveSummary }) => {
+    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, approveSummary, doAfter, doBefore, resetsOnRestart }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       // Stored cleaned, so the phone shows exactly what is stored (BOS-243 rule 2).
       const summary = approveSummary === undefined ? undefined : cleanSummary(approveSummary);
@@ -538,7 +570,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ownerMustDo: ownerMustDo || undefined, approveSummary: summary });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary });
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
