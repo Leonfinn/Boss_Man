@@ -21,9 +21,9 @@ afterEach(async () => {
 async function setup() {
   const { db, close } = await openPglite();
   let offset = 0;
-  const head: { value: string | null } = { value: "base" };
+  const head: { value: string | null; calls: number } = { value: "base", calls: 0 };
   const clock = () => new Date(Date.now() + offset);
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: clock, branchHead: async () => head.value });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: clock, branchHead: async () => { head.calls++; return head.value; } });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -71,6 +71,20 @@ describe("stuck-ticket card counts real progress (BOS-612)", () => {
     expect(card).toMatchObject({ recommendedOption: "Reassign", options: ["Reassign", "Got it"] });
     expect(card!.question).toContain("run on it 4 times with no new commit, state change or review");
     expect(card!.dedupeKey).toContain(id);
+  });
+
+  it("does not ask the runner for the branch head again once the card exists (answered or not)", async () => {
+    ctx = await setup();
+    await ctx.stuck("Empty runs", 4);
+    await ctx.toCard();
+    expect(await ctx.cards()).toHaveLength(1);
+    const before = ctx.head.calls;
+    expect(before).toBeGreaterThan(0);
+    for (let i = 0; i < 3; i++) {
+      ctx.advance(60_000);
+      await ctx.sweeps.run();
+    }
+    expect(ctx.head.calls).toBe(before);
   });
 
   it("keeps the old Got it card under the run limit", async () => {

@@ -1,5 +1,5 @@
 {
-  "id": "eeb4c23e-5b50-49f0-99b8-7182a5354cf4",
+  "id": "0ec52a98-9721-489b-a0df-379d04ef2d37",
   "prevId": "a93cac06-54cc-43ee-8a03-9d64b57148ae",
   "version": "7",
   "dialect": "postgresql",
@@ -8521,6 +8521,12 @@
           "notNull": true,
           "default": false
         },
+        "fixes_live": {
+          "name": "fixes_live",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "version": {
           "name": "version",
           "type": "integer",
@@ -8574,36 +8580,6 @@
         "blocked_until_reason": {
           "name": "blocked_until_reason",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "progress_head": {
-          "name": "progress_head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "progress_at": {
-          "name": "progress_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ceo_plan": {
-          "name": "ceo_plan",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ceo_plan_deadline": {
-          "name": "ceo_plan_deadline",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ceo_plan_alerted_at": {
-          "name": "ceo_plan_alerted_at",
-          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
