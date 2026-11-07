@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { deviceProfiles, owners } from "../src/db/schema.js";
+import { companies, deviceProfiles, owners } from "../src/db/schema.js";
+import { buildBrief } from "../src/services/brief.js";
 import { deviceProfilesService, DEVICE_PROFILES_MAX } from "../src/services/device-profiles.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -19,6 +20,9 @@ const reading = (over: Record<string, unknown> = {}) => ({
 });
 
 const report = (over: Record<string, unknown> = {}) => ({ label: "Brave · 840px · touch", browser: "Brave", fingerprint: "fp-brave", readings: [reading()], ...over });
+
+/** A phone profile: the toolbar shows at load (100dvh 800 < 100vh 900) and hides after a scroll. */
+const phoneReport = (over: Record<string, unknown> = {}) => report({ readings: [reading(), reading({ afterScroll: true })], ...over });
 
 let t: TestApp;
 let ownerId: string;
@@ -66,6 +70,15 @@ describe("deviceProfilesService", () => {
     const svc = deviceProfilesService(t.db);
     for (let i = 0; i < DEVICE_PROFILES_MAX + 3; i++) await svc.report(ownerId, report({ fingerprint: `fp-${i}` }));
     expect(await t.db.select().from(deviceProfiles).where(eq(deviceProfiles.ownerId, ownerId))).toHaveLength(DEVICE_PROFILES_MAX);
+  });
+
+  it("puts a recorded device in the agent's brief, with its measured figures", async () => {
+    await deviceProfilesService(t.db).report(ownerId, phoneReport());
+    const [company] = await t.db.insert(companies).values({ name: "App Co" }).returning();
+    const brief = await buildBrief(t.db, { companyId: company!.id, agentId: null, role: "worker", since: null, now: new Date() });
+    expect(brief).toContain("Your devices");
+    expect(brief).toContain("100dvh 800");
+    expect(brief).toContain("840×900");
   });
 });
 
