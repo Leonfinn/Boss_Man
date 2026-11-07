@@ -13,6 +13,7 @@ import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { criterionText, criteriaText, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
@@ -522,7 +523,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     }
   };
 
-  if (ticket.error) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such task." : ticket.error.message}</p>;
+  if (ticket.error && !away(ticket.error)) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such task." : ticket.error.message}</p>;
   if (!t) return null;
   const made = outputs.data ?? [];
   // Collapsed, a long description still shows its first 8 lines.

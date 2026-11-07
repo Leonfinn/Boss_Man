@@ -161,6 +161,10 @@ export const ALERT_KINDS = {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
   },
+  // opencode-vacuum.ts (BOS-622): the runner killed the OpenCode prune's one-off VACUUM at its cap. One card per runner per day.
+  opencode_vacuum_cut: {
+    topRung: "ceo",
+  },
   // watchdog.ts spareCapacity (BOS-659): the company is under-used while work waits, and picking the
   // next ticket is a judgement call. Stops at the CEO; one card per company folds the stretches together.
   spare_capacity: {

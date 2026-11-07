@@ -618,7 +618,8 @@ export function alertLadder(
       if (!ceo) throw new WatchdogError(403, "Only the CEO passes alerts to the owner.");
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
-      const ask = checkAsk({ ...input, byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      // The card's own options are buttons the owner sees, so R7 accepts "press <option>" (BOS-421).
+      const ask = checkAsk({ ...input, options: d.options as string[], byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Every permission card that reaches the owner carries the CEO's advice (BOS-233 item 2): what it's
       // needed for and what wouldn't get done if the owner denies it. Start from any advice the CEO already
