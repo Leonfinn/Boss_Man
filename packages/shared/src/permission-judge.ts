@@ -554,8 +554,8 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
   for (const m of c.matchAll(re)) {
     const name = m[1]!;
     const args = m[2]!;
-    const toks = args.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
-    const awk = /awk$/.test(name);
+    const toks: string[] = args.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+    const awk =/awk$/.test(name);
     // Inline code (-c / -e ...) is read by inlineCodeOk; an awk program is inline unless it has -f.
     let inline = awk && !toks.includes("-f");
     for (const t of toks) {
