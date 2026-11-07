@@ -16,7 +16,7 @@ import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { AnswerError, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
+import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
@@ -541,6 +541,38 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       const links = await missingPageNote(db, scope.companyId, `${question}\n${options.join("\n")}\n${steps?.join("\n") ?? ""}`);
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${links ? `\n\n${links}` : ""}`);
+    },
+  );
+
+  server.registerTool(
+    "submit_plan",
+    {
+      description: "For a plan-first ticket when you have no plan mode or ExitPlanMode (OpenCode and other non-Claude agents): save your plan on the ticket and raise the plan card for the approver. Approving it releases the ticket (the same as approving a plan from ExitPlanMode); \"Keep planning\" sends you feedback to revise, and you call submit_plan again. Stop and wait after calling it; don't change code until you are woken with the approval.",
+      inputSchema: { ticketId: z.string().uuid(), plan: z.string().min(1).max(40000) },
+    },
+    async ({ ticketId, plan }) => {
+      const [t] = await db.select({ id: tickets.id, title: tickets.title, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!t) return fail("No ticket with that ID in your company.");
+      if (!t.planFirst) return fail("This ticket is not plan-first, so it needs no plan card.");
+      if (t.planApprovedAt) return fail("This ticket's plan is already approved; go ahead with it.");
+      const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
+      if (reviewWrite) return fail(reviewWrite);
+      let d: { id: string };
+      try {
+        d = await decisions.raise({
+          companyId: scope.companyId,
+          agentId: scope.agentId,
+          question: `Plan for "${t.title}": approve it?\n\n${plan}`.slice(0, 4000),
+          options: [APPROVE_PLAN, KEEP_PLANNING],
+          recommended: APPROVE_PLAN,
+          blocksTicketId: ticketId,
+          plan,
+        });
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+      return text(`Plan card ${d.id} is with the plan approver. You'll be woken with the answer; stop now and don't change code until the plan is approved.`);
     },
   );
 
@@ -1255,7 +1287,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
