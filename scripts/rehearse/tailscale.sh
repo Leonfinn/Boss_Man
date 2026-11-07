@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Rehearses the Tailscale sidecar (deploy/tailscale.yml, docs/20-https-tailscale.md) on a throwaway Docker machine (DR-024).
 # Starts the real sidecar from the repo's own compose files, with no auth key, and checks the outcome:
-#   - over REHEARSE_SECONDS it is Up at the end, and every exit was a clean one (code 0) at least ~45 s apart. Without a key
-#     containerboot gives up on the login after ~60 s, exits 0 and is restarted (docs/20-https-tailscale.md, Troubleshooting),
-#     so those restarts are expected here; a crash (non-zero exit) or a fast restart loop fails the run;
+#   - over REHEARSE_SECONDS it is Up at the end, restarts no faster than one per ~45 s, and every start got as far as
+#     waiting for a login. Without a key containerboot gives up on the login after ~60 s, exits (code 0 in the field,
+#     1 on CI) and is restarted (docs/20-https-tailscale.md, Troubleshooting), so those restarts are expected here;
+#     a fast restart loop, or a start that dies before it asks for a login, fails the run;
 #   - it reports it needs a login (so it is running tailscaled, not crashing);
 #   - its state folder is written, and survives `docker compose restart tailscale`.
 # It cannot rehearse: the login itself, approving the device, the tailnet's HTTPS/DNS settings, and the
@@ -56,11 +57,13 @@ since="$(date +%s)"
 echo "== watch for ${secs}s: must stay up; only the clean ~60 s keyless restarts are allowed"
 sleep "$secs"
 wait_running || fail "sidecar stopped during the watch"
-codes="$(docker events --since "$since" --until "$(date +%s)" --filter "container=$(cid)" --filter event=die --format '{{.Actor.Attributes.exitCode}}')"
-grep -v '^0$' <<<"$codes" | grep -q . && fail "sidecar crashed during the watch (exit codes: $(tr '\n' ' ' <<<"$codes"))"
+codes="$(docker events --since "$since" --until "$(date +%s)" --filter "container=$(cid)" --filter event=die --format '{{.Actor.Attributes.exitCode}}' | tr '\n' ' ')"
 n=$(($(restarts) - first))
 [ "$n" -le $((secs / 45)) ] || fail "RestartCount went from $first to $(restarts) in ${secs}s: faster than the ~60 s keyless restart, a restart loop"
-echo "restarts during the watch: $n, all clean (expected without a key: about one per 60 s)"
+# docker logs keeps every start's output, so each start since the first must have reached NeedsLogin.
+logins="$(dc logs --no-color tailscale 2>&1 | grep -c "NeedsLogin" || true)"
+[ "$logins" -ge $((n + 1)) ] || fail "only $logins of $((n + 1)) starts reached the login wait: a start died early (exit codes: ${codes:-none})"
+echo "restarts during the watch: $n (exit codes: ${codes:-none}), each start waited for a login (expected without a key: about one per 60 s)"
 
 echo "== it says it needs a login (running, not crashing)"
 dc logs --no-color tailscale 2>&1 | grep -qiE "NeedsLogin|authkey" || fail "no login prompt in the logs"
