@@ -62,7 +62,7 @@ How the NAS reads the repo (a deploy key if it is private, https if it is public
 git clone <repo-https-url> src
 ```
 
-Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up.
+Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up. Moving this install to another host later: see [docs/21](21-move-to-new-host.md).
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
@@ -400,7 +400,7 @@ docker compose up -d
 ```
    Blue/green: first bring the schema up to what the running code expects (a restored older backup may be behind), using the live colour (`blue` below; find it with `grep reverse_proxy $D/proxy/active.caddy`, where `$D` is the deployer folder from step 9), then start only that colour:
 ```sh
-BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
 ```
 ```sh
 docker compose up -d --no-deps server-blue
@@ -689,7 +689,7 @@ grep -E '^(COMPOSE_FILE|BOSSMAN_HOST_PORT|BOSSMAN_PORTAL_HOST_PORT|BOSSMAN_PORTA
 
 ```sh
 BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue
-BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
 ```
 
 **6. The cutover (the one planned stop).** The old single server and its ports go; the proxy and blue take over. The runners reconnect by themselves (their address, `ws://server:3100`, now points at the proxy):
@@ -746,7 +746,7 @@ docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Con
 ```
 2. Build blue at the checkout's commit, then migrate:
 ```sh
-BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue && BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue && BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
 ```
 3. Restart blue on the new image (this is the 20 to 30 second gap):
 ```sh
@@ -872,9 +872,9 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    ```
    The last command prints the **publish token** (it starts with `tk_`). Copy it now.
 5. In Boss Man, open **Settings > Secrets** and save the publish token as a new secret.
-6. Open **Settings > Notifications** and fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (the secret from step 5). Set **Boss Man's address on your phone** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If "Send a test" fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
+6. Open **Notifications** in the side menu. In the **How you're told** box below the feed, tick **Send to my phone through my own ntfy server**, fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (paste the publish token from step 4), and choose **Save**. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If **Send a test to my phone** (it only appears after you Save) fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
 7. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
-8. In Boss Man, choose **Send a test to my phone**. It should arrive within seconds.
+8. On the **Notifications** page, choose **Send a test to my phone**. It should arrive within seconds.
 
 Check that it is locked down. Both commands must print `401` or `403` (the first tries to read, the second to publish, with no login):
 ```
@@ -893,7 +893,11 @@ ntfy action buttons make your phone call Boss Man directly, over Boss Man's http
 
 ### Moving off the Home Assistant webhook
 
-Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook in **Settings > Notifications**.
+Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook where you set it up.
+
+### Blue/green installs
+
+With blue/green the two Boss Man colours are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command (and in the rollback command). It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings in step 6 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
 
 ### Any Docker host
 

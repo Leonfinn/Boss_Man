@@ -92,6 +92,14 @@ if command -v flock >/dev/null; then
   hold() { local st="$t/stamp.$1.$RANDOM"; : >"$st"; ( exec 8>"$t/lock.slot.$1"; flock 8; for _ in $(seq 1500); do [ -n "$(find "$t/lock.queue" -type f -newer "$st" 2>/dev/null | head -1)" ] && break; sleep 0.1; done; exec sleep "$2" ) & }
   waitq() { for _ in $(seq 1500); do [ "$(find "$t/lock.queue" -type f 2>/dev/null | wc -l)" -ge "$1" ] && return 0; sleep 0.1; done; return 1; }
 
+  # Server-queued job (DR-003): no lock files are touched even while a slot is held, and it does not wait.
+  hold 1 3; holder=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_CHECK_NO_LOCK=1 BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1) || rc=$?
+  [ "$rc" = 0 ] || fail "no-lock mode: expected exit 0 with a busy slot, got $rc: $out"
+  grep -q "no lock files" <<<"$out" || fail "no-lock mode: not announced: $out"
+  [ ! -e "$t/lock.queue" ] || [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "no-lock mode: queue entry written"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
 
@@ -350,6 +358,18 @@ if command -v flock >/dev/null; then
   for _ in $(seq 300); do grep -q "lock held" "$t/new.out" 2>/dev/null && break; sleep 0.2; done
   grep -q "lock held" "$t/new.out" || fail "replace: the newer check never got the slot: $(cat "$t/new.out")"
   wait "$n" "$o" || true
+  # Only hand-run entries are ever replaced: a "replaced" marker for a waiting merge check's pid must not bounce it.
+  rm -rf "$t/lock.queue" "$t/mc.out"; hold 1 3600; h1=$!; sleep 0.3
+  ( lock env BOSSMAN_MERGE_CHECK=1 >"$t/mc.out" 2>&1 ) & mc=$!
+  for _ in $(seq 300); do ls "$t/lock.queue"/0-* >/dev/null 2>&1 && grep -q "waiting for a free check slot" "$t/mc.out" 2>/dev/null && break; sleep 0.2; done
+  mqe=""; for mqf in "$t"/lock.queue/0-*; do [ -e "$mqf" ] && mqe=${mqf##*/} && break; done; [ -n "$mqe" ] || fail "merge marker: merge check never queued: $(cat "$t/mc.out")"
+  : >"$t/lock.replaced.${mqe##*-}"
+  sleep 3
+  kill -0 "$mc" 2>/dev/null || fail "merge marker: a merge check left the line on a replaced marker: $(cat "$t/mc.out")"
+  ! grep -q "replaced by a newer check" "$t/mc.out" || fail "merge marker: merge check was replaced: $(cat "$t/mc.out")"
+  pkill -P "$mc" 2>/dev/null || true; kill "$mc" 2>/dev/null || true; wait "$mc" 2>/dev/null || true
+  rm -f "$t"/lock.replaced.*
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   # BOS-613 (a): an aged hand-run entry never beats an OLDER merge check. The merge entry is queued first, the hand-run check
   # ages past CHECK_ALL_AGE_AFTER behind it; when the slot frees it must still wait (today's code let it jump the merge check).
   rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"; hold 1 3600; h1=$!; sleep 0.3

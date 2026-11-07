@@ -23,7 +23,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
 
 1. **Host script plus a one-minute TrueNAS cron job.** No container, no socket.
 2. **It reuses `scripts/deploy.sh`** (backup, build, restart, health) and `scripts/update-runner.sh`, so there is one deploy path. `deploy.sh` gained `--commit SHA` so it deploys exactly the commit that was checked, not whatever main is by then.
-3. **The git remote is the source of truth.** The `src` checkout pulls from its `origin`: https for a public repo, or an SSH remote with a read-only deploy key set as `core.sshCommand` for a private one (`docs/00`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no extra credential.
+3. **The git remote is the source of truth.** The `src` checkout pulls from its `origin`: https for a public repo, or an SSH remote with a read-only deploy key set as `core.sshCommand` for a private one (`docs/00`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no extra credential. On a new host, the move guide (`docs/21-move-to-new-host.md`) sets up the same key.
 
    Exact clone commands (full steps in `docs/00`, step 2), with `$B` as the install folder:
 

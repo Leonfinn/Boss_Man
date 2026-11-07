@@ -1,0 +1,1 @@
+CREATE INDEX "check_results_company_at" ON "check_results" USING btree ("company_id","at");
