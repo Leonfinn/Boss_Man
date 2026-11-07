@@ -487,11 +487,14 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         text:
           r.landing?.state === "running"
             ? `${r.signoffAnswered ? "Signed off. " : ""}Checking and merging now.`
-            : // No landing to show: either a ticket with nothing to merge was finished in the same press,
-              // or the merge already finished (BOS-471). The reload below shows the merged state.
-              r.signoffAnswered
-              ? "Signed off."
-              : "Approved.",
+            : // The background merge (BOS-559) finished before the page read it back, so say so here;
+              // the reload below shows the merged state.
+              r.landing?.outcome === "merged"
+              ? `${r.signoffAnswered ? "Signed off and merged. " : "Merged."}`
+              : // No landing to show: a ticket with nothing to merge was finished in the same press (BOS-471).
+                r.signoffAnswered
+                ? "Signed off."
+                : "Approved.",
       });
       ticket.reload();
     } catch (err) {
