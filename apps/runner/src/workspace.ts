@@ -206,6 +206,8 @@ export class Workspaces {
 
       await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
       await this.git(["worktree", "prune"], { cwd: repo });
+      // Branch reflogs are how the real start point of a branch moved onto another ticket's work is found later (BOS-687).
+      await this.git(["config", "core.logAllRefUpdates", "true"], { cwd: repo });
       const branchExists = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo }).then(
         () => true,
         () => false,
@@ -884,6 +886,37 @@ export class Workspaces {
   }
 
   /**
+   * Where a ticket's branch really started (BOS-687). The recorded base is where the runner created
+   * the branch, normally a main commit. A branch the agent then moved onto another ticket's work
+   * before committing anything of its own (`git reset --hard <sha>`, `git switch -C`) started
+   * there: the branch's reflog shows the move ahead of its first commit. That point is recorded as
+   * the base, so the stack's lower tickets aren't refused for commits their descendants hold.
+   * A merge or fast-forward is not a start: that shape stays reported (BOS-369). Without a reflog
+   * (a branch older than reflogs here) the recorded base stands.
+   */
+  private async realBase(repo: string, b: { ticketId: string; branch: string }): Promise<string> {
+    const key = `bossman.ticket-${b.ticketId}.base`;
+    const recorded = await this.git(["config", "--get", key], { cwd: repo }).catch(() => "");
+    if (!recorded) return "";
+    const log = await this.gitCode(["reflog", "show", "--format=%H %gs", `refs/heads/${b.branch}`], { cwd: repo });
+    if (log.code !== 0) return recorded;
+    let start = "";
+    // The reflog lists newest first; walk from the oldest entry up to the branch's first commit.
+    for (const line of log.stdout.split("\n").filter(Boolean).reverse()) {
+      const [sha, ...msg] = line.split(" ");
+      const text = msg.join(" ");
+      if (/^commit|^merge|^rebase|^cherry-pick/.test(text)) break;
+      if (/^reset: moving to|^branch: Reset to|^checkout: moving/.test(text) && sha) start = sha;
+    }
+    if (!start || start === recorded) return recorded;
+    // Only when the new start sits on top of the recorded base (it descends from it).
+    const above = (await this.gitCode(["merge-base", "--is-ancestor", recorded, start], { cwd: repo })).code === 0;
+    if (!above) return recorded;
+    await this.git(["config", key, start], { cwd: repo });
+    return start;
+  }
+
+  /**
    * Which other tickets' unmerged commits this ticket's branch carries (BOS-130): for another
    * ticket's branch B, its commits not yet on origin/target, and which of those this branch has.
    * A commit on this branch that only reached it by merging B means B was carried in; missing
@@ -930,7 +963,7 @@ export class Workspaces {
           // (B's own, or one B has only because this ticket took it) is still reported (BOS-369), and so is a branch with no
           // recorded base, since the gate has to fail safe.
           if (!contained) {
-            const base = await this.git(["config", "--get", `bossman.ticket-${b.ticketId}.base`], { cwd: repo }).catch(() => "");
+            const base = await this.realBase(repo, b);
             if (base) {
               let allBelowBase = true;
               for (const sha of bLine.filter((s) => mine.has(s))) {

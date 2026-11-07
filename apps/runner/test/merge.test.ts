@@ -299,6 +299,66 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     expect(await ws.carried(spec, "main", [{ ticketId: bId, branch: `bossman/${bId}` }])).toEqual({ carried: [] });
   });
 
+  it("lets a three-ticket stack land bottom first, with the base recorded as moved and no hand edits (BOS-687)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const repo = ws.repoDir(ids.project);
+    const commitIn = (dir: string, file: string) => {
+      writeFileSync(path.join(dir, file), `${file}\n`);
+      git(dir, "add", ".");
+      git(dir, "commit", "-qm", file);
+    };
+    // B and C are created from main by the runner; the agent then moves each onto the one below (as BOS-378 did).
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const cId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    git(b.path, "reset", "-q", "--hard", `bossman/${ids.t}`);
+    commitIn(b.path, "b.txt");
+    const c = await ws.ensure({ ...spec, ticketId: cId });
+    git(c.path, "reset", "-q", "--hard", `bossman/${bId}`);
+    commitIn(c.path, "c.txt");
+    const A = { ticketId: ids.t, branch: `bossman/${ids.t}` };
+    const B = { ticketId: bId, branch: `bossman/${bId}` };
+    const C = { ticketId: cId, branch: `bossman/${cId}` };
+    // A merges first: neither descendant makes A look like it carries them.
+    expect(await ws.carried(spec, "main", [B, C])).toEqual({ carried: [] });
+    git(repo, "push", "-q", "origin", `refs/heads/${A.branch}:refs/heads/main`);
+    // B next (its A commit is on main now); C does not make B look like a carrier.
+    expect(await ws.carried({ ...spec, ticketId: bId }, "main", [A, C])).toEqual({ carried: [] });
+    git(repo, "push", "-q", "origin", `refs/heads/${B.branch}:refs/heads/main`);
+    // C last.
+    expect(await ws.carried({ ...spec, ticketId: cId }, "main", [A, B])).toEqual({ carried: [] });
+    // The start point was recorded where the branch really started.
+    expect(git(repo, "config", "--get", `bossman.ticket-${bId}.base`)).toBe(git(repo, "rev-parse", `bossman/${ids.t}`));
+  });
+
+  it("leaves a plain ticket off main with its main base (BOS-687)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    const start = git(b.path, "rev-parse", "HEAD");
+    writeFileSync(path.join(b.path, "b.txt"), "b\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b");
+    expect(await ws.carried(spec, "main", [{ ticketId: bId, branch: `bossman/${bId}` }])).toEqual({ carried: [] });
+    expect(git(ws.repoDir(ids.project), "config", "--get", `bossman.ticket-${bId}.base`)).toBe(start);
+  });
+
+  it("still refuses a branch that really carries unapproved work after the move (BOS-687)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    git(b.path, "reset", "-q", "--hard", `bossman/${ids.t}`);
+    writeFileSync(path.join(b.path, "b.txt"), "b\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b");
+    // B holds all of A's unmerged commit: asked from B's side, A is carried.
+    const hit = { ticketId: ids.t, branch: `bossman/${ids.t}` };
+    expect(await ws.carried({ ...spec, ticketId: bId }, "main", [hit])).toMatchObject({ carried: [{ ...hit, contained: true }] });
+  });
+
   it("still counts a stacked branch's own commit once this ticket takes it in (BOS-629)", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
