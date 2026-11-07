@@ -2,7 +2,8 @@
 // Landlock helper, so the adapter and everything it starts (Claude Code, shell commands, file
 // edits, browsers) can only write the session's own folders, and can't read other agents' files
 // and secrets, signal the runner, or reach other sessions' sockets. Proven in the BOS-315 spike.
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -228,27 +229,46 @@ export function sandboxSelfTest(): SandboxReport {
  * Prunes one pnpm store of packages no install references any more (BOS-633). Both stores only ever grow as
  * lockfiles change, on the volume every agent's work lives on, so the runner does this daily. pnpm's store
  * lock makes it safe beside a running install, and it never removes a package something still links to.
- * Never throws: a missing store, a wrong pnpm or a busy lock is logged and skipped, and there is always the next run.
+ * Runs asynchronously (a large store can take minutes) so the runner's event loop, connection and live sessions
+ * keep going; the child is killed on the timeout. Never rejects: a missing store, a wrong pnpm or a busy lock is
+ * logged and skipped, and there is always the next run.
  */
-export function pruneStore(storeDir: string, log: (m: string) => void = () => {}, bin = "pnpm"): { pruned: boolean; why?: string } {
+export async function pruneStore(
+  storeDir: string,
+  log: (m: string) => void = () => {},
+  bin = "pnpm",
+): Promise<{ pruned: boolean; why?: string }> {
   if (!existsSync(storeDir)) return { pruned: false, why: "no store yet" };
-  const r = spawnSync(bin, ["store", "prune", "--store-dir", storeDir], { encoding: "utf8", timeout: 10 * 60_000 });
-  if (r.error) {
-    log(`pnpm store prune of ${storeDir} failed: ${r.error.message}`);
-    return { pruned: false, why: r.error.message };
-  }
-  if (r.status !== 0) {
-    const why = (r.stderr || r.stdout || "").trim().split("\n").slice(-3).join(" ") || `exit ${r.status}`;
+  try {
+    const { stdout, stderr } = await promisify(execFile)(bin, ["store", "prune", "--store-dir", storeDir], {
+      encoding: "utf8",
+      timeout: 10 * 60_000,
+      killSignal: "SIGKILL",
+    });
+    log(`pnpm store prune of ${storeDir}: ${(stdout || "").trim().split("\n").pop() ?? "done"}`);
+    return { pruned: true };
+  } catch (err) {
+    const e = err as { stderr?: string; stdout?: string; message: string; killed?: boolean };
+    const why = e.killed
+      ? "timed out"
+      : (e.stderr || e.stdout || "").trim().split("\n").slice(-3).join(" ") || e.message;
     log(`pnpm store prune of ${storeDir} failed: ${why}`);
     return { pruned: false, why };
   }
-  log(`pnpm store prune of ${storeDir}: ${(r.stdout || "").trim().split("\n").pop() ?? "done"}`);
-  return { pruned: true };
 }
 
-/** Prunes the shared store and the gate's store beside it, in turn, one failing without stopping the other. */
-export function pruneStores(shared: string, log: (m: string) => void = () => {}, bin = "pnpm") {
-  return { shared: pruneStore(shared, log, bin), gate: pruneStore(`${shared}-gate`, log, bin) };
+/**
+ * Prunes the shared store and the gate's store beside it, one after the other, one failing without stopping the
+ * other. The gate store is exactly `${shared}-gate`: validation keeps that path on the same volume as the shared
+ * store (pnpmStoreDir), so a prune can never reach the root disk. Nothing in this repo creates the gate store yet
+ * (the merge gate's installs use the ambient PNPM_STORE_DIR like every other run), so pruning it is a no-op until
+ * that exists; pruneStore skips the folder when it is absent, and there is no fence grant for it (sessions only
+ * get the shared store, and the gate is fenced separately).
+ */
+export async function pruneStores(shared: string, log: (m: string) => void = () => {}, bin = "pnpm") {
+  const sharedResult = await pruneStore(shared, log, bin);
+  const gateResult = await pruneStore(`${shared}-gate`, log, bin);
+  return { shared: sharedResult, gate: gateResult };
 }
 
 /**

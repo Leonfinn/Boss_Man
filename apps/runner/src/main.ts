@@ -114,9 +114,11 @@ const housekeeping = async () => {
 void housekeeping();
 const sweep = setInterval(() => void housekeeping(), 3_600_000);
 // The pnpm stores only grow as lockfiles change (BOS-633). Pruned once at start-up and then daily: pnpm's store lock
-// makes each prune safe beside a running install, and it only drops packages no install references any more.
-pruneStores(storeDir, log);
-const prune = setInterval(() => pruneStores(storeDir, log), 24 * 3_600_000);
+// makes each prune safe beside a running install, and it only drops packages no install references any more. The
+// prune runs asynchronously, so start-up and the daily tick never wait on it, and a slow prune can't stall
+// the connection or live sessions; it never rejects.
+void pruneStores(storeDir, log);
+const prune = setInterval(() => void pruneStores(storeDir, log), 24 * 3_600_000);
 prune.unref();
 
 // The container healthcheck reads this file: it's touched while the server connection is live.

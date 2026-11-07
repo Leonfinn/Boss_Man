@@ -309,7 +309,7 @@ describe("pruneStores (BOS-633)", () => {
     execFileSync("chmod", ["+x", bin]);
     return bin;
   };
-  it("prunes the shared and gate stores, twice in a row, and leaves them in place", () => {
+  it("prunes the shared and gate stores, twice in a row, and leaves them in place", async () => {
     const d = mkdtempSync(path.join(tmpdir(), "prune-"));
     const log = path.join(d, "prune.log");
     const bin = fakePnpm(d);
@@ -318,8 +318,8 @@ describe("pruneStores (BOS-633)", () => {
     mkdirSync(`${shared}-gate`);
     process.env.PRUNE_LOG = log;
     try {
-      expect(pruneStores(shared, () => {}, bin)).toEqual({ shared: { pruned: true }, gate: { pruned: true } });
-      expect(pruneStores(shared, () => {}, bin)).toEqual({ shared: { pruned: true }, gate: { pruned: true } });
+      expect(await pruneStores(shared, () => {}, bin)).toEqual({ shared: { pruned: true }, gate: { pruned: true } });
+      expect(await pruneStores(shared, () => {}, bin)).toEqual({ shared: { pruned: true }, gate: { pruned: true } });
       const lines = readFileSync(log, "utf8").trim().split("\n");
       expect(lines).toEqual([shared, `${shared}-gate`, shared, `${shared}-gate`]);
       expect(existsSync(shared) && existsSync(`${shared}-gate`)).toBe(true);
@@ -327,19 +327,19 @@ describe("pruneStores (BOS-633)", () => {
       delete process.env.PRUNE_LOG;
     }
   });
-  it("skips a store that does not exist yet, without running pnpm for it", () => {
+  it("skips a store that does not exist yet, without running pnpm for it", async () => {
     const d = mkdtempSync(path.join(tmpdir(), "prune-"));
     const log = path.join(d, "prune.log");
     const bin = fakePnpm(d);
     process.env.PRUNE_LOG = log;
     try {
-      expect(pruneStore(path.join(d, "absent"), () => {}, bin)).toEqual({ pruned: false, why: "no store yet" });
+      expect(await pruneStore(path.join(d, "absent"), () => {}, bin)).toEqual({ pruned: false, why: "no store yet" });
       expect(existsSync(log)).toBe(false);
     } finally {
       delete process.env.PRUNE_LOG;
     }
   });
-  it("prunes the gate store even when the shared store's prune fails", () => {
+  it("prunes the gate store even when the shared store's prune fails", async () => {
     const d = mkdtempSync(path.join(tmpdir(), "prune-"));
     const log = path.join(d, "prune.log");
     const bin = path.join(d, "pnpm");
@@ -351,7 +351,7 @@ describe("pruneStores (BOS-633)", () => {
     process.env.PRUNE_LOG = log;
     const said: string[] = [];
     try {
-      const r = pruneStores(shared, (m) => said.push(m), bin);
+      const r = await pruneStores(shared, (m) => said.push(m), bin);
       expect(r.shared.pruned).toBe(false);
       expect(r.gate.pruned).toBe(true);
       expect(readFileSync(log, "utf8")).toContain(`${shared}-gate`);
