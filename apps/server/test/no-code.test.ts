@@ -136,6 +136,17 @@ describe("a ticket that changed nothing", () => {
     expect((await approveAndWait(ctx.req, t.id)).json()).toMatchObject({ verdict: "approved", outcome: "merged" });
   });
 
+  it("a merged no-code ticket reopened with a real commit on its branch is a code ticket again", async () => {
+    // Sent back after its merge as no-code to report a live check (DR-024 #5), then reopened for real
+    // work: the fresh commit on its branch (BOS-532) clears the mark, so the review checks code and merges.
+    ctx.diff.current = REAL;
+    const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review", mergeCommit: EMPTY.head });
+    expect((await approveAndWait(ctx.req, t.id)).json()).toMatchObject({ verdict: "approved", outcome: "merged" });
+    expect((await row(t.id)).noCode).toBe(false);
+    const logged = (await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary);
+    expect(logged.some((s) => s.includes("Reopened for code"))).toBe(true);
+  });
+
   it("create_ticket and the ticket patch set the flag", async () => {
     const c = await agent();
     const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 3, project: "Customer app", title: "Research limits", noCode: true } }));

@@ -140,12 +140,17 @@ export function repoGrant(bare: string, cwd: string): { bare: string; admin: str
  */
 export const checkQueueDirs = (dir: string) => ({ queue: path.join(dir, "queue"), gate: path.join(dir, "gate") });
 
-export const checkQueueEnv = (dir: string) => {
+/**
+ * slot: the runner's own copy of scripts/check-slot.sh (BOSSMAN_CHECK_SLOT, set by the runner image), passed on only when
+ * the file is there. With it every waiter, whatever branch it checks, follows one copy of the queue rules (BOS-614).
+ */
+export const checkQueueEnv = (dir: string, slot?: string) => {
   const { queue, gate } = checkQueueDirs(dir);
   return {
     CHECK_ALL_LOCK: path.join(queue, "check-all"),
     BOSSMAN_CHECK_STORE: path.join(gate, "check-results"),
     CHECK_ALL_PAIR_PROOF: path.join(gate, "check-pair-passed"),
+    ...(slot && path.isAbsolute(slot) && existsSync(slot) ? { BOSSMAN_CHECK_SLOT: slot } : {}),
   };
 };
 

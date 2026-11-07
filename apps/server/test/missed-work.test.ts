@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
@@ -238,6 +238,32 @@ describe("unmerged approvals sweep", () => {
     expect(asked[0]!.question).toContain('"Ship the API" was approved, but its merge didn\'t finish');
     // Asked once, not every pass, and not retried again.
     expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
+  });
+
+  it("raises a merge-stuck card with the stored refusal once the one retry is used up (BOS-684)", async () => {
+    ctx = await setup();
+    const id = await ctx.forgotten("Ship the API", { systemState: "review" });
+    const p2 = (await ctx.req("POST", `/api/companies/${ctx.company.id}/projects`, { name: "API" })).json() as { id: string };
+    await ctx.db.update(projects).set({ repoUrl: "https://github.com/Leonfinn/api.git" }).where(eq(projects.id, p2.id));
+    await ctx.db.update(tickets).set({ projectId: p2.id }).where(eq(tickets.id, id));
+    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", createdAt: new Date(Date.now() - 4 * HOUR), decidedAt: new Date(Date.now() - 3 * HOUR) });
+    // The sweep's one retry is used up; its card was answered, and the gate's refusal is what remains on the ticket.
+    await ctx.sweeps.run();
+    await new Promise((r) => setTimeout(r, 300));
+    await ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(like(decisions.dedupeKey, "merge-stuck:%"));
+    await ctx.db.update(tickets).set({ pullRequestNote: 'Waiting: its branch also carries unapproved work from "Permission gate" (high risk), which must merge first.' }).where(eq(tickets.id, id));
+    // The first attempt's heartbeat has gone quiet by now (a merge that is alive holds the sweep back).
+    const real = Date.now();
+    const spy = vi.spyOn(Date, "now").mockReturnValue(real + 2 * HOUR);
+    try {
+      expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    const [card] = await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "merge-stuck:%"));
+    expect(card!.question).toContain("sweep's one retry is used up");
+    expect(card!.question).toContain('"Permission gate"');
+    expect(card!.options).toContain("Run the check again");
   });
 
   it("a server that handed over mid-merge leaves it to the one now in charge, without asking the owner", async () => {

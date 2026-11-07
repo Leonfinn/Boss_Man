@@ -1,5 +1,5 @@
 {
-  "id": "e1ace20f-6d6d-410d-a6b4-f5d2e46120f5",
+  "id": "0ec52a98-9721-489b-a0df-379d04ef2d37",
   "prevId": "a93cac06-54cc-43ee-8a03-9d64b57148ae",
   "version": "7",
   "dialect": "postgresql",
@@ -2608,27 +2608,6 @@
             },
             {
               "expression": "signature",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "failure_signatures_company_recent": {
-          "name": "failure_signatures_company_recent",
-          "columns": [
-            {
-              "expression": "company_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -8541,6 +8520,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "fixes_live": {
+          "name": "fixes_live",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "version": {
           "name": "version",

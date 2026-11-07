@@ -7,8 +7,10 @@ import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTes
 import { harnessVersions } from "./harness-versions.js";
 import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
+import { DEFAULT_VACUUM_TIMEOUT_MS, keepDaysFrom, opencodeDataHomes, pruneOpencodeSessions } from "./opencode-prune.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
+import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
@@ -44,11 +46,22 @@ if (checkSlots > 1) {
     break;
   }
 }
-// The shared pnpm store (BOS-568), where PNPM_STORE_DIR moves it. Refused when it is the workspaces volume's root or
-// outside it (BOS-633): the fence grants everything beneath a rule, and the gate's store sits beside it.
+// One pnpm store for every install an agent's checks make (BOS-568): on the workspaces volume by default,
+// or at PNPM_STORE_DIR. Without it pnpm starts a fresh store in each agent's $HOME (on the root disk) and
+// the old ones are left behind. Refused when it is the workspaces volume's root or outside it (BOS-633).
 const storeDir = pnpmStoreDir(workspacesRoot, env.PNPM_STORE_DIR);
 mkdirSync(storeDir, { recursive: true });
-const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, { level: sandbox.level, pnpmStore: storeDir });
+// The merge gate runs unfenced, so it installs from a store of its own that the fence never grants (BOS-568 review):
+// a poisoned package in the shared store must not run in the gate, as the runner's own user.
+const gateStore = gateStoreDir(storeDir);
+assertSeparateStore(storeDir, gateStore);
+mkdirSync(gateStore, { recursive: true });
+// The runner's own installs use the shared store too, so the runner's ~1.3 GB isn't in a second store on the root disk.
+Object.assign(env, storeEnv(storeDir));
+// The 4th argument is the unfenced merge gate's store, so it gets its own (gateStore); agents can write the
+// shared store, and a poisoned package there must not run in the gate as the runner's user. Server-queued check
+// jobs are fenced like agents, so they use the shared store (BOS-316, BOS-568).
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, gateStore, { level: sandbox.level, pnpmStore: storeDir });
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
@@ -109,6 +122,38 @@ const housekeeping = async () => {
     connection.emit({ type: "runner.disk", ...report });
   } catch (err) {
     log(`workspace clean-up failed: ${(err as Error).message}`);
+  }
+  await pruneOpencode();
+};
+
+// OpenCode never deletes its old sessions (BOS-616): drop ones untouched for
+// BOSSMAN_OPENCODE_SESSION_DAYS (default 14, 0 = off), 50 per database per pass, then give the
+// space back (one VACUUM per database while no OpenCode run is live, small steps after that).
+// Each database is backed up and checked into runner-data/opencode-prune before its first delete.
+const opencodeKeepDays = keepDaysFrom(env.BOSSMAN_OPENCODE_SESSION_DAYS, log);
+let pruning = false;
+const pruneOpencode = async () => {
+  if (pruning || opencodeKeepDays <= 0) return;
+  pruning = true;
+  try {
+    const agentsRoot = path.join(dataDir, "agents");
+    const r = await pruneOpencodeSessions({
+      keepDays: opencodeKeepDays,
+      dataHomes: opencodeDataHomes(env, agentsRoot),
+      agentsRoot,
+      stateDir: path.join(dataDir, "opencode-prune"),
+      activeSessionIds: () => sessions.activeSessionIds(),
+      // The prune kills its VACUUM at 30 minutes (BOS-622); the hold lets go 5 minutes later whatever happens.
+      whileOpencodeIdle: (fn) => sessions.whileOpencodeIdle(fn, DEFAULT_VACUUM_TIMEOUT_MS + 5 * 60_000),
+      onVacuumCut: (cut) => connection.emit({ type: "runner.opencode_vacuum_cut", heldSeconds: Math.round(cut.heldMs / 1000), bytes: cut.bytes, agentHome: cut.agentHome }),
+      log,
+    });
+    if (r.deleted || r.failed || r.reclaimedBytes > 0)
+      log(`OpenCode sessions older than ${opencodeKeepDays} days: ${r.deleted} deleted, ${r.failed} failed, ${Math.round(r.reclaimedBytes / 1024 ** 2)} MB given back`);
+  } catch (err) {
+    log(`OpenCode session prune failed: ${(err as Error).message}`);
+  } finally {
+    pruning = false;
   }
 };
 void housekeeping();

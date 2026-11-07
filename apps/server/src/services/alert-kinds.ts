@@ -18,13 +18,15 @@ export type ClearWhen =
   /** Usage-limit cards: the account has room again (the same test as the scheduler's account pick). */
   | { kind: "limitReset"; fundingSourceId: string }
   /**
-   * Auth and credit-failure cards: a run on that account has finished cleanly since the card was raised.
-   * A revoked key or an empty credit balance leaves the quota windows untouched, so "room again" is true
-   * at once (BOS-469, security review): only a clean run proves the credential is fixed.
+   * An auth and credit-failure card's closer (BOS-469): a clean run on that account. A revoked key or an
+   * empty credit balance leaves the quota windows untouched, so "room again" is true at once; only a
+   * clean run proves the credential is fixed.
    */
   | { kind: "accountRanOk"; fundingSourceId: string }
   /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
   | { kind: "companyRanOk"; companyId: string }
+  /** A roadmap feature that had no open ticket now has one (BOS-595, closer in alert-clearing.ts). */
+  | { kind: "featureHasTicket"; featureId: string }
   /** Server-health cards (BOS-640): the rule has stayed under its level for 30 minutes. */
   | { kind: "serverCalm"; rule: "memory" | "freezes" };
 
@@ -167,6 +169,10 @@ export const ALERT_KINDS = {
   no_progress: {
     topRung: "owner",
   },
+  // opencode-vacuum.ts (BOS-622): the runner killed the OpenCode prune's one-off VACUUM at its cap. One card per runner per day.
+  opencode_vacuum_cut: {
+    topRung: "ceo",
+  },
   // watchdog.ts spareCapacity (BOS-659): the company is under-used while work waits, and picking the
   // next ticket is a judgement call. Stops at the CEO; one card per company folds the stretches together.
   spare_capacity: {
@@ -191,6 +197,14 @@ export const ALERT_KINDS = {
   alert: {
     topRung: "ceo",
     title: (_c, n) => `Boss Man has ${n} alert${n === 1 ? "" : "s"} of the same kind`,
+  },
+  /**
+   * feedback.ts raiseFeatureNoTicket, run by the sweep (BOS-595): a feature on the roadmap's Now, Next or
+   * In progress with no open ticket, so the work the owner expects is not actually being done. The CEO
+   * creates the ticket; the card closes by itself once one is linked (DR-016, BOS-470).
+   */
+  feature_no_ticket: {
+    topRung: "ceo",
   },
   // An alert only the owner can settle (a secret, a sign-off, host access).
   owner: {
