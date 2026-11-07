@@ -49,9 +49,6 @@ x-runner: &runner
     BOSSMAN_RUNNER_TOKEN_FILE: /run/secrets/runner_token
     # Full checks at once (BOS-542): the compose runner never received this, only the launcher passed it on.
     BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
-    # Where every agent install keeps its pnpm packages (BOS-568). Empty = one store on the workspaces volume;
-    # set an absolute path to move it, e.g. onto a bigger volume mounted at that path.
-    PNPM_STORE_DIR: ${PNPM_STORE_DIR:-}
   # Agents run code: keep the container unprivileged and bounded. Never mount docker.sock;
   # use a deploy target with a socket proxy instead (R14).
   cap_drop: [ALL]
@@ -155,9 +152,12 @@ services:
       BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
       BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
       BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
+      # Threads kept back for the server, database and proxy (BOS-586): off (default), auto = 2 on hosts with 6+ threads, or a number.
+      BOSSMAN_RESERVED_THREADS: ${BOSSMAN_RESERVED_THREADS:-off}
       BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-1}
-      # The shared pnpm store (BOS-568). Launcher runners only mount the workspaces volume, so on a launcher
-      # host this must stay under /home/node/workspaces (or the store lands on the runner's root disk).
+      # The shared pnpm store (BOS-568). Launcher runners have one writable volume, so this must be a folder under
+      # /home/node/workspaces, never its root (the fence would grant the whole volume and the gate store would land on
+      # the root disk); any other value is refused at start-up (BOS-633).
       PNPM_STORE_DIR: ${PNPM_STORE_DIR:-}
       BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
       BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}

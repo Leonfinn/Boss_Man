@@ -180,6 +180,43 @@ describe("the alert ladder (BOS-64)", () => {
     expect(await ownerNotified(d.id)).toHaveLength(1);
   });
 
+  it("keeps the CEO's Recommend Allow/Deny tag and notes when an advised permission card is escalated to the owner (BOS-533)", async () => {
+    await ctx.switchOn();
+    // A permission card already on the CEO's rung, the owner having asked for advice on it.
+    const at = new Date().toISOString();
+    const [d] = await ctx.db
+      .insert(decisions)
+      .values({
+        companyId: ctx.companyId,
+        kind: "permission",
+        question: "Run dd?",
+        options: ["Allow once", "Deny"],
+        recommendedOption: "Deny",
+        tier: "ceo",
+        context: {
+          type: "permission",
+          runnerId: randomUUID(),
+          runId: randomUUID(),
+          requestId: randomUUID(),
+          explain: { title: "Engineer wants to run a command", summary: "Only reads information", effect: "reads", command: "dd if=/tmp/session.db count=40" },
+          advice: { state: "asking", askedAt: at },
+          ladder: { rung: "ceo", since: at, ticketId: null, about: [], topRung: "owner", hops: [{ to: "ceo", at, why: "the owner asked the CEO to decide" }] },
+        },
+      })
+      .returning();
+    const ceo = await client(ctx.ceo.id);
+    const advised = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, outcome: "advice", what: "Copies part of a database file into another file.", needed: "Yes, the ticket needs it to check the export.", recommendation: "allow", why: "It only reads a file in /tmp the agent made itself." } });
+    expect(textOf(advised)).toMatch(/Advice saved/);
+    // The CEO then passes the same card on to the owner.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d!.id, triedFirst: "Read the command and the ticket; only the owner can judge this one" } }))).toBe(false);
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, d!.id));
+    expect(after!.tier).toBe("owner");
+    // The recommendation, needed and why survive the hand-over, so the owner still sees the Recommend tag.
+    expect(after!.context).toMatchObject({
+      advice: { state: "advised", recommendation: "allow", needed: "Yes, the ticket needs it to check the export.", why: "It only reads a file in /tmp the agent made itself.", what: "Copies part of a database file into another file." },
+    });
+  });
+
   it("the CEO can settle an alert with a plain answer, with a reason the owner can read", async () => {
     const d = await wakeChain();
     const bare = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it" } });
@@ -533,5 +570,62 @@ describe("the alert ladder (BOS-64)", () => {
     const after = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
     expect(after.status).toBe("withdrawn");
     expect((after.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/clean run/);
+  });
+});
+
+// BOS-233, advice half: every permission card that reaches the owner carries the CEO's advice (what
+// it's needed for, what a Deny stops), the CEO must give it to escalate a permission card, and a card
+// whose handover runs out says so and wakes the CEO for the advice.
+describe("permission cards carry the CEO's advice (BOS-233)", () => {
+  async function permissionAtCeo() {
+    const now = new Date().toISOString();
+    const ladder: Ladder = { rung: "ceo", since: now, ticketId: ctx.ticket.id, about: [], minutes: 5, hops: [{ to: "ceo", at: now, why: "a company rule sends it to the CEO" }] };
+    const [d] = await ctx.db
+      .insert(decisions)
+      .values({
+        companyId: ctx.companyId,
+        kind: "permission",
+        question: "An agent wants to run a command",
+        options: ["Allow once", "Deny"],
+        recommendedOption: "Deny",
+        tier: "ceo",
+        dedupeKey: `permission:${randomUUID()}`,
+        context: { type: "permission", runnerId: randomUUID(), runId: randomUUID(), requestId: randomUUID(), explain: { title: "An agent wants to run a command", summary: "Reads a file", effect: "reads", command: "dd if=/tmp/x count=1" }, ladder },
+      })
+      .returning();
+    return d!;
+  }
+
+  it("refuses to pass a permission card on without the CEO's advice, then carries it to the owner", async () => {
+    const d = await permissionAtCeo();
+    expect(await ctx.db.select().from(wakes)).toHaveLength(0);
+    const ceo = await client(ctx.ceo.id);
+    // No advice: refused, stays with the CEO.
+    const thin = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d.id, triedFirst: "Checked the command and the ticket, which needs the data" } });
+    expect(isError(thin)).toBe(true);
+    expect(textOf(thin)).toMatch(/adviceNeeded/);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.tier).toBe("ceo");
+    // With advice: it moves to the owner and the card carries it.
+    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d.id, triedFirst: "Checked the command and the ticket, which needs the data", adviceNeeded: "It is needed for BOS-1, to read the exported session file.", adviceDeny: "The session export cannot be checked, so BOS-1 stays blocked." } });
+    expect(isError(ok)).toBe(false);
+    const row = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
+    expect(row.tier).toBe("owner");
+    expect(row.context).toMatchObject({ advice: { state: "advised", what: expect.stringContaining("BOS-1"), denyStops: expect.stringContaining("blocked") } });
+  });
+
+  it("a permission card whose handover runs out reaches the owner marked, and wakes the CEO for the advice", async () => {
+    const d = await permissionAtCeo();
+    ctx.advance(21);
+    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    const row = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
+    expect(row.tier).toBe("owner");
+    expect(row.context).toMatchObject({ handoverRanOut: { at: expect.any(String) } });
+    const w = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
+    expect(w.some((x) => x.note?.includes("without your advice") && x.note.includes(d.id))).toBe(true);
+    // The owner sees it in the queue; the CEO can still add the advice afterwards.
+    const ceo = await client(ctx.ceo.id);
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d.id, outcome: "advice", what: "It reads the exported session file.", needed: "Yes, the ticket needs it to check the export.", recommendation: "allow", why: "It only reads a file in /tmp the agent made itself." } });
+    expect(isError(r)).toBe(false);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.context).toMatchObject({ advice: { state: "advised", recommendation: "allow" }, handoverRanOut: { at: expect.any(String) } });
   });
 });

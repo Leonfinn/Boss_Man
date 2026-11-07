@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
-import { applyCheckSlots, pnpmStoreDir, runnerFence, sandboxSelfTest } from "./fence.js";
+import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
@@ -47,7 +47,7 @@ if (checkSlots > 1) {
 }
 // One pnpm store for every install an agent's checks make (BOS-568): on the workspaces volume by default,
 // or at PNPM_STORE_DIR. Without it pnpm starts a fresh store in each agent's $HOME (on the root disk) and
-// the old ones are left behind.
+// the old ones are left behind. Refused when it is the workspaces volume's root or outside it (BOS-633).
 const storeDir = pnpmStoreDir(workspacesRoot, env.PNPM_STORE_DIR);
 mkdirSync(storeDir, { recursive: true });
 // The merge gate runs unfenced, so it installs from a store of its own that the fence never grants (BOS-568 review):
@@ -82,7 +82,7 @@ const sessions = new SessionManager({
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,
   checkJobs,
-  fence: { ...runnerFence(sandbox.level, dataDir, workspacesRoot, env.PNPM_STORE_DIR), pnpmStore: storeDir },
+  fence: { ...runnerFence(sandbox.level, dataDir, workspacesRoot), pnpmStore: storeDir },
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -125,6 +125,13 @@ const housekeeping = async () => {
 };
 void housekeeping();
 const sweep = setInterval(() => void housekeeping(), 3_600_000);
+// The pnpm stores only grow as lockfiles change (BOS-633). Pruned once at start-up and then daily: pnpm's store lock
+// makes each prune safe beside a running install, and it only drops packages no install references any more. The
+// prune runs asynchronously, so start-up and the daily tick never wait on it, and a slow prune can't stall
+// the connection or live sessions; it never rejects.
+void pruneStores(storeDir, log);
+const prune = setInterval(() => void pruneStores(storeDir, log), 24 * 3_600_000);
+prune.unref();
 
 // The container healthcheck reads this file: it's touched while the server connection is live.
 const marker = path.join(dataDir, "connected");
@@ -140,6 +147,7 @@ const beat = setInterval(() => {
 const stop = () => {
   clearInterval(beat);
   clearInterval(sweep);
+  clearInterval(prune);
   rmSync(marker, { force: true });
   sessions.shutdown();
   connection.stop();

@@ -128,13 +128,17 @@ describe("the runner launcher (R55)", () => {
     expect(containerSpec({ ...config(), pnpmStoreDir: "/home/node/workspaces/big/pnpm" }, "app-co").Env).toContain("PNPM_STORE_DIR=/home/node/workspaces/big/pnpm");
     expect(containerSpec(config(), "app-co").Env.join()).not.toContain("PNPM_STORE_DIR");
     expect([parsePnpmStoreDir(undefined), parsePnpmStoreDir("  "), parsePnpmStoreDir("/home/node/workspaces/big/pnpm/")]).toEqual([undefined, undefined, "/home/node/workspaces/big/pnpm"]);
-    expect(parsePnpmStoreDir("/home/node/workspaces")).toBe("/home/node/workspaces");
     expect(() => parsePnpmStoreDir("pnpm-store")).toThrow();
     expect(() => parsePnpmStoreDir("relative/pnpm")).toThrow();
     expect(() => parsePnpmStoreDir("/big/../etc")).toThrow();
     expect(() => parsePnpmStoreDir("/big/pnpm")).toThrow(/under/);
     expect(() => parsePnpmStoreDir("/home/node/workspaces-other")).toThrow(/under/);
     expect(() => parsePnpmStoreDir("/tmp/pnpm-store")).toThrow(/under/);
+    // BOS-633: the volume's own root is refused too: the fence would grant the whole volume, and the gate store
+    // (/home/node/workspaces-gate) would sit on the root disk.
+    expect(() => parsePnpmStoreDir("/home/node/workspaces")).toThrow(/root/);
+    expect(() => parsePnpmStoreDir("/home/node/workspaces/")).toThrow(/root/);
+    expect(() => parsePnpmStoreDir("/")).toThrow();
     expect([parseCheckSlots(undefined), parseCheckSlots(""), parseCheckSlots("2")]).toEqual([1, 1, 2]);
     expect(() => parseCheckSlots("0")).toThrow();
     expect(() => parseCheckSlots("lots")).toThrow();

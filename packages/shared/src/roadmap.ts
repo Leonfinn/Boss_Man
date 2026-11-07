@@ -1,5 +1,6 @@
 // The roadmap view: each objective's milestones on a timeline, with a status worked out from
 // their tickets and target date.
+import { isTimeZone } from "./dates.js";
 
 export type MilestoneCounts = { total: number; done: number; blocked: number };
 
@@ -32,12 +33,7 @@ export function milestoneStatus(counts: MilestoneCounts, targetDate: string | nu
 /** A timezone name Intl understands, such as "Europe/London"; otherwise the fallback. */
 export function timeZoneOr(tz: string | null | undefined, fallback = "Europe/London"): string {
   if (!tz) return fallback;
-  try {
-    new Intl.DateTimeFormat("en-GB", { timeZone: tz });
-    return tz;
-  } catch {
-    return fallback;
-  }
+  return isTimeZone(tz) ? tz : fallback;
 }
 
 // One formatter per zone: building an Intl.DateTimeFormat costs ~70 µs, formatting with one ~1 µs,

@@ -163,6 +163,33 @@ export class Workspaces {
     return next as Promise<T>;
   }
 
+  /**
+   * Check out an existing ticket branch into the ticket's own folder, recovering by itself from
+   * the two ways that used to fail every run on a ticket (BOS-634): a half-made folder (no .git)
+   * left in the way, and the branch still checked out in some other worktree of ours (an agent
+   * switched branches inside another ticket's folder). The other worktree is moved to a detached
+   * HEAD at the same commit: its files and uncommitted changes stay, only the branch is released.
+   * A worktree outside our workspace root is never touched; that case fails with a clear message.
+   */
+  private async addBranchWorktree(repo: string, dir: string, branch: string): Promise<void> {
+    await this.git(["worktree", "prune"], { cwd: repo });
+    if (existsSync(dir) && !existsSync(path.join(dir, ".git"))) rmSync(dir, { recursive: true, force: true });
+    const listing = await this.git(["worktree", "list", "--porcelain"], { cwd: repo });
+    const mine = path.resolve(dir);
+    const tickets = path.resolve(this.root, "tickets") + path.sep;
+    let current = "";
+    for (const line of listing.split("\n")) {
+      if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+      else if (line === `branch refs/heads/${branch}` && path.resolve(current) !== mine) {
+        if (!path.resolve(current).startsWith(tickets)) {
+          throw new Error(`Branch ${branch} is checked out in ${current}, outside this runner's workspaces; release it there first.`);
+        }
+        await this.git(["switch", "--detach", "--quiet"], { cwd: current });
+      }
+    }
+    await this.git(["worktree", "add", "--quiet", dir, branch], { cwd: repo });
+  }
+
   /** The ticket's worktree, created on first use and reused (never recreated) after that. */
   async ensure(spec: WorkspaceSpec, secrets: Record<string, string | undefined> = {}): Promise<WorkspaceInfo> {
     const auth = gitAuthEnv(secrets);
@@ -189,7 +216,7 @@ export class Workspaces {
       if (branchExists) {
         // Released earlier: carry on from the branch and keep the original base.
         baseCommit = (await this.git(["config", "--get", baseKey], { cwd: repo }).catch(() => "")) || (await this.git(["rev-parse", branch], { cwd: repo }));
-        await this.git(["worktree", "add", "--quiet", dir, branch], { cwd: repo });
+        await this.addBranchWorktree(repo, dir, branch);
       } else {
         baseCommit = await this.git(["rev-parse", "--verify", `${spec.baseRef.match(/^[0-9a-f]{7,40}$/) ? spec.baseRef : `refs/remotes/origin/${spec.baseRef}`}^{commit}`], { cwd: repo });
         await this.git(["worktree", "add", "--quiet", "-b", branch, dir, baseCommit], { cwd: repo });
@@ -221,8 +248,7 @@ export class Workspaces {
       const branch = branchFor(spec.ticketId);
       const has = existsSync(repo) && (await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo }).then(() => true, () => false));
       if (!has) throw new Error("That ticket has no workspace or branch on this runner.");
-      await this.git(["worktree", "prune"], { cwd: repo });
-      await this.git(["worktree", "add", "--quiet", dir, branch], { cwd: repo });
+      await this.addBranchWorktree(repo, dir, branch);
       const patch = this.patchFile(spec.ticketId);
       if (existsSync(patch)) {
         await this.git(["apply", "--whitespace=nowarn", patch], { cwd: dir });
@@ -520,22 +546,33 @@ export class Workspaces {
     if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
     const dir = path.join(this.root, "check-jobs", spec.jobId);
-    rmSync(dir, { recursive: true, force: true });
-    await this.withRepoLock(spec.projectId, async () => {
-      await this.git(["worktree", "prune"], { cwd: repo });
-      mkdirSync(path.dirname(dir), { recursive: true });
-      await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
-    });
+    const home = path.join(this.root, "check-jobs-home", spec.jobId);
+    this.activeJobs.add(spec.jobId);
     try {
-      return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, spec.jobId) });
-    } finally {
+      rmSync(dir, { recursive: true, force: true });
       await this.withRepoLock(spec.projectId, async () => {
-        await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
-        rmSync(dir, { recursive: true, force: true });
-        await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+        await this.git(["worktree", "prune"], { cwd: repo });
+        mkdirSync(path.dirname(dir), { recursive: true });
+        await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
+      try {
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, spec.jobId) });
+      } finally {
+        await this.withRepoLock(spec.projectId, async () => {
+          await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
+          rmSync(dir, { recursive: true, force: true });
+          await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+        });
+      }
+    } finally {
+      // The job's HOME/TMPDIR (whatever the tests left in it, and per-HOME caches) goes with the job.
+      rmSync(home, { recursive: true, force: true });
+      this.activeJobs.delete(spec.jobId);
     }
   }
+
+  /** Job ids whose folders belong to a check running in this process: the start-up sweep leaves them alone. */
+  private readonly activeJobs = new Set<string>();
 
   /**
    * The fence and own HOME/TMPDIR for one job, like an agent session's: the job's folder, its own home and temp folder, the pnpm
@@ -865,10 +902,29 @@ export class Workspaces {
         if (!exists) continue;
         // B is carried when this branch holds a commit on B's own first-parent line (B's work).
         // Commits B has only by merging this ticket in are on this ticket's side, not B's line (BOS-365).
-        if ((await refs(b.branch, true)).some((sha) => mine.has(sha))) {
+        const bLine = await refs(b.branch, true);
+        if (bLine.some((sha) => mine.has(sha))) {
           // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
           // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
           const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
+          // B stacked on this ticket (BOS-629): B was created from a commit this branch holds. The graph alone can't say who
+          // wrote a shared commit, but the base the runner recorded when it created B's branch can: a shared commit that is
+          // at or below that base was already there when B started, so it isn't B's work. Any shared commit above B's base
+          // (B's own, or one B has only because this ticket took it) is still reported (BOS-369), and so is a branch with no
+          // recorded base, since the gate has to fail safe.
+          if (!contained) {
+            const base = await this.git(["config", "--get", `bossman.ticket-${b.ticketId}.base`], { cwd: repo }).catch(() => "");
+            if (base) {
+              let allBelowBase = true;
+              for (const sha of bLine.filter((s) => mine.has(s))) {
+                if ((await this.gitCode(["merge-base", "--is-ancestor", sha, base], { cwd: repo })).code !== 0) {
+                  allBelowBase = false;
+                  break;
+                }
+              }
+              if (allBelowBase) continue;
+            }
+          }
           found.push({ ticketId: b.ticketId, branch: b.branch, contained });
         }
       }
@@ -974,6 +1030,20 @@ export class Workspaces {
         rmSync(dir, { recursive: true, force: true });
         removed.push(ticketId);
       }
+    }
+
+    // Check-job folders no running job owns: a runner restart mid-job skips the job's own clean-up. Jobs that
+    // start after this point are in activeJobs before they create anything, so the sweep never takes their folders.
+    for (const sub of ["check-jobs", "check-jobs-home"]) {
+      for (const jobId of list(path.join(this.root, sub))) {
+        if (this.activeJobs.has(jobId)) continue;
+        rmSync(path.join(this.root, sub, jobId), { recursive: true, force: true });
+        removed.push(`${sub}/${jobId}`);
+      }
+    }
+    // Their worktree entries in the repos are stale now.
+    for (const name of list(reposDir).filter((n) => n.endsWith(".git"))) {
+      await this.withRepoLock(name.slice(0, -4), () => this.git(["worktree", "prune"], { cwd: this.repoDir(name.slice(0, -4)) })).catch(() => undefined);
     }
 
     const tmp = path.join(this.root, "tmp");
