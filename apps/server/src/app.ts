@@ -607,6 +607,8 @@ export async function buildApp(opts: AppOptions) {
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
     onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
     onFeature: (id) => feedback.syncFeature(id),
+    // The board's "Approved, merging" cards say where their merge is (BOS-667). `review` is built below; this runs per request.
+    runningMerges: () => review.runningMerges(),
     now: opts.now,
   });
   // The CEO's proposed skills (BOS-86): review by the Security Reviewer where required, the owner's decision, then install.
