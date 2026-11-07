@@ -3,7 +3,7 @@ import { api, ApiError, type ActiveRun, type Company, type Decision, type Notice
 import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
-import { usePoll, useRoute } from "./hooks";
+import { useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
 import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
@@ -66,10 +66,30 @@ function useFeedNotifications(feed: NoticeFeed | null) {
 /** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
 const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "merge-queue", "rules", "settings", "projects"]);
 const CHOSEN = "bm-company";
+const SIDE_COLLAPSED = "bm-side-collapsed";
 function remember(id: string, set: (id: string) => void) {
   set(id);
   try {
     localStorage.setItem(CHOSEN, id);
+  } catch {
+    // Storage may be blocked; the choice lasts until the page reloads.
+  }
+}
+/** Whether the side menu is an icon-only strip (BOS-290): the owner's saved choice, else collapsed on a tablet or foldable and expanded on a desktop. */
+export function collapsedByDefault(): boolean {
+  try {
+    const saved = localStorage.getItem(SIDE_COLLAPSED);
+    if (saved === "1") return true;
+    if (saved === "0") return false;
+  } catch {
+    // Storage may be blocked; use the default for this width.
+  }
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia("(max-width: 1180px)").matches : false;
+}
+function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
+  set(off);
+  try {
+    localStorage.setItem(SIDE_COLLAPSED, off ? "1" : "0");
   } catch {
     // Storage may be blocked; the choice lasts until the page reloads.
   }
@@ -182,6 +202,10 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       return null;
     }
   });
+  // Tablet and foldable widths start collapsed so the page gets the room (BOS-290); a desktop starts
+  // expanded. A saved choice wins. The menu is a bar on a phone, so that width has no strip.
+  const narrow = useMediaQuery("(max-width: 1180px)");
+  const [collapsed, setCollapsed] = useState<boolean>(collapsedByDefault);
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
   // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
@@ -218,8 +242,11 @@ function Signed({ onLogout }: { onLogout: () => void }) {
     }, () => {});
   }, [companies.data, page, go]);
   return (
-    <div className="app">
+    <div className={`app${collapsed ? " side-collapsed" : ""}`}>
       <Sidebar
+        collapsed={collapsed}
+        onToggleCollapsed={() => rememberCollapsed(!collapsed, setCollapsed)}
+        narrow={narrow}
         active={page === "funding" || page === "rules" || page === "secrets" ? "settings" : page}
         activeAgent={route[2]}
         activeProject={route[1]}

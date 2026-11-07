@@ -1,5 +1,5 @@
 {
-  "id": "64cc0938-675c-492d-b883-454b98f29d75",
+  "id": "0efe8909-1ef1-4b22-9cc8-6340090e7c0a",
   "prevId": "c9633616-2b60-4286-b73c-f1c3aa2eb5a5",
   "version": "7",
   "dialect": "postgresql",
@@ -2615,27 +2615,6 @@
             },
             {
               "expression": "signature",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "failure_signatures_company_recent": {
-          "name": "failure_signatures_company_recent",
-          "columns": [
-            {
-              "expression": "company_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -8608,6 +8587,36 @@
         "blocked_until_reason": {
           "name": "blocked_until_reason",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "progress_head": {
+          "name": "progress_head",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "progress_at": {
+          "name": "progress_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ceo_plan": {
+          "name": "ceo_plan",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ceo_plan_deadline": {
+          "name": "ceo_plan_deadline",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ceo_plan_alerted_at": {
+          "name": "ceo_plan_alerted_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

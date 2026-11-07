@@ -1,10 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
-import { openPglite } from "../src/db/client.js";
+import { sharedDatabase } from "./helpers/shared-server.js";
 import { activity, agents, companies, decisions, notifications, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { signedInOwner } from "./helpers/owner-session.js";
@@ -15,13 +15,31 @@ let ctx: Awaited<ReturnType<typeof setup>>;
 const clients: Client[] = [];
 const H = 3_600_000;
 
+// One database and one app (listening) for the file, the database emptied before each test (BOS-686). Every
+// test makes its own company, agents and project, and only reads within them. The app's clock is this
+// variable, which each test sets afresh.
+let clock = new Date();
+let shared: Awaited<ReturnType<typeof sharedDatabase>>;
+let app: ReturnType<typeof boot> | undefined;
+async function boot() {
+  const built = await buildApp({ db: shared.db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: () => clock });
+  await built.app.listen({ host: "127.0.0.1", port: 0 });
+  return { built, base: `127.0.0.1:${(built.app.server.address() as { port: number }).port}` };
+}
+beforeAll(async () => {
+  shared = await sharedDatabase();
+});
+afterAll(async () => {
+  await (await app)?.built.app.close();
+  await shared.close();
+});
+
 async function setup() {
   // The database stamps state changes with its own clock, so the test clock starts at the real time.
-  let clock = new Date();
-  const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: () => clock });
-  await built.app.listen({ host: "127.0.0.1", port: 0 });
-  const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
+  clock = new Date();
+  await shared.reset();
+  const { db } = shared;
+  const { built, base } = await (app ??= boot());
   const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const co = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
@@ -49,7 +67,7 @@ async function setup() {
     return r.json();
   };
   const smWakes = () => db.select().from(wakes).where(and(eq(wakes.agentId, sm.id), eq(wakes.reason, WATCHDOG_REASON)));
-  return { ...built, db, close, base, req, companyId, sm, dev, ceo: ceo!, project, advance, ago, ticket, stalled, switchOn, smWakes, now: () => clock };
+  return { ...built, db, base, req, companyId, sm, dev, ceo: ceo!, project, advance, ago, ticket, stalled, switchOn, smWakes, now: () => clock };
 }
 
 beforeEach(async () => {
@@ -57,8 +75,6 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((c) => c.close()));
-  await ctx.app.close();
-  await ctx.close();
 });
 
 async function client(agentId: string) {

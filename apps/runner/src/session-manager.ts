@@ -16,7 +16,7 @@ import { probeModels } from "./models-probe.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { RepoLockTimeout, type Workspaces } from "./workspace.js";
+import { gitAuthorEnv, RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -322,6 +322,17 @@ export class SessionManager {
     for (const run of this.runs.values()) killGroup(run.child, 2000);
   }
 
+  /** Tickets whose /tmp leftovers were already looked for, so a busy ticket's every run doesn't scan /tmp again. */
+  private readonly rescued = new Set<string>();
+
+  /** Moves this ticket's /tmp leftovers into its kept scratch (BOS-592); once per ticket per runner process. */
+  private rescueTmp(ticketId: string, dirs: string[]) {
+    if (this.rescued.has(ticketId) || !this.opts.workspaces) return;
+    this.rescued.add(ticketId);
+    const moved = dirs.flatMap((d) => (d ? this.opts.workspaces!.rescueTmp(ticketId, d) : []));
+    if (moved.length) this.opts.emit({ type: "runner.log", level: "info", message: `Moved ${moved.length} leftover file(s) of ticket ${ticketId} from /tmp into its kept scratch.` });
+  }
+
   private starting = new Set<string>();
   private cancelledEarly = new Set<string>();
 
@@ -533,10 +544,28 @@ export class SessionManager {
     // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
     if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask"));
     if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir, base.BOSSMAN_CHECK_SLOT));
-    // Every harness the runner starts (Claude, Codex, OpenCode) gets this marker; scripts/check-all.sh and
+    // Kept scratch (BOS-592): proofs and check logs that /tmp loses on every restart. Made here so a command
+    // that only wants to write into it never has to, and reported as a warning when it can't be made.
+    // Its own session marker, so a check script can tell a run from a shell a person is using (BOS-592).
+    // Every harness the runner starts (Claude, Codex, OpenCode) gets the marker; scripts/check-all.sh and
     // scripts/vitest-guard.mjs refuse a hand-run full check or whole-suite run when they see it. CLAUDECODE only
     // covers Claude Code. Set last so a granted secret can't override it.
     env.BOSSMAN_AGENT_SESSION = "1";
+    // Commits say who made them (BOS-255). The worktrees share the repo's config, where a user.name an earlier
+    // run set would otherwise be used; env beats config. Set last so a secret can't override it.
+    if (cmd.agentName) Object.assign(env, gitAuthorEnv(cmd.agentName));
+    if (cmd.workspace && typeof this.opts.workspaces?.scratchDir === "function") {
+      const dir = this.opts.workspaces.scratchDir(cmd.workspace.ticketId);
+      try {
+        mkdirSync(dir, { recursive: true });
+        env.BOSSMAN_SCRATCH = dir;
+      } catch (err) {
+        this.opts.log?.(`couldn't make the kept scratch for ticket ${cmd.workspace.ticketId}: ${String((err as Error)?.message ?? err)}`);
+      }
+    }
+    // Which ticket this run is for, so a check script that can't write the scratch itself (a fenced run) leaves its log
+    // in /tmp under a name the runner moves into the scratch at its next start (BOS-592).
+    if (cmd.workspace) env.BOSSMAN_TICKET = cmd.workspace.ticketId;
     return env;
   }
 
@@ -567,6 +596,9 @@ export class SessionManager {
       env.npm_config_store_dir = fence.pnpmStore;
       readWrite.push(fence.pnpmStore);
     }
+    // The ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the agent writes its proofs and logs there, and
+    // nothing else on the workspaces root is granted, so it reaches no other ticket's folder.
+    if (env.BOSSMAN_SCRATCH) readWrite.push(env.BOSSMAN_SCRATCH);
     const readOnlyExtra: string[] = [];
     if (this.opts.coordDir) {
       const grant = checkQueueGrant(this.opts.coordDir);
@@ -651,8 +683,13 @@ export class SessionManager {
             }
           }
         };
-        if (spec.review) cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
-        else {
+        if (spec.review) {
+          cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
+          // BOS-693: the reviewer can run the ticket's tests in place, from the shared store. Outside the repo lock,
+          // and a failed install never stops the review: the reviewer can still read the work, or install by hand.
+          const deps = await workspaces.installReviewDeps(spec);
+          if (!deps.installed && deps.detail !== "not a pnpm project") emit({ type: "runner.log", level: "warn", message: `Run ${cmd.runId}: couldn't install the review copy's packages (${deps.detail}).` });
+        } else {
           const ws = await withLockRetry(() => workspaces.ensure(spec, secrets));
           cmd = { ...cmd, cwd: ws.path };
           emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
@@ -711,6 +748,9 @@ export class SessionManager {
         }
       }
     }
+    // A proof or log an older run of this ticket left in /tmp moves into its kept scratch, which the restart
+    // and the tmp sweep leave alone: /tmp is gone at the next restart, and so is the session's own temp folder.
+    if (cmd.workspace) this.rescueTmp(cmd.workspace.ticketId, [tmpdir(), ...(runTmp ? [runTmp] : [])]);
     const dropTmp = () => runTmp && rmSync(runTmp, { recursive: true, force: true });
     // OpenCode's database is being vacuumed (BOS-616): wait, since OpenCode gives up on its lock after 5 s.
     if (cmd.agentKind === "opencode" && this.opencodeHeld) {

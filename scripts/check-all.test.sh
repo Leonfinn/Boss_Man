@@ -43,6 +43,36 @@ run 2 0 "refused for the runner's session marker" 'echo x >>"$COUNT"' "$here/.."
 run 0 1 "CHECK_ALL_FORCE=1 overrides in an agent session" 'echo x >>"$COUNT"' "$here/.." "env CLAUDECODE=1 CHECK_ALL_FORCE=1 ./scripts/check-all.sh"
 run 0 1 "merge gate runs even if the marker is set" 'echo x >>"$COUNT"' "$here/.." "env CLAUDECODE=1 BOSSMAN_MERGE_CHECK=1 ./scripts/check-all.sh"
 
+# A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the whole log of the run is kept there, the previous one as .previous,
+# and a failed run's log is kept too. Written in place when the folder is writable; a fenced run that can't write it puts the
+# log in /tmp under a kept name, which the runner moves into the scratch at its next start.
+scratch_case() { # scratch_case <label> <scratch dir> <stub body> <expected rc>
+  local label=$1 dir=$2 body=$3 want=$4 rc=0
+  mkdir -p "$dir"
+  (cd "$here/.." && env CHECK_ALL_LOCK="$t/scl" CHECK_ALL_PAIR_PROOF="$t/scp" BOSSMAN_CHECK_STORE=off BOSSMAN_SCRATCH="$dir" BOSSMAN_TICKET=11111111-1111-4111-8111-111111111111 BOSSMAN_CHECK_BODY="$body" ./scripts/check-all.sh >"$t/out" 2>&1) || rc=$?
+  [ "$rc" = "$want" ] || fail "$label: rc $rc, want $want: $(cat "$t/out")"
+}
+scratch_case "scratch: a passing run" "$t/scratch.own" 'echo a step of output' 0
+[ -s "$t/scratch.own/check-all.log" ] || fail "scratch: no log in the scratch: $(cat "$t/out")"
+grep -q "a step of output" "$t/scratch.own/check-all.log" || fail "scratch: the log misses the run's output: $(cat "$t/scratch.own/check-all.log")"
+grep -q "check-all: finished .* (exit 0)" "$t/scratch.own/check-all.log" || fail "scratch: the log is not marked finished"
+scratch_case "scratch: a failing run" "$t/scratch.own" 'echo the failure; exit 3' 3
+[ -s "$t/scratch.own/check-all.log" ] || fail "scratch: a failing run left no log: $(cat "$t/out")"
+grep -q "the failure" "$t/scratch.own/check-all.log" || fail "scratch: a failure's log misses its output"
+grep -q "(exit 3)" "$t/scratch.own/check-all.log" || fail "scratch: a failure's log is not marked with its exit"
+grep -q "a step of output" "$t/scratch.own/check-all.log.previous" || fail "scratch: the previous run's log is not kept: $(ls "$t"/scratch.own)"
+# A fenced run can't write the scratch, but can write /tmp: the log waits there under a kept name, for the runner to move in.
+mkdir -p "$t/scratch.denied"; chmod 555 "$t/scratch.denied"
+keep="/tmp/bossman-scratch-11111111-1111-4111-8111-111111111111.log"
+if [ ! -w "$t/scratch.denied" ]; then
+  rm -f "$keep"
+  scratch_case "scratch: a run that can't write it" "$t/scratch.denied" 'echo through the temp folder' 0
+  grep -q "through the temp folder" "$keep" || fail "scratch: no /tmp log for a fenced run: $(cat "$t/out")"
+  grep -q "check-all: finished .* (exit 0)" "$keep" || fail "scratch: the /tmp log is not marked finished"
+  rm -f "$keep"
+fi
+chmod 755 "$t/scratch.denied"
+
 # The result store: a pass is kept and reused on identical content, the merge gate never reuses it, failures are not reused.
 # Needs a clean git checkout, so test in a scratch repo holding a copy of the script.
 if command -v git >/dev/null; then
