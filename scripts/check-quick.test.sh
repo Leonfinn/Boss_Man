@@ -87,7 +87,8 @@ logged "node --test" "full check next keeps script tests"
 for s in typecheck "vitest related" build check-shell; do notlogged "$s" "full check next"; done
 grep -q "^SKIP  typecheck, related tests, ShellCheck, web build: the full check runs next" "$t/out" || fail "no SKIP line: $(cat "$t/out")"
 run 1 "full check next, migration lint fails" env BOSSMAN_FULL_CHECK_NEXT=1 FAIL_ON=lint-migrations
-grep -q "^FAIL  migration lint" "$t/out" && grep -q "check-quick: FAILED" "$t/out" || fail "lint failure not reported: $(cat "$t/out")"
+grep -q "^FAIL  migration lint" "$t/out" || fail "lint failure not reported: $(cat "$t/out")"
+grep -q "check-quick: FAILED" "$t/out" || fail "no FAILED summary: $(cat "$t/out")"
 notlogged "typecheck" "full check next, failing"
 
 run 1 "typecheck fails" env FAIL_ON=typecheck
