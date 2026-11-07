@@ -153,6 +153,34 @@ export type DeployUpdate = {
   risks: string[];
 };
 
+/** A marked ticket in a deploy card's range (BOS-639): the live symptom it fixes, in its author's words. */
+export type LiveFix = { ticketId: string; ref: string; symptom: string };
+/**
+ * A deploy card that carries the fix for a live problem (BOS-639). `heading` leads the card, the phone push
+ * and the CEO's wake. `repeat`: every fix on it was already on an earlier card, so it isn't paged again
+ * (the owner was paged once per fix, not once per commit main moves on by).
+ */
+export type DeployUrgent = { heading: string; fixes: LiveFix[]; repeat?: boolean };
+
+/** Longest "fixes live" marker: one sentence, short enough to head a card and fit a phone push title. */
+export const FIXES_LIVE_MAX = 200;
+/** Why a "fixes live" marker can't be stored, or null when it's fine (one line, one short sentence). */
+export function fixesLiveProblem(text: string): string | null {
+  const t = text.trim();
+  if (!t) return null;
+  if (/[\r\n]/.test(t)) return "fixesLive must be one line: one sentence naming the live symptom, e.g. \"server freezes as memory climbs\".";
+  if (t.length > FIXES_LIVE_MAX) return `fixesLive must be at most ${FIXES_LIVE_MAX} characters: one sentence naming the live symptom.`;
+  return null;
+}
+/** The words that head an urgent deploy card and the CEO's wake (BOS-639): "Urgent: contains the fix for <symptom> (BOS-n)". */
+export function fixesLiveHeading(fixes: Array<{ symptom: string; ref: string }>): string {
+  const clean = (s: string) => s.trim().replace(/[.!\s]+$/, "");
+  const [first, ...rest] = fixes;
+  if (!first) return "";
+  const also = rest.length ? `; also ${rest.map((f) => `${clean(f.symptom)} (${f.ref})`).join("; ")}` : "";
+  return `Urgent: contains the fix for ${clean(first.symptom)} (${first.ref})${also}`;
+}
+
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
@@ -178,7 +206,7 @@ export type DecisionContext =
    */
   | { type: "owner_setup"; ticketId: string; steps: string[]; commit: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
-  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[] }
+  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[] }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string; /** The failed checks the "move to after the merge" choice would move (BOS-422). */ movable?: string[] }
@@ -773,6 +801,7 @@ export type LoopHooks = {
 };
 
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
+type SelfDeployCtx = Extract<DecisionContext, { type: "self_deploy" }>;
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
@@ -2026,8 +2055,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
-      // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164).
-      const sorted = rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164). The one
+      // exception is a deploy card carrying the fix for a live problem (BOS-639): it goes to the top, because
+      // the owner leaving it for later is what kept the BOS-410 memory fix off the live server for 12 hours.
+      // It is put first here, in the base order the do-this-next ordering below breaks ties by, so it is
+      // step 1, except that cards it says to do first (BOS-551: readings its restart would wipe) still
+      // come just before it. Deploying first would destroy those readings, and they are quick.
+      const urgent = (r: (typeof rows)[number]) => ((r.context as DecisionContext).type === "self_deploy" && !!(r.context as SelfDeployCtx).urgent ? 1 : 0);
+      const sorted = rows.sort((a, b) => urgent(b) - urgent(a) || b.createdAt.getTime() - a.createdAt.getTime());
 
       // (BOS-551) Do-this-next ordering and the "waiting on an agent" group. Only cards that need the
       // owner's hands are numbered and ordered against each other; everything else keeps the newest-first

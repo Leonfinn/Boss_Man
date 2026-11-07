@@ -105,6 +105,8 @@ export class Workspaces {
     private readonly baseEnv: NodeJS.ProcessEnv = process.env,
     /** check-all.sh's shared queue folder (checkQueueEnv), so the merge check takes turns with agents' checks. */
     private readonly coordDir?: string,
+    /** The pnpm store a check's install uses (BOS-568), so its packages aren't copied into the root disk's HOME; the gate gets its own, outside the fence's grant. */
+    private readonly pnpmStore?: string,
     /** Fence for server-queued check jobs (BOS-316, security F1): a job runs a commit nobody has reviewed yet. */
     private readonly jobFence?: { level: FenceLevel; pnpmStore?: string },
   ) {}
@@ -206,6 +208,8 @@ export class Workspaces {
 
       await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
       await this.git(["worktree", "prune"], { cwd: repo });
+      // Branch reflogs are how the real start point of a branch moved onto another ticket's work is found later (BOS-687).
+      await this.git(["config", "core.logAllRefUpdates", "true"], { cwd: repo });
       const branchExists = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo }).then(
         () => true,
         () => false,
@@ -600,7 +604,12 @@ export class Workspaces {
     return new Promise<VerifyResult>((resolve) => {
       // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
       // A server-queued job (DR-003) takes no lock at all: the server holds the slots (BOSSMAN_CHECK_NO_LOCK).
-      const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1", ...job.fence?.env } : this.coordDir ? checkQueueEnv(this.coordDir, this.baseEnv.BOSSMAN_CHECK_SLOT) : {}) } as NodeJS.ProcessEnv;
+      // The shared pnpm store (BOS-568): without it pnpm starts a new one in HOME for every install, on the root disk.
+      // A merge check gets this.pnpmStore (its own gate store); a fenced job gets job.fence.env (the shared store);
+      // a job on a runner that can't fence falls back to the shared job store, never this.pnpmStore (the gate's), so it
+      // doesn't start a store in HOME either (BOS-568 review).
+      const storeEnv = job ? (job.fence ? job.fence.env : this.jobFence?.pnpmStore ? { npm_config_store_dir: this.jobFence.pnpmStore } : {}) : this.pnpmStore ? { npm_config_store_dir: this.pnpmStore } : {};
+      const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1" } : this.coordDir ? checkQueueEnv(this.coordDir, this.baseEnv.BOSSMAN_CHECK_SLOT) : {}), ...storeEnv } as NodeJS.ProcessEnv;
       // BOS-614: a tree that takes part in the check line (it has scripts/check-all.sh) waits for its slot through the runner's
       // own check-slot.sh, not through the branch's copy of the queue rules: a branch based on older main brought older rules,
       // and old and new waiters jammed with both slots free. Inside, the branch's script gets a private lock and goes straight on.
@@ -884,6 +893,44 @@ export class Workspaces {
   }
 
   /**
+   * Where a ticket's branch really started (BOS-687). The recorded base is where the runner created
+   * the branch, normally a main commit. A branch the agent then moved onto another ticket's work
+   * before committing anything of its own (`git reset --hard <sha>`, `git switch -C`) started
+   * there: the branch's reflog shows the move ahead of its first commit. That point is used for this
+   * check only, never written back: the recorded base also drives the review diff and the agent can
+   * shape the reflog. It counts only when the ticket being checked holds that commit.
+   * A merge or fast-forward is not a start: that shape stays reported (BOS-369). Without a reflog
+   * (a branch older than reflogs here) the recorded base stands.
+   */
+  private async realBase(repo: string, b: { ticketId: string; branch: string }, holders: string[]): Promise<string> {
+    const key = `bossman.ticket-${b.ticketId}.base`;
+    const recorded = await this.git(["config", "--get", key], { cwd: repo }).catch(() => "");
+    if (!recorded) return "";
+    const log = await this.gitCode(["reflog", "show", "--format=%H %gs", `refs/heads/${b.branch}`], { cwd: repo });
+    if (log.code !== 0) return recorded;
+    let start = "";
+    // The reflog lists newest first; walk from the oldest entry up to the branch's first commit.
+    for (const line of log.stdout.split("\n").filter(Boolean).reverse()) {
+      const [sha, ...msg] = line.split(" ");
+      const text = msg.join(" ");
+      if (/^commit|^merge|^rebase|^cherry-pick/.test(text)) break;
+      if (/^reset: moving to|^branch: Reset to|^checkout: moving/.test(text) && sha) start = sha;
+    }
+    if (!start || start === recorded) return recorded;
+    // Only when the new start sits on top of the recorded base (it descends from it), and only when
+    // the ticket being checked really holds it: then the commits it shields are ones that ticket has.
+    // The reflog is the agent's to shape, so a start the checked ticket doesn't hold is ignored.
+    const above = (await this.gitCode(["merge-base", "--is-ancestor", recorded, start], { cwd: repo })).code === 0;
+    if (!above) return recorded;
+    // A deeper stack (C on B on A, checking A) has C start at B's tip, which B holds: another open
+    // ticket's branch counts too, never the branch being judged.
+    for (const holder of holders) {
+      if ((await this.gitCode(["merge-base", "--is-ancestor", start, `refs/heads/${holder}`], { cwd: repo })).code === 0) return start;
+    }
+    return recorded;
+  }
+
+  /**
    * Which other tickets' unmerged commits this ticket's branch carries (BOS-130): for another
    * ticket's branch B, its commits not yet on origin/target, and which of those this branch has.
    * A commit on this branch that only reached it by merging B means B was carried in; missing
@@ -930,7 +977,7 @@ export class Workspaces {
           // (B's own, or one B has only because this ticket took it) is still reported (BOS-369), and so is a branch with no
           // recorded base, since the gate has to fail safe.
           if (!contained) {
-            const base = await this.git(["config", "--get", `bossman.ticket-${b.ticketId}.base`], { cwd: repo }).catch(() => "");
+            const base = await this.realBase(repo, b, [branchFor(spec.ticketId), ...branches.map((o) => o.branch).filter((n) => n !== b.branch)]);
             if (base) {
               let allBelowBase = true;
               for (const sha of bLine.filter((s) => mine.has(s))) {

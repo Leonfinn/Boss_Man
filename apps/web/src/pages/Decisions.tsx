@@ -712,8 +712,17 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     ) : null}
                     <TicketRefs about={d.about} />
+                    {/* A Boss Man update carrying the fix for a live problem (BOS-639) leads with it, above everything else on the card. */}
+                    {d.context?.type === "self_deploy" && d.context.urgent && (
+                      <p className="urgent-deploy" style={{ margin: "8px 0", padding: "8px 12px", borderRadius: 8, background: "var(--red-soft)", color: "var(--red-ink)", fontWeight: 700, fontSize: 16, overflowWrap: "anywhere" }}>
+                        {d.context.urgent.heading}
+                      </p>
+                    )}
                     {d.context?.update && <DeployUpdateView u={d.context.update} />}
-                    {d.context?.type === "instructions" && d.context.instructions ? (
+                    {d.context?.type === "self_deploy" && d.context.urgent ? (
+                      // The question's first paragraph is the heading shown just above; the rest is the usual deploy question.
+                      <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n").slice(1).join("\n\n") || d.question} refs={d.refs} /></h2>
+                    ) : d.context?.type === "instructions" && d.context.instructions ? (
                       <>
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\nNew instructions:")[0]!} refs={d.refs} /></h2>

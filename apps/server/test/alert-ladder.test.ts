@@ -4,6 +4,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
+import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, decisions, notifications, quotaSamples, runs, tickets, wakes, watchdogActions } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
@@ -18,8 +19,7 @@ async function setup() {
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: () => clock });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const co = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
   const companyId = co.company.id;
@@ -207,13 +207,14 @@ describe("the alert ladder (BOS-64)", () => {
     const ceo = await client(ctx.ceo.id);
     const advised = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, outcome: "advice", what: "Copies part of a database file into another file.", needed: "Yes, the ticket needs it to check the export.", recommendation: "allow", why: "It only reads a file in /tmp the agent made itself." } });
     expect(textOf(advised)).toMatch(/Advice saved/);
-    // The CEO then passes the same card on to the owner.
-    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d!.id, triedFirst: "Read the command and the ticket; only the owner can judge this one" } }))).toBe(false);
+    // The CEO then passes the same card on to the owner, with the advice BOS-233 requires on every escalation.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d!.id, triedFirst: "Read the command and the ticket; only the owner can judge this one", adviceNeeded: "It is needed for the export check, to read the session file.", adviceDeny: "The export can't be checked, so the ticket stays blocked." } }))).toBe(false);
     const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, d!.id));
     expect(after!.tier).toBe("owner");
-    // The recommendation, needed and why survive the hand-over, so the owner still sees the Recommend tag.
+    // The recommendation, needed and why survive the hand-over, so the owner still sees the Recommend tag;
+    // the card's "What it's for" and "If you deny it" lines show the escalation's advice.
     expect(after!.context).toMatchObject({
-      advice: { state: "advised", recommendation: "allow", needed: "Yes, the ticket needs it to check the export.", why: "It only reads a file in /tmp the agent made itself.", what: "Copies part of a database file into another file." },
+      advice: { state: "advised", recommendation: "allow", needed: "Yes, the ticket needs it to check the export.", why: "It only reads a file in /tmp the agent made itself.", what: "It is needed for the export check, to read the session file.", denyStops: "The export can't be checked, so the ticket stays blocked." },
     });
   });
 

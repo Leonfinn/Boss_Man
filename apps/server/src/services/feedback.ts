@@ -3,7 +3,7 @@
 // matters to that person. Features are scored on demand (from their insights) and on the
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
@@ -345,6 +345,33 @@ export function feedbackService(
           milestones,
         };
       });
+    },
+
+    /**
+     * A feature the roadmap commits to — Now, Next or In progress, declined excluded — with no open
+     * ticket of its own, so the work the owner expects isn't actually being done (BOS-595). Called by
+     * the sweep so a feature can't sit there until the owner asks. `raise` puts one CEO card up, which
+     * closes by itself once a ticket is linked (DR-016, BOS-470). Returns how many cards it raised.
+     */
+    async raiseFeatureNoTicket(companyId: string, raise: (feature: { id: string; title: string; status: FeatureStatus; horizon: Horizon | null }) => Promise<unknown>) {
+      const fs = await db.select({ id: features.id, title: features.title, status: features.status, horizon: features.horizon }).from(features).where(eq(features.companyId, companyId));
+      let raised = 0;
+      for (const f of fs) {
+        if (f.status === "declined") continue;
+        const column = featureHorizon(f);
+        if (column !== "now" && column !== "next") continue;
+        // The ticket counts when it is the work of the feature itself: a sub-task's own ticket is done
+        // under its parent's, which is already counted here.
+        const [open] = await db
+          .select({ id: tickets.id })
+          .from(tickets)
+          .where(and(eq(tickets.featureId, f.id), isNull(tickets.parentTicketId), ne(tickets.systemState, "done")))
+          .limit(1);
+        if (open) continue;
+        await raise(f);
+        raised++;
+      }
+      return raised;
     },
 
     // ---- Customers ----

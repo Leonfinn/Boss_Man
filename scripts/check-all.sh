@@ -155,6 +155,13 @@ fi
 unset CHECK_ALL_STARTED_FILE
 # Test hook: scripts/check-all.test.sh stops here once the lock is held.
 [ -z "${CHECK_ALL_STOP_AFTER_LOCK:-}" ] || { echo "check-all: lock held"; exit 0; }
+# One CPU budget for every step of this check, slot-command runs included (BOS-674; see scripts/check-threads.mjs): this slot's
+# share of the container's CPUs, at most 4, or BOSSMAN_CHECK_THREADS if set. Vitest configs read it as their worker cap; tsc
+# (Go) and the web build (Rolldown, Rust) get it as their thread-pool sizes. Callers can override any of these.
+BOSSMAN_CHECK_THREADS="${BOSSMAN_CHECK_THREADS:-$(BOSSMAN_CHECK_SLOTS="${SLOTS:-${BOSSMAN_CHECK_SLOTS:-}}" node "$(dirname "${BASH_SOURCE[0]}")/check-threads.mjs" 2>/dev/null || true)}"
+[[ "$BOSSMAN_CHECK_THREADS" =~ ^[1-9][0-9]{0,3}$ ]] || BOSSMAN_CHECK_THREADS=2
+export BOSSMAN_CHECK_THREADS GOMAXPROCS="${GOMAXPROCS:-$BOSSMAN_CHECK_THREADS}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-$BOSSMAN_CHECK_THREADS}" TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-$BOSSMAN_CHECK_THREADS}"
+echo "check-all: CPU budget $BOSSMAN_CHECK_THREADS threads per step (BOSSMAN_CHECK_THREADS)"
 if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
 # step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
 step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
