@@ -902,8 +902,11 @@ describe("rules judge: close variants of Jane's round-5 findings (BOS-638, round
 
   // Part A: `--node-options`/`--node-arg` are passed to every node process a script starts, so they can load a file at
   // start. The value may be itself an option with an attached path (`--require=/tmp/x.js`), which the old check missed
-  // because it only looked at the text after the first `=`.
-  describe("2v. node options that load a /tmp file before a script runs", () => {
+  // because it only looked at the text after the first `=`. Following Jane's round-2 review of 941fab2e, a value that is
+  // a URL with a scheme (`--import=data:text/javascript,...`, `file:///tmp/x.mjs`) runs code too and is not a path, so
+  // `--node-options`/`--node-arg` now get no Allow at all, whatever the value (the strict option she offered). The judge
+  // can't tell which values are harmless (`--max-old-space-size=N` included), so none is allow-listed.
+  describe("2v. node options that load code before a script runs", () => {
     deny([
       "npm run build --node-options=--require=/tmp/x.js",
       "npm run build --node-options=--import=/tmp/x.mjs",
@@ -915,9 +918,16 @@ describe("rules judge: close variants of Jane's round-5 findings (BOS-638, round
       "npm run build --node-arg /tmp/x.js",
       "npm run build --node-options /tmp/x.js",
       "npm run build --node-options --require=/tmp/x.js",
+      // Jane round 2: a URL-scheme value runs inline or /tmp code but is not a path, so path-checking it allowed it.
+      "npm run build --node-options=--import=data:text/javascript,console.log%28%22x%22%29",
+      "npm run build --node-options=--import=file:///tmp/x.mjs",
+      "npm run build --node-arg=--import=data:text/javascript,console.log%281%29",
+      "pnpm run build --node-options=--import=file:///tmp/x.mjs",
+      // An in-checkout value is Deny too: the judge can't tell a code-loading value from a harmless one.
+      "npm run build --node-options=--require=./scripts/setup.js",
     ]);
-    // A node option naming an in-checkout file is still Allow.
-    allows(["npm run build --node-options=--require=./scripts/setup.js"]);
+    // A URL-scheme value in another tool's flag is caught too (Jane round 2, not a proven finding but covered).
+    deny(["npx vitest --config=file:///tmp/x.ts"]);
   });
 
   // Part B: the shell turns `~` into the agent's home folder and expands `$X`/`${X}` to a path the judge can't read, so
@@ -953,5 +963,19 @@ describe("rules judge: close variants of Jane's round-5 findings (BOS-638, round
   // there is an executor the judge would have to read.
   describe("5v. --call / -c piped code", () => {
     deny(["npx --call=node", "npm exec --call=node", "npm exec -c node", "npx -c 'node -e 1'"]);
+  });
+
+  // Rex round 2: the interpreter branch's code-loading check only matched the separated two-word form (`-r /tmp/x`). A
+  // leading flag before the file is already Deny, so a flag after the file reaches the script, not node: harmless today,
+  // but the attached form (`--import=/tmp/x`) is now checked too in case a leading flag is ever allowed. These confirm the
+  // attached form and the URL scheme are Deny and the safe forms stay Allow.
+  describe("6v. interpreter code-loading flags, attached form and URL values", () => {
+    deny([
+      "node --import=/tmp/x.mjs app.js",
+      "node --require=/tmp/x.js app.js",
+      "node --import=data:text/javascript,console.log%281%29 app.js",
+      "ts-node --require=/tmp/x.ts script.ts",
+    ]);
+    allows(["node scripts/x.js --out /tmp/out", "ts-node scripts/x.ts"]);
   });
 });

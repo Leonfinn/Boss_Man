@@ -629,6 +629,8 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
     return new RegExp(`(?:>\\s*['"]?(?:\\S*/)?${e}(?=$|[\\s;&|'"])|\\b(?:tee|cp|mv|ln|install|touch|sed|dd)\\b[^;&|\\n]*[\\s'"]${e}(?=$|[\\s;&|'"]))`).test(c);
   };
   const scriptOk = (w: string): boolean => {
+    // A URL with a scheme (`file:///tmp/x`, `data:...`) is never a plain script file in the checkout (BOS-638, Jane round 2).
+    if (/^[A-Za-z][\w+.-]*:/.test(w)) return false;
     const p = plainPath(w);
     if (p === null || p === "" || climbsOut(p) || !PLAIN_WORD.test(w) || /^~/.test(w)) return false;
     if (written(p)) return false;
@@ -692,12 +694,18 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
       if (prefixed) return true;
       // A package-manager setting that names a file can pick the shell that runs a script or the rc file it reads:
       // `npm run build --script-shell=/tmp/x.sh`, `npm --userconfig=/tmp/rc run build` (BOS-638, Jane round 5, finding 2).
-      // `--node-options`/`--node-arg` are passed to every node process a script starts, so they can load a file at start
-      // (`npm run build --node-options=--require=/tmp/x.js`) (BOS-638, Jane round 1, part A).
       // The value can come before or after the verb, so scan every argument; a file it names must be a plain in-checkout
       // script. The value may itself be an option with an attached path (`--require=/tmp/x.js`), so look past that prefix.
-      const CONFIG_FILE = /^--(?:script-shell|userconfig|globalconfig|config|node-options|node-arg)(?:=|$)/;
+      // `--node-options`/`--node-arg` are passed to every node process a script starts, so they load code at start. Their
+      // value can be a `data:`/`file:` URL that runs inline or /tmp code but is not a path, so the judge can't read it:
+      // they get no Allow at all, whatever the value (BOS-638, Jane round 2: the strict option she offered).
+      const NODE_OPTIONS = /^--(?:node-options|node-arg)(?:=|$)/;
+      const CONFIG_FILE = /^--(?:script-shell|userconfig|globalconfig|config)(?:=|$)/;
+      // A URL with a scheme (`data:...`, `file:///tmp/x`) is never a plain file path in the checkout: a setting that names
+      // one loads code the judge can't read. Kept here as a guard for the value checks below too.
+      const SCHEME = /^[A-Za-z][\w+.-]*:/;
       const valueLeaves = (v: string): boolean => {
+        if (SCHEME.test(v)) return true;
         // `--flag=/tmp/x` / `--flag /tmp/x` inside the value: judge the path, not the whole option word.
         const inner = /^--?[\w-]+=(.*)$/.exec(v);
         if (inner) return valueLeaves(inner[1]!);
@@ -708,6 +716,7 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
       };
       for (let k = 0; k < args.length; k++) {
         const w = args[k]!;
+        if (NODE_OPTIONS.test(w)) return true; // loads code at start, whatever the value
         if (!CONFIG_FILE.test(w)) continue;
         const v = w.includes("=") ? w.slice(w.indexOf("=") + 1) : args[++k];
         if (v === undefined || valueLeaves(v)) return true;
@@ -720,6 +729,8 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
       // `~` into the home folder and expands a variable to a path the judge can't read) (BOS-638, Rex/Jane round 1).
       const leaves = (w: string): boolean => {
         if (/^(?:~|[\s]*\$|[`])(?:$|[\/{\w])/.test(w)) return true;
+        // A URL with a scheme is not a path in the checkout: it can load code the judge can't read (`--config=file:///tmp`).
+        if (/^[A-Za-z][\w+.-]*:/.test(w)) return true;
         // A value that is itself an option with an attached path (`--require=/tmp/x.js`, from `--node-options=...`): judge
         // the path it names, not the whole word (BOS-638, Jane round 1, part A).
         const inner = /^--?[\w-]+=(.*)$/.exec(w);
@@ -848,7 +859,14 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
       if (!scriptOk(file)) return true;
       // A code-loading flag after the file can pull in a /tmp module even when the script is in the checkout (node's
       // `--require`/`--loader`/`--import`, a runner's `--config`). Its outside path is Deny; a plain output path is data.
-      if (va.slice(verb + 1).some((w, n, a) => /^(?:-r|--require|-l|--loader|--import|--experimental-loader|--config|-c)$/.test(a[n - 1] ?? "") && w.includes("/") && !scriptOk(w))) return true;
+      // Only the separated form (`-r /tmp/x`) can matter today: a flag *before* the file is already denied above
+      // (`file.startsWith("-")`), so a flag after the file reaches the script, not node. The attached form
+      // (`--require=/tmp/x`) is checked too, in case a flag before the file is ever allowed (BOS-638, Rex round 2).
+      if (va.slice(verb + 1).some((w, n, a) => {
+        const attached = /^(?:--require|--loader|--import|--experimental-loader|--config)=(.*)$/.exec(w);
+        if (attached) return !scriptOk(attached[1]!);
+        return /^(?:-r|--require|-l|--loader|--import|--experimental-loader|--config|-c)$/.test(a[n - 1] ?? "") && w.includes("/") && !scriptOk(w);
+      })) return true;
       continue;
     }
     // A command word that is a path (`/tmp/x.sh`, `./x.sh`, `../x.sh`, `scripts/x.sh`) runs a file the judge can't read
