@@ -166,7 +166,6 @@ export const ALERT_KINDS = {
   // run its own CEO either (HolidayHours went two days unseen that way). Closes on the company's next clean run.
   no_progress: {
     topRung: "owner",
-    groupBy: (c) => (c.companyId ? `no-progress:${c.companyId}` : null),
   },
   // watchdog.ts spareCapacity (BOS-659): the company is under-used while work waits, and picking the
   // next ticket is a judgement call. Stops at the CEO; one card per company folds the stretches together.
