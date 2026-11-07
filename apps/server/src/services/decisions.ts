@@ -97,6 +97,34 @@ async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string;
   );
 }
 
+/** A do-this-next link the raiser asked for but that wasn't stored (BOS-625), and why. */
+export type DroppedOrderLink = { decisionId: string; link: "doAfter" | "doBefore"; reason: "another company" | "not open" | "unknown" };
+
+/**
+ * Do-this-next links (BOS-551) that point at a card the raiser may legitimately order against:
+ * an open decision in the caller's own company (BOS-625). A link to another company's card, or to
+ * an answered one, is dropped rather than stored, so one company can't nudge another's queue order.
+ * The queue already ignores ids it can't see; this keeps the bad link out of the card in the first place.
+ * Each dropped link comes back with its reason, so raise_decision's reply can say which weren't applied.
+ */
+async function keepOpenInCompany<T extends OrderLink>(db: Db, companyId: string, links: T[] | undefined, link: DroppedOrderLink["link"]): Promise<{ kept?: T[]; dropped: DroppedOrderLink[] }> {
+  if (!links?.length) return { dropped: [] };
+  const ids = [...new Set(links.map((l) => l.decisionId))];
+  const rows = await db.select({ id: decisions.id, companyId: decisions.companyId, status: decisions.status }).from(decisions).where(inArray(decisions.id, ids));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  // Judged once per id, so a link asked for in both directions is reported once.
+  const why = new Map(ids.map((id): [string, DroppedOrderLink["reason"] | null] => {
+    const r = byId.get(id);
+    if (!r) return [id, "unknown"];
+    if (r.companyId !== companyId) return [id, "another company"];
+    if (r.status !== "open") return [id, "not open"];
+    return [id, null];
+  }));
+  const kept = links.filter((l) => why.get(l.decisionId) === null);
+  const dropped = ids.flatMap((id) => { const reason = why.get(id); return reason ? [{ decisionId: id, link, reason }] : []; });
+  return { ...(kept.length ? { kept } : {}), dropped };
+}
+
 /** One ticket a Boss Man update brings, as the owner sees it on a deploy card (BOS-213). */
 export type DeployChange = { ticketId: string; ref: string; title: string };
 /**
@@ -1576,6 +1604,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; setsUp?: Addon; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+      // Ordering links may only point at open cards in the raiser's own company (BOS-625).
+      const after = await keepOpenInCompany(db, input.companyId, input.doAfter, "doAfter");
+      const before = await keepOpenInCompany(db, input.companyId, input.doBefore, "doBefore");
+      const doAfter = after.kept;
+      const doBefore = before.kept;
+      const droppedLinks = [...after.dropped, ...before.dropped];
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -1588,7 +1622,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             raisedByAgentId: input.agentId,
             context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
-              ...(input.doAfter?.length ? { doAfter: input.doAfter } : {}), ...(input.doBefore?.length ? { doBefore: input.doBefore } : {}),
+              ...(doAfter?.length ? { doAfter } : {}), ...(doBefore?.length ? { doBefore } : {}),
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
               ...(input.resetsOnRestart ? { resetsOnRestart: true } : {}),
               // An add-on's setup card closes itself once the add-on is seen working (DR-023 D, BOS-522).
@@ -1612,7 +1646,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return row!;
       });
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
-      return raised;
+      // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
+      return { ...raised, droppedLinks };
     },
 
     /** Re-sends permission verdicts that couldn't be delivered, once the runner is back. */

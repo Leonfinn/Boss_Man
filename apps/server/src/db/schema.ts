@@ -78,6 +78,10 @@ export const companies = pgTable("companies", {
   watchdogTrippedReason: text("watchdog_tripped_reason"),
   /** Written by the sweep only, so it never overwrites the owner's settings. */
   watchdogLastSweepAt: timestamp("watchdog_last_sweep_at", { withTimezone: true }),
+  /** Spare-capacity rules (BOS-659): when the sweep first found the company under-used while work waits; null once it is busy again. */
+  watchdogSpareAt: timestamp("watchdog_spare_at", { withTimezone: true }),
+  /** ...and when it last told the CEO about it, so it says so once per quiet stretch. */
+  watchdogSpareAlertedAt: timestamp("watchdog_spare_alerted_at", { withTimezone: true }),
   /** Tickets are referred to as PREFIX-number (e.g. HOL-12); one sequence per company, handed out by a database trigger. */
   ticketPrefix: text("ticket_prefix"),
   nextTicketNumber: integer("next_ticket_number").notNull().default(1),

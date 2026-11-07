@@ -17,7 +17,7 @@ import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard, type decisionsService } from "./services/decisions.js";
+import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
@@ -118,6 +118,8 @@ async function refsOf(db: Db, companyId: string) {
 }
 /** A reference like HOL-12 (any prefix: an old one still finds the number). */
 const REF = /^[A-Za-z0-9]{1,10}-(\d{1,9})$/;
+/** The first 8 characters of a ticket's id, as the web app and wiki show it (BOS-435). */
+const ID_PREFIX = /^[0-9a-f]{8}$/i;
 
 const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null }>({ stateNote, stateNoteAt, stateNoteStaleAt, ...r }: T) => {
   const note = stateNoteLine({ stateNote, stateNoteAt, stateNoteStaleAt, lastActivityAt: r.lastActivityAt }, new Date());
@@ -570,7 +572,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return fail(`${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, call raise_decision again with stillNeeded saying what has changed.`);
         }
       }
-      let d: { id: string };
+      let d: { id: string; droppedLinks?: DroppedOrderLink[] };
       try {
         d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, doAfter, doBefore, resetsOnRestart });
       } catch (err) {
@@ -578,7 +580,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         throw err;
       }
       const links = await missingPageNote(db, scope.companyId, `${question}\n${options.join("\n")}\n${steps?.join("\n") ?? ""}`);
-      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${links ? `\n\n${links}` : ""}`);
+      // A link the raiser asked for that wasn't stored is named, with the reason (BOS-625).
+      const skipped = (d.droppedLinks ?? []).map((l) => `${l.link} link ${l.decisionId} ignored: ${l.reason === "another company" ? "not an open card in your company" : l.reason === "not open" ? "the card is already answered" : "no such card"}.`);
+      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${links ? `\n\n${links}` : ""}`);
     },
   );
 
@@ -1427,11 +1431,18 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     },
     async ({ action, q, state, ticketId: given, path, offset }) => {
       const asRef = given ? REF.exec(given) : null;
-      const ticketId = asRef
+      const ref = await refsOf(db, scope.companyId);
+      const idStartsWith = (p: string) => sql`${tickets.id}::text like ${`${p.toLowerCase()}%`}`;
+      let ticketId = asRef
         ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), eq(tickets.number, Number(asRef[1])))))[0]?.id
         : given && z.string().uuid().safeParse(given).success ? given : undefined;
+      // A unique 8-character id prefix finds the ticket; several matches are listed (BOS-435).
+      if (given && !ticketId && ID_PREFIX.test(given)) {
+        const hits = await db.select({ id: tickets.id, number: tickets.number, title: tickets.title }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), idStartsWith(given))).limit(10);
+        if (hits.length > 1) return fail(`${hits.length} tickets start with ${given}; use the reference or the full id:\n${hits.map((h) => `- ${ref(h).ref ?? h.id}: ${h.title} (id ${h.id})`).join("\n")}`);
+        ticketId = hits[0]?.id;
+      }
       if (given && !ticketId) return fail(`No ticket ${given} in your company.`);
-      const ref = await refsOf(db, scope.companyId);
       if (action === "file") {
         if (!ticketId || !path) return fail("Give the ticketId and the file's path in the repo.");
         try {
@@ -1444,12 +1455,13 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       }
       if (action === "find") {
         const byRef = q ? REF.exec(q.trim()) : null;
+        const byPrefix = q && ID_PREFIX.test(q.trim()) ? q.trim() : null;
         const like = q?.trim() && !byRef ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
         const rows = await db
           .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
-          .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like)) : undefined))
+          .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined))
           .orderBy(desc(tickets.lastActivityAt))
           .limit(40);
         return text(JSON.stringify(rows.map((r) => withNote(ref(r)))));
