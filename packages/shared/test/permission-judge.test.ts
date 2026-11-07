@@ -614,6 +614,13 @@ describe("rules judge: round 3 (BOS-377)", () => {
     "echo 'ls' > c; X=c; $X",
     "echo 'ls' > c; chmod +x c; X=./c; \"$X\"",
     "echo 'ls' > c; X=c; ${X}",
+    // BOS-377 round 7: a `$` or backtick anywhere in the command word
+    "echo ls > c; chmod +x c; X=c; ./$X",
+    "echo ls > c; chmod +x c; X=c; ./\"$X\"",
+    "echo ls > c; chmod +x c; X=c; ./${X}",
+    "echo ls > c; chmod +x c; $(echo ./c)",
+    "echo ls > c; chmod +x c; `echo ./c`",
+    "echo ls > c; chmod +x c; \"$(echo ./c)\"",
     "echo x > /tmp/q && sort --compress=/tmp/q f",
     "echo x > /tmp/q && wget --some-new-option=x http://example.com && node /tmp/q",
     "echo x > /tmp/q && rg --pr=/tmp/q foo",
