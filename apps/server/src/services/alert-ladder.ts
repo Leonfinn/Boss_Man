@@ -431,7 +431,7 @@ export function alertLadder(
     /** Raises one of Boss Man's own alerts on the ladder. Null when the dedupe key says it's already open. */
     async raise(input: AlertInput): Promise<{ id: string; rung: Rung } | null> {
       const kindId: AlertKind | undefined = isAlertKind(input.kind) ? input.kind : undefined;
-      const cause: AlertCause = { ...input.cause, agents: input.cause?.agents?.length ? input.cause.agents : input.about };
+      const cause: AlertCause = { ...input.cause, companyId: input.companyId, agents: input.cause?.agents?.length ? input.cause.agents : input.about };
       const row = kindRow(kindId, input.from);
       const start = kindStart(input.from);
       const ceiling = kindCeiling(kindId, input.from);
