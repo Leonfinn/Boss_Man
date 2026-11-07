@@ -16,6 +16,7 @@ import { and, desc, eq, gt, gte, inArray, isNull, lte, ne, notInArray, or, sql }
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, failureSignatures, runners, runs, settings, wakes } from "../db/schema.js";
 import type { AlertInput } from "./alert-ladder.js";
+import { HELD_AGENT, HELD_ALL_COMPANIES, HELD_COMPANY } from "./fair-share.js";
 import { accountOutage } from "./loop-guards.js";
 import { HOLD_REASON } from "./maintenance.js";
 
@@ -80,14 +81,21 @@ export function likelyCause(f: NoProgressFacts): NoProgressCause {
   if (net.length) return { text: `its runs fail to reach the network (${net.length} in the last hour: "${short(commonest(net)!)}"); the network guard may be refusing a host it needs`, platform: "network guard" };
   if (f.liveRuns > 0 && f.liveInCheckLine === f.liveRuns) return { text: `all ${f.liveRuns} of its running agents are waiting in the shared check line`, platform: "check line" };
   const held = (re: RegExp) => f.holds.filter((h) => h && re.test(h)).length;
-  const atLimit = held(/^at a concurrency limit$/);
+  const heldAs = (...reasons: string[]) => f.holds.filter((h) => h != null && reasons.includes(h)).length;
+  // The scheduler writes the fair-share reasons verbatim (BOS-582). The bare "at a concurrency limit" is
+  // what wakes held before BOS-582 still carry, for any of the three limits. It is counted with the
+  // all-companies hold: with nothing of the company's own running, that is the only limit that can be full.
+  const allCompanies = heldAs(HELD_ALL_COMPANIES, "at a concurrency limit");
+  const ownLimit = heldAs(HELD_COMPANY, HELD_AGENT);
   // Its own runs are 0, so the limit holding it is the all-companies one, kept full by others (DR-031's proof).
-  if (atLimit && f.liveRuns === 0) return { text: `${atLimit} of its wakes are held "at a concurrency limit" while it has nothing running: other companies' runs are filling the all-companies run limit`, platform: "run limit" };
+  if (allCompanies && f.liveRuns === 0) return { text: `${allCompanies} of its wakes are held "at a concurrency limit" while it has nothing running: other companies' runs are filling the all-companies run limit`, platform: "run limit" };
   const quota = held(/^subscription /);
   if (quota) return { text: `${quota} of its wakes are held because the owner's account is near its usage limit`, platform: false };
   const budget = held(/budget|cost cap|monthly cap/);
   if (budget) return { text: `${budget} of its wakes are held by a budget or cost cap`, platform: false };
-  if (atLimit) return { text: `its own run limit is full (${f.liveRuns} running) and none of those runs has finished in the last hour`, platform: false };
+  // Held by its own company or agent limit, or by the all-companies one while some of its own runs are
+  // going: either way its own unfinished runs are what it waits on, so the company's, not the platform's.
+  if (ownLimit || allCompanies) return { text: `its own run limit is full (${f.liveRuns} running) and none of those runs has finished in the last hour`, platform: false };
   const err = commonest(f.badEnds);
   if (err) {
     const account = accountOutage(err);
