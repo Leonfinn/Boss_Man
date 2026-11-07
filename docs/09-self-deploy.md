@@ -23,7 +23,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
 
 1. **Host script plus a one-minute TrueNAS cron job.** No container, no socket.
 2. **It reuses `scripts/deploy.sh`** (backup, build, restart, health) and `scripts/update-runner.sh`, so there is one deploy path. `deploy.sh` gained `--commit SHA` so it deploys exactly the commit that was checked, not whatever main is by then.
-3. **The git remote is the source of truth.** The `src` checkout pulls from its `origin`: https for a public repo, or an SSH remote with a read-only deploy key set as `core.sshCommand` for a private one (`docs/00`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no extra credential.
+3. **The git remote is the source of truth.** The `src` checkout pulls from its `origin`: https for a public repo, or an SSH remote with a read-only deploy key set as `core.sshCommand` for a private one (`docs/00`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no extra credential. On a new host, the move guide (`docs/21-move-to-new-host.md`) sets up the same key.
 
    Exact clone commands (full steps in `docs/00`, step 2), with `$B` as the install folder:
 
@@ -242,6 +242,7 @@ Built ahead of blue/green; on today's single server nothing changes. Nothing her
 | `BOSSMAN_LEADER_LOCK` | on | `0` is the kill switch: no lock, always the leader, exactly as before. |
 | `BOSSMAN_LEADER_MISSES` | `2` | Heartbeats in a row with no reply (3 s each, counted only while the server is not frozen) before the leader steps down. A connection or query error still steps down at once. `1` is the old behaviour. Read at start, so a change needs a server restart. |
 | `BOSSMAN_STALL_PROFILE` | on | The server samples its own CPU profile every 10 ms, so each `STALL:` line (and server_status `stalls`) names the functions that ran during the freeze. `0` turns the sampler off; the stall line then has CPU and cgroup figures only. Read at start. |
+| `BOSSMAN_SERVER_HEALTH_MS` | `60000` | How often the leader checks its own memory and freezes for the server-health cards (below). |
 | `BOSSMAN_MIGRATE_ON_START` | on | `0` skips migrating at start (only checks the database is current). |
 | `BOSSMAN_MIGRATE_LOCK_TIMEOUT_MS` | `60000` | How long `migrate.js` waits for another migration. |
 
@@ -250,6 +251,13 @@ PGlite (no `DATABASE_URL`) has no cross-process locks, so it is always the leade
 **How to check the role.** `GET /api/health` and `GET /api/ready` return `role`: `"leader"`, `"standby"`, or `"single"` (lock off or PGlite). Settings > Server and runner > Server shows it, with both colours when blue/green is on. Every change is logged as a line starting `LEADER: ***` (`docker logs <server> | grep LEADER`).
 
 **If the only server shows `standby`:** its role should be `leader` within about 2 s of boot. If it stays `standby`, another connection still holds the lock (look in `pg_locks` for `locktype = 'advisory'`; the leader connection sets `idle_session_timeout = 30s`, so Postgres ends a dead holder within about 30 s) or someone sent `SIGUSR1` or booted it with `BOSSMAN_ROLE=standby`. Fix: send `SIGUSR2`; or set `BOSSMAN_LEADER_LOCK=0` and restart to run exactly as before.
+
+**Server-health cards (BOS-640).** Once a minute the leader compares its own memory and freezes with two levels and raises a card when one is passed (`apps/server/src/services/server-health.ts`):
+
+- **Memory, to the CEO:** rss above 60% of the memory the server may use, or more than 1 GiB of growth in each of the last two hours. "The memory the server may use" is the smallest of the container's cgroup limit (v2 `memory.max`, v1 `memory.limit_in_bytes`, when one is set), the total the kernel reports, and a host-reported total when one is wired in. All of them are read inside the container, so nothing is fixed per host. On an LXC without lxcfs the kernel total is the whole Proxmox host's, so the share rule then trips late; set a container memory limit, or rely on the growth rule.
+- **Freezes, to the owner:** more than 10 freezes over the stall threshold (1 s) in 10 minutes, whatever the memory figure.
+
+Each card names what to do: approve the open server update card if there is one, otherwise restart the server. There is one card per rule while it is open. A card answered while the problem goes on is not raised again until the rule has been calm for 30 minutes. Each card closes itself (DR-016, `serverCalm`) once its rule has stayed under its level for 30 minutes. The readings belong to the process that leads: after a restart or a change of leader, the 30 minutes count from that process's first reading.
 
 ## Phase 3, part 2: blue/green swap (optional)
 

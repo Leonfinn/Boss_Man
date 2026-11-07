@@ -1,10 +1,13 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
+
+// Hoisted so it is set before review.ts reads it: the landing re-reads its check job row this often.
+vi.hoisted(() => { process.env.BOSSMAN_CHECK_JOB_POLL_MS = "20"; });
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
+import { activity, checkJobs, projects, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
 import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, INFRA_RETRY_ATTEMPTS, LOCK_RETRY_ATTEMPTS, setInfraRetryBase, setLockRetryBase, landingText } from "../src/services/review.js";
 import { supersedeSignoffs } from "../src/services/decisions.js";
 import { MERGE_CHECK_LIMIT_KEY } from "../src/services/check-gate.js";
@@ -27,7 +30,7 @@ const DIFF: WorkspaceDiff = {
   truncated: false,
 };
 
-type Answers = { verify?: unknown; merge?: unknown; diff?: unknown; carried?: unknown; migrations?: unknown; carriedFailures?: number };
+type Answers = { verify?: unknown; merge?: unknown | ((c: { phase?: string }) => unknown); diff?: unknown; carried?: unknown; migrations?: unknown; carriedFailures?: number };
 
 async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean } = {}) {
   const held: Array<() => void> = [];
@@ -53,7 +56,7 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
         if (opts.hold) held.push(reply);
         else queueMicrotask(reply);
       }
-      if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.merge }));
+      if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: typeof answers.merge === "function" ? (answers.merge as (c: unknown) => unknown)(c) : answers.merge }));
       if (c.type === "workspace.carried") {
         const a = answers.carried as { error?: string } | undefined;
         // carriedFailures: the runner is busy and answers with an error that many times first.
@@ -215,7 +218,8 @@ describe("approval lands in the background (B)", () => {
       c.held.forEach((release) => release());
       await answering;
     }
-    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toBeNull());
+    // The merge runs in the background, so its outcome is kept for the page to show (BOS-559).
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "finished", outcome: "merged" }));
   });
 
   it("says each outcome in plain words", () => {
@@ -287,6 +291,70 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(w).toMatchObject({ reason: "verify failed", agentId: c.worker.id });
     expect(w!.note).toContain("`pnpm test` exited with code 1");
     expect(w!.note).toContain("expected 1000 got 100");
+  });
+
+describe("server-owned check queue (BOS-316)", () => {
+    const approve = (c: Awaited<ReturnType<typeof setup>>) => approveAndWait(c.req, c.ticket.id);
+    const state = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+    const prepared = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40) };
+    const mergeAnswers = (c: { phase?: string }) => (c.phase === "prepare" ? prepared : { status: "merged", commit: prepared.commit });
+    // Plays the dispatcher: ends the first queued/running merge job with the given state.
+    const finishJob = async (c: Awaited<ReturnType<typeof setup>>, patch: Record<string, unknown>) => {
+      for (let i = 0; i < 40; i++) {
+        const [row] = await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+        if (row) { await c.db.update(checkJobs).set({ endedAt: new Date(), ...patch }).where(eq(checkJobs.id, row.id)); return row; }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error("no job was queued");
+    };
+    const on = async (c: Awaited<ReturnType<typeof setup>>) => {
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      await c.db.insert(settings).values({ key: "check_queue_mode", value: "server" });
+    };
+
+    it("queues a merge job for the prepared tree, waits for it, then pushes that commit and marks main green", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const res = approve(c);
+      const job = await finishJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
+      expect(job).toMatchObject({ kind: "merge", scope: "full", commit: prepared.commit, tree: prepared.tree });
+      expect(c.sent.some((x) => x.type === "workspace.verify")).toBe(false);
+      expect(c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase)).toEqual(["prepare", "finish"]);
+      const [p] = await c.db.select().from(projects).where(eq(projects.id, c.project.id));
+      expect(p!.mainState).toBe("green");
+      expect((await state(c)).systemState).toBe("done");
+    });
+
+    it("sends the ticket back with the log when the job fails, and pushes nothing", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const res = approve(c);
+      await finishJob(c, { state: "failed", exitCode: 1, logTail: "expected 1 got 2" });
+      expect((await res).json()).toMatchObject({ outcome: "verify_failed" });
+      expect(c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase)).toEqual(["prepare"]);
+      expect((await state(c)).systemState).toBe("in_progress");
+    });
+
+    it("raises the stuck card with the recorded reason when the job is stuck", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const res = approve(c);
+      await finishJob(c, { state: "stuck", reason: "The runner went away." });
+      expect((await res).json()).toMatchObject({ outcome: "check_stuck" });
+      expect(c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase)).toEqual(["prepare"]);
+      expect((await state(c)).systemState).toBe("review");
+    });
+
+    it("tries again with a fresh merge when main moved to a different tree", async () => {
+      let finishes = 0;
+      const c = (ctx = await setup({ answers: { merge: (m: { phase?: string }) => (m.phase === "prepare" ? prepared : ++finishes === 1 ? { status: "main_moved" } : { status: "merged", commit: prepared.commit }) } }));
+      await on(c);
+      const res = approve(c);
+      await finishJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
+      expect(c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase)).toEqual(["prepare", "finish", "prepare", "finish"]);
+    });
   });
 
   describe("checking the merged result (BOS-313)", () => {
@@ -563,25 +631,21 @@ describe("landing an approved ticket (R46, R47)", () => {
     const mergeCards = (c: Awaited<ReturnType<typeof setup>>) =>
       c.db.select().from(decisions).where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'check_stuck'`));
 
-    it("Approve and merge on the ticket answers the open sign-off and merges in one press (BOS-471)", async () => {
+    it("Approve and merge on the ticket answers the open sign-off and starts the merge in one press (BOS-471, BOS-559)", async () => {
       const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
       await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
       const signoff = await signoffCard(c);
       const res = c.req("POST", `/api/tickets/${c.ticket.id}/approve-merge`);
-      try {
-        // The sign-off is settled first, so its hold on the ticket is gone while the merge runs...
-        await vi.waitFor(async () => expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered"));
-        expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, signoff.id))).toHaveLength(0);
-        // ...and the merge is running under the owner's name.
-        await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "running", startedBy: "the owner" }));
-      } finally {
-        c.held.splice(0).forEach((release) => release());
-      }
-      const body = (await res).json() as { outcome: string; signoffAnswered: boolean; landing: unknown };
-      expect(body).toMatchObject({ outcome: "landing", signoffAnswered: true });
-      // The answer's own landing ran the merge and is gone by the time the route replies; the route must not
-      // start a second one, so there is no landing to hand back (BOS-471, review round 1).
-      expect(body.landing).toBeNull();
+      const body = (await res).json() as { outcome: string; signoffAnswered: boolean; landing: { state: string; startedBy: string } | null };
+      // The press returns at once, before the held check finishes (BOS-559): the sign-off is settled and the
+      // merge runs in the background under the owner's name, handed back for the page to poll.
+      expect(body).toMatchObject({ outcome: "landing", signoffAnswered: true, landing: { state: "running", startedBy: "the owner" } });
+      // The sign-off is settled, so its hold on the ticket is gone while the merge runs...
+      expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered");
+      expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, signoff.id))).toHaveLength(0);
+      // ...and exactly one landing is running (the press must not start a second one).
+      expect(c.held).toHaveLength(1);
+      c.held.splice(0).forEach((release) => release());
       await vi.waitFor(async () => expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("done"));
       expect(await mergeCards(c)).toHaveLength(0);
     });
@@ -604,6 +668,44 @@ describe("landing an approved ticket (R46, R47)", () => {
       expect((await c.req("POST", `/api/tickets/${c.ticket.id}/approve-merge`)).statusCode).toBe(200);
       expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered");
       expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!).toMatchObject({ systemState: "done", outcome: "completed" });
+    });
+
+    it("answers the sign-off card at once, before the runner's check finishes (BOS-559)", async () => {
+      // The check is held open by the fake runner: the answer must come back anyway, not wait for it.
+      const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      const signoff = await signoffCard(c);
+      const answered = await Promise.race([
+        c.req("POST", `/api/decisions/${signoff.id}/answer`, { answer: "Approve and merge" }).then((r) => r.statusCode),
+        new Promise<"held">((resolve) => setTimeout(() => resolve("held"), 2_000)),
+      ]);
+      // The card is closed and the merge is running in the background, still held by the fake runner.
+      expect(answered).toBe(200);
+      expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered");
+      expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "running", startedBy: "the owner" });
+      expect(c.held).toHaveLength(1);
+      // Finish the merge so the run leaves no timer behind.
+      c.held.splice(0).forEach((release) => release());
+      await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "finished", outcome: "merged" }));
+    });
+
+    it("still reaches the ticket and the owner when the background landing fails (BOS-559)", async () => {
+      // The runner never answers the carried-work check: the merge can't run, which is a failure to report.
+      setInfraRetryBase(1);
+      const c = (ctx = await setup({ answers: { carried: { carried: [] }, carriedFailures: 4 } }));
+      const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Permission gate", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+      await c.db.update(tickets).set({ branch: `bossman/${other.id}` }).where(eq(tickets.id, other.id));
+      const signoff = await signoffCard(c);
+      const res = await c.req("POST", `/api/decisions/${signoff.id}/answer`, { answer: "Approve and merge" });
+      expect(res.statusCode).toBe(200);
+      // The failure reaches the ticket (it stays in review with the reason on it) and the owner gets one card.
+      await vi.waitFor(async () => {
+        const cards = (await c.db.select().from(decisions)).filter((d) => d.status === "open" && d.dedupeKey === `merge-stuck:${c.ticket.id}`);
+        expect(cards).toHaveLength(1);
+      });
+      const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+      expect(t).toMatchObject({ systemState: "review", mergeCommit: null });
+      expect(t.pullRequestNote).toContain("Not merged");
     });
   });
 
@@ -717,7 +819,7 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
     await c.db.update(tickets).set({ systemState: "review", pullRequestNote: null }).where(eq(tickets.id, c.ticket.id));
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
-    expect(c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command)).toEqual(["pnpm test", "pnpm test:e2e"]);
+    expect(c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command)).toEqual(["export BOSSMAN_FULL_CHECK_NEXT=1; pnpm test", "pnpm test:e2e"]);
   });
 
   it("never lands a carried ticket that isn't approved, even when this branch holds all of it (BOS-372)", async () => {

@@ -144,4 +144,21 @@ describe("stall monitor", () => {
       m.stop();
     }
   });
+
+  it("activity names the open requests and the routes that finished within the window (BOS-410 memory jumps)", async () => {
+    const m = createStallMonitor();
+    const a = {}, b = {}, c = {};
+    m.requestStarted(a, "GET /api/companies/:id/runs/:runId/log");
+    m.requestStarted(b, "GET /api/companies/:id/runs/:runId/log");
+    m.requestStarted(c, "POST /mcp");
+    m.requestEnded(a);
+    m.requestEnded(b);
+    m.requestEnded({}); // never started: ignored
+    const act = m.activity(60_000);
+    expect(act.inFlight).toBe(1);
+    expect(act.oldest.map((o) => o.route)).toEqual(["POST /mcp"]);
+    expect(act.finished).toEqual({ "GET /api/companies/:id/runs/:runId/log": { count: 2, maxMs: expect.any(Number) } });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(m.activity(10).finished).toEqual({});
+  });
 });

@@ -30,7 +30,10 @@ export class TicketChatError extends Error {
 
 type NotifyHook = (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>;
 
-export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsService>; notify: NotifyHook; replies?: OwnerRepliesService }) {
+/** Offers a note to the CEO's reply lane (BOS-434): starts a short parallel run only if the agent is the CEO with a work run open. */
+type ReplyLaneHook = (agentId: string, input: { ticketId: string; note: string }) => Promise<unknown>;
+
+export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsService>; notify: NotifyHook; replyLane?: ReplyLaneHook; replies?: OwnerRepliesService }) {
   async function ticket(ticketId: string, companyId?: string) {
     const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
     if (!t || (companyId && t.companyId !== companyId)) throw new TicketChatError(404, "No ticket with that ID in your company.");
@@ -93,7 +96,7 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
         ? await db
             .select({ id: runs.id })
             .from(runs)
-            .where(and(eq(runs.agentId, target), isNull(runs.endedAt), ne(runs.ticketId, ticketId), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
+            .where(and(eq(runs.agentId, target), isNull(runs.endedAt), ne(runs.ticketId, ticketId), isNull(runs.purpose)))
             .limit(1)
         : [];
       let delivery: "live" | "woken" | "queued" | "unassigned" = "unassigned";
@@ -139,6 +142,11 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
             ? "The owner has asked you about this ticket (the conversation is above). You aren't the agent working it: answer with ticket_reply, and don't take over, reassign or change its work unless they ask you to."
             : "The owner has written to you on this ticket (the conversation is above). Answer with ticket_reply; if they ask for work, do it as usual.",
         });
+      }
+      // A message that went into a long live run, or queued behind one, would wait for it: the CEO also gets a short reply run (BOS-434).
+      // A "woken" message goes through notify above, which offers the lane itself.
+      if (agentId && (delivery === "live" || delivery === "queued")) {
+        await deps.replyLane?.(agentId, { ticketId, note: "The owner has written to you on this ticket (the conversation is above). Answer with ticket_reply." });
       }
       return m!;
     },

@@ -9,6 +9,8 @@ import { Journal, RunnerConnection } from "@boss-man/runner";
 import type { RunnerCommand } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import { buildApp } from "../src/app.js";
+import { runnerIngestWaiting } from "../src/routes/runner-socket.js";
+import { PROTOCOL_VERSION } from "@boss-man/shared";
 import { openPglite } from "../src/db/client.js";
 import { agents, costEvents, runnerEvents, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
@@ -191,6 +193,18 @@ describe("runner protocol (R31)", () => {
     await waitFor(async () => conn.isLive, (live) => !live, 3000);
     await waitFor(async () => conn.isLive, Boolean, 5000);
     conn.stop();
+  });
+
+  it("counts an event as no longer waiting when the hello ahead of it failed (BOS-410, Jane on BOS-472)", async () => {
+    const before = runnerIngestWaiting();
+    ctx.built.runners.touch = async () => { throw new Error("database gone"); };
+    const ws = new WebSocket(ctx.url, { headers: { authorization: `Bearer ${ctx.reg.token}` } });
+    await new Promise((r) => ws.once("open", r));
+    const closed = new Promise<number>((r) => ws.once("close", (code) => r(code)));
+    ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "test", imageVersion: null }));
+    ws.send(JSON.stringify({ type: "event", entry: { seq: 1, at: new Date().toISOString(), event: { type: "run.ended", runId: randomUUID(), stopReason: "end_turn", error: null } } }));
+    expect(await closed).toBe(1011);
+    await waitFor(async () => runnerIngestWaiting(), (n) => n === before);
   });
 });
 

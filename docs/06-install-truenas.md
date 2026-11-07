@@ -62,7 +62,7 @@ How the NAS reads the repo (a deploy key if it is private, https if it is public
 git clone <repo-https-url> src
 ```
 
-Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up.
+Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up. Moving this install to another host later: see [docs/21](21-move-to-new-host.md).
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
@@ -400,7 +400,7 @@ docker compose up -d
 ```
    Blue/green: first bring the schema up to what the running code expects (a restored older backup may be behind), using the live colour (`blue` below; find it with `grep reverse_proxy $D/proxy/active.caddy`, where `$D` is the deployer folder from step 9), then start only that colour:
 ```sh
-BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
 ```
 ```sh
 docker compose up -d --no-deps server-blue
@@ -663,7 +663,9 @@ cat > $D/proxy/active.caddy <<'EOF'
 	reverse_proxy server-blue:{args[0]} {
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 EOF
@@ -689,7 +691,7 @@ grep -E '^(COMPOSE_FILE|BOSSMAN_HOST_PORT|BOSSMAN_PORTAL_HOST_PORT|BOSSMAN_PORTA
 
 ```sh
 BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue
-BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
 ```
 
 **6. The cutover (the one planned stop).** The old single server and its ports go; the proxy and blue take over. The runners reconnect by themselves (their address, `ws://server:3100`, now points at the proxy):
@@ -738,7 +740,7 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
 
 **Before you run anything here that updates the checkout (`git merge`, `git checkout`, `git pull`), type `umask 022` in your root shell.** A root shell with `umask 077` writes every file git changes as mode 600. The server runs as user `node` in its container and the image copies file permissions as they are on disk, so it crashes at start with `EACCES: permission denied, open '/app/...'`, and a rollback with the same umask fails the same way (6 Nov outage, BOS-562). `scripts/rebuild-live.sh`, `scripts/deploy.sh` and the host deployer now check this before the backup and build: if any git-tracked file is unreadable by others, or its folder can't be read and searched, they stop, change nothing, list up to 10 paths and print the fix (`git ls-files -z | xargs -0 chmod go+r`, then `chmod go+rx` on the folders). Only tracked files are touched: `.env`, `secrets/` and the data folder stay private. If the new colour never answers, the STOPPED message ends with the last 20 lines of its container log.
 
-`scripts/rebuild-live.sh` does all of the steps below in one go: it backs up, builds the colour the proxy points at, migrates, recreates it, sends SIGUSR2, and waits until `/api/ready` shows it leading at the new commit. It stops at the first failure and says which step. The steps by hand, for reference (the examples say blue):
+`scripts/rebuild-live.sh` does all of the steps below in one go: it backs up, builds the colour the proxy points at, migrates, recreates it, sends SIGUSR2, and waits until `/api/ready` shows it leading at the new commit. It stops at the first failure and says which step. It first takes the host deployer's lock (`$BOSSMAN_DEPLOYER/lock`): if a deploy or switch-back is running it waits up to 120 s (`REBUILD_LOCK_WAIT_SECONDS`), then stops having changed nothing and says what holds the lock; run it again once the deployer is idle. It also refuses, changing nothing, while an update's trial window is running (`state/soak` exists): the deployer would switch a hand rebuild back, so wait until the window ends. The steps by hand, for reference (the examples say blue):
 
 1. Back up the database:
 ```sh
@@ -746,7 +748,7 @@ docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Con
 ```
 2. Build blue at the checkout's commit, then migrate:
 ```sh
-BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue && BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue && BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
 ```
 3. Restart blue on the new image (this is the 20 to 30 second gap):
 ```sh
@@ -782,7 +784,9 @@ cat > $D/proxy/active.caddy.new <<'INC'
 		header_up X-Forwarded-For {client_ip}
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC

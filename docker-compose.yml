@@ -112,8 +112,11 @@ services:
       BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_TRUSTED_PROXIES:-}
       # The feedback portal alone, on its own port: the only port that may ever face the internet.
       BOSSMAN_PORTAL_PORT: "3101"
-      # The portal's address as people reach it, for the share link, e.g. http://192.168.68.67:3111.
+      # The portal's address as people reach it, for the share link, e.g. http://<host-ip>:3111.
       BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
+      # JS heap cap in MiB (BOS-410). The live heap measured 89-100 MiB; 1536 leaves ~15x headroom. Raise it in .env if
+      # the memory log ("memory" lines, heapUsed) ever nears it. Keep it below BOSSMAN_SERVER_MEMORY when that is set.
+      NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
       # The stall profiler (BOS-602): 0 turns it off. Empty = on (the server checks only for "0").
       BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
     secrets:
@@ -149,7 +152,13 @@ services:
       BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
       BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
       BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
+      # Threads kept back for the server, database and proxy (BOS-586): off (default), auto = 2 on hosts with 6+ threads, or a number.
+      BOSSMAN_RESERVED_THREADS: ${BOSSMAN_RESERVED_THREADS:-off}
       BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-1}
+      # The shared pnpm store (BOS-568). Launcher runners have one writable volume, so this must be a folder under
+      # /home/node/workspaces, never its root (the fence would grant the whole volume and the gate store would land on
+      # the root disk); any other value is refused at start-up (BOS-633).
+      PNPM_STORE_DIR: ${PNPM_STORE_DIR:-}
       BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
       BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
