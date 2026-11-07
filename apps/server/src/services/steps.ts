@@ -150,6 +150,7 @@ export function hostTokensIn(steps: readonly string[]): string[] {
  * a value that would break a command block: a newline or a backtick); those tokens are left as they are, so the lint
  * and the card can't go out with a hole in it. */
 export function fillHostTokens(steps: readonly string[], values: Readonly<Record<string, string>>): { steps: string[]; missing: string[] } {
+  // not state: collects this one call's missing keys and is returned, nothing outlives the call.
   const missing = new Set<string>();
   const filled = steps.map((s) =>
     s.replace(HOST_TOKEN, (token, key: string) => {
