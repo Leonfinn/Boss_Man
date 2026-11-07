@@ -703,6 +703,18 @@ describe("rules judge: unknown environment and git global options (BOS-630)", ()
     "find . -name '*.tar' | xargs env TAR_OPTIONS=x tar xf",
     "bash -c 'TAR_OPTIONS=x tar xf a.tar'",
     "set -a; TAR_OPTIONS=x; tar xf a.tar",
+    "BOSSMAN_MERGE_CHECK=1 scripts/check-all.sh", // only the merge gate sets this (queue priority)
+    // Jane round 1: keyword mode, env options that take an argument, and `--` after -c.
+    "set -k; tar xf a.tar TAR_OPTIONS=--to-command=./x.sh",
+    "set -o keyword; tar xf a.tar TAR_OPTIONS=--to-command=./x.sh",
+    "set -ek; tar xf a.tar TAR_OPTIONS=--to-command=./x.sh",
+    "env -u X TAR_OPTIONS=--to-command=./x.sh tar xf a.tar",
+    "env --unset X TAR_OPTIONS=--to-command=./x.sh tar xf a.tar",
+    "env -C . TAR_OPTIONS=--to-command=./x.sh tar xf a.tar",
+    "env --chdir . TAR_OPTIONS=--to-command=./x.sh tar xf a.tar",
+    "bash -c -- 'TAR_OPTIONS=--to-command=./x.sh tar xf a.tar'",
+    "echo x > c.sh; bash -c -- './c.sh'",
+    "echo x > c.sh; bash -c -- 'node /tmp/x.js'",
     "git --git-dir .git apply /tmp/p.patch && node scripts/x.js",
     "git --git-dir=.git apply p.patch && node scripts/x.js",
     "git -C . apply p.patch && node scripts/x.js",

@@ -801,7 +801,7 @@ function toolingRunsScratch(name: string, args: string[], isScratch: (w: string)
  * WGETRC, RIPGREP_CONFIG_PATH, BASH_ENV, ENV, PERL5OPT, NODE_OPTIONS, NODE_PATH, PYTHONSTARTUP, PYTHONPATH, LD_PRELOAD, PATH,
  * GIT_*, PAGER ...). None of those is listed; a name not listed here is never Allow, whatever its value.
  */
-const SAFE_ENVIRONMENT = /^(?:CI|NODE_ENV|FORCE_COLOR|NO_COLOR|CLICOLOR|CLICOLOR_FORCE|TZ|TERM|COLUMNS|LINES|LANG|LANGUAGE|LC_[A-Z]+|DEBUG|CHECK_ALL_FORCE|CHECK_ALL_LOCK_WAIT|BOSSMAN_TEST_MAX_WORKERS|CHECK_QUICK_FORCE_RELATED|BOSSMAN_VITEST_NO_SLOT|BOSSMAN_CHECK_STORE|BOSSMAN_MERGE_CHECK)$/;
+const SAFE_ENVIRONMENT = /^(?:CI|NODE_ENV|FORCE_COLOR|NO_COLOR|CLICOLOR|CLICOLOR_FORCE|TZ|TERM|COLUMNS|LINES|LANG|LANGUAGE|LC_[A-Z]+|DEBUG|CHECK_ALL_FORCE|CHECK_ALL_LOCK_WAIT|BOSSMAN_TEST_MAX_WORKERS|CHECK_QUICK_FORCE_RELATED|BOSSMAN_VITEST_NO_SLOT|BOSSMAN_CHECK_STORE)$/;
 
 /**
  * True when a command puts a variable that is not on SAFE_ENVIRONMENT into a program's environment: as a prefix (`X=1 cmd`,
@@ -819,7 +819,7 @@ function setsUnknownEnvironment(assigns: string[], sh: string, args: string[]): 
     const exports = sh === "export" || args.some((a) => /^-[A-Za-z]*x/.test(a));
     if (exports && args.some((a) => !a.startsWith("-") && unknown(a))) return true;
   }
-  if (sh === "set" && args.some((a, i) => /^-[A-Za-z]*a/.test(a) || (a === "allexport" && args[i - 1] === "-o") || /^-o?allexport$/.test(a))) return true;
+  if (sh === "set" && args.some((a, i) => /^-[A-Za-z]*[ak]/.test(a) || ((a === "allexport" || a === "keyword") && args[i - 1] === "-o") || /^-o?(?:allexport|keyword)$/.test(a))) return true;
   return false;
 }
 
@@ -920,7 +920,7 @@ function usesScratchUnsafely(c: string): boolean {
       }
       while (i < args.length && (args[i]!.startsWith("-") || /^\w+=/.test(args[i]!) || (head === "timeout" && /^\d[\w.]*$/.test(args[i]!)) || (head === "nice" && /^-?\d+$/.test(args[i]!)))) {
         if (/^\w+=/.test(args[i]!)) assigns.push(args[i]!);
-        else if (/^(?:-n|-u|-C|-S|-s|-k)$/.test(args[i]!) && head !== "env") i++;
+        else if (head === "env" ? /^(?:-u|-C|-P|--unset|--chdir)$/.test(args[i]!) : /^(?:-n|-u|-C|-S|-s|-k)$/.test(args[i]!)) i++;
         i++;
       }
       if (head === "timeout" && /^\d[\w.]*$/.test(args[i] ?? "")) i++;
@@ -954,8 +954,10 @@ function usesScratchUnsafely(c: string): boolean {
     if (written.size > 0 && codeAt >= 0 && /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh)$/.test(sh) && (mentionsWritten(args.slice(codeAt + 1).join(" ")) || (/^-[A-Za-z]*m$/.test(args[codeAt]!) && named(args[codeAt + 1] ?? "")))) return true;
     const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
-      if (written.size > 0 && named(args[dashC + 1] ?? "")) return true; // the inner command may run what the outer one wrote
-      if (usesScratchUnsafely(args[dashC + 1] ?? "")) return true;
+      // `bash -c -- 'cmd'`: the command string is the first word after -c that is not `--`.
+      const inner = args.slice(dashC + 1).find((a) => a !== "--") ?? "";
+      if (written.size > 0 && named(inner)) return true; // the inner command may run what the outer one wrote
+      if (usesScratchUnsafely(inner)) return true;
       continue;
     }
     const all = [...assigns.map((a) => a.slice(a.indexOf("=") + 1)), head, ...args];
