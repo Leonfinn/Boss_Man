@@ -826,3 +826,94 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     });
   });
 });
+
+// BOS-639: on 6–7 Nov the BOS-410 memory fix merged at 08:44, but its deploy card looked like every other
+// one, and the live server stayed on the old code for 12 hours. A ticket marked "fixes live" now heads the
+// card, pages the owner once and sorts first; an unmarked card is unchanged.
+describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
+  const HEADING = "Urgent: contains the fix for server freezes as memory climbs (BOS-410)";
+  async function seed(c: Awaited<ReturnType<typeof setup>>, opts: { marked: boolean }) {
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    // Urgent and high priority on both: the marker is never guessed from either.
+    const [fix] = await c.db
+      .insert(tickets)
+      .values({ companyId: co!.id, projectId: p!.id, title: "Server memory fix", number: 410, urgent: true, risk: "high", ...(opts.marked ? { fixesLive: "server freezes as memory climbs." } : {}) })
+      .returning();
+    const [other] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Plan page titles are cut off", number: 200, urgent: true }).returning();
+    const commits = [
+      { sha: B, subject: `Merge "Server memory fix" (${fix!.id})` },
+      { sha: C, subject: `Merge "Plan page titles are cut off" (${other!.id})` },
+    ];
+    // A hands-on card (steps for the owner) raised after the deploy card: the do-this-next order (BOS-551)
+    // breaks the tie between two hands-on cards newest first, so without the marker it goes on top.
+    const newer = async () =>
+      (await c.db.insert(decisions).values({ companyId: co!.id, kind: "question", question: "A newer question", options: ["Done", "Not now"], recommendedOption: "Done", context: { type: "question", steps: ["Open Settings → Secrets and add the key"] }, createdAt: new Date(Date.now() + 60_000) }).returning())[0]!;
+    return { co: co!, fix: fix!, commits, newer };
+  }
+  type Urgent = { heading: string; fixes: Array<{ ticketId: string; ref: string; symptom: string }>; repeat?: boolean };
+  const urgentOf = (d: { context: unknown }) => (d.context as { urgent?: Urgent }).urgent;
+
+  it("heads the card with the symptom, pages the owner once, and sorts it first", async () => {
+    const c = (ctx = await setup());
+    const s = await seed(c, { marked: true });
+    await c.available({ commits: s.commits });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.question.split("\n\n")[0]).toBe(`${HEADING}.`);
+    expect(d!.question).toContain(`Deploy Boss Man ${A.slice(0, 8)} -> ${B.slice(0, 8)}?`);
+    expect(urgentOf(d!)).toEqual({ heading: HEADING, fixes: [{ ticketId: s.fix.id, ref: "BOS-410", symptom: "server freezes as memory climbs." }] });
+    // Boss Man still never deploys by itself: the owner approves.
+    expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+    expect(d!.options).toEqual(["Deploy", "Not now"]);
+
+    const newer = await s.newer();
+    await c.notes.syncDecisions();
+    const sent = await c.db.select().from(notifications);
+    expect(sent.find((n) => n.decisionId === d!.id)).toMatchObject({ requested: "page", level: "page", title: HEADING });
+    expect(sent.find((n) => n.decisionId === newer.id)).toMatchObject({ level: "ask" });
+    const queue = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>;
+    expect(queue.map((q) => q.id)).toEqual([d!.id, newer.id]);
+
+    // Main moves on: the new card still leads with the fix and still sorts first, but the owner isn't paged again.
+    await c.available({ tip: C, commits: [...s.commits, { sha: C, subject: "Tidy a comment" }] });
+    await c.selfDeploy.sync();
+    const [d2] = await c.open();
+    expect(d2!.id).not.toBe(d!.id);
+    expect(d2!.question.split("\n\n")[0]).toBe(`${HEADING}.`);
+    expect(urgentOf(d2!)).toMatchObject({ heading: HEADING, repeat: true });
+    await c.notes.syncDecisions();
+    expect((await c.db.select().from(notifications)).find((n) => n.decisionId === d2!.id)).toMatchObject({ requested: "ask", title: HEADING });
+    expect((await c.db.select().from(notifications)).filter((n) => n.requested === "page")).toHaveLength(1);
+    expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>)[0]!.id).toBe(d2!.id);
+  });
+
+  it("quiet hours still lower the page", async () => {
+    const c = (ctx = await setup());
+    const s = await seed(c, { marked: true });
+    const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
+    await c.notes.setSettings({ ...(await c.notes.getSettings()), quietHours: { start: hhmm(Date.now() - 3_600_000), end: hhmm(Date.now() + 3_600_000), timeZone: "UTC" } });
+    await c.available({ commits: s.commits });
+    await c.selfDeploy.sync();
+    await c.notes.syncDecisions();
+    const [n] = await c.db.select().from(notifications);
+    expect(n).toMatchObject({ requested: "page", demotedBy: "quiet hours", title: HEADING });
+    expect(n!.level).not.toBe("page");
+  });
+
+  it("an unmarked card is unchanged: no heading, an ordinary ask, newest first", async () => {
+    const c = (ctx = await setup());
+    const s = await seed(c, { marked: false });
+    await c.available({ commits: s.commits });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.question).toMatch(/^Deploy Boss Man /);
+    expect(d!.question).not.toContain("Urgent");
+    expect(urgentOf(d!)).toBeUndefined();
+    const newer = await s.newer();
+    await c.notes.syncDecisions();
+    expect((await c.db.select().from(notifications)).find((n) => n.decisionId === d!.id)).toMatchObject({ requested: "ask", level: "ask", title: "App Co needs a decision" });
+    expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((q) => q.id)).toEqual([newer.id, d!.id]);
+  });
+});

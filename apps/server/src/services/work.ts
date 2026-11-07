@@ -9,6 +9,7 @@ import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, WorkError } from "./ticket-links.js";
 import { derivedSignoff } from "./signoff.js";
+import { fixesLiveProblem } from "./decisions.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
 export { WorkError };
@@ -55,6 +56,8 @@ type TicketPatch = {
   noCode?: boolean;
   /** What the owner has to do once this is live, in plain words by button path (DR-011); null clears it. */
   ownerSetup?: string | null;
+  /** "Fixes live" (BOS-639): one sentence naming the live symptom this fixes; null or blank clears it. */
+  fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
   urgent?: boolean;
   /** Move past a full column anyway. */
@@ -354,6 +357,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (input.milestoneId) await assertLinkInCompany("milestone", input.milestoneId, p.companyId);
       if (input.keyResultId) await assertLinkInCompany("keyResult", input.keyResultId, p.companyId);
       if (input.featureId) await assertFeatureInCompany(input.featureId, p.companyId);
+      const badFix = input.fixesLive ? fixesLiveProblem(input.fixesLive) : null;
+      if (badFix) throw new WorkError(400, badFix);
       const parent = input.parentTicketId ? await parentOf(input.parentTicketId, p.companyId) : null;
       if (parent) await assertLinkWriteAllowed(p.companyId, [parent.id], input.createdByAgentId ?? null);
       const featureId = parent ? parent.featureId : (input.featureId ?? null);
@@ -377,6 +382,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           acceptanceCriteria: input.acceptanceCriteria ?? [],
           noCode: input.noCode ?? false,
           ownerSetup: input.ownerSetup?.trim() || null,
+          fixesLive: input.fixesLive?.trim() || null,
           urgent: input.urgent ?? false,
           lastActivityAt: now(),
           risk: input.risk ?? null,
@@ -557,6 +563,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       }
       // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
       if (patch.ownerSetup !== undefined) fields.ownerSetup = patch.ownerSetup?.trim() || null;
+      if (patch.fixesLive !== undefined) {
+        const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;
+        if (bad) throw new WorkError(400, bad);
+        fields.fixesLive = patch.fixesLive?.trim() || null;
+      }
       if (dest) Object.assign(fields, { projectId: dest.id });
       // A merged ticket goes back to its assignee as no-code so a live check can be reported and it can
       // close (DR-024 #5). If it is then reopened for real work (BOS-532), the flag is stale: moving a
