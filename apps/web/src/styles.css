@@ -189,6 +189,14 @@ p { margin: 0; }
 .board-bar label, .board-bar p { font-size: 13px; color: var(--muted); }
 .board-bar p { display: inline-flex; align-items: center; gap: 6px; }
 .board-bar select { min-height: 36px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--card); font-size: 13px; }
+/* A select is as wide as its longest option, so one long feature title made the Feature filter
+   wider than a narrow window (a folding phone's inner screen, ~720-840px) and pushed the whole page
+   past the right edge, the board and side menu with it (BOS-567). Every box in the bar may shrink
+   to the window, and the select and search box cap at their row's width (the select cuts its
+   text instead). */
+.board-bar > div, .board-bar label { min-width: 0; max-width: 100%; }
+.board-bar select { max-width: 100%; text-overflow: ellipsis; }
+.board-bar input[type="search"] { width: 220px; max-width: 100%; }
 .segmented { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--lane); }
 .segmented .chip { min-height: 34px; padding: 0 14px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); }
 .segmented .chip[aria-pressed="true"] { background: var(--raise); color: var(--head); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); }
@@ -905,3 +913,18 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .messenger .chat-form .owner-message-count, .messenger .chat-form .owner-message-over { flex-basis: 100%; }
 .chat-form .owner-message-count { width: 100%; }
 .activity-compose textarea { field-sizing: content; }
+
+/* ---------- The merge queue (BOS-587) ---------- */
+/* A read-only screen: one card per item, each a ticket line, its state in a tag, and what happens next.
+   It is one column at every width, so a phone shows the same thing without a sideways scroll. */
+.mq-list { display: flex; flex-direction: column; gap: 8px; }
+.mq-item { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; min-width: 0; }
+.mq-item.stuck { border-color: var(--red-ink); }
+.mq-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.mq-head a { font-size: 14px; font-weight: 500; color: var(--head); text-decoration: none; overflow-wrap: anywhere; min-width: 0; }
+.mq-head a:hover { text-decoration: underline; }
+.mq-head .mono { font-size: 12px; color: var(--muted); }
+.mq-wait { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.mq-line { margin: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+.mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.mq-next a { color: var(--accent-ink); }

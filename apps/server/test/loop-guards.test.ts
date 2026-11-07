@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { loopGuards } from "../src/services/loop-guards.js";
 import { budgetPolicies, costEvents, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -208,5 +209,46 @@ describe("spend caps (R53)", () => {
     await c.db.update(runs).set({ endedAt: new Date() });
     await c.scheduler.wake({ agentId: c.ceo.id, reason: "once more" });
     expect(await c.scheduler.tick()).toMatchObject({ launched: 0, deferred: 1 });
+  });
+});
+
+describe("stuck review card: move the checks to after the merge (BOS-422)", () => {
+  const LIVE_CHECK = "Answers on a real host from the owner's own machine";
+  it("offers the move only when the reviewers fail nothing but a live check, and the move flags it", async () => {
+    const c = (ctx = await setup({ maxRounds: 1 }));
+    await c.db.update(tickets).set({ acceptanceCriteria: [LIVE_CHECK, "Health check returns 200"] }).where(eq(tickets.id, c.ticket.id));
+    const send = (summary: string) => c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "changes_requested", summary });
+    await send(`Criterion 1 fails: ${LIVE_CHECK}`);
+    await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
+    await send(`Criterion 1 fails: ${LIVE_CHECK}`);
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    expect(d!.options).toEqual(["Send it back anyway", "Stop work on it", "Move these checks to after the merge"]);
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Move these checks to after the merge" });
+    expect((await c.state()).acceptanceCriteria).toEqual([{ text: LIVE_CHECK, after: "merge" }, "Health check returns 200"]);
+    expect((await c.state()).systemState).not.toBe("blocked");
+  });
+
+  it("does not offer it when a before-merge criterion or a line comment fails too", async () => {
+    const c = (ctx = await setup({ maxRounds: 1 }));
+    await c.db.update(tickets).set({ acceptanceCriteria: [LIVE_CHECK, "Health check returns 200"] }).where(eq(tickets.id, c.ticket.id));
+    await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "changes_requested", summary: "Round 1" });
+    await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
+    await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "changes_requested", summary: `Fails: ${LIVE_CHECK}. Fails: Health check returns 200`, comments: [] });
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    expect(d!.options).toEqual(["Send it back anyway", "Stop work on it"]);
+  });
+
+  it("does not offer it when one of two failing reviewers fails a before-merge criterion or leaves a line comment", async () => {
+    for (const other of [{ notes: "Criterion 2 fails: Health check returns 200", comments: [] }, { notes: `Criterion 1 fails: ${LIVE_CHECK}`, comments: [{ path: "a.ts", line: 1, body: "rename" }] }]) {
+      const c = (ctx = await setup({ maxRounds: 0 }));
+      await c.db.update(tickets).set({ acceptanceCriteria: [LIVE_CHECK, "Health check returns 200"] }).where(eq(tickets.id, c.ticket.id));
+      const mine = { notes: `Criterion 1 fails: ${LIVE_CHECK}`, comments: [] };
+      await loopGuards(c.db, { limits: { maxRounds: 0 } }).reviewRound({ ticketId: c.ticket.id, reviewer: "both", comments: other.comments, message: `${mine.notes}\n\n${other.notes}`, parts: [mine, other] });
+      const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+      expect(d!.options).toEqual(["Send it back anyway", "Stop work on it"]);
+      await ctx.app.close();
+      await ctx.close();
+      ctx = undefined;
+    }
   });
 });
