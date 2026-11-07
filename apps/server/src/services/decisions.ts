@@ -28,6 +28,7 @@ import {
   type OrderLink,
   alwaysChoices,
   explainPermission,
+  formatDate,
   type AlwaysChoice,
   type PermissionExplanation,
   type PermissionInfo,
@@ -2471,7 +2472,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
       if (always) {
         const [last] = await db.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
-        const on = now().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+        const on = formatDate("en-GB", now(), { day: "numeric", month: "short" });
         await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name} (from a request on ${on})`, trigger: "permission", condition: always.match, outcome: "allow", position: (last?.position ?? -1) + 1 });
         answer = ALLOW;
       }

@@ -3,8 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkResults, decisions, reviewRequests, ticketDependencies, tickets } from "../src/db/schema.js";
+import { checkJobs, checkResults, companies, decisions, reviewRequests, settings, ticketDependencies, tickets } from "../src/db/schema.js";
 import { failingLine, failingStep } from "../src/services/merge-queue.js";
+import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY } from "../src/services/check-queue.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -158,5 +159,61 @@ describe("merge queue screen (BOS-587)", () => {
     const data = await queue(c);
     expect(data).toMatchObject({ waitingCount: 0, running: [], waiting: [], recent: [] });
     expect(data.mode).toBe("legacy");
+  });
+});
+
+describe("merge queue screen in server mode (BOS-597)", () => {
+  // The server-owned check queue (BOS-316) is on: the screen reports its mode and slots, and a ticket
+  // with checks queued ahead of it shows "waiting for a check slot" rather than a plain wait.
+  async function serverMode(c: Awaited<ReturnType<typeof setup>>) {
+    await c.db.insert(settings).values([
+      { key: CHECK_QUEUE_MODE_KEY, value: "server" },
+      { key: CHECK_SLOTS_KEY, value: "2" },
+    ]);
+  }
+  // A ticket on the board, so a check job has something to point at (the job's ticket is a foreign key).
+  const spareTicket = async (c: Awaited<ReturnType<typeof setup>>) =>
+    (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Someone else's check" })).json() as { id: string };
+  const job = async (c: Awaited<ReturnType<typeof setup>>, ticketId: string, state: "queued" | "running", commit: string) =>
+    c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId, kind: "merge", scope: "full", commit, tree: commit });
+
+  it("reports server mode with the queue's slots and counts", async () => {
+    const c = (ctx = await setup());
+    await serverMode(c);
+    const other = await spareTicket(c);
+    await job(c, other.id, "running", "a".repeat(40));
+    await job(c, other.id, "queued", "b".repeat(40));
+    await job(c, other.id, "queued", "c".repeat(40));
+    const data = await queue(c);
+    expect(data.mode).toBe("server");
+    expect(data.slots).toBe(2);
+  });
+
+  it("shows a waiting ticket as waiting for a check slot when checks are queued ahead", async () => {
+    const c = (ctx = await setup());
+    await serverMode(c);
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Behind the queue" })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    await c.db.insert(reviewRequests).values({ ticketId: t.id, kind: "code", round: 1, status: "approved" });
+    await job(c, t.id, "queued", "d".repeat(40));
+    const data = await queue(c);
+    const row = data.waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
+    expect(row).toMatchObject({ state: "waiting_for_check_capacity" });
+    expect(row.label).toMatch(/waiting for a check slot \(1 ahead\)/);
+  });
+
+  it("keeps a plain wait with an empty queue, and counts only this company's jobs", async () => {
+    const c = (ctx = await setup());
+    await serverMode(c);
+    // Another company's queued check must not make this company's tickets look held back.
+    const [other] = await c.db.insert(companies).values({ name: "Other Co" }).returning();
+    const theirs = await spareTicket(c);
+    await c.db.insert(checkJobs).values({ companyId: other!.id, projectId: c.project.id, ticketId: theirs.id, kind: "merge", scope: "full", commit: "e".repeat(40), tree: "e".repeat(40) });
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Nothing ahead" })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    await c.db.insert(reviewRequests).values({ ticketId: t.id, kind: "code", round: 1, status: "approved" });
+    const data = await queue(c);
+    expect(data.mode).toBe("server");
+    expect(data.waiting.find((r: { ticketId: string }) => r.ticketId === t.id)).toMatchObject({ state: "waiting_for_slot" });
   });
 });

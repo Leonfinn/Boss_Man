@@ -7,7 +7,7 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "dr
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, formatDate, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
@@ -15,7 +15,7 @@ import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agentNotes, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
@@ -35,6 +35,7 @@ import { serverStatusService } from "./services/server-status.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
+import { serverHealthService, type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
@@ -85,6 +86,7 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
+import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
@@ -142,6 +144,8 @@ export type AppOptions = {
   portalLimits?: Partial<PortalLimits>;
   /** Clock for scheduling, sweeps and ranking; tests move it forward. */
   now?: () => Date;
+  /** Server-health readings (BOS-640); tests pass made-up rss, memory limit and freezes. */
+  serverHealth?: Partial<Pick<ServerHealthDeps, "rssMb" | "memoryLimit" | "stallsSince">>;
   /** The runner launcher (R55), when BOSSMAN_LAUNCHER=1. */
   launcher?: LauncherOptions;
   /** The folder shared with the host deployer (docs/09-self-deploy.md); self-deploy is off without it. */
@@ -476,8 +480,8 @@ export async function buildApp(opts: AppOptions) {
       const key = `quota-alert:${fundingSourceId}:${window}:${f.resetsAt?.toISOString() ?? "none"}`;
       const told = await db.insert(settings).values({ key, value: true }).onConflictDoNothing().returning();
       if (!told.length) continue;
-      const hhmm = (d: Date) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: OWNER_TZ });
-      const dayAt = (d: Date) => `${d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: OWNER_TZ })} at ${hhmm(d)}`;
+      const hhmm = (d: Date) => formatDate("en-GB", d, { hour: "2-digit", minute: "2-digit", timeZone: OWNER_TZ });
+      const dayAt = (d: Date) => `${formatDate("en-GB", d, { weekday: "short", day: "numeric", month: "short", timeZone: OWNER_TZ })} at ${hhmm(d)}`;
       await notes.notify({
         companyId: null,
         agentId: null,
@@ -556,11 +560,14 @@ export async function buildApp(opts: AppOptions) {
   // under which its cause is gone, and this closes it, on any tier, with the reason. It runs on the
   // sweep below and on the events that make a condition true: a run ending or speaking, a runner
   // connecting, a deploy finishing.
+  // Built after the ladder below (it raises through it); the closer asks it whether a rule is calm.
+  let health: ServerHealth | null = null;
   const clearing = alertClearing(db, {
     isConnected: (runnerId) => runners.isConnected(runnerId),
     hasRoom: (fundingSourceId) => scheduler.hasRoom(fundingSourceId),
     addons: addonFacts,
     release: (ticketId) => decisionsSvc.release(ticketId),
+    serverCalm: (rule) => health?.calmReason(rule) ?? null,
     now: opts.now,
   });
   // A runner coming back clears "could not start … runner offline" cards at once, on any tier
@@ -656,7 +663,7 @@ export async function buildApp(opts: AppOptions) {
     },
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
-    localHour: (t) => Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ }).format(t)),
+    localHour: (t) => Number(formatDate("en-GB", t, { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ })),
     now: opts.now,
     log: (m) => app.log.error(m),
   });
@@ -678,6 +685,30 @@ export async function buildApp(opts: AppOptions) {
     },
     now: opts.now,
   });
+  // Server-health alerts (BOS-640): memory to the CEO, freezes to the owner. main.ts runs check() on the leader.
+  health = serverHealthService({
+    now: opts.now ? () => opts.now!().getTime() : undefined,
+    stallsSince: (sinceMs) => stalls.since(sinceMs),
+    ...opts.serverHealth,
+    homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
+    openUpdateCard: async () =>
+      (
+        await db
+          .select({ id: decisions.id, question: decisions.question })
+          .from(decisions)
+          .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'self_deploy'`, sql`${decisions.context}->>'target' = 'server'`))
+          .orderBy(desc(decisions.createdAt))
+          .limit(1)
+      )[0] ?? null,
+    isOpen: async (dedupeKey) => (await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open"))).limit(1)).length > 0,
+    raise: async (input) => {
+      const r = await alerts.raise(input);
+      if (r) await notes.syncDecisions();
+      return r;
+    },
+    log: (m) => app.log.warn(m),
+  });
+  const serverHealth = health;
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
   const review = reviewService(db, {
@@ -692,9 +723,26 @@ export async function buildApp(opts: AppOptions) {
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
+  // In server mode (BOS-316, BOS-597) it reports the server-owned check queue's own mode, slots, and
+  // running and waiting counts for the company, so the screen can show "waiting for a check slot".
+  // The counts read only the live states, through check_jobs_state_queued: check_jobs has no company
+  // index, so a company-only filter would read the whole table.
+  const checkQueueSvc = checkQueue(db);
   const mergeQueue = mergeQueueService(db, {
     runningMerges: () => review.runningMerges(),
     limit: () => checkGate(db).limit(),
+    queueStatus: async (companyId) => {
+      const mode = await checkQueueSvc.mode();
+      if (mode !== "server") return { mode, slots: await checkQueueSvc.slots(), running: 0, waiting: 0 };
+      const [live] = (await db
+        .select({
+          running: sql<number>`(count(*) filter (where ${checkJobs.state} = 'running'))::int`.mapWith(Number),
+          waiting: sql<number>`(count(*) filter (where ${checkJobs.state} = 'queued'))::int`.mapWith(Number),
+        })
+        .from(checkJobs)
+        .where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.state, ["queued", "running"])))) as [{ running: number; waiting: number }];
+      return { mode: mode as CheckQueueMode, slots: await checkQueueSvc.slots(), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
+    },
     now: opts.now,
   });
   decisionsSvc.setLoopHooks({
@@ -2722,5 +2770,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
+  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
 }

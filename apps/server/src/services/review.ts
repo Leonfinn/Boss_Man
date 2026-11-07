@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
@@ -96,6 +96,8 @@ export const INFRA_CAUSE_TEXT: Record<InfraCause, (ms: number) => string> = {
 
 /** How long the server waits for the runner to merge or push an approved branch. */
 export const MERGE_WAIT_MS = 10 * 60_000;
+/** Set for the project check when the deeper check runs straight after it on the same tree (BOS-665); scripts/check-quick.sh reads it. */
+export const FULL_CHECK_NEXT = "BOSSMAN_FULL_CHECK_NEXT";
 /** How often a landing re-reads its check job row (BOS-316). Tests shorten it with BOSSMAN_CHECK_JOB_POLL_MS. */
 const CHECK_JOB_POLL_MS = Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) > 0 ? Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) : 3000;
 const CHECK_MERGED_KEY = "check_merged_result";
@@ -173,7 +175,7 @@ type NotifyHook = (agentId: string, input: { reason: string; note: string; ticke
 /** "4 Nov 07:35 UTC", for a sign-off named on a card or event. */
 const when = (iso: string) => {
   const d = new Date(iso);
-  return `${d.getUTCDate()} ${d.toLocaleString("en-GB", { month: "short", timeZone: "UTC" })} ${iso.slice(11, 16)} UTC`;
+  return `${d.getUTCDate()} ${formatDate("en-GB", d, { month: "short", timeZone: "UTC" })} ${iso.slice(11, 16)} UTC`;
 };
 
 /** The owner decides what to do with a check that couldn't finish; the ticket stays in review and the loop detector never hears of it. */
@@ -1235,8 +1237,15 @@ export function reviewService(
       // The project's check, plus its deeper one for high and critical work (R47, R48).
       // Deep check at the highest risk among this ticket and every ticket landing with it.
       const needsDeep = [t.risk, ...together.map((c) => c.risk)].some((r) => deepChecks(r));
-      const checks = opts?.skipChecks ? [] : [verifyCommand, needsDeep ? deepVerifyCommand : null].filter((c): c is string => !!c);
-      const kindOf = (command: string) => (command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify");
+      // BOS-665: when a different, deeper check runs next on the same tree, the project check is told so (FULL_CHECK_NEXT)
+      // and may skip what the deeper one repeats (check-quick.sh drops its typecheck and related tests). It rides in the
+      // command string because every way of running a check is `sh -c <command>`, so no runner change is needed; `named`
+      // maps it back to the project's own command for messages and check results.
+      const fullNext = needsDeep && !!deepVerifyCommand && !!verifyCommand && deepVerifyCommand !== verifyCommand;
+      const project = verifyCommand && fullNext ? `export ${FULL_CHECK_NEXT}=1; ${verifyCommand}` : verifyCommand;
+      const named = (command: string) => (command === project && verifyCommand ? verifyCommand : command);
+      const checks = opts?.skipChecks ? [] : [project, needsDeep ? deepVerifyCommand : null].filter((c): c is string => !!c);
+      const kindOf = (command: string) => (named(command) === deepVerifyCommand && named(command) !== verifyCommand ? "deep_verify" : "verify");
       // A failed check: wait for the lock, a stuck check, or the ticket goes back with the output (shared by both ways of checking).
       const checkFailed = async (command: string, v: VerifyResult): Promise<{ outcome: "verify_failed" | "check_stuck" | "lock_wait"; delivered: string | null; detail: unknown }> => {
         // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
@@ -1292,7 +1301,7 @@ export function reviewService(
           v = await runCheck(retry === INFRA_RETRY_ATTEMPTS);
         }
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(command), passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
-        if (!v.ok) return checkFailed(command, v);
+        if (!v.ok) return checkFailed(named(command), v);
       }
 
       // Its migrations must not take a number another branch already has (BOS-219): the merge is the
@@ -1353,14 +1362,14 @@ export function reviewService(
           );
       if (m0.status === "job_stuck") {
         await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The queued merge check stopped before it finished: ${m0.reason}` });
-        await raiseCheckStuck(db, t, m0.command, `stopped: ${m0.reason}`, m0.output);
+        await raiseCheckStuck(db, t, named(m0.command), `stopped: ${m0.reason}`, m0.output);
         return { outcome: "check_stuck", delivered: null, detail: m0 };
       }
       const m: MergeResult | PushResult = m0;
       if (m.status === "prepared") throw new ReviewError(409, "The runner answered the merge with an unfinished step; try again.");
       if (m.status === "check_failed") {
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(m.command), passed: false, detail: m.result.output.slice(-500) });
-        return checkFailed(m.command, m.result);
+        return checkFailed(named(m.command), m.result);
       }
       // The target kept moving while the merged result was checked; nothing was pushed, so land() tries again.
       if (m.status === "main_moved") return { outcome: "lock_wait", delivered: null, detail: m };
