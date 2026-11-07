@@ -1,5 +1,5 @@
 {
-  "id": "caa0a979-f64a-4687-af96-87761f138898",
+  "id": "d7462dda-c6f5-4053-83e3-9847dcd0cde0",
   "prevId": "e95fdc0c-229b-4d19-954b-e8bc22ccb8b2",
   "version": "7",
   "dialect": "postgresql",
@@ -1120,6 +1120,27 @@
           "columns": [
             {
               "expression": "ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "check_results_company_at": {
+          "name": "check_results_company_at",
+          "columns": [
+            {
+              "expression": "company_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -4873,24 +4894,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_by": {
-          "name": "created_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "source_decision_id": {
-          "name": "source_decision_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -4906,19 +4909,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "policy_rules_source_decision_id_decisions_id_fk": {
-          "name": "policy_rules_source_decision_id_decisions_id_fk",
-          "tableFrom": "policy_rules",
-          "tableTo": "decisions",
-          "columnsFrom": [
-            "source_decision_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

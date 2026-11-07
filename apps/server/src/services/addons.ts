@@ -56,7 +56,7 @@ export function addonsService(db: Db, deps: { trustedProxies: string[]; notifySe
 
       const s = await deps.notifySettings();
       let ntfy: AddonFact;
-      if (!s.ntfy) ntfy = { state: "not_set_up", since: null, source: "Settings → Notifications has no ntfy server" };
+      if (!s.ntfy) ntfy = { state: "not_set_up", since: null, source: "The Notifications page has no ntfy server" };
       else {
         const [last] = await db
           .select({ createdAt: notifications.createdAt, pushedAt: notifications.pushedAt, pushError: notifications.pushError })

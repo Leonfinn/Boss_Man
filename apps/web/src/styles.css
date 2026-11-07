@@ -905,3 +905,18 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .messenger .chat-form .owner-message-count, .messenger .chat-form .owner-message-over { flex-basis: 100%; }
 .chat-form .owner-message-count { width: 100%; }
 .activity-compose textarea { field-sizing: content; }
+
+/* ---------- The merge queue (BOS-587) ---------- */
+/* A read-only screen: one card per item, each a ticket line, its state in a tag, and what happens next.
+   It is one column at every width, so a phone shows the same thing without a sideways scroll. */
+.mq-list { display: flex; flex-direction: column; gap: 8px; }
+.mq-item { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; min-width: 0; }
+.mq-item.stuck { border-color: var(--red-ink); }
+.mq-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.mq-head a { font-size: 14px; font-weight: 500; color: var(--head); text-decoration: none; overflow-wrap: anywhere; min-width: 0; }
+.mq-head a:hover { text-decoration: underline; }
+.mq-head .mono { font-size: 12px; color: var(--muted); }
+.mq-wait { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.mq-line { margin: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+.mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.mq-next a { color: var(--accent-ink); }
