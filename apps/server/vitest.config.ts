@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { freemem } from "node:os";
 import { defineConfig } from "vitest/config";
+import { guardVitest } from "../../scripts/vitest-guard.mjs";
+
+// Keeps whole-suite runs at the merge gate for agent sessions; see scripts/vitest-guard.mjs.
+guardVitest();
 
 // Each worker holds its own in-process Postgres: measured ~0.9 GB per worker plus ~0.6 GB for the
 // rest (peak 1.5 GB at 1 worker, 2.3 GB at 2, 3.3 GB at 4).
@@ -45,6 +49,9 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     maxWorkers: workers(),
+    // The merge check sets BOSSMAN_TEST_TIMES_FILE to also get a JSON report, for per-file times in the gate store (BOS-654).
+    ...(process.env.BOSSMAN_TEST_TIMES_FILE ? { reporters: ["default", "json"], outputFile: { json: process.env.BOSSMAN_TEST_TIMES_FILE } } : {}),
     globalSetup: ["test/global-setup.ts"],
+    setupFiles: ["test/live-run-tokens.ts"],
   },
 });

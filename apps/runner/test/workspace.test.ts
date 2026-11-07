@@ -69,6 +69,37 @@ describe("git workspaces (R38)", () => {
     expect(ws.savedPatch(ids.a)).toBeNull();
   });
 
+  it("recovers by itself when the ticket's branch is checked out in another ticket's folder, or a half-made folder is in the way (BOS-634)", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const specA = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const specB = { projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" };
+    const a = await ws.ensure(specA);
+    const b = await ws.ensure(specB);
+    git(a.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work on A");
+    await ws.release(specA);
+    // An agent working on B switches B's folder onto A's branch, so A's branch is taken. A clone
+    // (BOS-323) has no other ticket's branch to switch to, so only the half-made folder applies.
+    const worktrees = !isClone(b.path);
+    if (worktrees) {
+      git(b.path, "switch", "-q", branchFor(ids.a));
+      writeFileSync(path.join(b.path, "b-note.txt"), "uncommitted\n");
+    }
+    // A half-made folder for A is in the way as well.
+    mkdirSync(ws.ticketDir(ids.a), { recursive: true });
+    writeFileSync(path.join(ws.ticketDir(ids.a), "junk"), "x");
+
+    const back = await ws.ensure(specA);
+    expect(back.created).toBe(true);
+    expect(git(back.path, "log", "-1", "--format=%s")).toBe("work on A");
+    expect(git(back.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branchFor(ids.a));
+    // B's folder keeps its files and uncommitted work, now on a detached HEAD.
+    if (worktrees) {
+      expect(git(b.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+      expect(readFileSync(path.join(b.path, "b-note.txt"), "utf8")).toBe("uncommitted\n");
+    }
+  });
+
   it("does not run hooks or a filesystem monitor named in the shared repo's config", async () => {
     const r = remote();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
@@ -163,6 +194,32 @@ describe("git workspaces (R38)", () => {
     // The agent's own staging area is exactly as it was.
     expect(git(w.path, "diff", "--cached", "--name-only")).toBe(stagedBefore);
     expect((await ws.diff(spec, 50)).truncated).toBe(true);
+  });
+
+  it("reports the tree of the head it read, even when a commit lands mid-diff", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    const headA = git(w.path, "rev-parse", "HEAD");
+    const treeA = git(w.path, "rev-parse", "HEAD^{tree}");
+    // A commit lands right after the head is read (during the slow steps).
+    const real = (ws as any).git.bind(ws);
+    let landed = false;
+    (ws as any).git = async (args: string[], opts?: unknown) => {
+      const out = await real(args, opts);
+      if (!landed && args[0] === "rev-parse" && args[1] === "HEAD") {
+        landed = true;
+        writeFileSync(path.join(w.path, "later.txt"), "B\n");
+        git(w.path, "add", "later.txt");
+        git(w.path, "commit", "-qm", "later");
+      }
+      return out;
+    };
+    const d = await ws.diff(spec);
+    expect(landed).toBe(true);
+    expect(d.head).toBe(headA);
+    expect(d.tree).toBe(treeA);
   });
 });
 

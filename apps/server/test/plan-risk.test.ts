@@ -209,7 +209,7 @@ describe("risk tiers (R48)", () => {
     expect(d!.question).toBe(`CEO approved "Add rate limiting", which is rated high risk. Merge it, or send it back?`);
 
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve and merge" });
-    expect(commands).toEqual(["pnpm test", "pnpm test:e2e"]);
+    expect(commands).toEqual(["export BOSSMAN_FULL_CHECK_NEXT=1; pnpm test", "pnpm test:e2e"]);
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
   });
 

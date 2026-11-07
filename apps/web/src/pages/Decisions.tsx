@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { HARNESSES, harnessLabel, modelFitProblem, providerLabel } from "@boss-man/shared";
+import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, type StepPiece, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -187,9 +187,6 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
   );
 }
 
-/** Where a command runs and as whom (BOS-427), read from its fence line: sh host="nas01" as="login". */
-type Where = { host: string; as: "root" | "login" };
-
 /** One command to paste, in its own block with a Copy button that copies exactly this text (BOS-269). */
 function CommandBlock({ command, where }: { command: string; where?: Where }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
@@ -218,28 +215,17 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
   );
 }
 
-/** The fence line's host and account for a block written by hand at raise time; a bare ```sh names neither. */
-function whereOf(lang: string): Where | undefined {
-  const m = /^sh\s+host="([^"]+)"\s+as="(root|login)"$/.exec(lang.trim());
-  return m ? { host: m[1]!, as: m[2] as Where["as"] } : undefined;
-}
-
-/** A step's text: sentences as before, and each fenced block as its own command with a Copy button (BOS-269, BOS-427). */
+/**
+ * A step's text: sentences as before, and each fenced block as its own command with a Copy button (BOS-269, BOS-427).
+ * The fences are read by the same parser as the server's card lint (BOS-550), so a step the lint accepts renders
+ * its commands as blocks, labelled fence lines and indented list items included.
+ */
 function StepText({ text, refs }: { text: string; refs?: Decision["refs"] }) {
-  const parts: Array<{ command: boolean; text: string; where?: Where }> = [];
-  const re = /```([^\n`]*)\n([\s\S]*?)\n```/g;
-  let last = 0;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    const before = text.slice(last, m.index).trim();
-    if (before) parts.push({ command: false, text: before });
-    parts.push({ command: true, text: m[2]!, ...(whereOf(m[1]!) ? { where: whereOf(m[1]!) } : {}) });
-    last = m.index + m[0].length;
-  }
-  const rest = text.slice(last).trim();
-  if (rest || parts.length === 0) parts.push({ command: false, text: parts.length === 0 ? text : rest });
+  const parsed = parseStep(text);
+  const parts: StepPiece[] = parsed.length ? parsed : [{ type: "text", text }];
   return (
     <>
-      {parts.map((p, i) => (p.command ? <CommandBlock key={i} command={p.text} where={p.where} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
+      {parts.map((p, i) => (p.type === "command" ? <CommandBlock key={i} command={p.text} where={p.where} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
     </>
   );
 }
@@ -501,6 +487,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   };
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
+  // (BOS-551) The server puts waiting cards last and marks them; show them in the "Waiting, nothing to do
+  // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
+  const queueCards = shown.filter((d) => !d.waiting);
+  const waitingCards = shown.filter((d) => !!d.waiting);
   const open = shown.filter((d) => !answered[d.id]);
   // Too long for an answer: the text goes in a .txt file, and the agent is told where to read it whole.
   const answerAsFile = async (d: Decision, long: string) => {
@@ -641,7 +631,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         </details>
       )}
 
-      {loaded && shown.length === 0 ? (
+      {loaded && queueCards.length === 0 && waitingCards.length === 0 ? (
         agentsWorking > 0 ? (
           <State img={art.busy} alt="Agents at work, nothing needs you" title="Nothing needs you yet">
             <p>{agentsWorking === 1 ? "1 agent is" : `${agentsWorking} agents are`} working. They'll raise a decision here when they need an answer, an approval or more budget.</p>
@@ -653,6 +643,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         )
       ) : (
         <>
+          {queueCards.length > 0 && (
+          <>
           <details className="formula">
             <summary>How the ranking works</summary>
             <p>The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
@@ -669,7 +661,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
             </ul>
           </details>
           <ol className="queue">
-            {shown.map((d) => {
+            {queueCards.map((d) => {
               const k = kindOf(d);
               const total = Math.max(1, d.parts.blocking + d.parts.urgency + d.parts.age + d.parts.liveRun);
               const w = (n: number) => `${Math.round((n / total) * 48)}px`;
@@ -677,6 +669,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const x = d.context?.explain;
               const rule = d.context?.rule;
               const advice = d.context?.advice;
+              const ranOut = d.context?.handoverRanOut;
               const asking = advice?.state === "asking";
               const ticketId = d.context?.type === "risk_review" ? d.context.ticketId : null;
               const land = ticketId ? landings[ticketId] : null;
@@ -696,6 +689,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                   </div>
                   <div className="body">
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                      {d.step ? (
+                        <span className="tag blue" title="Do this next, in this order" aria-label={`Step ${d.step}`}>
+                          Step {d.step}
+                        </span>
+                      ) : null}
                       <span className={`tag ${k.tone}`}>{k.label}</span>
                       <span className="muted" style={{ fontSize: 13 }}>
                         {d.companyName}
@@ -703,6 +701,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {d.tier === "ceo" ? ` · for ${d.forAgentName ?? "the CEO"}` : ""}
                       </span>
                     </div>
+                    {d.doAfter?.length ? (
+                      <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>
+                        Do after: {d.doAfter.join("; ")}
+                      </p>
+                    ) : null}
+                    {d.doBefore?.length ? (
+                      <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>
+                        Do before: {d.doBefore.join("; ")}
+                      </p>
+                    ) : null}
                     <TicketRefs about={d.about} />
                     {d.context?.update && <DeployUpdateView u={d.context.update} />}
                     {d.context?.type === "instructions" && d.context.instructions ? (
@@ -717,6 +725,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question} refs={d.refs} /></h2>
                         {d.context.text ? <MoreText label="New rules" text={d.context.text} /> : <p>This clears the standing rules.</p>}
                       </>
+                    ) : d.context?.type === "owner_setup" ? (
+                      // The server's question repeats the steps as plain numbered text (raiseOwnerSetup), so any
+                      // command block in them showed as raw ``` lines (BOS-550). The steps show once, as blocks, under
+                      // "What to do"; the heading is only the first line.
+                      <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
@@ -803,11 +816,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </>
                     )}
                     {advice?.state === "timed_out" && <p className="muted">You asked the CEO for advice, but the CEO didn't respond. It's back with you.</p>}
+                    {ranOut && advice?.state !== "advised" && <p className="muted">The CEO didn't get to this in time, so it reached you without their advice. They've been asked to add it.</p>}
                     {advice?.state === "advised" && (
                       <div className="ceo-advice">
                         <p style={{ fontWeight: 600 }}>The CEO's advice</p>
-                        {advice.what && <p>What it does: {advice.what}</p>}
-                        {advice.needed && <p>Does this ticket need it? {advice.needed}</p>}
+                        {advice.what && <p>What it's for: {advice.what}</p>}
+                        {advice.denyStops && <p>If you deny it, this won't get done: {advice.denyStops}</p>}
+                        {advice.needed && !advice.denyStops && <p>Does this ticket need it? {advice.needed}</p>}
                         {advice.recommendation && (
                           <p>
                             <span className={`tag ${advice.recommendation === "allow" ? "green" : "red"}`}>{advice.recommendation === "allow" ? "Recommend Allow" : "Recommend Deny"}</span>{" "}
@@ -1108,6 +1123,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               );
             })}
           </ol>
+          </>
+          )}
+          {waitingCards.length > 0 && (
+            // (BOS-551) Cards whose ticket is back with an agent, or that the agent is re-checking: not the
+            // owner's to do yet. Folded at the bottom so they never sit beside the cards that are ready.
+            <details className="sub">
+              <summary>Waiting, nothing to do yet ({waitingCards.length})</summary>
+              <ul>
+                {waitingCards.map((d) => (
+                  <li key={d.id} style={{ marginBottom: 8 }}>
+                    <TicketRefs about={d.about} />
+                    <strong>{d.question.split("\n")[0]}</strong>
+                    {d.waiting ? <div className="muted" style={{ fontSize: 13 }}>{d.waiting}</div> : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
         </>
       )}
     </>

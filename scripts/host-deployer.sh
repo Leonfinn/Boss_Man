@@ -52,13 +52,40 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # docs/09-self-deploy.md lists the same files.
 INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
-NOT_INFRA='^deploy/(penpot|ntfy)\.yml$'
+NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
 RUNNER_PATHS='^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
-g() { git -C "$REPO" "$@"; }
+# Every git command that can write the checkout runs under umask 022: from a root shell or cron with umask 077 it would leave files the server (user node) cannot read (BOS-562).
+g() { (umask 022; git -C "$REPO" "$@"); }
+# BEGIN readable-check (the same text is in rebuild-live.sh, host-deployer.sh and deploy.sh; deploy.test.sh keeps them equal)
+# BOS-562: the server image copies file modes as they are on disk and the server runs as user node, so a git-tracked
+# file that others can't read (or a folder they can't read and search) makes it crash at start. Reads modes only and
+# changes nothing. Only tracked paths count: .env, secrets/ and the data folder must stay private.
+unreadable_tracked() { # checkout folder: the tracked files and folders others can't use, one path per line
+  (
+    cd "$1" || exit 0
+    {
+      git ls-files -z | xargs -0 -r stat -c 'f %a %n' --
+      { echo .; git -c core.quotepath=off ls-files | awk '{ while (sub("/[^/]*$", "")) print }'; } | sort -u | tr '\n' '\0' | xargs -0 -r stat -c 'd %a %n' --
+    } 2>/dev/null | while read -r kind mode path; do
+      m=$((8#$mode))
+      if [[ $kind == f ]]; then ((m & 4)) || printf '%s\n' "$path"; else (((m & 5) == 5)) || printf '%s\n' "$path"; fi
+    done
+  ) || true
+}
+readable_problem() { # checkout folder: prints nothing when all is readable, else the message with the fix
+  local dir bad n
+  dir="$(cd "$1" && pwd)" || return 0
+  bad="$(unreadable_tracked "$dir")"
+  [[ -n $bad ]] || return 0
+  n="$(grep -c '' <<<"$bad")"
+  printf "%s file(s) or folder(s) in %s can't be read by the server, which runs as user node and gets the permissions the files have on disk, so it would crash when it starts (a root shell with umask 077 does this to every file git writes). First %s:\n%s\nFix, then run this again:\n  cd %q && git ls-files -z | xargs -0 chmod go+r && git ls-files | awk '{ while (sub(\"/[^/]*\$\", \"\")) print }' | sort -u | xargs -d '\\\\n' chmod go+rx && chmod go+rx ." \
+    "$n" "$dir" "$((n < 10 ? n : 10))" "$(head -n 10 <<<"$bad" | sed 's/^/  /')" "$dir"
+}
+# END readable-check
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { ((DRY)) || printf '%s %s\n' "$(now)" "$*" >>"$LOG"; printf '%s\n' "$*"; }
@@ -95,7 +122,9 @@ write_status() { # result message [backup]
   ((DRY)) && { log "[dry-run] status: $1: $2"; return 0; }
   local ended=""
   [[ $1 == running ]] || ended="$(now)"
-  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" >"$OUTBOX/status.json.tmp"
+  local soak=0 # the standby window this host really uses (BOS-401): the server holds the runner update for it
+  if bluegreen_enabled; then soak="$SOAK_SECONDS"; fi
+  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" >"$OUTBOX/status.json.tmp"
   chmod 644 "$OUTBOX/status.json.tmp"
   mv "$OUTBOX/status.json.tmp" "$OUTBOX/status.json"
   [[ $1 == running ]] || cat "$OUTBOX/status.json" >>"$OUTBOX/history.jsonl"
@@ -168,34 +197,173 @@ refresh_available() {
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
-# Host facts (BOS-427): the machine's own name and, for the folders it knows, their owner, group and mode,
-# read with `stat` only (never their contents). The server's owner-card lint (R6) uses this to refuse a step
-# that would run as the owner's login and hit a folder that login can't read. Every folder is optional: one
-# that isn't there is skipped, and a stat that fails is skipped too, so a host on another layout still gets a
-# record. The file is written mode 644 (no secrets in it) and only replaced when it changed.
+# Host facts (BOS-427, BOS-541): the machine's own name and, for the folders it knows, their owner, group, mode
+# and role, read with `stat` only (never their contents). The server's owner-card lint (R6) uses this to refuse a
+# step that would run as the owner's login and hit a folder that login can't read, or would open a backup, data
+# or secrets folder to everyone. The role is what the folder IS on this host, not what its name looks like: the
+# install folder holds the database backups by default, so it carries the "backups" role too. Every folder is
+# optional: one that isn't there is skipped, and a stat that fails is skipped too, so a host on another layout
+# still gets a record. The file is written mode 644 (no secrets in it) and only replaced when it changed.
 write_host_facts() {
   local f="$OUTBOX/host.json"
   ((DRY)) && { log "[dry-run] would write $f"; return 0; }
   local name; name="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost)"
   name="${name%%[[:space:]]*}"
   [[ $name =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || name="localhost"
-  local rows="" sep="" p o g m
+  local rows="" sep="" p d o g m r
   # The install folder (the deployer's parent), the deployer folder, backups, data and the checkout's secrets.
-  local -a folders=("$D/.." "$D" "${BOSSMAN_BACKUP_DIR:-$D/..}" "${BOSSMAN_DATA:-/srv/boss-man/data}" "$REPO/secrets")
+  # One folder can have more than one role (the install folder holds the backups by default), so paths repeat.
+  local -a folders=("$D/..:install" "${BOSSMAN_BACKUP_DIR:-$D/..}:backups" "$D:deployer" "${BOSSMAN_DATA:-/srv/boss-man/data}:data" "$REPO/secrets:secrets")
+  # Roles by path, in a fixed order (private ones first), so the same host always gets the same row.
+  local -A roles=()
   for p in "${folders[@]}"; do
-    [[ -n $p && -d $p ]] || continue
-    p="$(cd "$p" 2>/dev/null && pwd)" || continue
+    r="${p##*:}" d="${p%:*}"
+    [[ -n $d && -d $d ]] || continue
+    d="$(cd "$d" 2>/dev/null && pwd)" || continue
+    [[ -n $d ]] || continue
+    case " ${roles[$d]:-} " in *" $r "*) continue ;; esac
+    case $r in
+      backups | data | secrets) roles[$d]="$r${roles[$d]:+ ${roles[$d]}}" ;;
+      *) roles[$d]="${roles[$d]:+${roles[$d]} }$r" ;;
+    esac
+  done
+  while IFS= read -r p; do
     [[ -n $p ]] || continue
     o="$(stat -c %U "$p" 2>/dev/null || stat -c %u "$p" 2>/dev/null)" || continue
     g="$(stat -c %G "$p" 2>/dev/null || stat -c %g "$p" 2>/dev/null)" || continue
     m="$(stat -c %a "$p" 2>/dev/null)" || continue
     [[ $m =~ ^[0-7]{3,4}$ ]] || continue
-    # Avoid listing the same folder twice (install and backups can be the same folder).
-    [[ $rows == *"\"path\": $(jstr "$p")"* ]] && continue
-    rows+="$sep{\"path\": $(jstr "$p"), \"owner\": $(jstr "$o"), \"group\": $(jstr "$g"), \"mode\": \"$m\"}"; sep=", "
-  done
-  printf '{"version": 1, "name": %s, "writtenAt": %s, "ownership": [%s]}\n' "$(jstr "$name")" "$(jstr "$(now)")" "$rows" >"$f.tmp"
+    local rl="" rlsep=""
+    for r in ${roles[$p]}; do rl+="$rlsep$(jstr "$r")"; rlsep=", "; done
+    rows+="$sep{\"path\": $(jstr "$p"), \"owner\": $(jstr "$o"), \"group\": $(jstr "$g"), \"mode\": \"$m\", \"roles\": [$rl]}"; sep=", "
+  done < <(printf '%s\n' "${!roles[@]}" | LC_ALL=C sort)
+  local extra; extra="$(host_extra_facts 2>/dev/null)" || extra=""
+  printf '{"version": 1, "name": %s, "writtenAt": %s, "ownership": [%s]%s}\n' "$(jstr "$name")" "$(jstr "$(now)")" "$rows" "$extra" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
+}
+
+# BOS-419 (DR-008, DR-023, DR-024): more allowlisted host facts, as a JSON fragment that starts with ", " so it can be
+# appended to host.json. Every section is optional and a section that fails is left out, so an older server (which
+# ignores unknown fields) and a host with no docker both still get a record. Nothing here reads a key, token, auth
+# file or the contents of .env: only the keys on the PORT_KEYS list below, and only values that look like an address
+# or a port. Everything the deployer runs is fixed in this file; nothing comes from a request or from the server.
+PORT_KEYS="BOSSMAN_BIND BOSSMAN_HOST_PORT BOSSMAN_PORTAL_BIND BOSSMAN_PORTAL_HOST_PORT PENPOT_BIND PENPOT_HOST_PORT NTFY_BIND NTFY_HOST_PORT"
+REPO_PROBE_SECONDS="${REPO_PROBE_SECONDS:-3600}"
+ADDON_SERVICES="tailscale:tailscale ntfy:ntfy penpot:penpot-frontend" # add-on name:Compose service label
+have_docker() { command -v docker >/dev/null 2>&1; }
+dk() { timeout 10 docker "$@" 2>/dev/null; }
+env_value() { # key: the value of KEY in the checkout's .env (environment first); only called for keys on PORT_KEYS
+  local v="${!1:-}"
+  [[ -n $v ]] || v="$(grep -s "^$1=" "$REPO/.env" | tail -1 | cut -d= -f2- || true)"
+  v="${v%\"}"; v="${v#\"}"
+  printf '%s' "$v"
+}
+host_extra_facts() {
+  local out="" sep=", "
+  # --- repo access: how origin is reached and whether a read works. The URL itself is never reported (it can carry a token).
+  local url kind="none" ohost="" creds=false probe="skipped" probed=""
+  url="$(g remote get-url origin 2>/dev/null)" || url=""
+  case $url in
+    https://*) kind=https ;;
+    http://*) kind=http ;;
+    ssh://* | *@*:*) kind=ssh ;;
+    "") kind=none ;;
+    *) kind=other ;;
+  esac
+  if [[ $kind != none && $kind != other ]]; then
+    ohost="${url#*://}"; [[ $url == *://* ]] || ohost="$url"
+    [[ $ohost == *@* && ${ohost%%@*} != *[/]* ]] && { [[ $kind == https || $kind == http ]] && creds=true; ohost="${ohost#*@}"; }
+    ohost="${ohost%%[/:]*}"
+    [[ $ohost =~ ^[A-Za-z0-9_.-]{1,255}$ ]] || ohost=""
+  fi
+  if [[ $kind != none ]]; then
+    local cache="$STATE/repo-probe" now_s; now_s="$(date +%s)"
+    if [[ -f $cache && $(stat -c %Y "$cache" 2>/dev/null || echo 0) -gt $((now_s - REPO_PROBE_SECONDS)) ]]; then
+      read -r probe probed <"$cache" || true
+    else
+      # A read over whatever origin uses: anonymous for https (no credential helper, no prompt), the host's own key for ssh
+      # (BatchMode: never asks). Only ok/failed is kept.
+      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>&1); then probe=ok; else probe=failed; fi
+      probed="$(now)"
+      printf '%s %s\n' "$probe" "$probed" >"$cache" 2>/dev/null || true
+    fi
+    [[ $probe =~ ^(ok|failed)$ ]] || probe=failed
+  fi
+  out+="$sep\"repo\": {\"origin\": $(jstr "$kind"), \"originHost\": $(jstr "$ohost"), \"embeddedCredentials\": $creds, \"probe\": $(jstr "$probe"), \"probedAt\": $(jstr "$probed")}"
+  # --- folders and the compose setup
+  local srcdir deployerdir installdir cf cfl="" cfsep="" f bg=false colour=""
+  srcdir="$(cd "$REPO" 2>/dev/null && pwd)" || srcdir=""
+  deployerdir="$(cd "$D" 2>/dev/null && pwd)" || deployerdir=""
+  installdir="$(cd "$D/.." 2>/dev/null && pwd)" || installdir=""
+  cf="${COMPOSE_FILE:-}"; [[ -n $cf ]] || cf="$(grep -s '^COMPOSE_FILE=' "$REPO/.env" | tail -1 | cut -d= -f2- || true)"
+  cf="${cf%\"}"; cf="${cf#\"}"
+  for f in ${cf//[:,]/ }; do [[ $f =~ ^[A-Za-z0-9_./-]{1,200}$ ]] && { cfl+="$cfsep$(jstr "$f")"; cfsep=", "; }; done
+  if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
+  out+="$sep\"paths\": {\"install\": $(jstr "$installdir"), \"src\": $(jstr "$srcdir"), \"deployer\": $(jstr "$deployerdir")}"
+  out+="$sep\"compose\": {\"files\": [$cfl], \"bluegreen\": $bg, \"liveColour\": $(jstr "$colour")}"
+  # --- addresses and ports
+  local addrs="" asep="" a n=0 ports="" psep="" k v
+  while IFS= read -r a; do
+    [[ $a =~ ^[0-9a-fA-F:.]{3,45}$ && $a != 127.* && $a != ::1 && $a != fe80:* ]] || continue
+    ((n < 16)) || break; addrs+="$asep$(jstr "$a")"; asep=", "; n=$((n + 1))
+  done < <(if command -v ip >/dev/null 2>&1; then ip -o addr show scope global 2>/dev/null | awk '{ sub("/.*", "", $4); print $4 }'; else hostname -I 2>/dev/null | tr ' ' '\n'; fi || true)
+  for k in $PORT_KEYS; do
+    v="$(env_value "$k")"; [[ $v =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] || continue
+    ports+="$psep$(jstr "$k"): $(jstr "$v")"; psep=", "
+  done
+  out+="$sep\"network\": {\"addresses\": [$addrs], \"ports\": {$ports}}"
+  # --- memory, in kB, from /proc/meminfo
+  local mt ma
+  mt="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null)" || mt=""
+  ma="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null)" || ma=""
+  if [[ $mt =~ ^[0-9]+$ && $ma =~ ^[0-9]+$ ]]; then out+="$sep\"memory\": {\"totalKb\": $mt, \"availableKb\": $ma}"; fi
+  # --- add-ons (DR-023): found by their Compose service label; only not_set_up | stopped | needs_login | running
+  local pair name svc state ids ts adds="" adsep=""
+  for pair in $ADDON_SERVICES; do
+    name="${pair%%:*}" svc="${pair#*:}" state=not_set_up
+    if have_docker; then
+      ids="$(dk ps -a --filter "label=com.docker.compose.service=$svc" --format '{{.ID}} {{.State}}')" || ids=""
+      if [[ -n $ids ]]; then
+        if grep -q ' running$' <<<"$ids"; then state=running; else state=stopped; fi
+      fi
+    fi
+    if [[ $name == tailscale ]]; then
+      ts=""
+      if command -v tailscale >/dev/null 2>&1; then ts="$(timeout 10 tailscale status --json 2>/dev/null | jfield BackendState)" || ts=""
+      elif [[ $state == running ]]; then
+        ts="$(dk exec "$(head -n1 <<<"$ids" | cut -d' ' -f1)" tailscale status --json | jfield BackendState)" || ts=""
+      fi
+      case $ts in
+        Running) state=running ;;
+        NeedsLogin | NeedsMachineAuth) state=needs_login ;;
+        Stopped | Starting) state=stopped ;;
+      esac
+    fi
+    adds+="$adsep$(jstr "$name"): $(jstr "$state")"; adsep=", "
+  done
+  out+="$sep\"addons\": {$adds}"
+  # --- read-only checks (DR-024), chosen by name from this fixed list
+  local checks="" csep="" total=0 notrun=0 unhealthy=0 maxrestart=0 line r
+  if have_docker; then
+    while IFS= read -r line; do
+      [[ -n $line ]] || continue
+      total=$((total + 1))
+      [[ $line == *' running '* ]] || notrun=$((notrun + 1))
+      [[ $line == *unhealthy* ]] && unhealthy=$((unhealthy + 1))
+    done < <(dk ps -a --filter label=com.docker.compose.project --format '{{.ID}} {{.State}} {{.Status}}' || true)
+    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy}"; csep=", "
+    maxrestart=0
+    while read -r r; do [[ $r =~ ^[0-9]+$ ]] && ((r > maxrestart)) && maxrestart=$r; done < <(dk ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.RestartCount}}' 2>/dev/null || true)
+    checks+="$csep\"restart_counts\": {\"max\": $maxrestart}"; csep=", "
+  fi
+  local sizes="" ssep="" sf sz
+  for sf in "$OUTBOX/history.jsonl" "$LOG" "$STATE/hold"; do
+    sz="$(stat -c %s "$sf" 2>/dev/null)" || continue
+    sizes+="$ssep$(jstr "$(basename "$sf")"): $sz"; ssep=", "
+  done
+  checks+="$csep\"state_file_sizes\": {$sizes}"
+  out+="$sep\"checks\": {$checks}"
+  printf '%s' "$out"
 }
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
@@ -284,7 +452,9 @@ write_include() { # colour
 		header_up X-Forwarded-For {client_ip}
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC
@@ -295,7 +465,9 @@ INC
 	reverse_proxy server-$1:{args[0]} {
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC
@@ -339,7 +511,7 @@ backup_database() {
   local dir="${BOSSMAN_BACKUP_DIR:-$D/..}" old f
   mkdir -p "$dir"
   BG_BACKUP="$dir/bossman-$(date +%F-%H%M).sql.gz"
-  (umask 077; compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial") || { rm -f "$BG_BACKUP.partial"; return 1; }
+  (set -o pipefail; umask 077; compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial") || { rm -f "$BG_BACKUP.partial"; return 1; }
   { [[ -s $BG_BACKUP.partial ]] && gzip -t "$BG_BACKUP.partial"; } || { rm -f "$BG_BACKUP.partial"; return 1; }
   mv "$BG_BACKUP.partial" "$BG_BACKUP"
   # Same retention as deploy.sh: only bossman-*.sql.gz, newest 14 kept.
@@ -349,21 +521,40 @@ backup_database() {
 
 BG_RESULT="" BG_MSG="" BG_BACKUP="" BG_LIVE="" BG_IDLE="" BG_PREV=""
 bg_fail() { BG_RESULT=$1; BG_MSG=$2; return 1; }
+# The last 20 lines of a colour's container log, for a message that says it never came up (BOS-562); short lines, one block.
+colour_log_tail() { # colour
+  local t
+  t="$(compose logs --no-color --tail 20 "server-$1" 2>&1 | cut -c1-200 | head -c 2500 || true)"
+  [[ -z $t ]] || printf " Last 20 lines of the server-%s log:\n%s" "$1" "$t"
+}
 
 # Reverses a hand-over: demote the new colour, promote the old, point the proxy back, check, stop the new one.
 switch_back() {
   local ok=1
   log "Switching back from $BG_IDLE to $BG_LIVE."
+  # Never roll back to nothing: with the old colour not running there is nothing to go back to, so the new one is left alone.
+  [[ -n $(compose ps -q "server-$BG_LIVE" 2>/dev/null) ]] || { log "server-$BG_LIVE is not running; leaving server-$BG_IDLE as it is."; return 1; }
   compose kill -s USR1 "server-$BG_IDLE" >>"$LOG" 2>&1 || true
   compose kill -s USR2 "server-$BG_LIVE" >>"$LOG" 2>&1 || ok=0
   if ((ok)); then wait_ready "server-$BG_LIVE" leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
   if ((ok)); then flip_proxy "$BG_LIVE" || ok=0; fi
   if ((ok)); then wait_ready proxy leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
-  # Never roll back to nothing: the new colour is stopped only once the old one answers as the leader.
-  if ((ok)); then compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
-  else log "The old colour $BG_LIVE did not take over; leaving $BG_IDLE running so something still answers."; fi
-  ((ok)) && { g reset --quiet --hard "$BG_PREV" || true; }
+  if ((ok)); then
+    compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+    g reset --quiet --hard "$BG_PREV" || true
+  else
+    # The old colour did not take over: put the new one back in charge and keep it running (the checkout stays on what runs).
+    log "The switch-back to $BG_LIVE failed; keeping server-$BG_IDLE running."
+    flip_proxy "$BG_IDLE" >>"$LOG" 2>&1 || true
+    compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+  fi
   ((ok))
+}
+
+# What to type on the host when both automatic paths failed (generic: the configured checkout, no fixed paths or names).
+recovery_hint() {
+  printf 'Look at the host now. In %s run: docker compose ps. To start the colour that should be live and make it lead: docker compose up -d --no-deps server-%s, then docker compose kill -s USR2 server-%s. If server-%s is running, docker compose kill -s USR2 server-%s makes it lead instead. Log: %s' \
+    "$REPO" "$BG_LIVE" "$BG_LIVE" "$BG_IDLE" "$BG_IDLE" "$LOG"
 }
 
 # After the swap: the proxy answers as the new leader at the new commit, and the portal answers.
@@ -385,13 +576,16 @@ pre_fail() { # message: undo what happened before the hand-over; the live colour
 }
 
 do_deploy_bluegreen() {
-  local c why=""
+  local c why="" problem
   BG_PREV="$FROM"
   BG_LIVE="$(live_colour)" || { bg_fail failed "No usable $INCLUDE: do the first blue/green bring-up by hand (docs/06-install-truenas.md, 9d)."; return 1; }
   BG_IDLE="$(other_colour "$BG_LIVE")"
   for c in proxy "server-$BG_LIVE"; do
     [[ -n $(compose ps -q "$c" 2>/dev/null) ]] || { bg_fail failed "The $c container is not running; nothing was changed."; return 1; }
   done
+  # Files the server (user node) cannot read would crash the new colour at start (BOS-562): stop before the backup and build.
+  problem="$(readable_problem "$REPO")"
+  [[ -z $problem ]] || { bg_fail failed "$problem"$'\n'"Nothing was changed."; return 1; }
   rm -f "$STATE/soak" # a swap while the last one is soaking ends that soak: its standby is about to be rebuilt
 
   log "Blue/green: $BG_LIVE is live; building $BG_IDLE at ${COMMIT:0:8}."
@@ -399,10 +593,10 @@ do_deploy_bluegreen() {
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
   BOSSMAN_COMMIT="$COMMIT" compose build "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Building $BG_IDLE failed."; return 1; }
   # Expand-only migrations: the live colour keeps working on the new schema.
-  BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
+  BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
   compose up -d --no-deps --force-recreate "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Starting $BG_IDLE failed."; return 1; }
   # It is a standby because the live colour holds the leader lock; seeing that also shows the lock works.
-  wait_ready "server-$BG_IDLE" standby "$COMMIT" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby at ${COMMIT:0:8} within ${BG_READY_SECONDS}s."; return 1; }
+  wait_ready "server-$BG_IDLE" standby "$COMMIT" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby at ${COMMIT:0:8} within ${BG_READY_SECONDS}s.$(colour_log_tail "$BG_IDLE")"; return 1; }
   # A login-free read straight from the idle colour (not through the proxy).
   [[ $(probe "server-$BG_IDLE" 3100 /api/setup 2>/dev/null | jfield needsSetup) == False ]] || { pre_fail "The smoke test on $BG_IDLE failed (GET /api/setup)."; return 1; }
 
@@ -416,7 +610,7 @@ do_deploy_bluegreen() {
   [[ -n $why ]] || verify_live "$COMMIT" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "$why Switched back to $BG_LIVE automatically. Backup: $BG_BACKUP"
-    else bg_fail failed "$why The switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "$why The switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
 
@@ -452,7 +646,7 @@ soak_tick() {
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
   rm -f "$f"
   if switch_back; then finish rolled_back "The update to ${commit:0:8} was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the previous version (${prev:0:8}) automatically and is running normally on it."
-  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the host now (docker compose ps; $LOG)."; fi
+  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: $(recovery_hint)"; fi
 }
 
 # By hand, any time (also after the soak window): go back to the other colour, i.e. the previous release.
@@ -494,7 +688,7 @@ do_rollback_bluegreen() {
   [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "Rollback failed ($why); $BG_LIVE is live again. Backup: $BG_BACKUP"
-    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.
@@ -586,7 +780,7 @@ main() {
     finish rejected "Rejected: this request was already handled."
   fi
 
-  local head tip last wait
+  local head tip last wait problem
   head="$FROM"
   [[ -n $head ]] || finish failed "The checkout at $REPO is not a git repository."
   if [[ $TARGET == server ]]; then
@@ -614,6 +808,7 @@ main() {
   fi
 
   if ((DRY)); then
+    if [[ $TARGET == server ]]; then problem="$(readable_problem "$REPO")"; [[ -z $problem ]] || log "[dry-run] the real run would stop: $problem"; fi
     log "[dry-run] checks passed: would run: $(if [[ $TARGET != server ]]; then echo "scripts/update-runner.sh"; elif bluegreen_enabled; then echo "a blue/green swap to ${COMMIT:0:8}"; else echo "scripts/deploy.sh --yes --no-runner --commit ${COMMIT:0:8}"; fi)"
     exit 0
   fi

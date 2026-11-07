@@ -64,6 +64,20 @@ describe("evaluatePermission defaults", () => {
     expect(evaluatePermission(exec("git push origin feature"), []).outcome).toBe("owner");
   });
 
+  it("pins today's routing for a read-only dd read and an unrecognised command (BOS-233)", () => {
+    // The owner's recorded decision: a plain `dd if=` read (no `of=`) stays with the owner, with a Deny
+    // recommendation, because it matches the destructive list. Unrecognised commands are allowed by the
+    // "Other shell commands" default, as on main. Item 1 (which would send both to the CEO) is frozen, so
+    // this pins the current behaviour so a later change can't move it silently.
+    for (const c of ["dd if=/dev/zero of=/dev/null bs=1M count=1", "dd if=/dev/zero"]) {
+      expect(evaluatePermission(exec(c), []), c).toMatchObject({ outcome: "owner", rule: "Destructive commands go to the owner" });
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    }
+    for (const c of ["frobnicate --do-thing", "mytool --frob"]) {
+      expect(evaluatePermission(exec(c), []), c).toMatchObject({ outcome: "allow", rule: "Other shell commands" });
+    }
+  });
+
   it("allows ordinary work and workspace edits", () => {
     expect(evaluatePermission(exec("echo spike > spike.txt"), []).outcome).toBe("allow");
     expect(evaluatePermission({ title: "Edit src/a.ts", kind: "edit", rawInput: {} }, []).outcome).toBe("allow");
@@ -144,8 +158,8 @@ describe("helpers", () => {
       expect(recommendedVerdict(exec(c)), c).toBe("deny");
     }
     expect(recommendedVerdict(exec(`git status && git push origin bossman/${ticket}`))).toBe("deny");
-    // rm -rf inside a sed script is text being edited, not run; inside bash -c it runs.
-    expect(recommendedVerdict(exec(`sed "s|trap 'rm -rf \\"\\$t\\"' EXIT|:|" a.sh > /tmp/x.sh && bash /tmp/x.sh`))).toBe("allow");
+    // rm -rf inside a sed script may run (sed '1e rm -rf x'), so only a data-only program's quotes are skipped (BOS-116 review).
+    expect(recommendedVerdict(exec(`sed "s|trap 'rm -rf \\"\\$t\\"' EXIT|:|" a.sh > /tmp/x.sh && bash /tmp/x.sh`))).toBe("deny");
     expect(recommendedVerdict(exec("git commit -m 'stop rm -rf in scripts'"))).toBe("allow");
     expect(recommendedVerdict(exec("bash -c 'rm -rf /'"))).toBe("deny");
     expect(recommendedVerdict(exec("eval \"rm -rf $d\""))).toBe("deny");
@@ -415,6 +429,13 @@ describe("working-copy cleanup (BOS-120)", () => {
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
       expect(cleanupScope(c), c).toBeNull();
     }
+  });
+
+  it("sends a working-copy delete spelled to dodge the text patterns to the owner (BOS-116)", () => {
+    for (const c of [
+      "r\\m -rf dist", "\\rm -rf dist", "rm \\\n -rf dist", "command rm -rf dist", '"rm" -rf dist',
+      "rm -rf dist; truncate -s0 x", "rm -f x; python3 -c 'import shutil; shutil.rmtree(\"/x\")'",
+    ]) expect(route(c), c).toEqual({ outcome: "owner", rule: "Destructive commands go to the owner", position: 3 });
   });
 
   it("only reads a command written as one string: an argv array runs without a shell", () => {

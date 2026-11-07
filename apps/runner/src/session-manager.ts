@@ -13,11 +13,17 @@ import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods,
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
+import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { isClone, RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
+
+/** How long one preflight attempt may take before it counts as failed, and how many attempts a run makes. */
+const MCP_PREFLIGHT_TIMEOUT_MS = 10_000;
+const MCP_PREFLIGHT_ATTEMPTS = 3;
+const MCP_PREFLIGHT_DELAY_MS = 2_000;
 
 export type SessionManagerOptions = {
   emit: (event: RunnerEvent) => void;
@@ -25,6 +31,17 @@ export type SessionManagerOptions = {
   resolveEnv: (runId: string) => Promise<Record<string, string>>;
   /** Boss Man's MCP endpoint as agents reach it. */
   mcpUrl: string;
+  /** Wait up to this long for the MCP endpoint to answer before a turn starts, retrying once more after telling the owner (0 or unset: no preflight). */
+  mcpPreflightMs?: number;
+  /** Test tuning for that preflight. */
+  mcpPreflightTuning?: { attemptTimeoutMs?: number; delayMs?: number };
+  /** Test tuning for the preflight an mcpRequired run does when mcpPreflightMs is unset (BOS-664): shorter budget, attempt timeout and delay than the production 30 s / 10 s / 2 s. */
+  mcpRequiredPreflight?: { budgetMs?: number; attemptTimeoutMs?: number; delayMs?: number };
+  /**
+   * Confirms the Boss Man tools are reachable before an mcpRequired run starts (BOS-552). The default
+   * asks the live server for its tool list; tests override it to drive the success and failure paths.
+   */
+  checkBossManTools?: (url: string, token: string) => Promise<{ ok: boolean; tools?: string[]; reason?: string }>;
   /** Environment every agent inherits (PATH, HOME, proxy settings); secrets are added per run. */
   baseEnv?: NodeJS.ProcessEnv;
   /** How long a permission request waits for a verdict before it is refused. */
@@ -55,6 +72,8 @@ export type SessionManagerOptions = {
   fence?: { level: FenceLevel; agentsRoot: string; pnpmStore?: string };
   /** The folder check-all.sh's queue and results share across sessions and the merge check (checkQueueEnv). */
   coordDir?: string;
+  /** Runs and stops server-queued check jobs (BOS-316). */
+  checkJobs?: import("./check-jobs.js").CheckJobs;
   log?: (msg: string) => void;
 };
 
@@ -167,9 +186,11 @@ export function linkSharedMemory(configDir: string, cwd: string, bare: string) {
 /**
  * Secrets only the daemon may hold: git authentication, in any of the ways git reads it from the
  * environment (a token or credentials, an askpass helper, an ssh command, or the config variables
- * that build a header), plus the forge tokens Claude Code and other tools push with on their own.
+ * that build a header), plus the forge and package-manager tokens git, Claude Code and other tools push
+ * with on their own. The forge/package families match a suffix too (GITHUB_TOKEN_WORK, NPM_TOKEN_LEGACY):
+ * the suffix says which repo or registry, so the whole family is withheld (BOS-396).
  */
-const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|GH_TOKEN|GITHUB_TOKEN|GITEA_TOKEN)$/;
+const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|(GH_TOKEN|GH_PAT|GITHUB_TOKEN|GITHUB_PAT|GITLAB_TOKEN|GL_TOKEN|GITEA_TOKEN|CI_JOB_TOKEN|BITBUCKET_TOKEN|ATLASSIAN_API_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|YARN_NPM_AUTH_TOKEN|VERCEL_TOKEN)(_[A-Z0-9_]+)?)$/;
 
 /** A run's granted secrets without the git credential, for the agent's own environment. */
 export function withoutGitCredentials(secrets: Record<string, string>): Record<string, string> {
@@ -264,6 +285,11 @@ export class SessionManager {
     return [...this.runs.entries()].flatMap(([runId, state]) => [...state.pendingPermissions.keys()].map((requestId) => ({ runId, requestId })));
   }
 
+  /** Ids of the runs this runner is running now, told to the server in hello (BOS-583). */
+  liveRunIds(): string[] {
+    return [...this.runs.keys()];
+  }
+
   get activeRuns() {
     return this.runs.size;
   }
@@ -286,6 +312,15 @@ export class SessionManager {
       case "run.start":
         this.starting.add(command.runId);
         void this.start(command).finally(() => this.starting.delete(command.runId));
+        return;
+      case "check.run":
+        this.opts.checkJobs?.run(command);
+        return;
+      case "check.cancel":
+        this.opts.checkJobs?.cancel(command.jobId);
+        return;
+      case "check.ack":
+        this.opts.checkJobs?.acknowledge(command.jobId);
         return;
       case "run.cancel": {
         const run = this.runs.get(command.runId);
@@ -383,7 +418,7 @@ export class SessionManager {
                     ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets)
                     : command.type === "workspace.migrations"
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
-                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null),
+                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, command.phase === "prepare" ? { phase: "prepare" } : command.phase === "finish" && command.commit && command.tree ? { phase: "finish", commit: command.commit, tree: command.tree } : null),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),
@@ -461,6 +496,10 @@ export class SessionManager {
     // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
     if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask"));
     if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir));
+    // Every harness the runner starts (Claude, Codex, OpenCode) gets this marker; scripts/check-all.sh and
+    // scripts/vitest-guard.mjs refuse a hand-run full check or whole-suite run when they see it. CLAUDECODE only
+    // covers Claude Code. Set last so a granted secret can't override it.
+    env.BOSSMAN_AGENT_SESSION = "1";
     return env;
   }
 
@@ -807,8 +846,53 @@ export class SessionManager {
       }
 
       const mcpServers: McpServer[] = [{ type: "http", name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
-      // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
+      // Wait out a server stall before the agent's own (about 5 s) MCP handshake can give up on us (BOS-403):
+      // one round of retries, then tell the owner and the server log and try one more round.
+      const waitForBossMan = async (budgetMs: number, tuning: { attemptTimeoutMs?: number; delayMs?: number } | undefined) => {
+        let pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs, ...tuning });
+        if (pre.ok || !this.runs.has(cmd.runId)) return pre;
+        emit({ type: "runner.log", level: "warn", message: `mcp-preflight: Boss Man tools unreachable for run ${cmd.runId} after ${pre.attempts} tries over ${Math.round(pre.waitedMs / 1000)}s (${pre.lastError}); retrying once.` });
+        emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools didn't load, retrying." } });
+        pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs, ...tuning });
+        if (!pre.ok) emit({ type: "runner.log", level: "error", message: `mcp-preflight: Boss Man tools still unreachable for run ${cmd.runId} (${pre.lastError}).` });
+        return pre;
+      };
+      if (this.opts.mcpPreflightMs && !cmd.mcpRequired) {
+        // An older server that doesn't send mcpRequired: wait, then start the turn anyway, saying so.
+        const pre = await waitForBossMan(this.opts.mcpPreflightMs, this.opts.mcpPreflightTuning);
+        if (!this.runs.has(cmd.runId)) return;
+        if (!pre.ok) emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools could not be reached after a retry; this turn may run without them." } });
+      }
       const supported = (init.agentCapabilities as { mcpCapabilities?: Record<string, boolean | undefined> } | undefined)?.mcpCapabilities;
+      // Boss Man tools are required (BOS-552): OpenCode accepts a session/new even when its MCP server
+      // is unreachable and then runs with no tools, so check the tools are really there first. Checking
+      // before session/new means a run that can't reach them never reaches run.started: it ends with a
+      // clear error, which the ticket feed shows as "Run ended: error: ...".
+      if (cmd.mcpRequired) {
+        if (!supported?.http) {
+          finish(null, `This run was stopped because ${cmd.agentKind} doesn't support HTTP MCP servers, so it would start without the Boss Man tools.`);
+          return;
+        }
+        // Wait out a brief stall first (BOS-403: retries, then tell the owner and retry once more),
+        // then require the tools to actually list. A test-provided check drives both steps itself,
+        // so it isn't run against the real URL.
+        const injected = this.opts.checkBossManTools;
+        let result: { ok: boolean; reason?: string };
+        if (injected) {
+          result = await injected(this.opts.mcpUrl, cmd.mcpToken);
+        } else {
+          const reach = this.opts.mcpPreflightMs
+            ? await waitForBossMan(this.opts.mcpPreflightMs, this.opts.mcpPreflightTuning)
+            : await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: MCP_PREFLIGHT_TIMEOUT_MS * MCP_PREFLIGHT_ATTEMPTS, attemptTimeoutMs: MCP_PREFLIGHT_TIMEOUT_MS, delayMs: MCP_PREFLIGHT_DELAY_MS, ...this.opts.mcpRequiredPreflight });
+          if (!this.runs.has(cmd.runId)) return;
+          result = reach.ok ? await checkBossManTools(this.opts.mcpUrl, cmd.mcpToken) : { ok: false, reason: reach.lastError ?? "no answer" };
+        }
+        if (!result.ok) {
+          finish(null, `This run was stopped because it couldn't reach the Boss Man tools (${result.reason ?? "no answer"}), so it would have worked blind. It runs again when the server is reachable.`);
+          return;
+        }
+      }
+      // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
       for (const m of cmd.mcpServers ?? []) {
         const token = m.secretEnv ? secrets[m.secretEnv] : undefined;
         if (m.secretEnv && !token) continue;

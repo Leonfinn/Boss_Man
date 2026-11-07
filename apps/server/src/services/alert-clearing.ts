@@ -8,6 +8,7 @@ import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { decisions, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
+import { signoffClearedReason } from "./signoff.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
@@ -27,12 +28,19 @@ export type ClearWhen =
    */
   | { kind: "accountRanOk"; fundingSourceId: string }
   /**
+   * The owner's sign-off card (DR-021): the ticket no longer waits on the sign-off. It was signed off, merged,
+   * cancelled or moved out of review, a new review round started, or its risk no longer needs the owner.
+   */
+  | { kind: "signoffNotWaiting"; ticketId: string }
+  /**
    * An add-on's setup card (DR-023 D): the add-on reads running, seen working after the card was raised.
    * "Running" alone isn't enough: Tailscale stays running for a day after its last request and ntfy until
    * the next push fails, so a card raised to fix one that has just broken would close at once on the old
    * reading (the BOS-469 lesson). A request through the edge or a push that went through since then proves it.
    */
-  | { kind: "addonRunning"; addon: Addon };
+  | { kind: "addonRunning"; addon: Addon }
+  /** A server-health card (BOS-640): its rule (memory or freezes) has stayed under its level for 30 minutes. */
+  | { kind: "serverCalm"; rule: "memory" | "freezes" };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -66,8 +74,14 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "accountRanOk":
         if (typeof c.fundingSourceId === "string") out.push({ kind: "accountRanOk", fundingSourceId: c.fundingSourceId });
         break;
+      case "signoffNotWaiting":
+        if (typeof c.ticketId === "string") out.push({ kind: "signoffNotWaiting", ticketId: c.ticketId });
+        break;
       case "addonRunning":
         if ((ADDONS as readonly unknown[]).includes(c.addon)) out.push({ kind: "addonRunning", addon: c.addon as Addon });
+        break;
+      case "serverCalm":
+        if (c.rule === "memory" || c.rule === "freezes") out.push({ kind: "serverCalm", rule: c.rule });
         break;
       default:
         break;
@@ -85,6 +99,8 @@ export type AlertClearingDeps = {
   addons?: () => Promise<AddonFacts>;
   /** Moves a ticket that waited on a closed card back to ready once nothing else holds it, and wakes its assignee. */
   release?: (ticketId: string) => Promise<unknown>;
+  /** Why a server-health rule's card can go (server-health.ts), or null while it can't; without it those cards stay open. */
+  serverCalm?: (rule: "memory" | "freezes") => string | null;
   now?: () => Date;
 };
 
@@ -149,6 +165,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
           .limit(1);
         return clean?.endedAt ? `a run on the account succeeded at ${hhmm(clean.endedAt)}` : null;
       }
+      case "signoffNotWaiting":
+        return signoffClearedReason(db, c.ticketId);
       case "addonRunning": {
         const f = (await addonFacts())?.[c.addon];
         if (f?.state !== "running" || !f.since) return null;
@@ -156,6 +174,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         if (!(since.getTime() > card.createdAt.getTime())) return null;
         return `${ADDON_LABELS[c.addon]} is running (${f.source}, at ${hhmm(since)})`;
       }
+      case "serverCalm":
+        return deps.serverCalm?.(c.rule) ?? null;
       default:
         return null;
     }
@@ -198,6 +218,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         .where(and(eq(decisions.id, row.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id, question: decisions.question });
       if (!done) continue;
+      // A sign-off card holds its ticket: the hold goes with it, or the ticket would stay blocked on a closed card.
+      if ((row.context as { type?: string } | null)?.type === "risk_review") await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, row.id));
       closed++;
       // A ticket that waited on the card (a setup card raised with blocksTicketId) waits no longer, the
       // same as when its raiser withdraws it; its assignee is woken with the news.

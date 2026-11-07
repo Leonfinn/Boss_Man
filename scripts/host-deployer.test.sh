@@ -86,6 +86,40 @@ has "$D/outbox/host.json" '"mode": "'
 hasnt "$D/outbox/host.json" '"login"' # the deployer runs as root and doesn't guess the owner's account
 [[ $(stat -c %a "$D/outbox/host.json") == 644 ]] || fail "host.json is not mode 644"
 node -e 'const h=require(process.argv[1]);if(!Array.isArray(h.ownership)||!h.ownership.length)process.exit(1);for(const o of h.ownership)if(!/^\/[^"]*$/.test(o.path)||!/^[0-7]{3,4}$/.test(o.mode)||!o.owner||!o.group)process.exit(2)' "$D/outbox/host.json" || fail "host.json ownership is malformed: $(cat "$D/outbox/host.json")"
+# 1a2. Roles (BOS-541): each known folder says what it is for. The deployer folder is "deployer"; the install
+# folder is "install", and the backups folder is "backups" (here a separate folder; the default layout, below,
+# has the install folder do both). One row per folder, roles in a fixed order.
+mkdir -p "$BOSSMAN_BACKUP_DIR"; host
+role_of() { node -e 'const h=require(process.argv[1]);const p=process.argv[2];const r=h.ownership.find(o=>o.path===p);if(!r)process.stdout.write("MISSING");else process.stdout.write((r.roles||[]).join(","))' "$D/outbox/host.json" "$1"; }
+[[ $(role_of "$(cd "$D/.." && pwd)") == install ]] || fail "install folder role: $(cat "$D/outbox/host.json")"
+[[ $(role_of "$(cd "$D" && pwd)") == deployer ]] || fail "deployer folder role: $(cat "$D/outbox/host.json")"
+[[ $(role_of "$BOSSMAN_BACKUP_DIR") == backups ]] || fail "backups folder role: $(cat "$D/outbox/host.json")"
+node -e 'const h=require(process.argv[1]);const paths=h.ownership.map(o=>o.path);if(new Set(paths).size!==paths.length)process.exit(1);if(h.ownership.some(o=>!Array.isArray(o.roles)||!o.roles.length))process.exit(2);const all=new Set(h.ownership.flatMap(o=>o.roles));for(const r of all)if(!["install","deployer","backups","data","secrets"].includes(r))process.exit(3)' "$D/outbox/host.json" || fail "host.json roles are malformed: $(cat "$D/outbox/host.json")"
+# 1a2. More facts (BOS-419): repo access, folders, addresses and ports, memory, add-ons and the fixed read-only checks.
+# Every field is optional for the server; none carries a URL, key or token.
+node -e '
+const h=require(process.argv[1]);const bad=m=>{console.error(m);process.exit(1)};
+if(!["https","ssh","http","other","none"].includes(h.repo.origin))bad("repo.origin");
+if(typeof h.repo.embeddedCredentials!=="boolean"||!["ok","failed","skipped"].includes(h.repo.probe))bad("repo");
+if(!h.paths.src||!h.paths.deployer||!h.paths.install)bad("paths");
+if(!Array.isArray(h.compose.files)||typeof h.compose.bluegreen!=="boolean")bad("compose");
+if(!Array.isArray(h.network.addresses)||typeof h.network.ports!=="object")bad("network");
+if(!(h.memory.totalKb>0)||h.memory.availableKb>h.memory.totalKb)bad("memory");
+for(const a of ["tailscale","ntfy","penpot"])if(!["not_set_up","stopped","needs_login","running"].includes(h.addons[a]))bad("addon "+a);
+if(Object.keys(h.addons).length!==3)bad("addons list");
+if(!h.checks.state_file_sizes)bad("checks");
+' "$D/outbox/host.json" || fail "host.json extra facts are malformed: $(cat "$D/outbox/host.json")"
+hasnt "$D/outbox/host.json" "$T/origin.git" # the origin URL is never reported
+# Ports come only from the allowlist, and only values that look like an address or a port.
+printf 'BOSSMAN_HOST_PORT=3199\nSECRET_TOKEN=abc123\nPENPOT_BIND=bad value;\n' >"$T/src/.env"
+host
+has "$D/outbox/host.json" '"BOSSMAN_HOST_PORT": "3199"'
+hasnt "$D/outbox/host.json" 'abc123'
+hasnt "$D/outbox/host.json" 'SECRET_TOKEN'
+hasnt "$D/outbox/host.json" 'PENPOT_BIND'
+rm -f "$T/src/.env"
+# The repo probe is cached for an hour: a second run does not repeat it.
+cp "$D/state/repo-probe" "$T/probe1"; sleep 1.1; host; cmp -s "$D/state/repo-probe" "$T/probe1" || fail "repo probe was repeated within the hour"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
 sed -i 's/^AVAILABLE_REFRESH_SECONDS=0$/AVAILABLE_REFRESH_SECONDS=300/' "$D/host.conf"
 printf '{"tip":"stale"}\n' >"$D/outbox/available.json"
@@ -96,11 +130,19 @@ host
 [[ ! -e $D/inbox/check ]] || fail "inbox/check was left behind"
 conf 0
 
+# 1c. The default layout: with no BOSSMAN_BACKUP_DIR the backups live in the install folder itself, so that one
+# folder is recorded as both install and backups (BOS-541). R6 reads the role, so it still knows it is private.
+# The deployer sits beside $T/src, as on a real host, so the checkout is found the usual way.
+D_default="$T/default-deployer"; mkdir -p "$D_default/inbox" "$D_default/outbox"
+BOSSMAN_DEPLOYER="$D_default" BOSSMAN_BACKUP_DIR="" "$here/host-deployer.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (default layout)"; }
+node -e 'const h=require(process.argv[1]);const p=process.argv[2];const r=h.ownership.find(o=>o.path===p);if(!r)process.exit(1);const want=["backups","install"];const got=r.roles||[];if(got.join(",")!==want.join(",")){console.error("roles: "+got.join(","));process.exit(2)}' "$D_default/outbox/host.json" "$(cd "$D_default/.." && pwd)" || fail "default install folder roles: $(cat "$D_default/outbox/host.json")"
+
 # 2. A good server request runs the fixed action, writes status and history, and stays quiet on success.
 req server "$c1" 11111111-1111-1111-1111-111111111111
 host
 [[ $(status result) == deployed && $(status to_commit) == "$c1" && $(status backup) == /b/x.sql.gz ]] || fail "status after deploy: $(cat "$D/outbox/status.json")"
 has "$STUB_LOG" "deploy.sh --yes --no-runner --commit $c1"
+has "$D/outbox/status.json" '"soak_seconds": "0"' # not blue/green: no standby window to wait for (BOS-401)
 [[ ! -e $D/inbox/request.json ]] || fail "request not consumed"
 [[ $(wc -l <"$D/outbox/history.jsonl") == 1 ]] || fail "history"
 [[ ! -s $T/hook.out ]] || fail "webhook posted on success while off"
@@ -155,7 +197,7 @@ for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-r
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
 # CI files and the Penpot and ntfy add-ons don't touch Boss Man's containers.
-for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml; do
+for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml deploy/ntfy-bluegreen.yml; do
   if echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
 done
 
@@ -262,7 +304,7 @@ case "$a" in
   "ps -q "*) x=${a#ps -q }; x=${x#server-}; [[ -e $W/running.$x ]] && echo cid ;;
   "exec -T db pg_dump"*) echo dump ;;
   "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
-  "run --rm migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
+  "run --rm --no-deps migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
   "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
   "kill -s USR1 server-"*) c=${a##*server-}; echo "signal USR1 $c" >>"$DL"; [[ -n ${FAKE_NO_DEMOTE:-} ]] || echo standby >"$W/role.$c" ;;
@@ -332,6 +374,18 @@ printf 'REPO=%s\nSOAK_SECONDS=abc\n' "$T/src" >"$D/host.conf"; chmod 600 "$D/hos
 hasnt "$D/outbox/available.json" '"soakSeconds"'
 has "$D/deployer.log" "SOAK_SECONDS is not a whole number of seconds"
 conf 0; : >"$D/inbox/check"; bg
+
+# 14b. BOS-562: a checkout with files the server (user node) can't read is refused before the backup and build; nothing changes.
+reset_world blue "$cur"
+(cd "$T/src" && chmod 600 "$(git ls-files | head -1)")
+bgreq "$b1"; bg --dry-run; has "$T/out" "the real run would stop"; rm -f "$D/inbox/request.json"
+bgreq "$b1"; bg
+has "$D/outbox/status.json" '"result": "failed"'
+has "$D/outbox/status.json" "can't be read by the server"
+[[ "$(git -C "$T/src" rev-parse HEAD)" == "$cur" ]] || fail "moved the checkout despite unreadable files"
+grep -q 'pg_dump' "$STUB_LOG" && fail "backed up despite unreadable files"
+(cd "$T/src" && chmod 644 "$(git ls-files | head -1)")
+reset_world blue "$cur"
 unset COMPOSE_FILE
 bgreq "$b1"; bg --dry-run; has "$T/out" "would run: scripts/deploy.sh --yes --no-runner --commit ${b1:0:8}"; rm -f "$D/inbox/request.json"
 printf "COMPOSE_FILE='docker-compose.yml:deploy/truenas-bluegreen.yml'\n" >"$T/src/.env.tmp"; mv "$T/src/.env.tmp" "$T/src/.env"
@@ -344,6 +398,7 @@ reset_world blue "$cur"; P="$(git -C "$T/src" rev-parse HEAD)"
 bgreq "$b1"; bg
 [[ $(status result) == deployed && $(status to_commit) == "$b1" ]] || fail "bg status: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "green is live"
+has "$D/outbox/status.json" '"soak_seconds": "900"' # the host's own window rides in the status file (BOS-401)
 order "$DL" "pg_dump" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
 hasnt "$DL" "build blue" # only the idle colour is built
 ls "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz >/dev/null 2>&1 || fail "no backup written"
@@ -417,6 +472,17 @@ FAKE_VERIFY_FAIL=green bg
 order "$DL" "signal USR1 blue" "signal USR2 green" "reload now green" "signal USR1 green" "signal USR2 blue" "reload now blue" "stopped green"
 live_is blue; [[ ! -e $D/state/soak ]] || fail "soak recorded for a failed swap"
 has "$T/hook.out" '"result": "rolled_back"'
+
+# 18b. The old colour died and the new one then fails its checks: the switch-back has nothing to go back to, so the new colour is NOT stopped; the alert carries the recovery commands.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+b3b="$(push apps/server/bg3b)"; bgreq "$b3b"; bg
+[[ $(status result) == deployed ]] || fail "setup swap 18b: $(cat "$D/outbox/status.json")"
+: >"$DL"; rm -f "$W/running.blue"
+FAKE_VERIFY_FAIL=green bg
+[[ $(status result) == failed ]] || fail "no old colour: $(cat "$D/outbox/status.json")"
+hasnt "$DL" "stopped green"; [[ -e $W/running.green ]] || fail "the new colour was stopped with nothing to go back to"
+has "$D/outbox/status.json" "docker compose kill -s USR2 server-green"
+has "$T/hook.out" '"result": "failed"'
 
 # 19. A failed smoke test on the idle colour: nobody is demoted, the idle colour is stopped, failure webhook.
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"

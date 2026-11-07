@@ -175,6 +175,17 @@ describe("turning a ticket's worktree into a clone (BOS-323)", () => {
     expectEveryFileKept(w.path);
   });
 
+  it("never clears a conversion cut short as a half-made folder when a check reopens it first (BOS-634 merge)", async () => {
+    const { as, spec, w, repo } = await workedWorktree();
+    git(repo, "worktree", "lock", w.path);
+    renameSync(path.join(w.path, ".git"), path.join(w.path, ".git.bossman-converting"));
+    for (const kind of ["worktree", "clone"] as const) await expect(as(kind).diff(spec)).rejects.toThrow();
+    expectEveryFileKept(w.path);
+    await as("clone").ensure(spec);
+    expect(isClone(w.path)).toBe(true);
+    expectEveryFileKept(w.path);
+  });
+
   it("finishes a conversion cut short before the index was rebuilt", async () => {
     const { as, spec, w, admin } = await workedWorktree();
     const pointer = readFileSync(path.join(w.path, ".git"), "utf8");

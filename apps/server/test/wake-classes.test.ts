@@ -11,6 +11,7 @@ import { openPglite } from "../src/db/client.js";
 import { costEvents, decisions, runs, tickets, wakes } from "../src/db/schema.js";
 import { WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
 import type { Limits } from "../src/services/scheduler.js";
+import { HELD_COMPANY } from "../src/services/fair-share.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -60,6 +61,10 @@ describe("wake classes: the table", () => {
     // A command's options in the owner-replies service (BOS-425), not a wake.
     "unanswered at 5 minutes, the agent is woken again",
     "unanswered at 10 minutes, the CEO is asked",
+    // The reasons a dropped do-after/do-before link is reported to its raiser (BOS-625), not wakes.
+    "another company",
+    "not open",
+    "unknown",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {
@@ -146,7 +151,7 @@ describe("wake classes: scheduled wakes", () => {
     expect(ctx!.commands.map((c) => c.agentId)).toEqual([b.id]);
   });
 
-  it("does not age an agent-started wake", async () => {
+  it("ages an agent-started wake like a scheduled one (DR-031; DR-002 left them flat)", async () => {
     ctx = await setup({ instance: 1, company: 1 });
     const a = await ctx!.agent("A");
     const b = await ctx!.agent("B");
@@ -154,7 +159,74 @@ describe("wake classes: scheduled wakes", () => {
     await ctx!.scheduler.wake({ agentId: b.id, reason: "assigned", priority: 2 });
     await ctx!.db.update(wakes).set({ createdAt: new Date(Date.now() - 40 * 60_000) }).where(eq(wakes.id, old.id));
     await ctx!.scheduler.tick();
+    expect(ctx!.commands.map((c) => c.agentId)).toEqual([a.id]);
+  });
+});
+
+describe("wake classes: a held agent wake gains rank until it gets a slot (BOS-579)", () => {
+  const ago = (ms: number) => new Date(Date.now() - ms);
+  const HOUR = 3_600_000;
+
+  it("gives the next free slot to an 18-hour-old engagement wake ahead of newer scheduled wakes", async () => {
+    ctx = await setup({ instance: 1, company: 1 });
+    const busy = await ctx!.agent("Busy");
+    const checker = await ctx!.agent("Checker");
+    const watcher = await ctx!.agent("Watcher");
+    const t1 = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Booked check" })).json();
+    // The one slot is taken, so everything below is held "at a concurrency limit".
+    const [live] = await ctx!.db.insert(runs).values({ companyId: ctx!.company.id, agentId: busy.id, lastEventAt: new Date() }).returning();
+    const engagement = await ctx!.scheduler.wake({ agentId: ctx!.ceo.id, reason: "engagement", note: "Engagement 443477d4: the server is back." });
+    const check = await ctx!.scheduler.notify(checker.id, { ticketId: t1.id, reason: "check due", note: "Check due (1 of 5)" });
+    const watch = await ctx!.scheduler.wake({ agentId: watcher.id, reason: "missed work", note: "fresh" });
+    await ctx!.db.update(wakes).set({ createdAt: ago(18 * HOUR) }).where(eq(wakes.id, engagement.id));
+    // Newer than the engagement but old enough that, with only scheduled wakes ageing, it led by 4.
+    await ctx!.db.update(wakes).set({ createdAt: ago(1 * HOUR) }).where(eq(wakes.id, check.id));
+    await ctx!.scheduler.tick();
+    expect(ctx!.commands).toHaveLength(0);
+    expect((await ctx!.db.select().from(wakes).where(eq(wakes.id, engagement.id)))[0]!.statusReason).toBe(HELD_COMPANY);
+
+    // The slot frees: the engagement goes first, and the scheduled wakes wait their turn.
+    await ctx!.db.update(runs).set({ endedAt: new Date(), outcome: "end_turn" }).where(eq(runs.id, live!.id));
+    await ctx!.scheduler.tick();
+    expect(ctx!.commands.map((c) => c.agentId)).toEqual([ctx!.ceo.id]);
+    const left = await ctx!.db.select().from(wakes).where(eq(wakes.status, "queued"));
+    expect(left.map((w) => w.id).sort()).toEqual([check.id, watch.id].sort());
+  });
+
+  it("caps the age bonus: past it the oldest wake goes first, whatever its class or stored priority", async () => {
+    ctx = await setup({ instance: 1, company: 1 });
+    const a = await ctx!.agent("A");
+    const b = await ctx!.agent("B");
+    // 3 hours at priority 3 would be rank 15 without the cap, ahead of 18 hours at priority 2 (rank 10).
+    const newer = await ctx!.scheduler.wake({ agentId: a.id, reason: "resume", priority: 3, note: "newer" });
+    const older = await ctx!.scheduler.wake({ agentId: b.id, reason: "nudge", priority: 2, note: "older" });
+    await ctx!.db.update(wakes).set({ createdAt: ago(3 * HOUR) }).where(eq(wakes.id, newer.id));
+    await ctx!.db.update(wakes).set({ createdAt: ago(18 * HOUR) }).where(eq(wakes.id, older.id));
+    await ctx!.scheduler.tick();
     expect(ctx!.commands.map((c) => c.agentId)).toEqual([b.id]);
+  });
+
+  it("still starts a someone-is-waiting wake ahead of any aged one", async () => {
+    ctx = await setup({ instance: 1, company: 1 });
+    const a = await ctx!.agent("A");
+    const old = await ctx!.scheduler.wake({ agentId: a.id, reason: "engagement", note: "old" });
+    await ctx!.db.update(wakes).set({ createdAt: ago(18 * HOUR) }).where(eq(wakes.id, old.id));
+    await ctx!.scheduler.wake({ agentId: ctx!.ceo.id, reason: "decision", note: "A card." });
+    await ctx!.scheduler.tick();
+    expect(ctx!.commands.map((c) => c.agentId)).toEqual([ctx!.ceo.id]);
+  });
+});
+
+describe("wake classes: agedRank", () => {
+  it("leaves waiting wakes alone, ages the others by 1 per 15 minutes, and stops at the cap", async () => {
+    const { agedRank, AGE_RANK_CAP, AGE_STEP_MS } = await import("../src/services/wake-classes.js");
+    expect(agedRank(2, "waiting", 10 * 3_600_000)).toBe(2);
+    expect(agedRank(2, "agent", AGE_STEP_MS * 3)).toBe(5);
+    expect(agedRank(2, "scheduled", AGE_STEP_MS * 3)).toBe(5);
+    expect(agedRank(2, "agent", 18 * 3_600_000)).toBe(AGE_RANK_CAP);
+    // A clock step backwards never lowers a rank, and a stored priority above the cap is kept.
+    expect(agedRank(2, "agent", -60_000)).toBe(2);
+    expect(agedRank(AGE_RANK_CAP + 2, "scheduled", 18 * 3_600_000)).toBe(AGE_RANK_CAP + 2);
   });
 });
 
@@ -236,6 +308,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "app.ts": DROP_RECORDED + " (assigned, feedback, skill decided); owner and rule wakes are never dropped",
     "mcp.ts": DROP_RECORDED + " (hooks.wake: note request, ...)",
     "services/alert-ladder.ts": CHECKS_OUTCOME + " (a dropped rung is not counted as sent)",
+    "services/check-dispatcher.ts": NEVER_DROPPED + " (check_result is scheduled)",
     "services/chat.ts": NEVER_DROPPED,
     "services/pa.ts": NEVER_DROPPED,
     "services/decisions.ts": NEVER_DROPPED + "; chased and engagement are " + DROP_RECORDED,

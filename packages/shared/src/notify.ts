@@ -4,6 +4,8 @@
 //   page  - a browser notification and a phone push;
 //   ask   - needs an answer: a browser notification and a phone push.
 // Quiet hours and per-agent caps lower the level rather than dropping the notification.
+import { dateFormat } from "./dates.js";
+
 export const NOTIFY_LEVELS = ["note", "flag", "page", "ask"] as const;
 export type NotifyLevel = (typeof NOTIFY_LEVELS)[number];
 
@@ -22,7 +24,7 @@ export function minutesOf(hhmm: string): number | null {
 
 /** Minutes since midnight at `now`, read in a time zone. */
 function minuteOfDay(now: Date, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
+  const parts = dateFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
   return Number(parts.find((p) => p.type === "hour")!.value) * 60 + Number(parts.find((p) => p.type === "minute")!.value);
 }
 

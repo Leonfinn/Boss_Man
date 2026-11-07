@@ -369,3 +369,34 @@ describe("stale requests (BOS-123)", () => {
     expect(stale).toHaveLength(0);
   });
 });
+
+describe("submit_plan (BOS-531)", () => {
+  it("saves the plan on a plan-first ticket and approving the card sets planApprovedAt", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Plan me", c.worker.id);
+    await c.db.update(tickets).set({ planFirst: true }).where(eq(tickets.id, t.id));
+    const client = await c.mcp(c.worker.id);
+    const r = await client.callTool({ name: "submit_plan", arguments: { ticketId: t.id, plan: "Step 1: do the thing." } });
+    expect(isError(r), textOf(r)).toBe(false);
+    const [mid] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(mid!.plan).toBe("Step 1: do the thing.");
+    expect(mid!.planApprovedAt).toBeNull();
+    const [card] = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    expect(card!.question).toContain("Step 1: do the thing.");
+    await c.decisions.answer(card!.id, "Keep planning");
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.planApprovedAt).toBeNull();
+    const again = await client.callTool({ name: "submit_plan", arguments: { ticketId: t.id, plan: "Step 1 revised." } });
+    expect(isError(again), textOf(again)).toBe(false);
+    const [card2] = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    await c.decisions.answer(card2!.id, "Approve plan");
+    const [after] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(after!.planApprovedAt).not.toBeNull();
+    expect(after!.plan).toBe("Step 1 revised.");
+  });
+  it("refuses a ticket that is not plan-first", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Plain", c.worker.id);
+    const r = await (await c.mcp(c.worker.id)).callTool({ name: "submit_plan", arguments: { ticketId: t.id, plan: "x" } });
+    expect(isError(r)).toBe(true);
+  });
+});
