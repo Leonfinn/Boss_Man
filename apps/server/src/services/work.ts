@@ -66,6 +66,9 @@ type TicketPatch = {
 /** Roles that may move a ticket into work whatever it waits on (BOS-254): the CEO, a manager, or the owner (no agent). */
 const START_OVERRIDE_ROLES = new Set(["ceo", "manager"]);
 
+/** Reopening a merged no-code ticket for code: moving it back into one of these clears the stale mark (BOS-532). The review state is left to review.ts: only a commit there is real code work. */
+const REOPEN_STATES = new Set<SystemState>(["ready", "in_progress"]);
+
 /**
  * Why a ticket may not start (BOS-254): it still waits on an unfinished ticket or engagement, or it is
  * in the Backlog and nobody handed it over. Null when it may start. `actor.agentId` is the agent
@@ -555,6 +558,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
       if (patch.ownerSetup !== undefined) fields.ownerSetup = patch.ownerSetup?.trim() || null;
       if (dest) Object.assign(fields, { projectId: dest.id });
+      // A merged ticket goes back to its assignee as no-code so a live check can be reported and it can
+      // close (DR-024 #5). If it is then reopened for real work (BOS-532), the flag is stale: moving a
+      // *merged* ticket back into ready or in_progress by hand clears it, so review and done ask for a diff
+      // again. Plain no-code tickets (never merged) keep it, and so do Boss Man's own move back from the
+      // merge (internal). A move into review is left to review.ts, where only a real commit clears it.
+      if (t.noCode && t.mergeCommit && patch.noCode === undefined && !patch.internal && col?.systemState && REOPEN_STATES.has(col.systemState) && col.systemState !== t.systemState) fields.noCode = false;
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
       // starts and before a plan is approved turns it on for high and critical, off otherwise.
       if (patch.risk !== undefined && patch.planFirst === undefined && !t.planApprovedAt && (t.systemState === "backlog" || t.systemState === "ready"))

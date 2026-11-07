@@ -6,6 +6,7 @@ import { and, eq, sql } from "drizzle-orm";
 vi.hoisted(() => { process.env.BOSSMAN_CHECK_JOB_POLL_MS = "20"; });
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
+import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, checkJobs, projects, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
 import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, INFRA_RETRY_ATTEMPTS, LOCK_RETRY_ATTEMPTS, setInfraRetryBase, setLockRetryBase, landingText } from "../src/services/review.js";
@@ -37,8 +38,7 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
   const answers: Answers = { merge: { status: "merged", commit: "c".repeat(40) }, migrations: { needed: false, reason: "No other branch uses this ticket's migration numbers." }, ...opts.answers };
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
@@ -792,6 +792,26 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "carried" });
     expect(await c.db.select().from(decisions)).toHaveLength(0);
     expect(await state(c)).toMatchObject({ systemState: "review" });
+  });
+
+  it("lets the CEO start a fresh merge attempt on an approved ticket the gate refused, and refuses one that isn't approved (BOS-684)", async () => {
+    const c = (ctx = await setup());
+    const asCeo = { byAgentId: c.ceo.id, companyId: c.company.id };
+    // Not approved yet: nothing to retry.
+    await expect(c.review.retryMerge(c.ticket.id, asCeo)).rejects.toMatchObject({ status: 409 });
+    const other = await otherTicket(c, "Permission gate");
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch }] };
+    await c.db.insert(reviewRequests).values({ ticketId: c.ticket.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    expect(await c.review.land(c.ticket.id, "Reviewer")).toMatchObject({ outcome: "carried" });
+    expect((await state(c)).pullRequestNote).toContain("must merge first");
+    // The carried work has merged since: the retry runs the gate again on the runner and lands it.
+    c.answers.carried = { carried: [] };
+    const before = c.sent.filter((x) => x.type === "workspace.carried").length;
+    await c.review.retryMerge(c.ticket.id, asCeo);
+    await vi.waitFor(async () => expect(await state(c)).toMatchObject({ systemState: "done" }));
+    expect(c.sent.filter((x) => x.type === "workspace.carried").length).toBe(before + 1);
+    // A finished ticket can't be retried.
+    await expect(c.review.retryMerge(c.ticket.id, asCeo)).rejects.toMatchObject({ status: 409 });
   });
 
   it("lands an approved ticket together with the one that holds all of it (fast-forward case, BOS-372)", async () => {

@@ -57,6 +57,34 @@ describe("owner chat", () => {
     expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: agent paused");
   });
 
+  it("stays open while an update waits and an agent is still working (BOS-349)", async () => {
+    const c = await setup();
+    // The CEO is busy with its own work, then a runner update starts to drain.
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision" });
+    await c.scheduler.tick();
+    expect(await c.db.select().from(runs).where(eq(runs.companyId, c.company.id))).toHaveLength(1);
+    await c.maintenance.start({ minutes: 30 });
+    // The owner's chat is let through: it starts and answers as normal, even mid-drain.
+    c.sent.length = 0;
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What's still running?" })).statusCode).toBe(201);
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start");
+    expect(start).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true });
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("answering");
+  });
+
+  it("still holds the chat when nothing is working and an update is waiting (BOS-349)", async () => {
+    await (async () => {
+      const c = await setup();
+      await c.maintenance.start({ minutes: 30 });
+      // No agent is working, so the swap can land any moment: the chat waits, exactly as before.
+      expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Are you there?" })).statusCode).toBe(201);
+      await c.scheduler.tick();
+      expect(c.sent.some((x) => x.type === "run.start")).toBe(false);
+      expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: update pending");
+    })();
+  });
+
   it("answers with a board-only run beside the CEO's own work, and the reply lands in the chat", async () => {
     const c = await setup();
     await c.db.delete(wakes);
@@ -125,9 +153,9 @@ describe("owner chat", () => {
     expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "SSO", description: "For Acme.", milestoneId: c.ms.id } }))).toMatch(/^Created feature [0-9a-f-]{36} "SSO"/);
     expect((await c.feedback.scored(c.company.id)).features[0]).toMatchObject({ title: "SSO", description: "For Acme.", milestoneId: c.ms.id });
     expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "sso" } }))).toMatch(/already exists/);
-    const auth = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Refactor auth", risk: "medium" } }));
+    const auth = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Refactor auth", body: "Move the auth routes behind the shared session helper.", risk: "medium" } }));
     const authId = /#\/tickets\/([0-9a-f-]{36})/.exec(auth)![1]!;
-    const made = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Rate-limit login", risk: "high", milestoneId: c.ms.id, assignee: "engineer", waitsOn: [authId] } }));
+    const made = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Rate-limit login", body: "Cap login attempts per account before the beta.", risk: "high", milestoneId: c.ms.id, assignee: "engineer", waitsOn: [authId] } }));
     expect(made).toMatch(/^Created #\/tickets\/[0-9a-f-]{36} "Rate-limit login" in App \(plan first\)\.$/);
     const rateId = /#\/tickets\/([0-9a-f-]{36})/.exec(made)![1]!;
     const [t] = await c.db.select().from(tickets).where(eq(tickets.id, rateId));
