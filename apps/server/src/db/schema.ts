@@ -413,7 +413,8 @@ export const decisions = pgTable("decisions", {
   staleReason: text("stale_reason"),
 },
   // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
-  (t) => [index("decisions_status").on(t.status)],
+  // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.
+  (t) => [index("decisions_status").on(t.status), index("decisions_company_status").on(t.companyId, t.status)],
 );
 
 export const engagementStatus = pgEnum("engagement_status", [
@@ -877,7 +878,7 @@ export const checkResults = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     detail: text("detail"),
   },
-  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at)],
+  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at), index("check_results_company_at").on(t.companyId, t.at)],
 );
 
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */

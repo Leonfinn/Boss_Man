@@ -2,9 +2,9 @@
 // launcher to start the container with it, so nobody copies tokens into files. The launcher
 // is optional (BOSSMAN_LAUNCHER=1); without it the owner registers runners by hand as before.
 import { readFile } from "node:fs/promises";
-import { eq, like } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { companies, mcpServers, settings } from "../db/schema.js";
+import { companies, mcpServers, projects, settings } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
 export type LauncherOptions = { url: string; keyFile: string };
@@ -41,6 +41,31 @@ export function toolServerAddress(url: string): string | null {
     const u = new URL(url);
     if (u.hostname.startsWith("[")) return null;
     return `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+  } catch {
+    return null;
+  }
+}
+
+/** The launcher's own check for an allow entry (apps/launcher/src/spec.ts): one bad entry makes it refuse the whole list, so never send one it would refuse. */
+const LAUNCHER_ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
+function sendable(addr: string | null): string | null {
+  if (!addr || !LAUNCHER_ALLOW_ENTRY.test(addr)) return null;
+  const [host, port] = [addr.slice(0, addr.lastIndexOf(":")), Number(addr.slice(addr.lastIndexOf(":") + 1))];
+  return port >= 1 && port <= 65535 && !host.endsWith(".") ? addr : null;
+}
+
+/** host:port of a project's git remote (http 80, https 443, ssh 22 unless it names a port), or null for a local path or anything the guard or launcher can't allow. */
+export function gitHostAddress(repoUrl: string): string | null {
+  return sendable(rawGitHostAddress(repoUrl));
+}
+
+function rawGitHostAddress(repoUrl: string): string | null {
+  const scp = /^[\w.-]+@([A-Za-z0-9.-]+):(?!\/\/)/.exec(repoUrl);
+  if (scp) return `${scp[1]}:22`;
+  try {
+    const u = new URL(repoUrl);
+    if (!["http:", "https:", "ssh:"].includes(u.protocol) || !u.hostname || u.hostname.startsWith("[")) return null;
+    return `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : u.protocol === "ssh:" ? "22" : "80")}`;
   } catch {
     return null;
   }
@@ -89,10 +114,12 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     return now!.value as string;
   }
 
-  /** The company's tool servers as host:port: the runner's network guard keeps these reachable on private addresses. */
+  /** The company's tool servers and git remotes as host:port: the runner's network guard keeps these reachable on private addresses. */
   async function allowFor(companyId: string): Promise<string[]> {
     const rows = await db.select({ url: mcpServers.url }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
-    return [...new Set(rows.map((r) => toolServerAddress(r.url)).filter((a): a is string => !!a))];
+    // The company's own git remotes: each project's host and port only, so its runner can clone and fetch from a LAN git server.
+    const repos = await db.select({ url: projects.repoUrl }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+    return [...new Set([...rows.map((r) => sendable(toolServerAddress(r.url))), ...repos.map((r) => gitHostAddress(r.url!))].filter((a): a is string => !!a))];
   }
 
   return {
@@ -105,6 +132,27 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
         await call("PUT", `/runners/${await slugFor(companyId)}/allow`, { allow: await allowFor(companyId) });
       } catch {
         /* the next runner start sends the list again */
+      }
+    },
+
+    /**
+     * At server start (leader only): sends every launched company's runner its allow list once, so a runner that outlived a deploy gets the git hosts without a restart.
+     * A launcher that is still coming up (503/502) is tried again; a company with no runner (404) is skipped. Best effort: never throws.
+     */
+    async syncAll(retryMs = 15_000, attempts = 4) {
+      if (!opts) return;
+      const rows = await db.select().from(settings).where(like(settings.key, `${SLUG_KEY}%`)).catch(() => []);
+      for (const row of rows) {
+        const companyId = row.key.slice(SLUG_KEY.length);
+        for (let i = 0; i < attempts; i++) {
+          try {
+            await call("PUT", `/runners/${row.value as string}/allow`, { allow: await allowFor(companyId) });
+            break;
+          } catch (err) {
+            if (!(err instanceof LauncherError) || err.status === 404 || i === attempts - 1) break;
+            await new Promise((r) => setTimeout(r, retryMs));
+          }
+        }
       }
     },
 

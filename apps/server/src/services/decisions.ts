@@ -51,7 +51,7 @@ import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
-import { commandProblem, parseStep } from "./steps.js";
+import { commandProblem, parseStep, strayFence } from "./steps.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -124,7 +124,7 @@ export type DeployUpdate = {
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint }
+  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
@@ -539,7 +539,10 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
 export function ownerSetupProblem(steps: string[]): string | null {
   const text = steps.join("\n");
   if (!text.trim()) return "it has no steps";
-  for (const piece of parseStep(text)) {
+  const pieces = parseStep(text);
+  const stray = strayFence(pieces);
+  if (stray !== null) return `a \`\`\` isn't a complete command block, so it would show as raw text: ${stray}`;
+  for (const piece of pieces) {
     if (piece.type !== "command") continue;
     const problem = commandProblem(piece.text);
     if (problem) return `a command is not copy-safe (${problem}): ${piece.text}`;
@@ -1519,7 +1522,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; setsUp?: Addon }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; setsUp?: Addon; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string }) {
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -1530,12 +1533,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
-            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}),
+            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // An add-on's setup card closes itself once the add-on is seen working (DR-023 D, BOS-522).
               ...(input.setsUp ? { setsUp: input.setsUp, clearWhen: [{ kind: "addonRunning", addon: input.setsUp }] } : {}),
             },
           })
           .returning();
+        if (input.plan && input.blocksTicketId) await tx.update(tickets).set({ plan: input.plan, lastActivityAt: now() }).where(and(eq(tickets.id, input.blocksTicketId), isNull(tickets.planApprovedAt)));
         if (input.blocksTicketId) {
           // The same guarded writer every other link uses (BOS-86 round 12): a proposer can't block
           // the Security Reviewer's task with a question, on any route.
@@ -2410,6 +2414,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // The audit says how many repeats this one answer settled (BOS-376).
       if (ctx.type === "permission" && repeatsNow?.length) log(`permission decision ${id} settled ${repeatsNow.length} repeat(s) of the same command`);
+
+      // A plan put through submit_plan (BOS-531): approving the card releases plan-first, like approving ExitPlanMode.
+      if (ctx.type === "question" && ctx.plan && ctx.ticketId && answer === APPROVE_PLAN) await db.update(tickets).set({ planApprovedAt: now() }).where(eq(tickets.id, ctx.ticketId));
 
       let delivered: boolean | null = null;
       let endedHere = false;
