@@ -633,17 +633,18 @@ describe("rules judge: disguised paths and unknown launchers (BOS-378, Jane roun
   });
 });
 
-// BOS-378, Rex's round 12: a script file run from inside a `-c`/`-S` string, or loaded through a startup/loader
-// environment variable, still got Allow on be3db767 because the judge never opened that text. Both are now judged as if
-// typed plainly. Every deny row here was Allow on be3db767.
-describe("rules judge: script run from inside a -c/-S string or a loader variable (BOS-378, Rex round 12)", () => {
+// BOS-378, Rex's round 12 and Jane's round 12: a script file run from inside a `-c`/`-S` string, a script file named
+// after an option the judge wrongly read as "inline", and a program name written in disguise, all got Allow on be3db767
+// because the judge never read that text. All are now judged as if typed plainly. Every deny row here was Allow on
+// be3db767. (Loader variables such as NODE_OPTIONS and BASH_ENV are BOS-630, not this ticket.)
+describe("rules judge: a script run from inside a -c/-S string, a disguised option or program name (BOS-378, rounds 12)", () => {
   const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
   const ws = "/home/node/workspaces";
   const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
   const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
   const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
 
-  describe("1. a script file inside a shell's -c string", () => {
+  describe("1. a script file inside a shell's -c/-S string (Rex)", () => {
     denies([
       "bash -c 'bash /tmp/x'",
       'bash -c "bash /tmp/x"',
@@ -652,30 +653,22 @@ describe("rules judge: script run from inside a -c/-S string or a loader variabl
       "su -c 'bash /tmp/x'",
       "doas -c 'node /tmp/x.js'",
       "ionice -c3 bash -c 'node /tmp/x.js'",
+      "env -S 'node /tmp/x.js'",
+      "env -S 'bash /tmp/x'",
     ]);
     // Plain commands and own-folder scripts inside the string are still Allow.
-    allows(["bash -c 'echo hi'", "bash -c 'cd scripts && node x.js'", "bash -c 'pnpm test'"]);
+    allows(["bash -c 'echo hi'", "bash -c 'cd scripts && node x.js'", "bash -c 'pnpm test'", "env -S 'python3 scripts/x.py'"]);
   });
 
-  describe("2. a script file inside env -S", () => {
-    denies(["env -S 'node /tmp/x.js'", "env -S 'bash /tmp/x'"]);
-    allows(["env -S 'python3 scripts/x.py'"]);
+  describe("2. only -c (and -m for python) means inline; another option leaves the script file", () => {
+    denies(["bash -e /tmp/x.sh", "sh -e /tmp/x.sh", "python3 -E /tmp/x.py", "bash -x /tmp/x.sh", "python3 -u /tmp/x.py", "bash -O /tmp/x.sh"]);
+    // A checked-in script after a skipped option is still Allow.
+    allows(["bash -e scripts/x.sh", "python3 -m venv .venv"]);
   });
 
-  describe("3. a script loaded through a startup/loader variable", () => {
-    denies([
-      'NODE_OPTIONS="--require /tmp/x.js" node a.js',
-      "NODE_OPTIONS=/tmp/x.js node a.js",
-      "NODE_OPTIONS='--require=/tmp/x.js' node a.js",
-      "PYTHONSTARTUP=/tmp/x python3 a.py",
-      "PYTHONPATH=/tmp python3 a.py",
-      "PERL5OPT=-Mlib=/tmp/x.pl perl a.pl",
-      "BASH_ENV=/tmp/x.sh bash a.sh",
-      "LD_PRELOAD=/tmp/x.so ls",
-      "RUBYOPT='-r /tmp/x.rb' ruby a.rb",
-      "ENV=/tmp/x.sh sh",
-    ]);
-    // Plain tuning flags and an own-folder module path are still Allow.
-    allows(["NODE_OPTIONS='--max-old-space-size=4096' node a.js", "PYTHONPATH=./vendor python3 scripts/x.py"]);
+  describe("3. a program name written in disguise", () => {
+    denies(['"node" /tmp/x.js', "'node' /tmp/x.js", "n\\ode /tmp/x.js", "b''ash /tmp/x.sh", "$(which node) /tmp/x.js"]);
+    // A plain checked-in script is still Allow.
+    allows(["node scripts/x.js", "bash scripts/check-quick.sh"]);
   });
 });

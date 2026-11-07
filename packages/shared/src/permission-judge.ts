@@ -247,10 +247,12 @@ export function judgePermission(question: string, command: string | null, ownFol
   // tar and unzip, must be placed too.
   for (const t of toolTargets(forTargets)) addTarget(t);
   // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
-  // Code handed to a shell or interpreter as a string (`sh -c '…'`, `env -S '…'`) and code loaded through an environment
-  // variable (`NODE_OPTIONS="--require /tmp/x.js" node a.js`) is judged as if written plainly (BOS-378, Rex's round 12).
+  // Code handed to a shell or interpreter as a string (`sh -c '…'`, `env -S '…'`) is judged as if written plainly
+  // (BOS-378, Rex's round 12). A program name written in disguise (`"node"`, `n\ode`, `$(which node)`) is read the same
+  // way (BOS-378, Jane's round 12). Loader variables (NODE_OPTIONS, PYTHONSTARTUP, BASH_ENV, ...) are BOS-630, not here.
   if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || unknownLauncherBeforeInterpreter(c)) return result("outside");
-  if (nestedCodeUnread(c, inOwn, writeOk) || loaderEnvUnread(c, inOwn)) return result("outside");
+  if (nestedCodeUnread(c, inOwn, writeOk)) return result("outside");
+  if (disguisedInterpreter(c)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
@@ -356,6 +358,27 @@ function shellWords(s: string): string[] {
   if (has || cur) out.push(cur);
   return out;
 }
+
+/**
+ * True when one option word means the interpreter's code is written inline, so no script file follows. Only `-c` (sh, bash,
+ * zsh, dash, ksh), `-c`/`-m` (python) and the eval flags of the other interpreters (perl/ruby `-e`, php `-r`, lua/deno/bun
+ * `-e`) count as inline; every other option (`-e`/`-E` on a shell, `-x`, `-u`, `-O`, `--norc`, ...) is skipped and the next
+ * plain word is the script file, which then gets the path check (BOS-378, Jane round 12). `--eval`/`--command`/`--print`
+ * and a bare `-` (code on stdin) are inline too.
+ */
+function inlineOption(name: string, t: string): boolean {
+  if (t === "-" || /^--(?:eval|command|print)\b/.test(t)) return true;
+  const m = /^-([A-Za-z]*)([ceErmp])$/.exec(t);
+  if (!m) return false;
+  const flag = m[2]!;
+  if (/^(?:sh|bash|zsh|dash|ksh)$/.test(name)) return flag === "c";
+  if (/^python[\d.]*$/.test(name)) return flag === "c" || flag === "m";
+  if (/^(?:perl|ruby|lua|deno|bun|Rscript|tclsh)$/.test(name)) return flag === "e";
+  if (name === "php") return flag === "r";
+  if (/^node(?:js)?$/.test(name)) return flag === "e" || flag === "p";
+  return false;
+}
+
 
 /**
  * True when the arguments of one git command (words after `git`) are not on the allow-list. `repoOk` places the repository
@@ -665,12 +688,13 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
     const args = m[2]!;
     const toks: string[] = args.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
     const awk = /awk$/.test(name);
-    // Inline code (-c / -e ...) is read by inlineCodeOk; an awk program is inline unless it has -f.
+    // Inline code (-c / -e ...) is read by inlineCodeOk; an awk program is inline unless it has -f. Only the inline options
+    // count (BOS-378, Jane round 12): a skipped option like -e/-E leaves the next plain word as the script file.
     let inline = awk && !toks.includes("-f");
     for (const t of toks) {
       if (!t.startsWith("-") || t === "-") break;
-      // `-r` is a module to preload for node and ruby, not code.
-      if (/^-[A-Za-z]*[ceEp]$/.test(t) || (/^-[A-Za-z]*r$/.test(t) && /^(?:php|Rscript|lua)$/.test(name)) || /^--(?:eval|command|print)\b/.test(t)) { inline = true; break; }
+      if (inlineOption(name, t)) { inline = true; break; }
+      if (awk && t === "-f") { inline = false; break; }
     }
     if (inline) continue;
     // Words that name the script: everything up to the first one that looks like a script file, else all of them.
@@ -723,26 +747,40 @@ function nestedCodeUnread(c: string, inOwn: (p: string) => boolean, writeOk: (t:
 }
 
 /**
- * Variables that make an interpreter or the loader read and run a file the judge never sees: NODE_OPTIONS can name a
- * `--require`/`--import`/`--loader` script, PYTHONSTARTUP/BASH_ENV/ENV/ZDOTDIR a startup script, PERL5OPT/RUBYOPT a
- * preload, and LD_PRELOAD/LD_LIBRARY_PATH a library. Each must name only a plain path inside the agent's own checkout;
- * any `/tmp` path, unreadable path word, variable, home or `..` means the loaded code is unknown (BOS-378, Rex round 12).
+ * True when the command word is a disguised interpreter: its name is written with quotes, escapes, an empty-quote splice,
+ * a variable or a `$(...)`/backtick lookup and, decoded, is a program (BOS-378, Jane round 12). `"node" /tmp/x.js`,
+ * `n\ode /tmp/x.js`, `b''ash /tmp/x.sh`, `$(which node) /tmp/x.js`: the plain-name regexes above can't read these, so the
+ * script file after them would otherwise escape the check. Allow-list: a command word that is a plain literal name is left
+ * to the checks above. Only command words are read (after a separator or `then`/`do`/a known wrapper).
  */
-const LOADER_ENV = /^(?:NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|PERL5LIB|RUBYOPT|BASH_ENV|ENV|ZDOTDIR|LD_PRELOAD|LD_LIBRARY_PATH|NODE_PATH|GEM_HOME)$/;
-function loaderEnvUnread(c: string, inOwn: (p: string) => boolean): boolean {
-  // `NAME=value cmd` anywhere, with the value quoted or not.
-  for (const m of c.matchAll(/(?:^|[;\s&|(])([A-Za-z_]\w*)=(?:'([^']*)'|"([^"]*)"|([^\s;&|)]*))/g)) {
-    if (!LOADER_ENV.test(m[1]!)) continue;
-    const val = m[2] ?? m[3] ?? m[4] ?? "";
-    // Split the value on whitespace and `:` (PATH-style); every word must be a plain path inside the own folder.
-    for (const w of val.split(/[\s:]+/).filter(Boolean)) {
-      // `--require /tmp/x.js`, `--import=./scripts/x.mjs`: take the part after an `=`, drop a leading loader flag.
-      const p = w.includes("=") ? w.slice(w.indexOf("=") + 1) : /^--/.test(w) ? "" : w;
-      if (p === "") continue;
-      const n = plainPath(p.replace(/^['"]+|['"]+$/g, ""));
-      if (n === null || n === "" || /^~/.test(p) || climbsOut(n) || /^\/tmp(\/|$)/.test(n)) return true;
-      if (n.startsWith("/") && !inOwn(n)) return true;
+function disguisedInterpreter(c: string): boolean {
+  const words = "python[\\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh|g?awk|mawk|sh|bash|zsh|dash|ksh";
+  const plain = new RegExp(`^(?:[\\w./-]*/)?(?:${words})$`);
+  const wrap = /^(?:then|do|else|exec|env|nohup|time|sudo|doas|xargs|command|nice|setsid|stdbuf|flock|ionice|chrt|busybox|chroot|su|-exec|-execdir|-ok|-okdir)$/;
+  for (const seg of c.split(/&&|\|\||[;&|\n]+/)) {
+    // Keep `$(...)` and backtick lookups as one token, so a lookup of the program name is read whole.
+    const toks = seg.trim().match(/(?:\$\([^)]*\)|`[^`]*`|'[^']*'|"[^"]*"|\S)+/g) ?? [];
+    let i = 0;
+    // Skip assignment prefixes, `{`/`(`/`!` and the known wrappers, like the other launcher checks.
+    while (i < toks.length && (/^[A-Za-z_]\w*=/.test(toks[i]!) || /^[({!]+$/.test(toks[i]!))) i++;
+    while (i < toks.length && wrap.test(toks[i]!.replace(/^.*\//, ""))) {
+      i++;
+      while (i < toks.length && /^-\S*$|^\d+[a-z]*$|^\w+=\S*$/.test(toks[i]!)) i++;
     }
+    const raw = toks[i];
+    if (raw === undefined) continue;
+    // A plain literal command word is judged elsewhere; only disguised forms are read here.
+    if (plain.test(raw)) continue;
+    if (!/['"\\`$]/.test(raw)) continue;
+    // Decode: drop quotes entirely, unescape, and strip a `$(,)`/backtick wrapper; the leftover must look like a program.
+    const decoded = raw
+      .replace(/\$\(\s*(?:[\w./-]*\/)?(?:which|type|command)\s+([\w.-]+)\s*\)/g, "$1")
+      .replace(/[`](\s*(?:[\w./-]*\/)?([\w.-]+)\s*)[`]/g, "$2")
+      .replace(/\$\([^)]*\)/g, "\u0000")
+      .replace(/\\(.)/g, "$1")
+      .replace(/['"]/g, "");
+    if (decoded.includes("\u0000")) return true; // an unresolved substitution in the command word
+    if (plain.test(decoded)) return true;
   }
   return false;
 }
@@ -765,11 +803,12 @@ function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
     const seg = m[0]!;
     const isAwk = /awk$/.test(name);
     const fed = /<<|\s-(?:\s|$)/.test(seg) || piped.test(c); // code arrives by heredoc or pipe
-    // Inline when an option like -c / -e / -r comes before the first plain argument (which would be a script file).
+    // Inline when an inline option (-c/-e/-r/-m) comes before the first plain argument (which would be a script file). A
+    // skipped option like a shell's -e/-E does not make it inline (BOS-378, Jane round 12).
     let inline = isAwk;
     for (const t of m[2]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []) {
       if (!t.startsWith("-") || t === "-") break;
-      if (/^-[A-Za-z]*[ceErp]$/.test(t) || /^--(?:eval|command|print)\b/.test(t)) { inline = true; break; }
+      if (inlineOption(name, t)) { inline = true; break; }
       if (isAwk && t === "-f") { inline = false; break; }
     }
     if (!inline && !fed) continue;
