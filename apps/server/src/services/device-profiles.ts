@@ -56,18 +56,14 @@ export function deviceProfilesService(db: Db) {
     return !!row;
   }
 
-  /** The profiles agents read through their brief and the devices tool: only the ones a layout
-   * test can actually run at, so an unmeasured or half-reported device is never presented as fact. */
-  async function renderable(ownerId: string): Promise<DeviceProfile[]> {
-    return (await list(ownerId)).filter((p) => isRenderableProfile(p));
-  }
-
   /** Every renderable profile, for an agent reading them in a run. Boss Man has one owner, so this
-   * is that owner's list; it is owner-agnostic so the run's scope (which has no owner id) can use it. */
+   * is that owner's list; it is owner-agnostic so the run's scope (which has no owner id) can use it.
+   * Only profiles a layout test can actually run at are returned, so an unmeasured or half-reported
+   * device is never presented as fact. */
   async function allRenderable(): Promise<DeviceProfile[]> {
     const rows = await db.select().from(deviceProfiles).orderBy(desc(deviceProfiles.reportedAt));
     return rows.map(toProfile).filter((p): p is DeviceProfile => !!p && isRenderableProfile(p));
   }
 
-  return { report, list, rename, remove, renderable, allRenderable };
+  return { report, list, rename, remove, allRenderable };
 }
