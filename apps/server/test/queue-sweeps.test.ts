@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { and, eq, getTableName, inArray, ne, sql } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
@@ -213,12 +213,18 @@ describe("ranked decision queue (R20)", () => {
       const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string }; ceo: { id: string } };
       const foreign = await ctx.decisions.raise({ companyId: other.company.id, agentId: other.ceo.id, question: "Elsewhere's card", options: ["Yes", "No"], recommended: "Yes" });
       const mine = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "My card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: foreign.id, label: "Elsewhere's card" }], doBefore: [{ decisionId: foreign.id, label: "Elsewhere's card" }] });
+      // The raiser is told which links weren't stored, and why.
+      expect(mine.droppedLinks).toEqual([
+        { decisionId: foreign.id, link: "doAfter", reason: "another company" },
+        { decisionId: foreign.id, link: "doBefore", reason: "another company" },
+      ]);
       const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, mine.id));
       const c = row!.context as { doAfter?: unknown[]; doBefore?: unknown[] };
       expect(c.doAfter ?? []).toEqual([]);
       expect(c.doBefore ?? []).toEqual([]);
-      // A clean card of my own is still stored and shown.
+      // A clean card of my own is still stored and shown, and nothing is reported dropped.
       const keeps = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Second card", options: ["Done", "Skip"], recommended: "Done", steps: ["Do it."], doAfter: [{ decisionId: mine.id, label: "My card" }] });
+      expect(keeps.droppedLinks).toEqual([]);
       const [kept] = await ctx.db.select().from(decisions).where(eq(decisions.id, keeps.id));
       expect((kept!.context as { doAfter?: unknown[] }).doAfter).toEqual([{ decisionId: mine.id, label: "My card" }]);
     });
@@ -228,6 +234,11 @@ describe("ranked decision queue (R20)", () => {
       const done = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Answered", options: ["Yes", "No"], recommended: "Yes" });
       await ctx.req("POST", `/api/decisions/${done.id}/answer`, { answer: "Yes" });
       const mine = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Late card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: done.id, label: "Answered" }] });
+      // The raiser is told which link wasn't stored, and why; an unknown id is reported too.
+      expect(mine.droppedLinks).toEqual([{ decisionId: done.id, link: "doAfter", reason: "not open" }]);
+      const ghost = randomUUID();
+      const nobody = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ghost card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: ghost, label: "Ghost" }] });
+      expect(nobody.droppedLinks).toEqual([{ decisionId: ghost, link: "doAfter", reason: "unknown" }]);
       const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, mine.id));
       expect((row!.context as { doAfter?: unknown[] }).doAfter ?? []).toEqual([]);
     });

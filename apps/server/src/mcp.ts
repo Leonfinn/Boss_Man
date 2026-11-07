@@ -16,7 +16,7 @@ import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
+import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, adviceOf, checkAsk, isSystemCard, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
@@ -539,7 +539,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return fail(`${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, call raise_decision again with stillNeeded saying what has changed.`);
         }
       }
-      let d: { id: string };
+      let d: { id: string; droppedLinks?: DroppedOrderLink[] };
       try {
         d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, doAfter, doBefore, resetsOnRestart });
       } catch (err) {
@@ -547,7 +547,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         throw err;
       }
       const links = await missingPageNote(db, scope.companyId, `${question}\n${options.join("\n")}\n${steps?.join("\n") ?? ""}`);
-      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${links ? `\n\n${links}` : ""}`);
+      // A link the raiser asked for that wasn't stored is named, with the reason (BOS-625).
+      const skipped = (d.droppedLinks ?? []).map((l) => `${l.link} link ${l.decisionId} ignored: ${l.reason === "another company" ? "not an open card in your company" : l.reason === "not open" ? "the card is already answered" : "no such card"}.`);
+      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${links ? `\n\n${links}` : ""}`);
     },
   );
 
