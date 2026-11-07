@@ -576,7 +576,7 @@ describe("proposing a change", () => {
     expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("skipped");
     // The stored proposal can no longer be reviewed and installed.
     const proposals = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
-    expect(proposals.every((x) => !["proposed", "in_review", "awaiting_owner"].includes(x.status))).toBe(true);
+    expect(proposals.map((x) => x.status)).toEqual(["rejected"]);
   });
 
   it("a lesson raises the existing lesson decision for the CEO, and counts as applied once it is added", async () => {

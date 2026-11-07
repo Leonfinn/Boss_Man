@@ -708,10 +708,12 @@ export function retroService(
       } catch (err) {
         // A change recorded as skipped must not ship: if propose() got as far as storing the proposal,
         // close it before the change is marked skipped.
-        const proposalId = ((claimed.after ?? {}) as Record<string, any>).proposalId as string | undefined;
-        if (claimed.lever === "playbook" && proposalId) {
+        // `claimed` predates the proposalId carryOut wrote, so read the row again.
+        if (claimed.lever === "playbook") {
           try {
-            await deps.skillProposals.cancel(c.companyId, proposalId);
+            const [fresh] = await db.select({ after: workflowChanges.after }).from(workflowChanges).where(eq(workflowChanges.id, changeId));
+            const proposalId = ((fresh?.after ?? {}) as Record<string, any>).proposalId as string | undefined;
+            if (proposalId) await deps.skillProposals.cancel(c.companyId, proposalId);
           } catch {
             /* no proposal was stored, nothing to close */
           }
