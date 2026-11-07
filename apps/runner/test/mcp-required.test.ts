@@ -14,7 +14,7 @@ const fake = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-openc
 
 type Check = (url: string, token: string) => Promise<{ ok: boolean; tools?: string[]; reason?: string }>;
 
-async function run(opts: { mcpRequired?: boolean; caps?: object; mcpUrl?: string; check?: Check }) {
+async function run(opts: { mcpRequired?: boolean; caps?: object; mcpUrl?: string; check?: Check; preflightMs?: number }) {
   const events: RunnerEvent[] = [];
   let done!: () => void;
   const ended = new Promise<void>((r) => (done = r));
@@ -23,6 +23,7 @@ async function run(opts: { mcpRequired?: boolean; caps?: object; mcpUrl?: string
     baseEnv: { PATH: process.env.PATH },
     adapterBins: { opencode: fake },
     ...(opts.check ? { checkBossManTools: opts.check } : {}),
+    ...(opts.preflightMs ? { mcpPreflightMs: opts.preflightMs, mcpPreflightTuning: { attemptTimeoutMs: 100, delayMs: 50 } } : {}),
     resolveEnv: async () => ({ DUMP: path.join(mkdtempSync(path.join(tmpdir(), "bm-pf-")), "dump.json"), MCP_CAPS: JSON.stringify(opts.caps ?? { http: true, sse: true }) }),
     emit: (e) => (events.push(e), e.type === "run.ended" && done()),
   });
@@ -53,6 +54,16 @@ describe("Boss Man tools preflight (BOS-552)", () => {
     expect(ended.error).toContain("couldn't reach the Boss Man tools");
     expect(events.find((e) => e.type === "run.started")).toBeUndefined();
   }, 60_000);
+
+  it("tells the owner and the server log before retrying once, then stops the run (BOS-403 + BOS-552)", async () => {
+    const events = await run({ mcpRequired: true, mcpUrl: "http://127.0.0.1:9/mcp", preflightMs: 300 });
+    const said = events.filter((e) => e.type === "run.update").map((e) => (e as { update: { text?: string } }).update.text);
+    expect(said).toContain("Boss Man tools didn't load, retrying.");
+    const logs = events.filter((e) => e.type === "runner.log").map((e) => e as { level: string; message: string }).filter((l) => l.message.startsWith("mcp-preflight:"));
+    expect(logs.map((l) => l.level)).toEqual(["warn", "error"]);
+    expect((events.find((e) => e.type === "run.ended") as { error: string | null }).error).toContain("couldn't reach the Boss Man tools");
+    expect(events.find((e) => e.type === "run.started")).toBeUndefined();
+  }, 30_000);
 
   it("stops an mcpRequired run loudly when the agent can't use HTTP MCP at all", async () => {
     const events = await run({ mcpRequired: true, caps: { sse: true }, check: async () => ({ ok: true, tools: ["x"] }) });

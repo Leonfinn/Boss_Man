@@ -82,6 +82,8 @@ export const MISSED_REASON = "missed work";
 export const URGENT_IDLE_REASON = "urgent idle";
 /** A free run slot given to an in-progress ticket nobody is working on (BOS-574, DR-029). */
 export const IDLE_SLOT_REASON = "idle slot";
+/** Free run slots and idle agents with nothing ready: the CEO is asked to hand out work (BOS-615). */
+export const IDLE_AGENTS_REASON = "idle agents";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 /** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
@@ -1671,6 +1673,55 @@ export function schedulerService(
     },
 
     /**
+     * A ticket in backlog or blocked whose blockers are all resolved moves to ready and its assignee is woken
+     * (BOS-603: a backlog ticket was never released). With no assignee there is nobody to wake, so the CEO gets
+     * one notice instead and the ticket stays put. Safe to call again: a released ticket no longer matches,
+     * and the notice is keyed on the ticket. Returns whether it released or noticed.
+     */
+    async releaseIfUnblocked(ticketId: string, causedByRunId?: string | null): Promise<boolean> {
+      const [cur] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+      if (!cur || (cur.systemState !== "backlog" && cur.systemState !== "blocked")) return false;
+      const deps = await db
+        .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
+        .from(ticketDependencies)
+        .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+        .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+        .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+        .where(eq(ticketDependencies.blockedTicketId, ticketId));
+      if (deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) return false;
+      if (!cur.assigneeAgentId) {
+        if (!deps.length) return false;
+        // A blocked ticket has always gone to ready here, assignee or not; keep that.
+        if (cur.systemState === "blocked") {
+          await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, ticketId), eq(tickets.systemState, "blocked")));
+          return true;
+        }
+        const rows = await db
+          .insert(decisions)
+          .values({
+            companyId: cur.companyId,
+            kind: "question",
+            question: `"${cur.title}" was waiting on other work, which is now finished, but nobody is assigned to it, so it has not started. Assign it to someone.`,
+            options: ["Got it"],
+            recommendedOption: "Got it",
+            dedupeKey: `unblocked-unassigned:${cur.id}`,
+            context: { type: "question" },
+          })
+          .onConflictDoNothing()
+          .returning({ id: decisions.id });
+        return rows.length > 0;
+      }
+      const [t] = await db
+        .update(tickets)
+        .set({ systemState: "ready", lastActivityAt: now() })
+        .where(and(eq(tickets.id, ticketId), inArray(tickets.systemState, ["backlog", "blocked"])))
+        .returning();
+      if (!t?.assigneeAgentId) return false;
+      await this.notify(t.assigneeAgentId, { ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
+      return true;
+    },
+
+    /**
      * After a ticket is done: dependents whose blockers are all resolved move to ready,
      * and their assignees are woken. Wakes caused by an agent's run carry the chain depth.
      */
@@ -1680,16 +1731,7 @@ export function schedulerService(
       const [finished] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
       if (finished) await ownerActed(db, { companyId: finished.companyId, ticketIds: [ticketId], reason: "a ticket it waited on finished", now: now(), wake: (input) => this.notify(input.agentId, input) });
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, ticketId));
-      for (const { id } of dependents) {
-        const blockers = await db
-          .select({ state: tickets.systemState })
-          .from(ticketDependencies)
-          .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-          .where(eq(ticketDependencies.blockedTicketId, id));
-        if (blockers.some((b) => b.state !== "done")) continue;
-        const [t] = await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, id), eq(tickets.systemState, "blocked"))).returning();
-        if (t?.assigneeAgentId) await this.notify(t.assigneeAgentId, { ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
-      }
+      for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
       // The wiki maintainer files what finished work produced (R73). One waiting run covers
       // every ticket finished before it starts, and a paused maintainer's run waits.
       const [done] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));

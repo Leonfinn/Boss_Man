@@ -123,7 +123,11 @@ fi
 # The merge check queues like the rest but goes ahead of waiting hand-run checks; one already running is never interrupted.
 # fd 9 is inherited by pnpm/vitest: if a timed-out check leaves children behind they keep the slot until
 # they exit (tracked in the runner-cleanup ticket). Skipped where flock is missing (macOS).
-if command -v flock >/dev/null; then
+# BOSSMAN_CHECK_NO_LOCK=1 (set by the runner for a server-queued job, DR-003): the server holds the slots, so this script
+# touches no lock file and does not queue; it still keeps the result store.
+if [ -n "${BOSSMAN_CHECK_NO_LOCK:-}" ]; then
+  echo "check-all: slot taken, running the checks (the server holds the slots; no lock files)"
+elif command -v flock >/dev/null; then
   LOCK=${CHECK_ALL_LOCK:-/tmp/bossman-check-all}
   # One check at a time until a measured side-by-side pair has passed: that run writes the proof file below
   # (see the Build and test note). CHECK_ALL_PAIR_TRIAL=1 lets the two measuring runs use more slots.
