@@ -31,7 +31,7 @@ function setup() {
 describe("check job folders", () => {
   it.skipIf(level === "unavailable")("removes the job's home folder, with what the check left in it, when the job ends", async () => {
     const { root, commit } = setup();
-    const ws = new Workspaces(root, process.env, undefined, { level });
+    const ws = new Workspaces(root, process.env, undefined, undefined, { level });
     const jobId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const r = await ws.runCommitCheck({ projectId, jobId, commit }, 'echo junk > "$TMPDIR/left-behind"; echo ok', 60_000);
     expect(r.ok).toBe(true);

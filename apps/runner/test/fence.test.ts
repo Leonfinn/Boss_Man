@@ -75,6 +75,7 @@ describe("the runner's fence setting", () => {
 
   // BOS-568: the store can be moved with PNPM_STORE_DIR, e.g. to a folder on a bigger volume; never a relative path.
   it("moves the shared pnpm store wherever PNPM_STORE_DIR says", () => {
+    expect(runnerFence("full", "/data", "/ws")).toMatchObject({ pnpmStore: "/ws/.pnpm-store" });
     expect(pnpmStoreDir("/ws", undefined)).toBe("/ws/.pnpm-store");
     expect(pnpmStoreDir("/ws", "  ")).toBe("/ws/.pnpm-store");
     expect(pnpmStoreDir("/ws", "/ws/big//pnpm/")).toBe("/ws/big/pnpm");
@@ -98,6 +99,10 @@ describe("the runner's fence setting", () => {
   it("is passed to the runner's SessionManager from its self-test", () => {
     const main = readFileSync(path.join(import.meta.dirname, "..", "src", "main.ts"), "utf8");
     expect(main).toMatch(/new SessionManager\(\{[\s\S]*?\n  fence: \{ \.\.\.runnerFence\(sandbox\.level, dataDir, workspacesRoot\), pnpmStore: storeDir \},[\s\S]*?\n\}\);/);
+    // The unfenced merge gate installs from its own gate store (4th arg); fenced server-queued jobs use the
+    // shared store agents write (5th arg), since they are fenced like agents (BOS-568, BOS-316).
+    expect(main).toMatch(/new Workspaces\(workspacesRoot, process\.env, coordDir, gateStore, \{ level: sandbox\.level, pnpmStore: storeDir \}\);/);
+    expect(main).toMatch(/assertSeparateStore\(storeDir, gateStore\)/);
     // The store comes from PNPM_STORE_DIR through the same check, and both stores are pruned on a schedule (BOS-633).
     expect(main).toMatch(/const storeDir = pnpmStoreDir\(workspacesRoot, env\.PNPM_STORE_DIR\)/);
     expect(main).toMatch(/pruneStores\(storeDir, log\)/);
