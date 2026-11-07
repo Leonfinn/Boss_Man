@@ -24,7 +24,10 @@ let app: ReturnType<typeof buildApp> | undefined;
 beforeAll(async () => {
   shared = await sharedDatabase();
 });
-afterEach(() => {
+afterEach(async () => {
+  // A fake-runner reply still held open would let a landing run on into the next test's emptied tables.
+  ctx?.held.splice(0).forEach((release) => release());
+  if (ctx) await new Promise((resolve) => setTimeout(resolve, 25));
   ctx = undefined;
 });
 afterAll(async () => {
