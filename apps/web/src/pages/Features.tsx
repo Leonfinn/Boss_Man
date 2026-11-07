@@ -17,6 +17,7 @@ import {
   type ScoredFeatures,
 } from "../api";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { when } from "./Runs";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
@@ -547,7 +548,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
       () => (setError(null), setSummaryDraft(null), data.reload()),
       (err: Error) => setError(err.message),
     );
-  if (data.error) return <p className="error">{data.error.status === 404 ? "There's no such feature." : data.error.message}</p>;
+  if (data.error && !away(data.error)) return <p className="error">{data.error.status === 404 ? "There's no such feature." : data.error.message}</p>;
   const d = data.data;
   if (!d) return null;
   const f = d.feature;

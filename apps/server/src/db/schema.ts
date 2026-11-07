@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -71,6 +71,8 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
+  /** The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323). Existing companies stay off. */
+  fenceMode: text("fence_mode", { enum: FENCE_MODES }).notNull().default("off"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -378,6 +380,12 @@ export const tickets = pgTable(
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /**
+     * "Fixes live" (BOS-639): one sentence naming the live symptom this ticket fixes, e.g. "server freezes
+     * as memory climbs". Set by hand (CEO, author or reviewer), never guessed from priority or urgency.
+     * A deploy card whose range carries a marked merge leads with it and pages the owner once.
+     */
+    fixesLive: text("fixes_live"),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
@@ -394,6 +402,14 @@ export const tickets = pgTable(
     /** Optional "blocked until" time and reason (BOS-59); the same trigger clears both when the ticket leaves blocked. */
     blockedUntil: timestamp("blocked_until", { withTimezone: true }),
     blockedUntilReason: text("blocked_until_reason"),
+    /** The branch head the missed-work sweep last saw, and when it changed (BOS-612): a new commit is progress, a run start is not. */
+    progressHead: text("progress_head"),
+    progressAt: timestamp("progress_at", { withTimezone: true }),
+    /** The CEO's plan for this ticket and its deadline (BOS-612): the stuck alert stays quiet until the deadline plus a grace, then raises one card. */
+    ceoPlan: text("ceo_plan"),
+    ceoPlanDeadline: timestamp("ceo_plan_deadline", { withTimezone: true }),
+    /** When the "plan deadline passed" card was raised, so it comes once per plan. */
+    ceoPlanAlertedAt: timestamp("ceo_plan_alerted_at", { withTimezone: true }),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -1,6 +1,8 @@
 import { defineConfig, mergeConfig } from "vitest/config";
 // @ts-ignore plain .mjs shared by every package's test config, no types
 import { guardVitest } from "../../scripts/vitest-guard.mjs";
+// @ts-ignore plain .mjs, no types
+import { checkThreads } from "../../scripts/check-threads.mjs";
 import viteConfig from "./vite.config";
 
 // Keeps whole-suite runs at the merge gate for agent sessions; see scripts/vitest-guard.mjs.
@@ -8,4 +10,5 @@ import viteConfig from "./vite.config";
 // stage copies only apps/web) never loads test tooling from outside its build context.
 guardVitest();
 
-export default mergeConfig(viteConfig, defineConfig({}));
+// Worker cap: one CPU budget for every part of a check (see scripts/check-threads.mjs).
+export default mergeConfig(viteConfig, defineConfig({ test: { maxWorkers: checkThreads() } }));

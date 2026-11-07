@@ -1,36 +1,50 @@
 // Workflow retros (docs/19-workflow-retros.md parts 2 and 3): when one starts, what the retro agent can call,
 // and what each approved change writes.
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, ne } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
-import { openPglite } from "../src/db/client.js";
+import { signedInOwner } from "./helpers/owner-session.js";
+import { sharedDatabase } from "./helpers/shared-server.js";
 import { activity, agentChanges, agentSkills, agents, companies, decisions, retros, skillProposals, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { LESSON_ADD, LESSON_DROP } from "../src/services/project-brief.js";
 import { SKILL_ADD, SKILL_REJECT } from "../src/services/decisions.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
+
+// One database and one app (listening) for the file, the database emptied before each test (BOS-686). Every
+// test makes its own company, agents and project and reads only those.
+let shared: Awaited<ReturnType<typeof sharedDatabase>>;
+let app: ReturnType<typeof boot> | undefined;
+async function boot() {
+  const built = await buildApp({ db: shared.db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", tickOnWake: false });
+  await built.app.listen({ host: "127.0.0.1", port: 0 });
+  return { built, base: `127.0.0.1:${(built.app.server.address() as { port: number }).port}` };
+}
+beforeAll(async () => {
+  shared = await sharedDatabase();
+});
 afterEach(async () => {
   await Promise.all((ctx?.clients ?? []).map((c) => c.close()));
-  await ctx?.app.close();
-  await ctx?.close();
   ctx = undefined;
+});
+afterAll(async () => {
+  await (await app)?.built.app.close();
+  await shared.close();
 });
 
 const D = 86_400_000;
 const ago = (ms: number) => new Date(Date.now() - ms);
 
 async function setup(opts: { pm?: boolean; reviewer?: boolean } = {}) {
-  const { db: pg, close } = await openPglite();
-  const built = await buildApp({ db: pg, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", tickOnWake: false });
-  await built.app.listen({ host: "127.0.0.1", port: 0 });
-  const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  await shared.reset();
+  const pg = shared.db;
+  const { built, base } = await (app ??= boot());
+  const cookie = await signedInOwner(pg);
   const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "Retro Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const db = pg;
@@ -59,7 +73,7 @@ async function setup(opts: { pm?: boolean; reviewer?: boolean } = {}) {
   };
   const priorRetro = (age: number) => db.insert(retros).values({ companyId: company.id, agentId: pm?.id ?? ceo.id, startedAt: ago(age), since: ago(age + 7 * D), until: ago(age), doneCount: 5 }).returning().then((r) => r[0]!);
   const wakeFor = async (reason = "retro") => db.select().from(wakes).where(and(eq(wakes.companyId, company.id), eq(wakes.reason, reason)));
-  return { ...built, db, close, clients, req, company, ceo, project, pm, eng, eng2, reviewer, mcp, done, priorRetro, wakeFor };
+  return { ...built, db, clients, req, company, ceo, project, pm, eng, eng2, reviewer, mcp, done, priorRetro, wakeFor };
 }
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 /** A tool call whose refusal may come back as an error result or a thrown protocol error. */
@@ -509,7 +523,12 @@ describe("proposing a change", () => {
       linkedAtPropose = (seen!.after as { proposalId?: string }).proposalId;
       return original(input);
     }) as typeof c.skillProposals.propose;
-    expect((await answer(c, id, "Apply")).statusCode).toBe(200);
+    try {
+      expect((await answer(c, id, "Apply")).statusCode).toBe(200);
+    } finally {
+      // The service is shared by every test in this file (BOS-686): put the real one back.
+      c.skillProposals.propose = original;
+    }
     const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
     expect(linkedAtPropose).toBe(proposal!.id);
   });
@@ -677,8 +696,6 @@ describe("checking a change's result (part 4)", () => {
       expect(d.question).toMatch(k.say);
       expect(d.recommendedOption).toBe(k.pick);
       await Promise.all(c.clients.map((x) => x.close()));
-      await c.app.close();
-      await c.close();
       ctx = undefined;
     }
   });

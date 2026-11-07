@@ -1,5 +1,5 @@
 {
-  "id": "0b04de82-3d7e-437e-8fa0-1700f1a0d3de",
+  "id": "0ec52a98-9721-489b-a0df-379d04ef2d37",
   "prevId": "a93cac06-54cc-43ee-8a03-9d64b57148ae",
   "version": "7",
   "dialect": "postgresql",
@@ -5965,60 +5965,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.runner_event_attempts": {
-      "name": "runner_event_attempts",
-      "schema": "",
-      "columns": {
-        "runner_id": {
-          "name": "runner_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "seq": {
-          "name": "seq",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "tries": {
-          "name": "tries",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "runner_event_attempts_runner_id_runners_id_fk": {
-          "name": "runner_event_attempts_runner_id_runners_id_fk",
-          "tableFrom": "runner_event_attempts",
-          "tableTo": "runners",
-          "columnsFrom": [
-            "runner_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "runner_event_attempts_runner_id_seq_pk": {
-          "name": "runner_event_attempts_runner_id_seq_pk",
-          "columns": [
-            "runner_id",
-            "seq"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.runner_events": {
       "name": "runner_events",
       "schema": "",
@@ -8574,6 +8520,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "fixes_live": {
+          "name": "fixes_live",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "version": {
           "name": "version",
