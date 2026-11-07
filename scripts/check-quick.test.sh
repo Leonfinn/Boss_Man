@@ -18,6 +18,7 @@ chmod +x "$repo/scripts/check-shell.sh"
 cat >"$t/bin/pnpm" <<'S'
 #!/usr/bin/env bash
 echo "pnpm $*" >>"$LOG"
+echo "threads=${BOSSMAN_CHECK_THREADS:-} go=${GOMAXPROCS:-} rayon=${RAYON_NUM_THREADS:-} tokio=${TOKIO_WORKER_THREADS:-} for $*" >>"$LOG"
 if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "boom"; exit 1; fi
 S
 cat >"$t/bin/node" <<'S'
@@ -61,6 +62,13 @@ logged "pnpm --filter @boss-man/web build" "web"
 notlogged "@boss-man/server" "web"
 notlogged "check-shell" "web"
 grep -q "^PASS  typecheck @boss-man/web" "$t/out" || fail "PASS line"
+# One CPU budget (BOS-674) reaches every step, inside the slot and out: the stub node prints nothing, so the fallback 2 applies;
+# BOSSMAN_CHECK_THREADS sets it.
+logged "threads=2 go=2 rayon=2 tokio=2 for --filter @boss-man/web typecheck" "default budget in the slot"
+logged "threads=2 go=2 rayon=2 tokio=2 for --filter @boss-man/web build" "default budget for the build"
+run 0 "set budget" env BOSSMAN_CHECK_THREADS=3
+logged "threads=3 go=3 rayon=3 tokio=3 for --filter @boss-man/web exec vitest related" "set budget in the slot"
+logged "threads=3 go=3 rayon=3 tokio=3 for --filter @boss-man/web build" "set budget for the build"
 
 commit apps/server/drizzle/0099_x.sql apps/server/src/b.ts
 run 0 "server and migration change" env
