@@ -222,6 +222,23 @@ describe("interrupted or lost review runs are not a missed verdict", () => {
     spy.mockRestore();
   });
 
+  it("asks the runner once, not every sweep, on the give-up path (review already past its wakes)", async () => {
+    ctx = await setup();
+    const reviewer = await ctx.hire("Reviewer", { template: SENIOR_DEV_TEMPLATE });
+    const id = await ctx.ticket("Stuck clean");
+    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: reviewer.id, round: 1, createdAt: new Date(Date.now() - 4 * HOUR) });
+    for (const h of [3, 2, 1]) {
+      await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: reviewer.id, ticketId: id, reason: REVIEW_REASON, status: "launched", note: `- ${id} "x": r1`, createdAt: new Date(Date.now() - h * HOUR) });
+    }
+    const spy = vi.spyOn(ctx.review, "branchClash").mockResolvedValue([]);
+    for (let i = 0; i < 5; i++) {
+      await ctx.sweeps.run();
+      ctx.advance(2 * MIN);
+    }
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
   it("wakes the reviewer as before when the clash check cannot answer", async () => {
     ctx = await setup();
     const reviewer = await ctx.hire("Reviewer", { template: SENIOR_DEV_TEMPLATE });

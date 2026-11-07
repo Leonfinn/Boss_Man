@@ -514,6 +514,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   }
 
   /** A review whose turn it is, with an idle reviewer and no verdict: wake the reviewer again, then tell the owner. */
+  const clashAskedAt = new Map<string, number>(); // review id -> when the runner was last asked about a clash (BOS-426)
   async function stalledReviews(t: Date) {
     const result = { woken: 0, gaveUp: 0 };
     const pending = await db
@@ -566,7 +567,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
             done.add(agentId);
             continue;
           }
-          const clash = await opts.branchClash(ticket.id);
+          // Asked recently (clean, unknown or clash alike)? Don't ask again: the give-up path below wakes nobody,
+          // so without this a stuck review would cost a fetch every sweep. Lost on restart, which is harmless.
+          const askedAt = clashAskedAt.get(r.id);
+          const clash = askedAt !== undefined && t.getTime() - askedAt < limits.missedAfterMs ? null : (clashAskedAt.set(r.id, t.getTime()), await opts.branchClash(ticket.id));
           if (clash) {
             await opts.wake({
               agentId: ticket.assigneeAgentId,
