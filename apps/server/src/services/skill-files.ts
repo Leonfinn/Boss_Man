@@ -17,6 +17,60 @@ export function hashFiles(files: SkillFile[]) {
   return { fileHashes, bundleHash };
 }
 
+/** One side of a change to a skill, as the change log shows it. */
+export type SkillSide = { name: string; description: string; bundleHash: string; skillMd: string; paths: string[] };
+
+/** The side for a library row (files as stored, base64). */
+export const skillSide = (s: { name: string; description: string; files: SkillFile[] }): SkillSide => ({
+  name: s.name,
+  description: s.description,
+  bundleHash: hashFiles(s.files).bundleHash,
+  skillMd: Buffer.from(s.files.find((f) => f.path === "SKILL.md")?.content ?? "", "base64").toString("utf8"),
+  paths: s.files.map((f) => f.path),
+});
+
+/**
+ * The activity entry for any change to a skill's bytes (BOS-178, BOS-181), so no skill in the library
+ * changes without a trace. The summary (capped at 300) shows the short fingerprints and only the region
+ * that differs, so a hidden tail or a description change still shows; detail keeps the full old and new text.
+ * `head` says who changed what; it gets the two short fingerprints and " (was <old name>)" when the name changed.
+ */
+export function skillChangeEntry(skillId: string, before: SkillSide, after: SkillSide, head: (from: string, to: string, was: string) => string, tail: string) {
+  const min = Math.min(before.skillMd.length, after.skillMd.length);
+  let start = 0;
+  while (start < min && before.skillMd[start] === after.skillMd[start]) start++;
+  let endBefore = before.skillMd.length;
+  let endAfter = after.skillMd.length;
+  while (endBefore > start && endAfter > start && before.skillMd[endBefore - 1] === after.skillMd[endAfter - 1]) {
+    endBefore--;
+    endAfter--;
+  }
+  const diff = { before: before.skillMd.slice(start, endBefore), after: after.skillMd.slice(start, endAfter) };
+  // Keep both ends when it is long: a payload is often added at the end, after harmless opening text.
+  const flat = (text: string, max: number) => {
+    const one = text.replace(/\s+/g, " ").trim();
+    if (one.length <= max) return one;
+    const half = Math.max(1, Math.floor((max - 1) / 2));
+    return `${one.slice(0, half)}…${one.slice(-half)}`;
+  };
+  const h = `${head(before.bundleHash.slice(0, 12), after.bundleHash.slice(0, 12), after.name !== before.name ? ` (was ${flat(before.name, 40)})` : "")}.`;
+  // Leave room for the head and tail, then share what is left between the two differing sides.
+  const room = Math.max(20, 300 - h.length - tail.length - 30);
+  const shown = !diff.before && !diff.after ? "The visible text is unchanged." : `Old: "${flat(diff.before, Math.floor(room / 2))}" New: "${flat(diff.after, Math.floor(room / 2))}".`;
+  return {
+    summary: `${h} ${shown}${tail}`,
+    detail: {
+      skillId,
+      name: { before: before.name, after: after.name },
+      description: { before: before.description, after: after.description },
+      bundleHash: { before: before.bundleHash, after: after.bundleHash },
+      skillMd: { before: before.skillMd, after: after.skillMd },
+      changedRegion: diff,
+      removedFiles: before.paths.filter((p) => p !== "SKILL.md" && !after.paths.includes(p)),
+    },
+  };
+}
+
 // What "contains a script" means (BOS-87 standard, section 1), decided by content, never by a name. The system decides, not the CEO.
 // Only SKILL.md can be instructions; every other file counts as a script, whatever it is called. SKILL.md counts too
 // when it holds anything an agent could run. When unsure, review.

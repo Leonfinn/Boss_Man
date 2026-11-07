@@ -544,28 +544,33 @@ export class Workspaces {
     if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
     const dir = path.join(this.root, "check-jobs", spec.jobId);
-    rmSync(dir, { recursive: true, force: true });
-    await this.withRepoLock(spec.projectId, async () => {
-      await this.git(["worktree", "prune"], { cwd: repo });
-      mkdirSync(path.dirname(dir), { recursive: true });
-      await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
-    });
-    const home = this.checkJobHome(spec.jobId);
+    const home = path.join(this.root, "check-jobs-home", spec.jobId);
+    this.activeJobs.add(spec.jobId);
     try {
-      return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) });
-    } finally {
+      rmSync(dir, { recursive: true, force: true });
       await this.withRepoLock(spec.projectId, async () => {
-        await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
-        rmSync(dir, { recursive: true, force: true });
-        await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+        await this.git(["worktree", "prune"], { cwd: repo });
+        mkdirSync(path.dirname(dir), { recursive: true });
+        await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
-      // The job's HOME, temp folder and caches (BOS-655); the hourly housekeeping sweeps any a killed runner left behind.
+      try {
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) });
+      } finally {
+        await this.withRepoLock(spec.projectId, async () => {
+          await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
+          rmSync(dir, { recursive: true, force: true });
+          await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+        });
+      }
+    } finally {
+      // The job's HOME/TMPDIR (whatever the tests left in it, and per-HOME caches) goes with the job.
       rmSync(home, { recursive: true, force: true });
+      this.activeJobs.delete(spec.jobId);
     }
   }
 
-  /** A check job's own HOME on the workspaces volume (holds its tmp, .cache and .config). */
-  private checkJobHome = (jobId: string) => path.join(this.root, "check-jobs-home", jobId);
+  /** Job ids whose folders belong to a check running in this process: the start-up sweep leaves them alone. */
+  private readonly activeJobs = new Set<string>();
 
   /**
    * The environment, and fence where the runner can fence, for one job, like an agent session's: the job's folder, its own home
@@ -1022,18 +1027,24 @@ export class Workspaces {
       }
     }
 
+    // Check-job folders no running job owns: a runner restart mid-job skips the job's own clean-up. Jobs that
+    // start after this point are in activeJobs before they create anything, so the sweep never takes their folders.
+    for (const sub of ["check-jobs", "check-jobs-home"]) {
+      for (const jobId of list(path.join(this.root, sub))) {
+        if (this.activeJobs.has(jobId)) continue;
+        rmSync(path.join(this.root, sub, jobId), { recursive: true, force: true });
+        removed.push(`${sub}/${jobId}`);
+      }
+    }
+    // Their worktree entries in the repos are stale now.
+    for (const name of list(reposDir).filter((n) => n.endsWith(".git"))) {
+      await this.withRepoLock(name.slice(0, -4), () => this.git(["worktree", "prune"], { cwd: this.repoDir(name.slice(0, -4)) })).catch(() => undefined);
+    }
+
     const tmp = path.join(this.root, "tmp");
     for (const f of list(tmp)) {
       const p = path.join(tmp, f);
       if (now - (statSync(p, { throwIfNoEntry: false })?.mtimeMs ?? now) > 3_600_000) rmSync(p, { recursive: true, force: true });
-    }
-
-    // A check job's HOME is removed when the job ends; one older than a day is from a runner killed mid-job (BOS-655).
-    // A day is far past any check job's timeout, so a running job's home is never caught.
-    const jobHomes = path.join(this.root, "check-jobs-home");
-    for (const f of list(jobHomes)) {
-      const p = path.join(jobHomes, f);
-      if (now - (statSync(p, { throwIfNoEntry: false })?.mtimeMs ?? now) > 86_400_000) rmSync(p, { recursive: true, force: true });
     }
 
     const repos = await Promise.all(list(reposDir).filter((n) => n.endsWith(".git")).map(async (n) => ({ projectId: n.slice(0, -4), bytes: await diskUsage(path.join(reposDir, n)) })));

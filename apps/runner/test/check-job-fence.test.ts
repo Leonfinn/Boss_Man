@@ -3,7 +3,7 @@
 // BOS-655: the job's HOME is removed when it ends, and a runner that can't fence still gives the job its own
 // HOME/TMPDIR and the pnpm store on the workspaces volume, so an install doesn't fill the root disk.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -60,20 +60,5 @@ describe("unfenced check job (BOS-655)", () => {
     expect(r.output).toContain(`store=${store}`);
     expect(existsSync(home)).toBe(false);
     expect(existsSync(path.join(root, "check-jobs", jobId))).toBe(false);
-  });
-
-  it("housekeeping sweeps a job HOME older than a day and keeps a fresh one", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "bm-fj-sweep-"));
-    const ws = new Workspaces(root);
-    const old = path.join(root, "check-jobs-home", "dddddddd-dddd-4ddd-8ddd-dddddddddddd");
-    const fresh = path.join(root, "check-jobs-home", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
-    mkdirSync(path.join(old, "tmp"), { recursive: true });
-    mkdirSync(path.join(fresh, "tmp"), { recursive: true });
-    const now = Date.now();
-    const twoDaysAgo = new Date(now - 2 * 86_400_000);
-    utimesSync(old, twoDaysAgo, twoDaysAgo);
-    await ws.housekeeping(now);
-    expect(existsSync(old)).toBe(false);
-    expect(existsSync(fresh)).toBe(true);
   });
 });

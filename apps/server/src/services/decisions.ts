@@ -28,6 +28,7 @@ import {
   type OrderLink,
   alwaysChoices,
   explainPermission,
+  formatDate,
   type AlwaysChoice,
   type PermissionExplanation,
   type PermissionInfo,
@@ -42,7 +43,7 @@ import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
 import { REVIEW_REASON } from "./review-kinds.js";
-import { type CardLint, type HostFacts, NOT_OVERRIDABLE, lintLines, lintOwnerSteps } from "./steps.js";
+import { type CardLint, type HostFacts, NOT_OVERRIDABLE, fillHostTokens, lintLines, lintOwnerSteps } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -54,6 +55,7 @@ import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, les
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 import { commandProblem, parseStep, strayFence } from "./steps.js";
+import { openReviewProposal } from "./skill-proposals.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -93,6 +95,34 @@ async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string;
       Object.fromEntries(w.found.flatMap((r) => { const t = byCompany.get(w.companyId)?.get(r); return t ? [[r, t]] : []; })) as Record<string, { ticketId: string; title: string; ref: string }>,
     ]),
   );
+}
+
+/** A do-this-next link the raiser asked for but that wasn't stored (BOS-625), and why. */
+export type DroppedOrderLink = { decisionId: string; link: "doAfter" | "doBefore"; reason: "another company" | "not open" | "unknown" };
+
+/**
+ * Do-this-next links (BOS-551) that point at a card the raiser may legitimately order against:
+ * an open decision in the caller's own company (BOS-625). A link to another company's card, or to
+ * an answered one, is dropped rather than stored, so one company can't nudge another's queue order.
+ * The queue already ignores ids it can't see; this keeps the bad link out of the card in the first place.
+ * Each dropped link comes back with its reason, so raise_decision's reply can say which weren't applied.
+ */
+async function keepOpenInCompany<T extends OrderLink>(db: Db, companyId: string, links: T[] | undefined, link: DroppedOrderLink["link"]): Promise<{ kept?: T[]; dropped: DroppedOrderLink[] }> {
+  if (!links?.length) return { dropped: [] };
+  const ids = [...new Set(links.map((l) => l.decisionId))];
+  const rows = await db.select({ id: decisions.id, companyId: decisions.companyId, status: decisions.status }).from(decisions).where(inArray(decisions.id, ids));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  // Judged once per id, so a link asked for in both directions is reported once.
+  const why = new Map(ids.map((id): [string, DroppedOrderLink["reason"] | null] => {
+    const r = byId.get(id);
+    if (!r) return [id, "unknown"];
+    if (r.companyId !== companyId) return [id, "another company"];
+    if (r.status !== "open") return [id, "not open"];
+    return [id, null];
+  }));
+  const kept = links.filter((l) => why.get(l.decisionId) === null);
+  const dropped = ids.flatMap((id) => { const reason = why.get(id); return reason ? [{ decisionId: id, link, reason }] : []; });
+  return { ...(kept.length ? { kept } : {}), dropped };
 }
 
 /** One ticket a Boss Man update brings, as the owner sees it on a deploy card (BOS-213). */
@@ -513,7 +543,7 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * `addons` are the add-on facts for R9 (DR-023); a route that has them passes them, and `setsUp` names the
  * add-on this card sets up, so its own setup steps aren't refused for it not running yet.
  */
-export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; addons?: AddonFacts; setsUp?: Addon }): { error: string; lint?: undefined } | { error: null; lint?: CardLint } {
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -525,14 +555,24 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
   if (override !== undefined && !a.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the steps instead, or ask the CEO to raise the card." };
   if (override !== undefined && override.length < 10) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
   if (!a.steps?.length) return { error: null };
-  const { refuse, warn } = lintOwnerSteps(a.steps, { ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}) });
+  // `{{host.…}}` tokens (DR-008): filled from the recorded host facts before the lint, so the lint reads what the owner
+  // will. A fact that isn't recorded stops the card; a caller with no facts leaves the token, which R4 refuses.
+  let steps = a.steps;
+  if (a.hostValues) {
+    const filled = fillHostTokens(a.steps, a.hostValues);
+    if (filled.missing.length) {
+      return { error: `These steps use host facts Boss Man doesn't have: ${filled.missing.map((k) => `{{host.${k}}}`).join(", ")}. The host deployer hasn't reported them (it may not be applied yet, or the fact can't be detected). Ask the owner to confirm it in Settings → This host, or wait for the host's report, then raise the card again.` };
+    }
+    steps = filled.steps;
+  }
+  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}) });
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
   const soft = refuse.filter((f) => !NOT_OVERRIDABLE.has(f.rule));
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
   if (hard.length) return { error: `These steps can't go to the owner as written:\n${lintLines(refuse)}\n${tail}${override ? " lintOverride can't let through a command that isn't copy-safe or a value Boss Man doesn't have." : ""}` };
   if (soft.length && !override) return { error: `These steps can't go to the owner as written:\n${lintLines(soft)}\n${tail}${a.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
   const lint: CardLint = { warn, ...(soft.length && override ? { override: { reason: override, findings: soft } } : {}) };
-  return { error: null, ...(lint.warn.length || lint.override ? { lint } : {}) };
+  return { error: null, steps, ...(lint.warn.length || lint.override ? { lint } : {}) };
 }
 
 /**
@@ -650,6 +690,8 @@ export type Advice = {
   what?: string;
   /** advised: whether the ticket actually needs it, in plain words. */
   needed?: string;
+  /** advised: what wouldn't get done if the owner denies it, in plain words (BOS-233). */
+  denyStops?: string;
   /** advised: the CEO's recommendation, shown on the card. */
   recommendation?: "allow" | "deny";
   /** advised: why the CEO recommends it. */
@@ -885,6 +927,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [t] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId));
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, extra.assigneeAgentId), eq(agents.companyId, t?.companyId ?? "")));
       if (!a) throw new AnswerError("That person isn't on this ticket's team. Pick someone from the list.");
+      // Defence in depth for the security review's own tasks (BOS-176): the other ticket-writing tools all
+      // refuse to move an open skill-review ticket, so this route must too. The owner's own answer is the
+      // owner writing (settledBy is only ever an agent), so they stay allowed, as they are there.
+      if (t?.companyId && extra.settledBy && (await openReviewProposal(db, t.companyId, ctx.blockerTicketId))) {
+        throw new AnswerError("This is a security review task: only the Security Reviewer and the owner can move it. Pick another ticket to hand on, or chase it instead.");
+      }
     }
     if (ctx.type === "stale_blocker" && answer === LET_CEO_DECIDE) {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
@@ -1527,6 +1575,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; setsUp?: Addon; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+      // Ordering links may only point at open cards in the raiser's own company (BOS-625).
+      const after = await keepOpenInCompany(db, input.companyId, input.doAfter, "doAfter");
+      const before = await keepOpenInCompany(db, input.companyId, input.doBefore, "doBefore");
+      const doAfter = after.kept;
+      const doBefore = before.kept;
+      const droppedLinks = [...after.dropped, ...before.dropped];
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -1539,7 +1593,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             raisedByAgentId: input.agentId,
             context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
-              ...(input.doAfter?.length ? { doAfter: input.doAfter } : {}), ...(input.doBefore?.length ? { doBefore: input.doBefore } : {}),
+              ...(doAfter?.length ? { doAfter } : {}), ...(doBefore?.length ? { doBefore } : {}),
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
               ...(input.resetsOnRestart ? { resetsOnRestart: true } : {}),
               // An add-on's setup card closes itself once the add-on is seen working (DR-023 D, BOS-522).
@@ -1563,7 +1617,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return row!;
       });
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
-      return raised;
+      // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
+      return { ...raised, droppedLinks };
     },
 
     /** Re-sends permission verdicts that couldn't be delivered, once the runner is back. */
@@ -2125,32 +2180,45 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * blocked onto it and closes the original without an answer; "handled" settles it (never an owner-only kind).
      * Returns null when the owner answered first.
      */
-    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; lint?: CardLint } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what: string; needed: string; recommendation: "allow" | "deny"; why: string }) {
+    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; lint?: CardLint } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
       const via = input.runId ? ` (CEO run ${input.runId})` : "";
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId)));
       if (!d) throw new AnswerError("No decision with that id.");
       if (d.status !== "open") return null;
       const advice = adviceOf(d.context);
-      if (advice?.state !== "asking") throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
       const at = now().toISOString();
       if (input.outcome === "advice") {
-        // Only a command the owner has been asked to allow makes sense here: the advice says what it does
-        // and whether to allow it, and stays on the card while the owner decides.
-        if (d.kind !== "permission" || (d.context as { type?: string }).type !== "permission") throw new AnswerError("Advice in these words is for a permission request. For other cards use reissue or handled.");
-        const what = input.what.trim();
-        const needed = input.needed.trim();
+        // Advice on a permission request is for the owner's queue whatever the rung: the CEO may add it
+        // unasked (BOS-233 item 3), and on a CEO-rung card it travels down when the card does, without
+        // settling it. A permission request the CEO raised itself goes to the owner as before.
+        const permission = d.kind === "permission" && (d.context as { type?: string }).type === "permission";
+        if (permission) {
+          if (d.raisedByAgentId && d.raisedByAgentId === input.agentId) throw new AnswerError("That's the CEO's own permission request; its advice would be on its own request. Leave it for the owner.");
+        } else if (advice?.state !== "asking") {
+          // On any other card advice answers the owner's question, so it needs the owner to have asked.
+          throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
+        }
+        const what = (input.what ?? "").trim();
+        const needed = (input.needed ?? "").trim();
         const why = input.why.trim();
-        if (what.length < 10 || needed.length < 5 || why.length < 10) throw new AnswerError("Say what the command does, whether the ticket needs it, and why, in short plain sentences.");
+        if (why.length < 10) throw new AnswerError("Say why, in a short plain sentence: the owner reads it on the card.");
+        if (permission && (what.length < 10 || needed.length < 5)) throw new AnswerError("Say what the command does and whether the ticket needs it, in short plain sentences.");
+        // A permission card shows the advice block (what it does / whether it's needed / the recommendation).
+        // Any other card only carries a plain note answering the owner's question.
+        const nextAdvice: Advice = permission
+          ? { ...advice, state: "advised", at, what, needed, recommendation: input.recommendation, why }
+          : { state: "advised", at, note: advice?.note, originalQuestion: advice?.originalQuestion, summary: why, why };
         const [done] = await db
           .update(decisions)
-          .set({ context: { ...(d.context as object), advice: { ...advice, state: "advised", at, what, needed, recommendation: input.recommendation, why } } })
-          .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' = 'asking'`))
+          .set({ context: { ...(d.context as object), advice: nextAdvice } })
+          .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), permission ? undefined : sql`${decisions.context}->'advice'->>'state' = 'asking'`))
           .returning({ id: decisions.id });
         if (!done) return null;
         const held = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
-        await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held[0]?.ticketId, kind: "decision_advised", summary: `CEO advised ${input.recommendation === "allow" ? "Allow" : "Deny"} on "${d.question}": ${why}${via}`, at: now() });
+        await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held[0]?.ticketId, kind: "decision_advised", summary: permission ? `CEO advised ${input.recommendation === "allow" ? "Allow" : "Deny"} on "${d.question}": ${why}${via}` : `CEO advised on "${d.question}": ${why}${via}`, at: now() });
         return { outcome: "advice" as const, id: d.id };
       }
+      if (advice?.state !== "asking") throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
       if (input.outcome === "reissue") {
         if (d.kind === "permission") throw new AnswerError("A permission request has its command and options already. Use outcome advice to tell the owner what it does and whether to allow it.");
         // The CEO proposed this skill, so it must not get to reword the card the owner decides on (BOS-168).
@@ -2439,7 +2507,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
       if (always) {
         const [last] = await db.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
-        const on = now().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+        const on = formatDate("en-GB", now(), { day: "numeric", month: "short" });
         await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name} (from a request on ${on})`, trigger: "permission", condition: always.match, outcome: "allow", position: (last?.position ?? -1) + 1 });
         answer = ALLOW;
       }

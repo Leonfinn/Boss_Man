@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, formatDate, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
@@ -315,7 +315,7 @@ export function schedulerService(
       const urgentStillRuns = source.quotaOverage !== "pause" || !(overage || full.some((s) => s.utilization >= 1));
       if (held && !source.quotaHeldNotified) {
         const first = full.reduce((a, b) => (b.utilization > a.utilization ? b : a));
-        const reset = first.resetsAt ? ` until ${first.resetsAt.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "";
+        const reset = first.resetsAt ? ` until ${formatDate("en-GB", first.resetsAt, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "";
         const stillRuns = urgentStillRuns ? "Chats, reviews, deploy approvals and urgent tickets still run." : "Chats, reviews and deploy approvals still run; urgent tickets wait too, because the limit is reached.";
         await deps
           .notifyOwner({
@@ -995,8 +995,32 @@ export function schedulerService(
       if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
       const { maxTotal, maxCompany } = await limitsNow();
       const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
-      const live = await db.select({ companyId: runs.companyId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
-      const waiting = await db.select({ companyId: wakes.companyId }).from(wakes).where(and(inArray(wakes.status, ["queued", "deferred"]), ne(wakes.reason, CHAT_REASON), ne(wakes.reason, CEO_REPLY_REASON)));
+      const live = await db.select({ companyId: runs.companyId, agentId: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
+      // Only wakes that would take a slot of their own (BOS-667). A wake held until later (quiet hours, a
+      // retry time) or by the quota can't start now, and a wake whose agent already has its runs going
+      // starts only in the slot that run frees, so neither stands in for a slot that is in use. Counting
+      // them let the idle-slot sweep see a full house while slots sat empty (7 Nov, 5 of 10 slots).
+      const t = now();
+      const queue = await db
+        .select({ companyId: wakes.companyId, agentId: wakes.agentId })
+        .from(wakes)
+        .where(
+          and(
+            or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)), sql`coalesce(${wakes.statusReason}, '') not like ${QUOTA_HOLD_LIKE}`)),
+            sql`coalesce(${wakes.statusReason}, '') <> 'agent paused'`,
+            ne(wakes.reason, CHAT_REASON),
+            ne(wakes.reason, CEO_REPLY_REASON),
+          ),
+        );
+      const room = new Map<string, number>();
+      for (const r of live) if (r.agentId) room.set(r.agentId, (room.get(r.agentId) ?? limits.agent) - 1);
+      const waiting: typeof queue = [];
+      for (const w of queue) {
+        const left = room.get(w.agentId) ?? limits.agent;
+        if (left <= 0) continue;
+        room.set(w.agentId, left - 1);
+        waiting.push(w);
+      }
       const total = live.length + waiting.length;
       const mine = live.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
       // A company with nothing running or waiting still gets one, however full other companies'

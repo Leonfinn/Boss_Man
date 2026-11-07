@@ -72,6 +72,8 @@ export type StallMonitor = {
   summary(): StallSummary;
   /** What the server was doing over the last `windowMs`: oldest open requests, and routes that finished in it (BOS-410 memory jumps). */
   activity(windowMs: number): { inFlight: number; oldest: { route: string; ageMs: number }[]; finished: Record<string, { count: number; maxMs: number }> };
+  /** Stalls that started at or after `sinceMs` (epoch ms), from the last `keep` kept, and the longest (server-health.ts, BOS-640). */
+  since(sinceMs: number): { count: number; worstMs: number; thresholdMs: number };
 };
 
 export type StallMonitorOptions = {
@@ -293,6 +295,10 @@ export function createStallMonitor(opts: StallMonitorOptions = {}): StallMonitor
         t.maxMs = Math.max(t.maxMs, f.ms);
       }
       return { inFlight: open.size, oldest, finished: finishedByRoute };
+    },
+    since(sinceMs) {
+      const hits = recent.filter((s) => Date.parse(s.at) >= sinceMs);
+      return { count: hits.length, worstMs: hits.reduce((m, s) => Math.max(m, s.ms), 0), thresholdMs };
     },
     summary() {
       const hourAgo = Date.now() - 3_600_000;

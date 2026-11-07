@@ -7,7 +7,7 @@ import { agentSkills, agents, decisions, projects, skillProposals, skills, ticke
 import { record } from "./activity.js";
 import { byLoad, securityReviewers } from "./review-policy.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "./decisions.js";
-import { hashFiles, scriptFilesOf, sha256, unreadableFile } from "./skill-files.js";
+import { hashFiles, scriptFilesOf, sha256, skillChangeEntry, skillSide, unreadableFile } from "./skill-files.js";
 import { normalise, parseSkillMd, skillName, skillNameOf, SkillError, type SkillFile, type skillsService } from "./skills.js";
 
 type SkillsSvc = ReturnType<typeof skillsService>;
@@ -452,7 +452,17 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       try {
         // A retry after a crash between install and the patch below: the same files are already in the library, so carry on to the rest.
         const [there] = await installed();
-        skill = there && hashFiles(there.files).bundleHash === p.bundleHash ? there : await skillsSvc.save(companyId, { files: p.files, source: p.source === "link" ? "link" : p.source === "retro" ? "retro" : "written", sourceUrl: p.sourceUrl, sourceRef: p.pinnedRef, name: p.name, replaceId: p.replacesSkillId });
+        if (there && hashFiles(there.files).bundleHash === p.bundleHash) skill = there;
+        else {
+          // An update overwrites the library copy: keep its old bytes for the log below (BOS-181).
+          const [old] = p.replacesSkillId ? await db.select().from(skills).where(and(eq(skills.id, p.replacesSkillId), eq(skills.companyId, companyId))) : [];
+          const saved = await skillsSvc.save(companyId, { files: p.files, source: p.source === "link" ? "link" : p.source === "retro" ? "retro" : "written", sourceUrl: p.sourceUrl, sourceRef: p.pinnedRef, name: p.name, replaceId: p.replacesSkillId });
+          skill = saved;
+          if (old) {
+            const entry = skillChangeEntry(old.id, skillSide(old), skillSide(saved), (from, to, was) => `${by} approved an update to the skill ${saved.name}${was} from ${from} to ${to}`, " Through the add-a-skill review; full text in detail.");
+            await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.updated", ...entry, at });
+          }
+        }
       } catch (e) {
         // Two answers at once: the other call saved this skill first. The unique name index is the
         // same "already installed with the same files" path, not a database error for the owner.
