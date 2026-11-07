@@ -36,14 +36,14 @@ async function setup() {
   let seq = 0;
   /** An agent's run asks to run a shell command; returns the decision it made, if any. */
   // With a ticket, the runner reports it started the run in that ticket's worktree, unless workspace says otherwise.
-  const ask = async (command: string, agentId = dev.id, opts: { ticketId?: string; rawInput?: Record<string, unknown>; workspace?: false | { ticketId: string } } = {}) => {
+  const ask = async (command: string, agentId = dev.id, opts: { ticketId?: string; rawInput?: Record<string, unknown>; workspace?: false | { ticketId: string }; tool?: { title: string; kind: string; rawInput: unknown } } = {}) => {
     const runId = randomUUID();
     const requestId = randomUUID();
     await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.started", runId, agentId, acpSessionId: "s", model: null } });
     if (opts.ticketId) await db.update(runs).set({ ticketId: opts.ticketId }).where(eq(runs.id, runId));
     const ws = opts.workspace === false ? null : (opts.workspace ?? (opts.ticketId ? { ticketId: opts.ticketId } : null));
     if (ws) await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.workspace", runId, ticketId: ws.ticketId, branch: `bossman/${ws.ticketId}`, baseCommit: "abc123", created: false, restoredPatch: false } });
-    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, title: "Create branch worktree and install deps", kind: "execute", rawInput: { command, ...opts.rawInput }, optionKinds: ["allow_once", "reject_once"] } });
+    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, ...(opts.tool ?? { title: "Create branch worktree and install deps", kind: "execute", rawInput: { command, ...opts.rawInput } }), optionKinds: ["allow_once", "reject_once"] } });
     const [d] = await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
     return { d, runId, requestId };
   };
@@ -134,7 +134,11 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
 
     const { d: d2 } = await ctx.ask("rm -rf /tmp/other-agents-cache");
     const ceo = await client(ctx.ceo.id);
-    const r = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d2!.id, triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it." } });
+    // A permission card now needs the CEO's advice before it reaches the owner (BOS-233): what it's for and
+    // what a Deny stops.
+    const noAdvice = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d2!.id, triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it." } });
+    expect(isError(noAdvice)).toBe(true);
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d2!.id, triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it.", adviceNeeded: "It is needed to clear the old cache before the next build.", adviceDeny: "The cache stays, so the next build may fail or run out of space." } });
     expect(isError(r)).toBe(false);
     expect(await reload(d2!.id)).toMatchObject({ tier: "owner", status: "open" });
     expect((await reload(d2!.id)).context).toMatchObject({ triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it." });
@@ -150,6 +154,28 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
   });
 });
 
+describe("unrecognised tools go to the CEO first (BOS-295)", () => {
+  const tool = (title: string) => ({ tool: { title, kind: "other", rawInput: {} } });
+
+  it("waits with the CEO, with a warning on a lookalike name, and the CEO is woken", async () => {
+    const plain = (await ctx.ask("", ctx.dev.id, tool("mcp__frobnicator__run"))).d;
+    expect(plain).toMatchObject({ tier: "ceo", status: "open" });
+    expect(plain!.question).not.toMatch(/Warning/);
+    expect((await ctx.decisions.queue()).map((q) => q.id)).not.toContain(plain!.id);
+    const look = (await ctx.ask("", ctx.dev.id, tool("mcp__bossrnan__wiki"))).d;
+    expect(look).toMatchObject({ tier: "ceo" });
+    expect(look!.question).toMatch(/doesn't recognise.*Warning: this name looks like one of Boss Man's own tools/);
+    const wake = (await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id))).find((w) => w.note?.includes("bossrnan"));
+    expect(wake!.note).toMatch(/doesn't recognise this tool/);
+  });
+
+  it("goes to the owner when the CEO itself asks, or the CEO is paused", async () => {
+    expect((await ctx.ask("", ctx.ceo.id, tool("mcp__frobnicator__run"))).d).toMatchObject({ tier: "owner" });
+    await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.ceo.id));
+    expect((await ctx.ask("", ctx.dev.id, tool("mcp__frobnicator__run"))).d).toMatchObject({ tier: "owner" });
+  });
+});
+
 describe("deletes in the agent's own working copy go to the CEO first (BOS-120)", () => {
   const PROBE = "rm -f test/zz-probe.test.ts && rm -rf dist 2>/dev/null; git status";
 
@@ -162,13 +188,17 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
     expect(c.workingCopy).toMatchObject({ ticketId: ctx.ticket.id, branch: `bossman/${ctx.ticket.id}`, files: ["test/zz-probe.test.ts", "dist"] });
     expect(c.ladder).toMatchObject({ rung: "ceo", minutes: 5 });
     expect(d!.question).toContain(`working copy for `);
-    expect(d!.question).toContain(`(branch bossman/${ctx.ticket.id}): test/zz-probe.test.ts, dist.`);
+    expect(d!.question).toContain(`(branch bossman/${ctx.ticket.id}), and Boss Man can't see where it has moved to since: test/zz-probe.test.ts, dist.`);
+    // BOS-159: the card says where the run STARTED, never that the paths are inside the checkout now.
+    expect(d!.question).not.toContain(`(branch bossman/${ctx.ticket.id}): test/zz-probe.test.ts, dist.`);
     expect((await ctx.decisions.queue()).map((q) => q.id)).not.toContain(d!.id);
     expect(await ownerNotified(d!.id)).toEqual([]);
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
-    expect(w).toMatchObject({ reason: "decision", priority: 3 });
+    expect(w).toMatchObject({ reason: "decision", priority: 3, ticketId: ctx.ticket.id });
     expect(w!.note).toContain("symlink");
-    expect(w!.note).toContain("It has no cd.");
+    // BOS-159: the shell keeps its folder between commands, so the note can't vouch for where it sits.
+    expect(w!.note).toContain("can't vouch for where it sits now");
+    expect(w!.note).not.toContain("It has no cd.");
     expect(w!.note).not.toContain("pnpm or npm install");
 
     const ceo = await client(ctx.ceo.id);
@@ -190,7 +220,11 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
   });
 
   it("recommends Allow only for build output, never for source (adversarial review)", async () => {
-    expect((await ctx.ask("rm -rf dist apps/web/dist/ node_modules", ctx.dev.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "ceo", recommendedOption: "Allow once" });
+    expect((await ctx.ask("rm -rf dist node_modules", ctx.dev.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "ceo", recommendedOption: "Allow once" });
+    // BOS-150: a trailing slash or a deeper path follows a symlinked dist, so it is never recommended Allow
+    for (const [c, tier] of [["rm -rf dist/", "owner"], ["rm -rf apps/web/dist/", "owner"], ["rm -rf dist apps/web/dist", "ceo"]] as [string, string][]) {
+      expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier, recommendedOption: "Deny" });
+    }
     for (const c of ["rm -rf src", "rm -rf package.json", "rm -rf .github/workflows", "rm -f .env", "rm -rf dist src"]) {
       expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier: "ceo", recommendedOption: "Deny" });
     }

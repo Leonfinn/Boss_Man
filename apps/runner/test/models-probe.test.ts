@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
 import { startCanaryModel } from "../src/canary.js";
 import { probeModels } from "../src/models-probe.js";
-import { SessionManager } from "../src/session-manager.js";
+import { SessionManager, withoutGitCredentials } from "../src/session-manager.js";
 
 const fake = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-acp.mjs");
 
@@ -45,6 +45,34 @@ describe("models.probe", () => {
     const config = JSON.parse(String((err as Error).message).split("config=")[1]!);
     expect(config.disabled_providers).toEqual(["opencode"]);
     expect(config.provider.ollama.options.baseURL).toBe("http://192.168.1.2:11434/v1");
+  });
+
+  it("withholds the git credential from a probe too, in any form git reads it (BOS-322)", async () => {
+    // The probe spawns the adapter with the run's secrets; the adapter reports the env it actually got.
+    const report = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-env-report.mjs");
+    const secrets = { GIT_TOKEN: "ghp_probe_token", GIT_USERNAME: "bot", GIT_CONFIG_COUNT: "1", GIT_CONFIG_VALUE_0: "Authorization: Basic x", GH_TOKEN: "gh_probe", GITHUB_TOKEN: "ghub_probe", ANTHROPIC_API_KEY: "sk-ant-probe" };
+    const err = await probeModels("opencode", secrets, { adapterBin: report, timeoutMs: 10_000 }).catch((e: Error) => e);
+    const line = String((err as Error).message).split("envnames=")[1]!.split("\n")[0]!;
+    const [names, control] = line.split(";control=");
+    // Every secret the filter withholds must be absent; the filter is the same one a run uses, so this can't drift.
+    const kept = withoutGitCredentials(secrets);
+    const withheld = Object.keys(secrets).filter((k) => !(k in kept));
+    expect(withheld.length).toBeGreaterThan(0);
+    expect(names!.split(",").filter((n) => withheld.includes(n))).toEqual([]);
+    expect(control).toBe("set");
+  });
+
+  it("withholds a forge's own push or package token from a probe, by the same filter as a run (BOS-396)", async () => {
+    const report = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-env-report.mjs");
+    const secrets = { GITLAB_TOKEN: "glpat-1", GL_TOKEN: "glpat-2", BITBUCKET_TOKEN: "bb-3", NPM_TOKEN: "npm-4", NODE_AUTH_TOKEN: "npm-5", GITHUB_TOKEN_WORK: "ghp-6", ANTHROPIC_API_KEY: "sk-ant-probe" };
+    const err = await probeModels("opencode", secrets, { adapterBin: report, timeoutMs: 10_000 }).catch((e: Error) => e);
+    const line = String((err as Error).message).split("envnames=")[1]!.split("\n")[0]!;
+    const [names, control] = line.split(";control=");
+    const kept = withoutGitCredentials(secrets);
+    const withheld = Object.keys(secrets).filter((k) => !(k in kept));
+    expect(withheld).toContain("GITLAB_TOKEN");
+    expect(names!.split(",").filter((n) => withheld.includes(n))).toEqual([]);
+    expect(control).toBe("set");
   });
 
   it("reports why the agent died, not just that the connection closed", async () => {

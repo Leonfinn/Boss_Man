@@ -53,3 +53,16 @@ describe("the commits a pull request is made of, and a compare (BOS-130)", () =>
     expect(seen[0]).toBe("https://host/api/repos/leon/site/compare/targetsha...branch%2Fname?per_page=250");
   });
 });
+
+describe("checks on a commit (DR-024 #2)", () => {
+  const host = (status: number, body: unknown) => gitHostService({ fetch: (async () => json(status, body)) as unknown as typeof fetch });
+  it("counts GitHub check runs and names the failing ones", async () => {
+    const ok = await host(200, { check_runs: [{ name: "check", status: "completed", conclusion: "success" }, { name: "rehearse", status: "completed", conclusion: "success" }] }).checks(cfg("github"), "t", "a".repeat(40));
+    expect(ok).toEqual({ state: "passed", failing: [], total: 2 });
+    const bad = await host(200, { check_runs: [{ name: "rehearse", status: "completed", conclusion: "failure" }] }).checks(cfg("github"), "t", "a".repeat(40));
+    expect(bad).toMatchObject({ state: "failed", failing: ["rehearse"] });
+  });
+  it("says so when the token can't read checks", async () => {
+    await expect(host(403, { message: "Resource not accessible by personal access token" }).checks(cfg("github"), "t", "a".repeat(40))).rejects.toMatchObject({ status: 403 });
+  });
+});

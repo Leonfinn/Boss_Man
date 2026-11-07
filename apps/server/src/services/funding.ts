@@ -1,18 +1,22 @@
 import { and, count, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
 import {
+  billingCycle,
+  boundsAsEpoch,
   budgetStatus,
   creditStatus,
   dateIn,
   forecastQuota,
+  formatDate,
   parseClaudeRateLimit,
   parseCodexRateLimits,
   parseSyntheticQuota,
+  windowBounds,
   type BudgetWindow,
   type QuotaSample,
   type SyntheticQuota,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, budgetPolicies, companies, costEvents, fundingSources, providerQuotaReadings, providerQuotaWarnings, quotaSamples, runs, secretGrants } from "../db/schema.js";
+import { agents, budgetPolicies, companies, costEvents, fundingSources, providerQuotaReadings, providerQuotaWarnings, quotaSamples, runs, secretGrants, settings } from "../db/schema.js";
 
 type FundingRow = typeof fundingSources.$inferSelect;
 type PolicyRow = typeof budgetPolicies.$inferSelect;
@@ -239,7 +243,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     const paid = await db.select({ name: agents.name, company: companies.name }).from(agents).innerJoin(companies, eq(companies.id, agents.companyId)).where(and(eq(agents.fundingSourceId, source.id), sql`${agents.retiredAt} is null`)).orderBy(agents.name);
     const when = (iso: string | null) =>
       iso
-        ? `${new Date(iso).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone })} at ${new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone })}`
+        ? `${formatDate("en-GB", new Date(iso), { weekday: "short", day: "numeric", month: "short", timeZone })} at ${formatDate("en-GB", new Date(iso), { hour: "2-digit", minute: "2-digit", timeZone })}`
         : "Synthetic doesn't say";
     // The card says "about X% used": the stored count is the percentage rounded to 0.01 points.
     const usedPercent = Math.floor(percent);
@@ -274,8 +278,31 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return sent;
   }
 
-  async function spendFor(where: SQL | undefined) {
-    return db.select({ occurredAt: costEvents.occurredAt, costMicros: costEvents.costMicros }).from(costEvents).where(where);
+  /**
+   * What a scope spent: all of it, and inside each `[after, before)` range (epoch milliseconds, null
+   * for no bound: `after` inclusive, `before` exclusive) asked for. One statement, so a source with
+   * 50k cost events costs a scan of the `(funding_source_id, occurred_at)` index, not 50k rows read
+   * into JS (BOS-671).
+   */
+  async function spendFor(where: SQL | undefined, ranges: Array<{ after: number | null; before: number | null }>) {
+    const inRange = (r: { after: number | null; before: number | null }) =>
+      and(
+        r.after !== null ? gte(costEvents.occurredAt, new Date(r.after)) : undefined,
+        r.before !== null ? lt(costEvents.occurredAt, new Date(r.before)) : undefined,
+      );
+    const sumExpr = sql`sum(${costEvents.costMicros})`;
+    const sums: Record<string, SQL> = { total: sql<string>`coalesce(${sumExpr}, 0)::text` };
+    ranges.forEach((r, i) => {
+      const range = inRange(r);
+      // An unbounded range is the all-time total; only a bounded one needs the filter. `filter` binds
+      // to the aggregate itself, so it sits inside `coalesce` (before the zero fallback).
+      sums[`r${i}`] = range
+        ? sql<string>`coalesce(${sumExpr} filter (where ${range}), 0)::text`
+        : sql<string>`coalesce(${sumExpr}, 0)::text`;
+    });
+    const [row] = await db.select(sums).from(costEvents).where(where);
+    const total = Number(row?.total ?? 0);
+    return { total, ranges: ranges.map((_, i) => Number(row?.[`r${i}`] ?? 0)) };
   }
 
   async function latestQuota(fundingSourceId: string) {
@@ -286,6 +313,14 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
       .where(eq(quotaSamples.fundingSourceId, fundingSourceId))
       .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
     return rows;
+  }
+
+  /** The latest reading per window and when each runs out at the recent rate (R78). */
+  async function quotaForecasts(source: typeof fundingSources.$inferSelect, now: Date) {
+    const fundingSourceId = source.id;
+    const quota = source.kind === "subscription" ? await latestQuota(fundingSourceId) : [];
+    const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
+    return { quota, forecasts: Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)])) };
   }
 
   return {
@@ -319,31 +354,42 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     async status(id: string, now = new Date(), timeZone = "Europe/London") {
       const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, id));
       if (!source) return null;
-      const events = await spendFor(eq(costEvents.fundingSourceId, id));
+      // The credit card reads this cycle's spend; the window is known before any row is read.
+      const cycle = source.kind === "api_credit" && source.monthlyGrantMicros != null && source.cycleAnchor ? billingCycle(source.cycleAnchor, now) : null;
+      const spend = await spendFor(eq(costEvents.fundingSourceId, id), [boundsAsEpoch(cycle ?? { start: null, end: null })]);
       const credit =
-        source.kind === "api_credit" && source.monthlyGrantMicros != null && source.cycleAnchor
-          ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, events, now)
+        cycle && source.cycleAnchor && source.monthlyGrantMicros != null
+          ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, [], now, spend.ranges[0])
           : null;
-      const quota = source.kind === "subscription" ? await latestQuota(id) : [];
+      const { quota, forecasts } = await quotaForecasts(source, now);
       // Every window name the adapter has reported, so the owner can switch each one on or off (BOS-227).
       const windowsSeen = source.kind === "subscription" ? [...new Set((await db.selectDistinct({ window: quotaSamples.window }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id))).map((r) => r.window))].sort() : [];
-      // When each window runs out at the recent rate (R78).
-      const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, id), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
-      const forecasts = Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)]));
       return {
         source,
         credit,
         quota,
         windowsSeen,
+        claudeActive: ((await db.select().from(settings).where(eq(settings.key, "claude-active-account")))[0]?.value ?? null) === id,
         forecasts,
         /** Synthetic's own used/limit reading, its age and its history; null for other providers. */
         providerQuota: await providerQuota(source),
         daily: await this.daily(id, now, timeZone),
         byCompany: await this.byCompany(id, now),
-        totalSpentMicros: events.reduce((s, e) => s + e.costMicros, 0),
+        totalSpentMicros: spend.total,
         // Boss Man only sees its own runs (spike S3: no Admin API on individual accounts).
         coverage: "boss_man_runs_only" as const,
       };
+    },
+
+    /**
+     * Just the source and its window forecasts, for the quota alert on every `run.quota` event.
+     * status() also adds up a week of runs and every cost event, which the alert never reads
+     * (BOS-604/BOS-649 T1: that roll-up on each event was what froze the server).
+     */
+    async forecasts(id: string, now = new Date()) {
+      const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, id));
+      if (!source) return null;
+      return { source, ...(await quotaForecasts(source, now)) };
     },
 
     /**
@@ -362,17 +408,20 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .where(and(gte(runs.startedAt, since), sql`(${runs.id} in (select ${costEvents.runId} from ${costEvents} where ${costEvents.fundingSourceId} = ${id} and ${costEvents.runId} is not null) or ${agents.fundingSourceId} = ${id})`));
       const money = await db.select({ occurredAt: costEvents.occurredAt, costMicros: costEvents.costMicros }).from(costEvents).where(and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since)));
-      const day = (at: Date) => dateIn(at, timeZone);
-      return dates.map((d) => {
-        const on = runsHere.filter((r) => day(r.startedAt) === d);
-        return {
-          day: d,
-          runs: on.length,
-          inputTokens: on.reduce((n, r) => n + (r.input ?? 0), 0),
-          outputTokens: on.reduce((n, r) => n + (r.output ?? 0), 0),
-          costMicros: money.filter((m) => day(m.occurredAt) === d).reduce((n, m) => n + m.costMicros, 0),
-        };
-      });
+      // One pass per row, not one per row per day (BOS-643: a week of runs froze the server).
+      const byDay = new Map(dates.map((d) => [d, { day: d, runs: 0, inputTokens: 0, outputTokens: 0, costMicros: 0 }]));
+      for (const r of runsHere) {
+        const b = byDay.get(dateIn(r.startedAt, timeZone));
+        if (!b) continue;
+        b.runs++;
+        b.inputTokens += r.input ?? 0;
+        b.outputTokens += r.output ?? 0;
+      }
+      for (const m of money) {
+        const b = byDay.get(dateIn(m.occurredAt, timeZone));
+        if (b) b.costMicros += m.costMicros;
+      }
+      return [...byDay.values()];
     },
 
     /**
@@ -408,14 +457,14 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         .sort((a, b) => b.costMicros - a.costMicros || b.tokens - a.tokens);
     },
 
-    async recordCost(input: typeof costEvents.$inferInsert) {
-      const [row] = await db.insert(costEvents).values(input).returning();
+    async recordCost(input: typeof costEvents.$inferInsert, tx: Db = db) {
+      const [row] = await tx.insert(costEvents).values(input).returning();
       return row!;
     },
 
-    async recordQuota(fundingSourceId: string, samples: QuotaSample[], observedAt = new Date()) {
+    async recordQuota(fundingSourceId: string, samples: QuotaSample[], observedAt = new Date(), tx: Db = db) {
       if (samples.length === 0) return [];
-      return db
+      return tx
         .insert(quotaSamples)
         .values(
           samples.map((s) => ({
@@ -432,9 +481,9 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     },
 
     /** Raw adapter payloads straight from the runner. */
-    async recordQuotaFromAdapter(fundingSourceId: string, payload: { claudeMeta?: unknown; codexRateLimits?: unknown }) {
+    async recordQuotaFromAdapter(fundingSourceId: string, payload: { claudeMeta?: unknown; codexRateLimits?: unknown }, tx: Db = db) {
       const samples = [...parseClaudeRateLimit(payload.claudeMeta), ...parseCodexRateLimits(payload.codexRateLimits)];
-      return this.recordQuota(fundingSourceId, samples);
+      return this.recordQuota(fundingSourceId, samples, new Date(), tx);
     },
 
     /**
@@ -506,11 +555,12 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
               ? sql`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId}) = ${p.scopeId}`
               : eq(costEvents.agentId, p.scopeId);
         const where = p.fundingSourceId ? and(scope, eq(costEvents.fundingSourceId, p.fundingSourceId)) : scope;
-        const events = await spendFor(where);
         const source = p.fundingSourceId ? sources.get(p.fundingSourceId) : undefined;
+        const window = toWindow(p, source);
+        const spend = await spendFor(where, [boundsAsEpoch(windowBounds(window, now))]);
         out.push({
           policy: p,
-          status: budgetStatus({ limitMicros: p.limitMicros, window: toWindow(p, source), onLimit: p.onLimit, warnAt: p.warnAt }, events, now),
+          status: budgetStatus({ limitMicros: p.limitMicros, window, onLimit: p.onLimit, warnAt: p.warnAt }, [], now, spend.ranges[0]),
         });
       }
       return out;

@@ -28,6 +28,21 @@ export const WatchdogSettings = z.object({
   alertMinutes: z.number().int().min(5).max(24 * 60),
   /** Alerts handed to the CEO in a rolling hour; past it they go to the owner, so a loop can't keep starting CEO runs. */
   maxCeoAlertsPerHour: z.number().int().min(1).max(30),
+  /** The progress contract (BOS-314): runs that go quiet are asked for a status and flagged, reviews that stall move on. It works even while the watchdog is off. */
+  progressContract: z.boolean(),
+  /** A working run with no post on its ticket this long is sent a note asking for a status. */
+  silentSteerMinutes: z.number().int().min(5).max(24 * 60),
+  /** ...and flagged to the Scrum Master after this long. */
+  silentFlagMinutes: z.number().int().min(5).max(24 * 60),
+  /** An in-progress ticket whose note still says "likely / not proven" after this long goes to the CEO. */
+  unprovenHours: z.number().min(0.25).max(24 * 14),
+  /**
+   * The idle-capacity rules (BOS-659): an agent holding in-progress work with no run for this long is
+   * handed to the Scrum Master to re-wake, short enough to notice half the slots going quiet.
+   */
+  idleAgentMinutes: z.number().int().min(5).max(24 * 60),
+  /** Fewer than this many run slots busy for `spareCapacityMinutes` while work waits means the company is under-used: the CEO is told. */
+  spareCapacityMinutes: z.number().int().min(5).max(24 * 60),
 });
 export type WatchdogSettings = z.infer<typeof WatchdogSettings>;
 
@@ -46,6 +61,12 @@ export const DEFAULT_WATCHDOG: WatchdogSettings = {
   maxNudgesPerHour: 12,
   alertMinutes: 30,
   maxCeoAlertsPerHour: 6,
+  progressContract: true,
+  silentSteerMinutes: 30,
+  silentFlagMinutes: 60,
+  unprovenHours: 2,
+  idleAgentMinutes: 15,
+  spareCapacityMinutes: 20,
 };
 
 /** Reads a stored value defensively: unknown or bad fields fall back to the defaults. */
@@ -59,13 +80,15 @@ export function readWatchdogSettings(v: unknown): WatchdogSettings {
   return out;
 }
 
-export const WATCHDOG_RULES = ["unassigned", "run_crashed", "run_ended_unmoved", "stale_in_progress", "stale_review", "stale_blocked", "blocked_until_passed", "review_loop", "owner_decision_waiting"] as const;
+export const WATCHDOG_RULES = ["unassigned", "run_crashed", "run_ended_unmoved", "idle_agent", "unstarted", "stale_in_progress", "stale_review", "stale_blocked", "blocked_until_passed", "review_loop", "owner_decision_waiting"] as const;
 export type WatchdogRule = (typeof WATCHDOG_RULES)[number];
 
 export const WATCHDOG_RULE_LABEL: Record<WatchdogRule, string> = {
   unassigned: "nobody is assigned",
   run_crashed: "its last run crashed",
   run_ended_unmoved: "its last run ended without moving it",
+  idle_agent: "in progress with no run for the set time",
+  unstarted: "ready to start but no run has started on it",
   stale_in_progress: "no movement in progress",
   stale_review: "no movement in review",
   stale_blocked: "blocked with no movement",
@@ -74,17 +97,17 @@ export const WATCHDOG_RULE_LABEL: Record<WatchdogRule, string> = {
   owner_decision_waiting: "it waits on the owner's decision",
 };
 
-export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo", "daily_summary", "urgent_alert", "alert_hop", "alert_resolved", "record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page", "record_alert_skip"] as const;
+export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo", "daily_summary", "urgent_alert", "alert_hop", "alert_resolved", "record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page", "record_alert_skip", "quota_held_alert", "record_quota_held_alert", "spare_capacity_alert", "record_spare_capacity_alert"] as const;
 export type WatchdogActionKind = (typeof WATCHDOG_ACTIONS)[number];
 
 /**
  * Record-only entries (BOS-166): what the watchdog would have done in rehearsal. Nothing reached
  * anyone, so they never count toward a cap or toward the once-per-hand-off rule.
  */
-export const WATCHDOG_RECORD_KINDS: readonly WatchdogActionKind[] = ["record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page", "record_alert_skip"];
+export const WATCHDOG_RECORD_KINDS: readonly WatchdogActionKind[] = ["record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page", "record_alert_skip", "record_quota_held_alert", "record_spare_capacity_alert"];
 
 /** The caps and the once-per-hand-off rule never count these (BOS-166); every other log entry is real. */
-export const WATCHDOG_NON_CAPPED_KINDS: readonly WatchdogActionKind[] = [...WATCHDOG_RECORD_KINDS, "urgent_alert", "alert_hop", "alert_resolved", "tripped", "undo", "daily_summary"];
+export const WATCHDOG_NON_CAPPED_KINDS: readonly WatchdogActionKind[] = [...WATCHDOG_RECORD_KINDS, "urgent_alert", "alert_hop", "alert_resolved", "tripped", "undo", "daily_summary", "quota_held_alert", "spare_capacity_alert"];
 
 /** True for a rehearsal entry, written while record-only mode was on. */
 export const isRecordedAction = (kind: string) => (WATCHDOG_RECORD_KINDS as readonly string[]).includes(kind);
@@ -123,4 +146,8 @@ export const WATCHDOG_ACTION_LABEL: Record<WatchdogActionKind, string> = {
   record_auto_escalate: "Would have escalated to the CEO",
   record_urgent_page: "Would have paged you",
   record_alert_skip: "Would have passed Boss Man's own alert up the ladder",
+  quota_held_alert: "Told the CEO work is held by the usage limit",
+  record_quota_held_alert: "Would have told the CEO work is held by the usage limit",
+  spare_capacity_alert: "Told the CEO there is spare capacity while work waits",
+  record_spare_capacity_alert: "Would have told the CEO there is spare capacity",
 };

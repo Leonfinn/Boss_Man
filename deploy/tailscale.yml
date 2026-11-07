@@ -1,0 +1,54 @@
+# HTTPS for Boss Man on your tailnet only, through Tailscale Serve (BOS-242). Add it to COMPOSE_FILE in .env:
+#   COMPOSE_FILE=docker-compose.yml:deploy/tailscale.yml   (plus your host file, if any, e.g. deploy/truenas.yml)
+# Steps: docs/20-https-tailscale.md (any Docker host). The subnet and address are BOSSMAN_EDGE_SUBNET / BOSSMAN_EDGE_IP in .env.
+# BOSSMAN_EDGE_SERVER_IP (default 172.30.0.3) is the server's own address on edge; keep it in the subnet and different from BOSSMAN_EDGE_IP.
+#
+# Why a sidecar on its own network: Boss Man believes X-Forwarded-For / X-Forwarded-Proto only from
+# the exact address BOSSMAN_EDGE_IP (BOSSMAN_TRUSTED_PROXIES). That address lives on the private "edge" network, which
+# only this container and the server join. LAN requests reach the server through the published port on the
+# default network, so they can never arrive from this address.
+#
+# Serve (not Funnel): serve.json has no AllowFunnel, so nothing is published on the public internet. It fronts
+# only the owner's web/login port (server:3100), never the feedback portal (3101).
+services:
+  tailscale:
+    image: tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c
+    restart: unless-stopped
+    hostname: ${TS_HOSTNAME:-boss-man}
+    environment:
+      # Set a one-time auth key (Tailscale admin > Settings > Keys) for the first start; remove it from .env afterwards, the login is kept in the state folder.
+      # Without a key containerboot waits for an interactive login, gives up after ~60 s, exits 0 and restarts with a new login link, so the login never completes (docs/20-https-tailscale.md, Troubleshooting).
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTH_ONCE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      # Userspace networking: no /dev/net/tun and no extra capabilities, so it also runs in a Proxmox LXC. Serve only proxies to the server over Docker's network.
+      TS_USERSPACE: "true"
+    volumes:
+      - ${BOSSMAN_DATA:-/srv/boss-man/data}/tailscale:/var/lib/tailscale
+      - ./deploy/tailscale:/config:ro
+    networks:
+      edge:
+        ipv4_address: ${BOSSMAN_EDGE_IP:-172.30.0.2}
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+    depends_on: [server]
+
+  server:
+    # Name every network: the server also needs default (the published port) and launcher (runner starts).
+    networks:
+      default: {}
+      launcher: {}
+      edge:
+        # Pinned so Docker never hands the sidecar's address to the server first (it would, as the lowest free one).
+        ipv4_address: ${BOSSMAN_EDGE_SERVER_IP:-172.30.0.3}
+    environment:
+      BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_EDGE_IP:-172.30.0.2}
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: ${BOSSMAN_EDGE_SUBNET:-172.30.0.0/29}

@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
-import { ticketRef } from "@boss-man/shared";
+import { ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -134,14 +135,14 @@ export function QuickAdd({ label, button, onAdd }: { label: string; button: stri
   );
 }
 
-type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean; featureId: string | null; acceptanceCriteria?: string[] };
+type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean; featureId: string | null; acceptanceCriteria?: Criterion[] };
 type NewFeatureInput = { title: string; description: string | null; planWithCeo: boolean } & GoalLink;
 /** What the add form was opened for: a feature, or a task (optionally inside one feature). */
 type Adding = { mode: "feature" | "task"; featureId: string };
 
 /** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
 function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onGrill, onClose }: { companyId: string; initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onGrill: (d: { kind: "task" | "feature"; title: string; description: string | null }) => Promise<unknown>; onClose: () => void }) {
-  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "" };
+  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "", after: new Set<number>() };
   const [mode, setMode] = useState(initial.mode);
   const [form, setForm] = useState(blank);
   const img = useImageAttach(companyId);
@@ -154,7 +155,7 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
   const body = () => withAttachments(form.body, img.attached).trim();
   const submit = async (e?: FormEvent) => {
     e?.preventDefault();
-    if (!form.title.trim() || busy) return;
+    if (!form.title.trim() || busy || tooLongToSend(body())) return;
     setBusy(true);
     try {
       if (isFeature) await onAddFeature({ title: form.title.trim(), description: body() || null, planWithCeo: form.plan && hasCeo, ...form.goal });
@@ -167,7 +168,11 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
           assigneeAgentId: form.assignee && form.assignee !== "owner" ? form.assignee : null,
           assignedToOwner: form.assignee === "owner",
           featureId: form.feature || null,
-          acceptanceCriteria: form.criteria.split("\n").map((l) => l.trim()).filter(Boolean),
+          acceptanceCriteria: form.criteria
+            .split("\n")
+            .map((l, i) => ({ line: l.trim(), on: form.after.has(i) }))
+            .filter((x) => x.line)
+            .map((x): Criterion => (x.on ? { text: x.line, after: "merge" } : x.line)),
         });
       onClose();
     } catch (err) {
@@ -178,13 +183,22 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
   };
   // Hands the draft to the CEO, who questions the owner in chat and then creates it.
   const grill = async () => {
-    if (!form.title.trim() || busy) return;
+    if (!form.title.trim() || busy || tooLongToSend(body())) return;
     setBusy(true);
     try {
       await onGrill({ kind: mode, title: form.title.trim(), description: body() || null });
     } catch (err) {
       setError((err as Error).message);
       setBusy(false);
+    }
+  };
+  // Too long for the description: put it in a .txt file and link that instead, so it isn't cut.
+  const bodyAsFile = async (long: string) => {
+    try {
+      const markdown = await img.uploadText(long, "description.txt");
+      setForm((f) => ({ ...f, body: withAttachments("The text was too long for the description box, so it's in this file:\n\n", [markdown]) }));
+    } catch (err) {
+      setError((err as Error).message);
     }
   };
   const agentChosen = !isFeature && !!form.assignee && form.assignee !== "owner";
@@ -212,26 +226,25 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
       </div>
       <div className="field">
         <label htmlFor="nt-body">{isFeature ? "What problem does it solve, and for whom?" : "Description"}</label>
-        <textarea
+        <OwnerMessageBox
           id="nt-body"
+          label={isFeature ? "What problem does it solve, and for whom?" : "Description"}
           rows={6}
-          maxLength={20_000}
           placeholder={isFeature ? "" : "What should be done, and what counts as finished."}
           value={form.body}
-          onChange={(e) => setForm({ ...form, body: e.target.value })}
+          onChange={(text) => setForm({ ...form, body: text })}
           onPaste={img.onPaste}
-          style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
-        />
-        <ImagePreviews attached={img.attached} onRemove={img.remove} />
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {img.button}
-          <small className="muted">Or paste a screenshot into the description.</small>
-        </div>
-        {img.error && (
-          <p className="error" role="alert">
-            {img.error}
-          </p>
-        )}
+          onSendAsFile={bodyAsFile}
+          attaching={img.busy}
+          error={img.error}
+          textareaStyle={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
+        >
+          <ImagePreviews attached={img.attached} onRemove={img.remove} />
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {img.button}
+            <small className="muted">Or paste a screenshot into the description.</small>
+          </div>
+        </OwnerMessageBox>
       </div>
       {!isFeature && (
         <div className="field">
@@ -245,7 +258,36 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
             onChange={(e) => setForm({ ...form, criteria: e.target.value })}
             style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
           />
-          <small className="muted">Optional, up to 10. The agent reports pass or fail against each when it asks for review.</small>
+          <small className="muted">Optional, up to 10. The agent reports pass or fail against each before merge when it asks for review.</small>
+          {form.criteria
+            .split("\n")
+            .some((l) => l.trim()) && (
+            <fieldset style={{ border: "1px solid var(--line-strong)", borderRadius: 8, padding: "6px 10px", margin: 0 }}>
+              <legend style={{ fontSize: 13 }} className="muted">
+                On a real host (checked after merge)
+              </legend>
+              {form.criteria.split("\n").map((l, i) =>
+                l.trim() ? (
+                  <label key={i} style={{ display: "block", fontSize: 14 }}>
+                    <input
+                      type="checkbox"
+                      checked={form.after.has(i)}
+                      onChange={(e) =>
+                        setForm((f) => {
+                          const n = new Set(f.after);
+                          if (e.target.checked) n.add(i);
+                          else n.delete(i);
+                          return { ...f, after: n };
+                        })
+                      }
+                    />{" "}
+                    {l.trim()}
+                  </label>
+                ) : null,
+              )}
+              <small className="muted">Tick the checks only the real host can settle: reviewers skip them, and the task stays open after the merge until they're reported.</small>
+            </fieldset>
+          )}
         </div>
       )}
       {isFeature ? (
@@ -304,11 +346,11 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
         </p>
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <button className="btn primary" type="submit" disabled={busy || !form.title.trim()}>
+        <button className="btn primary" type="submit" disabled={busy || !form.title.trim() || tooLongToSend(body())}>
           {isFeature ? "Add feature" : agentChosen ? "Add and start" : "Add to backlog"}
         </button>
         {hasCeo && (
-          <button className="btn" type="button" disabled={busy || !form.title.trim()} onClick={() => void grill()}>
+          <button className="btn" type="button" disabled={busy || !form.title.trim() || tooLongToSend(body())} onClick={() => void grill()}>
             Let the CEO question me first
           </button>
         )}
@@ -423,12 +465,19 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // A saved feature that is not in this company's list (other company, deleted) counts as any.
   const featureFilter = filters.feature === "any" || filters.feature === "none" || featureList.some((f) => f.id === filters.feature) ? filters.feature : "any";
   const visibleFeatures = featureList.filter((f) => shownStates.includes(f.status));
-  // The review column is two lanes: agent review, and every ticket, from any column, whose next step is the owner's.
-  const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Agent review" : c.name);
+  // The review column is three lanes (BOS-667): still with its reviewers, approved by all of them and
+  // only merging, and every ticket, from any column, whose next step is the owner's. Approved work used
+  // to sit with the work awaiting review, so a long merge line read as a reviewer shortage.
+  const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Awaiting review" : c.name);
   const waiting = (board.data?.columns ?? []).flatMap((c) => c.tickets.filter((t) => t.waitingOnOwner));
-  const lanes = (board.data?.columns ?? []).flatMap((col) => {
-    const lane = { col, tickets: col.tickets.filter((t) => !t.waitingOnOwner), mine: false };
-    return col.systemState === "review" ? [lane, { col, tickets: waiting, mine: true }] : [lane];
+  const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean }> => {
+    const open = col.tickets.filter((t) => !t.waitingOnOwner);
+    if (col.systemState !== "review") return [{ col, tickets: open, mine: false }];
+    return [
+      { col, tickets: open.filter((t) => t.reviewStage !== "merging"), mine: false },
+      { col, tickets: open.filter((t) => t.reviewStage === "merging"), mine: false, merging: true },
+      { col, tickets: waiting, mine: true },
+    ];
   });
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
@@ -616,7 +665,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             ))}
           </div>
           {view !== "features" && (
-            <input type="search" aria-label="Search tasks" placeholder="Search: HOL-12, title, words…" value={query} onChange={(e) => setQuery(e.target.value)} style={{ minWidth: 220 }} />
+            <input type="search" aria-label="Search tasks" placeholder="Search: HOL-12, title, words…" value={query} onChange={(e) => setQuery(e.target.value)} />
           )}
           {view !== "features" && (
             <label>
@@ -674,7 +723,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
-          {lanes.map(({ col, tickets, mine }) => {
+          {lanes.map(({ col, tickets, mine, merging }) => {
             const full = col.wipLimit != null && col.tickets.length >= col.wipLimit;
             const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
             // Every word must appear in the ticket's reference, title, feature or description.
@@ -688,13 +737,23 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             const rows = done ? [...shown].sort((x, y) => (y.lastActivityAt ?? "").localeCompare(x.lastActivityAt ?? "")) : shown;
             const visible = done && !allDone && !words.length ? rows.slice(0, DONE_SHOWN) : rows;
             return (
-              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : `lane-${col.id}`}>
+              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : merging ? "merging" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : `lane-${col.id}`}>
                 {mine ? (
                   <header className="lane-head">
                     <div className="lane-title">
                       <h2 id="lane-your-review">Your review</h2>
                       <span className="count-badge">{shown.length}</span>
                     </div>
+                  </header>
+                ) : merging ? (
+                  <header className="lane-head">
+                    <div className="lane-title">
+                      <h2 id="lane-merging">Approved, merging</h2>
+                      <span className="mono">{shown.length}</span>
+                    </div>
+                    <span className="lane-hint">
+                      Every reviewer approved. Boss Man checks and merges these itself. <a href={`#/merge-queue/${current?.companyId ?? ""}`}>See the merge queue</a>
+                    </span>
                   </header>
                 ) : renaming === col.id ? (
                   <RenameColumn col={col} onCancel={() => setRenaming(null)} onSave={async (name) => { await rename(col.id, name); setRenaming(null); }} />
@@ -716,7 +775,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </header>
                 )}
-                {shown.length === 0 && <p className="lane-empty">{EMPTY_HINT[col.systemState] ?? "No tasks here."}</p>}
+                {shown.length === 0 && <p className="lane-empty">{merging ? "Nothing approved is waiting to merge." : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>}
                 {done ? (
                   <>
                     <ul className="done-list">
@@ -796,6 +855,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         </span>
                       )}
                       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
+                      {merging && t.mergeNote && <span className="note">{t.mergeNote}</span>}
                       {!!t.working?.length && (
                         <span className="working" role="status">
                           <span className="pulse-dot" aria-hidden="true" />

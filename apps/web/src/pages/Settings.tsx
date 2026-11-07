@@ -1,5 +1,5 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { RUNNER_ADDONS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
+import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, ApiError, type Agent, type Company, type FundingSource, type Project } from "../api";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
@@ -12,7 +12,8 @@ import { toBase64 } from "./Skills";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
-type RunnerStatus = ({ registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null }) & { launcher?: Launched };
+type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
+type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; report?: CompanyReport | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
 type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
@@ -130,18 +131,24 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           Boss Man's launcher runs this company's runner as the container <code className="mono">boss-man-runner-{launched.slug}</code>, locked down, with its files under <code className="mono">companies/{launched.slug}</code> in your data folder.
         </p>
         <dl className="facts" role="status">
-          <dt>Connection</dt>
-          <dd>
-            {connected ? (
-              <span className="tag green">Connected</span>
-            ) : c?.state === "running" ? (
-              <span className="tag amber">Starting…</span>
-            ) : c ? (
-              <span className="tag amber">{c.state[0]!.toUpperCase() + c.state.slice(1)}</span>
+          <dt>Now</dt>
+          <dd data-testid="runner-now">
+            {s?.report ? (
+              <span className={s.report.live.ok ? undefined : "tag red"}>{s.report.live.text}</span>
             ) : (
-              <span className="tag">Not started</span>
-            )}{" "}
-            {s?.registered && <Since connected={!!connected} at={s.lastSeenAt} />}
+              <>
+                {connected ? (
+                  <span className="tag green">Connected</span>
+                ) : c?.state === "running" ? (
+                  <span className="tag amber">Starting…</span>
+                ) : c ? (
+                  <span className="tag amber">{c.state[0]!.toUpperCase() + c.state.slice(1)}</span>
+                ) : (
+                  <span className="tag">Not started</span>
+                )}{" "}
+                {s?.registered && <Since connected={!!connected} at={s.lastSeenAt} />}
+              </>
+            )}
           </dd>
           {/* Docker's own words, e.g. "Up 14 hours (healthy)": how long the container has run, not the connection. */}
           {c && (
@@ -157,6 +164,11 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </dl>
+        {s?.report?.last && (
+          <div data-testid="company-update-history">
+            <UpdateHistory r={s.report.last} />
+          </div>
+        )}
         {launched.error && (
           <p className="error" role="alert">
             {launched.error}
@@ -192,9 +204,15 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
       {s && !s.registered && <p>This company has no runner yet. A runner is the container its agents work in; it connects out to this server, so it needs no open ports.</p>}
       {s?.registered && (
         <dl className="facts" role="status">
-          <dt>Connection</dt>
-          <dd>
-            {s.connected ? <span className="tag green">Connected</span> : <span className="tag amber">Offline</span>} <Since connected={s.connected} at={s.lastSeenAt} />
+          <dt>Now</dt>
+          <dd data-testid="runner-now">
+            {s.report ? (
+              <span className={s.report.live.ok ? undefined : "tag red"}>{s.report.live.text}</span>
+            ) : (
+              <>
+                {s.connected ? <span className="tag green">Connected</span> : <span className="tag amber">Offline</span>} <Since connected={s.connected} at={s.lastSeenAt} />
+              </>
+            )}
           </dd>
           {s.imageVersion && (
             <>
@@ -209,6 +227,11 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </dl>
+      )}
+      {s?.registered && s.report?.last && (
+        <div data-testid="company-update-history">
+          <UpdateHistory r={s.report.last} />
+        </div>
       )}
       {token ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1101,6 +1124,11 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "maxNudgesPerHour", label: "Most Scrum Master actions per hour", unit: "actions" },
   { key: "alertMinutes", label: "Move an alert up a level after", unit: "minutes" },
   { key: "maxCeoAlertsPerHour", label: "Most alerts sent to the CEO per hour", unit: "alerts" },
+  { key: "silentSteerMinutes", label: "Ask a silent run for a status after", unit: "minutes" },
+  { key: "silentFlagMinutes", label: "Flag a silent run to the Scrum Master after", unit: "minutes" },
+  { key: "unprovenHours", label: "Flag an unproven cause ('likely') after", unit: "hours" },
+  { key: "idleAgentMinutes", label: "Re-wake an agent whose in-progress work has no run for", unit: "minutes" },
+  { key: "spareCapacityMinutes", label: "Tell the CEO the company is under-used after", unit: "minutes" },
 ];
 
 /** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */
@@ -1370,6 +1398,298 @@ function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: ()
   );
 }
 
+/** Standing rules (BOS-353): what every agent reads at the start of every run. The owner can edit, clear or undo them here; agents cannot. */
+function StandingRules({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  type Rules = { text: string; by: string | null; at: string | null; max: number };
+  const [rules, setRules] = useState<Rules | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [draft, setDraft] = useState<string | null>(null);
+  const act = useAction();
+  useEffect(() => {
+    let live = true;
+    void api<Rules>(`/api/companies/${company.id}/standing-rules`)
+      .then((r) => live && setRules(r))
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [company.id]);
+  const url = `/api/companies/${company.id}/standing-rules`;
+  return (
+    <Section id="standing-rules-h" title="Standing rules">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The rules every agent reads at the start of every run. Your CEO can set them, and so can you; no other agent can change them. They are capped at {rules?.max ?? 2000} characters.
+      </p>
+      {failed ? (
+        <p className="muted">Couldn't load the standing rules.</p>
+      ) : !rules ? (
+        <p className="muted">Loading…</p>
+      ) : draft !== null ? (
+        <>
+          <textarea aria-label="Standing rules" value={draft} onChange={(e) => setDraft(e.target.value)} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={act.busy}
+              onClick={() =>
+                void act.run(async () => {
+                  const saved = await api<Rules>(url, { method: "PUT", body: { text: draft } });
+                  setRules(saved);
+                  setDraft(null);
+                  onChanged();
+                  return "Saved.";
+                })
+              }
+            >
+              Save
+            </button>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(null)}>
+              Cancel
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          {rules.text ? (
+            <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit", fontSize: 14, padding: 12, background: "var(--panel, #f6f6f6)", borderRadius: 6 }}>{rules.text}</pre>
+          ) : (
+            <p className="muted">No standing rules are set yet.</p>
+          )}
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            {rules.text ? "Last changed by " : "Last cleared by "}
+            {rules.by === "undo" ? "an undo" : (rules.by ?? "no one")}
+            {rules.at ? ` on ${when(rules.at)}` : ""}.
+          </p>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(rules.text)}>
+              Edit
+            </button>
+            {rules.text ? (
+              <button
+                type="button"
+                className="btn"
+                disabled={act.busy}
+                onClick={() => {
+                  if (!confirm("Clear the standing rules? Agents will stop reading them from the next run.")) return;
+                  void act.run(async () => {
+                    const saved = await api<Rules>(url, { method: "PUT", body: { text: "" } });
+                    setRules(saved);
+                    onChanged();
+                    return "Cleared.";
+                  });
+                }}
+              >
+                Clear
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="btn"
+              disabled={act.busy || !rules.at}
+              onClick={() =>
+                void act.run(async () => {
+                  const saved = await api<Rules>(`${url}/undo`, { method: "POST" });
+                  setRules(saved);
+                  onChanged();
+                  return "Undone.";
+                })
+              }
+            >
+              Undo last change
+            </button>
+          </div>
+        </>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
+/** How the rules judge advises on permission cards (BOS-337). It only picks the suggested button; it never answers a card. */
+function PermissionJudgeSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const act = useAction();
+  const mode = company.permissionJudge ?? "watch";
+  return (
+    <Section id="permission-judge-h" title="Advice on permission cards">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Boss Man can look at where a command reaches (its own folder, secrets, other agents, the network) and suggest Allow or Deny with a one-line reason. It only suggests: you or the CEO still press the button, and pushes to main, publishing, deploys, secrets and other agents' work stay decided by fixed rules.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="permission-judge">Advice</label>
+        <select
+          id="permission-judge"
+          value={mode}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { permissionJudge: e.target.value } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        >
+          <option value="advise">Advise: suggest a button and say why</option>
+          <option value="watch">Watch: only record what it would suggest next to your answer</option>
+          <option value="off">Off: use the older text rules</option>
+        </select>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null } | null; sandboxCheckedAt?: string | null };
+
+/** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
+function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const act = useAction();
+  const status = usePoll((signal) => api<FenceStatus>(`/api/companies/${company.id}/runner`, { signal }), 30_000, `fence-${company.id}`);
+  const mode = company.fenceMode ?? "off";
+  const sb = status.data?.sandbox ?? null;
+  const hostLine = !status.data?.registered
+    ? "This company has no runner yet."
+    : !sb
+      ? "This host hasn't reported its fence level yet. It reports each time the runner starts."
+      : sb.level === "unavailable"
+        ? "This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). Agents run as before."
+        : `This host fences agents ${sb.level === "full" ? "fully" : "partly"}${sb.missing.length ? ` (not covered: ${sb.missing.join(", ")})` : ""}.${sb.probe === false ? " Its self-test did not see a write outside the agent's folders refused." : ""} Last checked ${status.data?.sandboxCheckedAt ? when(status.data.sandboxCheckedAt) : "never"}.`;
+  return (
+    <Section id="fence-h" title="Agent fence">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
+      </p>
+      <p style={{ fontSize: 14 }}>{hostLine}</p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="fence-mode">Fence</label>
+        <select
+          id="fence-mode"
+          value={mode}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { fenceMode: e.target.value } });
+              onChanged();
+              return "Saved. It applies to runs that start from now on.";
+            })
+          }
+        >
+          <option value="off">Off: agents run as before</option>
+          <option value="watch">Watch: agents run inside the fence and every refusal is logged</option>
+          <option value="enforce" disabled>
+            Enforce: not available yet (waiting for a security fix, BOS-323)
+          </option>
+        </select>
+      </div>
+      <details style={{ marginTop: 10 }}>
+        <summary>Setting up a host</summary>
+        <ul style={{ fontSize: 14 }}>
+          <li>The fence needs a Linux kernel with Landlock (5.13 or newer, and 6.x for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
+          <li>The runner tests the fence each time it starts. If this page says "can't fence", update the host's kernel, or check that the container's security profile doesn't block Landlock, then restart the runner.</li>
+          <li>A fenced agent has its own temporary folder for each run and can't write to the shared /tmp. A skill that hard-codes /tmp needs to use the folder in $TMPDIR instead.</li>
+          <li>Start with Watch on one company, look at the permission log after a few days, and fix what it shows before anything stricter.</li>
+        </ul>
+      </details>
+      {act.view}
+    </Section>
+  );
+}
+
+type SecondOpinion = { enabled: boolean; baseUrl: string; model: string; secretId: string | null };
+
+/** The optional model second opinion on permission cards (BOS-338): off by default. The key is a secret from the encrypted store. */
+function SecondOpinionSetting({ company }: { company: Company }) {
+  const cur = usePoll((signal) => api<SecondOpinion>(`/api/companies/${company.id}/second-opinion`, { signal }), 600_000, `second-${company.id}`);
+  const secrets = usePoll((signal) => api<Array<{ id: string; name: string }>>("/api/secrets", { signal }), 600_000, "secrets");
+  const [v, setV] = useState<SecondOpinion | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const sv = useSaveState(v);
+  // Only the first load fills the form, so a background refresh never overwrites an edit in progress.
+  useEffect(() => {
+    if (!cur.data || v) return;
+    setV(cur.data);
+    sv.reset(cur.data);
+  }, [cur.data]);
+  if (!v) return null;
+  const judgeOff = (company.permissionJudge ?? "watch") === "off";
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    api(`/api/companies/${company.id}/second-opinion`, { method: "PUT", body: v })
+      .then(
+        () => (sv.markSaved(), setMsg("Saved.")),
+        (err: Error) => setMsg(err.message),
+      )
+      .finally(() => setBusy(false));
+  };
+  const test = () => {
+    setBusy(true);
+    setMsg("Asking the model…");
+    api<{ ok: boolean; message: string }>(`/api/companies/${company.id}/second-opinion/test`, { method: "POST", body: v })
+      .then(
+        (r) => setMsg(r.message),
+        (err: Error) => setMsg(err.message),
+      )
+      .finally(() => setBusy(false));
+  };
+  return (
+    <Section id="second-opinion-h" title="Second opinion from a model (optional)">
+      <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <p className="muted" style={{ fontSize: 14 }}>
+          Off by default. When it's on, a card the rules above would suggest allowing is also shown to a model you pick. It can only make the advice stricter: a card is suggested Allow only when both agree. If the model is slow (over 5 seconds), down, out of credit or gives an answer Boss Man can't read, the rules decide alone. It never presses a button. The card's text is sent to the provider, with tokens, keys and passwords removed first.
+        </p>
+        {judgeOff && <p className="muted" style={{ fontSize: 14 }}>Advice on permission cards is off, so the model isn't asked. Set it to Watch or Advise first.</p>}
+        <label>
+          <input type="checkbox" checked={v.enabled} onChange={(e) => setV({ ...v, enabled: e.target.checked })} /> Ask a model for a second opinion
+        </label>
+        <div>
+          <strong style={{ fontSize: 14 }}>Suggested models</strong> <span className="muted" style={{ fontSize: 14 }}>(from our test on 203 real cards; click one to fill in the fields)</span>
+          <ul style={{ margin: "6px 0", paddingLeft: 20, fontSize: 14 }}>
+            {SECOND_OPINION_PRESETS.map((p) => (
+              <li key={p.label}>
+                <button type="button" className="linkish" onClick={() => setV({ ...v, baseUrl: p.baseUrl, model: p.model })}>
+                  {p.label}
+                </button>{" "}
+                <span className="muted">— {p.note}</span>
+              </li>
+            ))}
+          </ul>
+          <small className="muted">Decision models such as Jev, d3 and the others that only return a score don't work for this: they can't tell safe from unsafe reliably and give no reason. Use a chat model.</small>
+        </div>
+        <div className="field">
+          <label htmlFor="second-url">Provider address</label>
+          <input id="second-url" value={v.baseUrl} placeholder="https://openrouter.ai/api/v1" onChange={(e) => setV({ ...v, baseUrl: e.target.value })} />
+          <small className="muted">Any OpenAI-compatible service (it must accept /chat/completions): OpenRouter, Synthetic, or your own server such as Ollama.</small>
+        </div>
+        <div className="field">
+          <label htmlFor="second-model">Model</label>
+          <input id="second-model" value={v.model} placeholder="openai/gpt-oss-safeguard-20b" onChange={(e) => setV({ ...v, model: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="second-key">API key</label>
+          <select id="second-key" value={v.secretId ?? ""} onChange={(e) => setV({ ...v, secretId: e.target.value || null })}>
+            <option value="">None (a local server)</option>
+            {(secrets.data ?? []).map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.name}
+              </option>
+            ))}
+          </select>
+          {!v.secretId && <small className="muted">Add the key under Secrets first, then pick it here.</small>}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <SaveButton {...sv} busy={busy} />
+          <button type="button" className="btn" disabled={busy || !v.baseUrl || !v.model} onClick={test}>
+            Test
+          </button>
+        </div>
+        {msg && <p role="status">{msg}</p>}
+      </form>
+    </Section>
+  );
+}
+
 /** The company's hourly nudge limit (BOS-73). */
 function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
@@ -1590,7 +1910,6 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
 }
 
 type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
-type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
 
 /** How many agents may run at once, in total and per company; the per-agent limit is fixed at one. */
 function RunLimits() {
@@ -1608,14 +1927,14 @@ function RunLimits() {
         <label htmlFor="limit-instance">Across all companies (1 to 32)</label>
         <input id="limit-instance" type="number" min={1} max={32} value={v.instance} onChange={(e) => setEdit({ ...v, instance: e.target.value })} style={{ width: 80 }} />
         <p className="muted" style={{ fontSize: 14 }}>
-          Agents running at once, across all companies (default {d.defaults.instance}). Each running agent uses memory and CPU on this machine and spends from its funding source. Higher: more work happens in parallel, but more spend at once and more load on the server. Lower: work queues for longer.
+          Agents running at once, across all companies (default {d.defaults.instance}). Each running agent uses memory and CPU on this machine and spends from its funding source. Higher: more work happens in parallel, but more spend at once and more load on the server. Lower: work queues for longer (you'll see "at a concurrency limit: all companies"). When a slot frees, a company with nothing running gets it first, so one busy company can't keep the others waiting.
         </p>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <label htmlFor="limit-company">In one company (1 to 16, no more than the number above)</label>
         <input id="limit-company" type="number" min={1} max={16} value={v.company} onChange={(e) => setEdit({ ...v, company: e.target.value })} style={{ width: 80 }} />
         <p className="muted" style={{ fontSize: 14 }}>
-          Agents running at once in one company (default {d.defaults.company}). Stops one busy company from using every slot. Higher: that company's tickets and reviews start sooner; spend can rise faster. Lower: tickets wait in the queue (you'll see "at a concurrency limit").
+          Agents running at once in one company (default {d.defaults.company}). Stops one busy company from using every slot. Higher: that company's tickets and reviews start sooner; spend can rise faster. Lower: tickets wait in the queue (you'll see "at a concurrency limit: this company").
         </p>
       </div>
       <p className="muted" style={{ fontSize: 14 }}>
@@ -1643,28 +1962,86 @@ function RunLimits() {
   );
 }
 
+type UpdateRow = { at: string; title: string; body: string; state: "ok" | "resolved" | "problem"; todo: string | null };
+type LiveRow = { slug: string; name: string; registered: boolean; connected: boolean; at: string | null; imageVersion: string | null; fault: string | null };
+type Report = { live: LiveRow[]; update: UpdateRow | null };
+type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+
+/** The last update as history: grey and "Resolved" once the runner has come back on its image, red only for something wrong now (BOS-465). */
+function UpdateHistory({ r }: { r: UpdateRow }) {
+  if (r.state === "ok")
+    return (
+      <p style={{ fontSize: 14 }} data-testid="update-history">
+        <span className="tag">OK</span> Last update {when(r.at)}: {r.title}. {r.body}
+      </p>
+    );
+  if (r.state === "resolved")
+    return (
+      <p style={{ fontSize: 14 }} data-testid="update-history">
+        <span className="tag grey">Resolved</span> Last update {when(r.at)}: it finished with problems ({r.body}), but the runner has since reconnected on the new image.
+      </p>
+    );
+  return (
+    <p style={{ fontSize: 14 }} data-testid="update-history">
+      <span className="tag red">PROBLEM</span> Last update {when(r.at)}: {r.title}. {r.body} <strong>{r.todo}</strong>
+    </p>
+  );
+}
+
+/** The live state of one company's runner, leading the panel: connected or not, and since when. */
+function LiveState({ r }: { r: LiveRow }) {
+  const connected = r.registered && r.connected;
+  return (
+    <li style={{ listStyle: "none" }}>
+      <strong>{r.name}</strong>{" "}
+      {connected ? <span className="tag green">Connected</span> : <span className="tag red">Not connected</span>}{" "}
+      <span className="muted">
+        {connected ? "since" : r.at ? "last seen" : ""} {r.at ? when(r.at) : ""}
+        {connected && r.imageVersion ? ` · image ${r.imageVersion}` : ""}
+        {r.fault ? ` · ${r.fault}` : ""}
+      </span>
+    </li>
+  );
+}
+
 /** Drain-then-swap for runner updates: start it by hand (after scripts/update-runner.sh built the image) or cancel one that is running. */
-function RunnerUpdate() {
+export function RunnerUpdate() {
   const view = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-settings");
+  const report = usePoll((signal) => api<Report>("/api/runner-report", { signal }), 5_000, "runner-report");
   const act = useAction();
   const m = view.data;
   if (!m) return null;
+  const r = report.data;
   return (
     <Section id="drain-h" title="Runner update">
+      {r && (
+        <div role="status" data-testid="runner-live">
+          <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Now</h3>
+          {r.live.length ? (
+            <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+              {r.live.map((l) => (
+                <LiveState key={l.slug} r={l} />
+              ))}
+            </ul>
+          ) : (
+            <p className="muted" style={{ fontSize: 14 }}>No company has a runner yet.</p>
+          )}
+        </div>
+      )}
       <p className="muted" style={{ fontSize: 14 }}>
         {m.on
           ? `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
-      <p role="status" style={{ fontSize: 14 }}>
-        {m.last ? (
-          <>
-            <span className={m.last.ok ? "tag" : "tag red"}>{m.last.ok ? "OK" : "PROBLEM"}</span> Last update {when(m.last.at)}: {m.last.title}. {m.last.body}
-          </>
+      <div>
+        {r?.update ? (
+          <UpdateHistory r={r.update} />
         ) : (
-          <span className="muted">No runner update has finished here yet.</span>
+          <p className="muted" style={{ fontSize: 14 }}>
+            No runner update has finished here yet.
+          </p>
         )}
-      </p>
+      </div>
       <div>
         <button
           type="button"
@@ -1691,6 +2068,74 @@ type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; c
 const ROLE_NOTE = { leader: "", standby: " (another copy is in charge; changes here are refused)", single: " (no leader lock)" };
 
 /** This copy of the server ("leader" runs the work, "standby" only serves reads; docs/09-self-deploy.md) and, when blue/green is on, both colours. */
+type HostFactsView = {
+  hostName: string | null;
+  reportedAt: string | null;
+  ownerFacts: string[];
+  facts: Record<string, { value: string; source: "host" | "owner"; at: string; conflict?: { confirmed: string; reported: string } }>;
+};
+const OWNER_FACT_LABELS: Record<string, string> = {
+  "network.publicAddress": "Address you reach Boss Man at from outside",
+  "repo.deployKeyAdded": "Deploy key added to the code host (yes or no)",
+};
+
+/** Settings → This host (BOS-419): what the host deployer reported, and the facts only the owner can confirm. */
+export function ThisHost() {
+  const facts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 30_000, "host-facts");
+  const act = useAction();
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const d = facts.data;
+  if (!d) return null;
+  const keys = Object.keys(d.facts).sort();
+  const save = (key: string) =>
+    act.run(async () => {
+      await api("/api/host-facts", { method: "PUT", body: { key, value: draft[key] ?? "" } });
+      facts.reload();
+      return "Saved.";
+    });
+  return (
+    <Section id="this-host-h" title="This host">
+      <p className="muted" style={{ fontSize: 14 }}>
+        {d.reportedAt
+          ? `What the host${d.hostName ? ` ${d.hostName}` : ""} last told Boss Man about itself, ${when(d.reportedAt)}. Agents' cards use these facts, so a card can't be raised while one it needs is missing.`
+          : "The host hasn't reported yet. Once its deployer runs, its facts show up here."}
+      </p>
+      {keys.length > 0 && (
+        <dl data-testid="host-facts" style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 16px", fontSize: 14 }}>
+          {keys.map((k) => {
+            const f = d.facts[k]!;
+            return (
+              <Fragment key={k}>
+                <dt className="mono">{k}</dt>
+                <dd>
+                  <span className="mono">{f.value}</span> <span className="muted">({f.source === "host" ? "reported by the host" : "confirmed by you"})</span>
+                  {f.conflict && (
+                    <span className="error" role="alert">
+                      {" "}
+                      You confirmed "{f.conflict.confirmed}" but the host reports "{f.conflict.reported}". The host's value is used.
+                    </span>
+                  )}
+                </dd>
+              </Fragment>
+            );
+          })}
+        </dl>
+      )}
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Facts only you can give</h3>
+      {d.ownerFacts.map((k) => (
+        <div key={k} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <label htmlFor={`hf-${k}`}>{OWNER_FACT_LABELS[k] ?? k}</label>
+          <input id={`hf-${k}`} className="mono" maxLength={500} placeholder={d.facts[k]?.value ?? ""} value={draft[k] ?? ""} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} />
+          <button type="button" className="btn" disabled={act.busy || !(draft[k] ?? "").trim() || d.facts[k]?.source === "host"} onClick={() => void save(k)}>
+            Confirm
+          </button>
+        </div>
+      ))}
+      {act.view}
+    </Section>
+  );
+}
+
 function ServerPanel() {
   const h = usePoll((signal) => api<Health>("/api/health", { signal }), 10_000, "server-role");
   const bg = usePoll((signal) => api<BlueGreen>("/api/bluegreen", { signal }), 10_000, "bluegreen");
@@ -1720,6 +2165,16 @@ function ServerPanel() {
             {b.colours.map((c) => (
               <ColourRow key={c.colour} c={c} />
             ))}
+            {b.colours.some((c) => !c.up) && (
+              <>
+                <dt>Note</dt>
+                <dd data-testid="colour-down-note">
+                  {b.colours.find((c) => c.colour === b.self)?.role === "leader"
+                    ? "One colour is not running, so there is nothing to switch back to. This is normal after a finished update (the old copy is stopped on purpose); if it is not, check the last update's result."
+                    : "This copy is not leading and the other colour is not running, so nothing is in charge. Start the live colour on the host and send it SIGUSR2; the update's alert lists the exact commands. If both colours are stopped this page cannot load at all, so use that alert."}
+                </dd>
+              </>
+            )}
           </>
         )}
       </dl>
@@ -1970,6 +2425,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
           <>
             <ServerPanel />
             <SelfDeploy go={go} />
+            <ThisHost />
             <RunLimits />
           </>
         )}
@@ -2019,6 +2475,10 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <NudgeCap company={company} onChanged={onChanged} />
             <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
+            <StandingRules company={company} onChanged={onChanged} />
+            <PermissionJudgeSetting company={company} onChanged={onChanged} />
+            <FenceSetting company={company} onChanged={onChanged} />
+            <SecondOpinionSetting company={company} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />
             <Chapters company={company} />

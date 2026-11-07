@@ -5,6 +5,9 @@
 #
 #   proxy         Caddy. Owns the host ports (UI and portal) and the network name "server", so runners keep dialling
 #                 ws://server:3100 and reach whichever colour is live. Has no docker.sock and no launcher network.
+#   front         a private network (internal) shared by the proxy and the two colours only. The proxy has a fixed address on it
+#                 (BOSSMAN_FRONT_PROXY_IP) and reaches the live colour there as server-<colour>-front, a name that
+#                 resolves on this network alone. The colours trust forwarded headers from that one address and nobody else.
 #   server-blue / server-green   the same image built twice (tags boss-man-server:blue / :green). One leads; the other
 #                 is a standby. The host deployer builds the idle one, hands over and flips the proxy.
 #   migrate       one-shot `node dist/migrate.js`, run by the deployer before the idle colour starts.
@@ -23,6 +26,12 @@ x-server: &server
       condition: service_healthy
   secrets:
     - master_key
+  # Same limits and priority as the single server in docker-compose.yml.
+  # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.
+  # CPU weight left at Docker's default 1024 (BOS-412); runners get 512.
+  mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
+  mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
+  oom_score_adj: -500
   networks: [default, launcher]
   # /api/ready: the database answers. Standby and leader are both ready; the role is in the body.
   healthcheck:
@@ -47,9 +56,15 @@ x-server-env: &server-env
   BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
   BOSSMAN_PORTAL_PORT: "3101"
   BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
+  # The stall profiler (BOS-602): 0 turns it off. Empty = on.
+  BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
   BOSSMAN_DEPLOYER_DIR: /run/deployer
+  # JS heap cap in MiB, as in docker-compose.yml (BOS-410).
+  NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
   # The deployer runs the migrations (the migrate service) before a colour starts; a server only checks.
   BOSSMAN_MIGRATE_ON_START: "0"
+  # Forwarded headers are believed from the proxy's fixed address on the private "front" network, and from nobody else.
+  BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_FRONT_PROXY_IP:-172.30.0.18}
 
 services:
   # Parked: the proxy took its name and ports. `--profile single-server` would bring it back, which is not a supported mix.
@@ -60,6 +75,11 @@ services:
   server-blue:
     <<: *server
     image: boss-man-server:blue
+    networks:
+      default:
+      launcher:
+      front:
+        aliases: [server-blue-front]
     environment:
       <<: *server-env
       BOSSMAN_COLOUR: blue
@@ -69,6 +89,11 @@ services:
   server-green:
     <<: *server
     image: boss-man-server:green
+    networks:
+      default:
+      launcher:
+      front:
+        aliases: [server-green-front]
     environment:
       <<: *server-env
       BOSSMAN_COLOUR: green
@@ -94,6 +119,8 @@ services:
     networks:
       default:
         aliases: [server]
+      front:
+        ipv4_address: ${BOSSMAN_FRONT_PROXY_IP:-172.30.0.18}
     ports:
       # Same variables as the single server: UI on BOSSMAN_HOST_PORT, portal on BOSSMAN_PORTAL_HOST_PORT.
       - "${BOSSMAN_BIND:-127.0.0.1}:${BOSSMAN_HOST_PORT:-3100}:3100"
@@ -111,7 +138,12 @@ services:
     # The image's caddy binary carries this file capability; without it in the bounding set exec fails ("operation not permitted").
     cap_add: [NET_BIND_SERVICE]
     security_opt: ["no-new-privileges:true"]
+    # Double weight: the proxy is tiny and must never wait for CPU (BOS-412).
+    cpu_shares: 2048
     mem_limit: 128m
+    mem_reservation: 64m
+    # The proxy is the last thing the kernel may kill: when it dies, the UI is gone.
+    oom_score_adj: -900
     pids_limit: 64
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/api/ready"]
@@ -122,3 +154,13 @@ services:
 
   runner-app-co:
     depends_on: !override [proxy]
+
+networks:
+  # Proxy and the two colours only: no runners, no Tailscale, no internet. Fixed proxy address, colours from the range.
+  # If the default subnets clash with something on the host ("Pool overlaps"), set the three BOSSMAN_FRONT_* variables.
+  front:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${BOSSMAN_FRONT_SUBNET:-172.30.0.16/28}
+          ip_range: ${BOSSMAN_FRONT_RANGE:-172.30.0.24/29}

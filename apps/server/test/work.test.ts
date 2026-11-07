@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { decisions, reviewRequests, runs, ticketDependencies } from "../src/db/schema.js";
+import { decisions, reviewRequests, runs, ticketDependencies, wakes } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp;
@@ -104,6 +104,32 @@ describe("tickets waiting on the owner", () => {
     expect(((await cards()) as typeof by).find((x) => x.title === "Needs you")?.waitingOnOwner).toBe(false);
   });
 
+  it("tells review tickets still with a reviewer apart from approved ones that only wait to merge, on the board and the dashboard (BOS-667)", async () => {
+    const { company: c, ceo } = await company("Merge Co");
+    const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "Site" })).json();
+    const make = async (title: string) => (await req("POST", `/api/projects/${p.id}/tickets`, { title, state: "review", risk: "low" })).json() as { id: string };
+    const pending = await make("Still with a reviewer");
+    await t.db.insert(reviewRequests).values({ ticketId: pending.id, kind: "code", reviewerAgentId: ceo.id, round: 1 });
+    // Sent back once, then approved in round 2: only the newest round counts.
+    const approved = await make("Approved, waiting to merge");
+    await t.db.insert(reviewRequests).values([
+      { ticketId: approved.id, kind: "code", reviewerAgentId: ceo.id, round: 1, status: "changes_requested" },
+      { ticketId: approved.id, kind: "code", reviewerAgentId: ceo.id, round: 2, status: "approved" },
+    ]);
+    // Approved in round 1, back in review for round 2: with its reviewer again.
+    const reopened = await make("Back for another round");
+    await t.db.insert(reviewRequests).values([
+      { ticketId: reopened.id, kind: "code", reviewerAgentId: ceo.id, round: 1, status: "approved" },
+      { ticketId: reopened.id, kind: "code", reviewerAgentId: ceo.id, round: 2 },
+    ]);
+    const cards = (await req("GET", `/api/projects/${p.id}/board`)).json().columns.flatMap((x: { tickets: unknown[] }) => x.tickets) as Array<{ title: string; reviewStage: string | null; mergeNote: string | null; waitingOnOwner: boolean }>;
+    expect(cards.find((x) => x.title === "Still with a reviewer")).toMatchObject({ reviewStage: "awaiting_review", mergeNote: null, waitingOnOwner: false });
+    expect(cards.find((x) => x.title === "Approved, waiting to merge")).toMatchObject({ reviewStage: "merging", mergeNote: "Waiting to be checked and merged.", waitingOnOwner: false });
+    expect(cards.find((x) => x.title === "Back for another round")).toMatchObject({ reviewStage: "awaiting_review" });
+    const stats = (await req("GET", `/api/companies/${c.id}/dashboard`)).json().stats;
+    expect(stats).toMatchObject({ inReview: 3, awaitingReview: 2, approvedToMerge: 1 });
+  });
+
   it("flags a ticket in any column that waits on an owner question, but not one the CEO is asked", async () => {
     const { company: c } = await company("Ask Co");
     const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "Site" })).json();
@@ -187,5 +213,65 @@ describe("dependencies (R25)", () => {
     expect(after.working).toEqual([`${agent.name} working`]);
     // The card's time comes from the live run, not the older chat run.
     expect(after.workingSince).toBe("2026-10-20T09:00:00.000Z");
+  });
+});
+
+describe("the quota hold on a ticket's page (BOS-471)", () => {
+  /** The ticket's agent, paid from a Claude Max subscription, with one of its wakes held for the week. */
+  async function held(c: { id: string }, ticketId: string, opts: { agentHeld?: boolean; other?: string } = {}) {
+    const source = (await req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    const agent = (await req("POST", `/api/companies/${c.id}/agents`, { name: "Penfold" })).json() as { id: string };
+    await req("PATCH", `/api/agents/${agent.id}`, { fundingSourceId: source.id });
+    await req("PATCH", `/api/tickets/${ticketId}`, { assigneeAgentId: agent.id });
+    const until = new Date(Date.now() + 86_400_000);
+    // Its own ticket's wake holds it, or (BOS-253) a wake for another of its tickets.
+    await t.db.insert(wakes).values({ companyId: c.id, agentId: agent.id, ticketId: opts.agentHeld ? (opts.other ?? ticketId) : ticketId, reason: "assigned", status: "deferred", statusReason: "subscription seven_day window nearly used up", notBefore: until });
+    return { agent, until };
+  }
+
+  it("names the agent's account, and says no other ticket holds it", async () => {
+    const { company: c } = await company("Hold Co");
+    const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "App" })).json();
+    const tk = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Fix it", state: "ready" })).json();
+    await held(c, tk.id);
+    const detail = (await req("GET", `/api/tickets/${tk.id}`)).json();
+    expect(detail).toMatchObject({ quotaHeldSource: "Claude Max", quotaHeldReason: "subscription seven_day window nearly used up", quotaHeldOther: null });
+    expect(detail.quotaHeldUntil).toBeTruthy();
+  });
+
+  it("names the other ticket only when one really holds the agent", async () => {
+    const { company: c } = await company("Hold Co");
+    const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "App" })).json();
+    const tk = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Fix it", state: "ready" })).json();
+    const other = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Ship the dashboard", state: "ready" })).json();
+    await held(c, tk.id, { agentHeld: true, other: other.id });
+    const detail = (await req("GET", `/api/tickets/${tk.id}`)).json();
+    expect(detail.quotaHeldAgent).toBe(true);
+    expect(detail.quotaHeldOther).toMatchObject({ title: "Ship the dashboard" });
+    expect(detail.quotaHeldOther.ref).toMatch(/^[A-Z]+-\d+$/);
+  });
+
+  it("reports no hold on a ticket in review, waiting on the owner, or done, even when its agent is held", async () => {
+    const { company: c } = await company("Hold Co");
+    const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "App" })).json();
+    for (const state of ["review", "done"] as const) {
+      const tk = (await req("POST", `/api/projects/${p.id}/tickets`, { title: `Ticket ${state}`, state })).json();
+      await held(c, tk.id);
+      const detail = (await req("GET", `/api/tickets/${tk.id}`)).json();
+      expect(detail).toMatchObject({ systemState: state, quotaHeldUntil: null, quotaHeldSource: null });
+    }
+  });
+
+  it("says on the ticket that the owner's sign-off is waiting, so the button can settle it (BOS-471)", async () => {
+    const { company: c } = await company("Hold Co");
+    const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "App" })).json();
+    const tk = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Needs you", state: "review", risk: "high" })).json();
+    expect((await req("GET", `/api/tickets/${tk.id}`)).json().signoffWaiting).toBe(false);
+    const [d] = await t.db
+      .insert(decisions)
+      .values({ companyId: c.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: tk.id, reviewer: "R" } })
+      .returning();
+    await t.db.insert(ticketDependencies).values({ blockedTicketId: tk.id, blockerDecisionId: d!.id });
+    expect((await req("GET", `/api/tickets/${tk.id}`)).json().signoffWaiting).toBe(true);
   });
 });

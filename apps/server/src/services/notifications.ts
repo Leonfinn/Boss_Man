@@ -5,7 +5,7 @@
 // Boss Man only ever sends outbound requests and is never exposed at the router.
 import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
-import { effectiveLevel, inQuietHours, NOTIFY_LEVELS, type NotifyLevel } from "@boss-man/shared";
+import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, type NotifyLevel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, notifications, settings } from "../db/schema.js";
 import type { DecisionContext } from "./decisions.js";
@@ -15,14 +15,7 @@ export const NotifySettings = z.object({
     .object({
       start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:MM"),
       end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:MM"),
-      timeZone: z.string().refine((tz) => {
-        try {
-          new Intl.DateTimeFormat("en-GB", { timeZone: tz });
-          return true;
-        } catch {
-          return false;
-        }
-      }, "Use a time zone name such as Europe/London"),
+      timeZone: z.string().refine((tz) => isTimeZone(tz), "Use a time zone name such as Europe/London"),
     })
     .nullable(),
   /** Notifications per agent per hour before the rest become notes. */
@@ -124,7 +117,12 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     return row;
   }
 
-  /** A notification about a decision is read once the decision is settled, whoever answered it and however. */
+  /**
+   * A notification about a decision is read once the decision is settled, whoever answered it and however.
+   * Cards answered or withdrawn through the decisions service mark their own notification read at that
+   * moment (BOS-413). This sweep is the safety net for a close made anywhere else, and runs once a minute
+   * rather than on every feed poll, so a read never writes.
+   */
   const readAnswered = () =>
     db
       .update(notifications)
@@ -167,15 +165,18 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       for (const { d, company } of open) {
         const options = d.options as string[];
         const alertOnly = options.length === 1 && options[0] === "Got it";
-        const level: NotifyLevel = d.tier === "ceo" ? "note" : alertOnly ? "flag" : "ask";
-        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : `${company} needs a decision`, body: d.question, link: evidenceLink(d.context as DecisionContext), decisionId: d.id });
+        // A deploy card carrying the fix for a live problem (BOS-639) is paged, once per fix: a later card for
+        // the same fix (main moved on) is a plain ask. Quiet hours still lower it, in notify, as for any page.
+        const c = d.context as DecisionContext;
+        const urgent = c.type === "self_deploy" && d.tier !== "ceo" ? c.urgent : undefined;
+        const level: NotifyLevel = d.tier === "ceo" ? "note" : urgent && !urgent.repeat ? "page" : alertOnly ? "flag" : "ask";
+        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : urgent ? urgent.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id });
       }
       return open.length;
     },
 
     async list(opts: { before?: Date; limit?: number; status?: "unread" | "read"; level?: NotifyLevel; company?: string } = {}) {
-      await readAnswered();
-      // `company: "none"` means notices that belong to no company.
+      // The read path only reads (BOS-413): a settled card's notification was marked read when it settled.
       const where = and(
         opts.before ? lt(notifications.createdAt, opts.before) : undefined,
         opts.status === "unread" ? isNull(notifications.readAt) : opts.status === "read" ? isNotNull(notifications.readAt) : undefined,
@@ -193,10 +194,13 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     },
 
     async unread() {
-      await readAnswered();
+      // The read path only reads (BOS-413): a settled card's notification was marked read when it settled.
       const [row] = await db.select({ n: count() }).from(notifications).where(isNull(notifications.readAt));
       return Number(row?.n ?? 0);
     },
+
+    /** A read never writes (BOS-413). This is the once-a-minute sweep that catches cards closed outside the decisions service. */
+    markAnsweredRead: readAnswered,
 
     async markRead(ids: string[] | "all") {
       await db

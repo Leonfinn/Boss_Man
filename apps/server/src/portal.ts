@@ -13,7 +13,7 @@ import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
-import { IMPORTANCE } from "@boss-man/shared";
+import { assetPathOf, IMPORTANCE, PRECOMPRESSED_SUFFIX_LIST } from "@boss-man/shared";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 
 export const PORTAL_CSP = "default-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
@@ -50,7 +50,7 @@ export function sendLogo(reply: FastifyReply, logo: { bytes: Buffer; type: strin
 
 type Feedback = ReturnType<typeof feedbackService>;
 
-export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean; limits?: Partial<PortalLimits>; now?: () => number }) {
+export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean | "auto"; limits?: Partial<PortalLimits>; now?: () => number }) {
   const limits = { ...DEFAULT_PORTAL_LIMITS, ...deps.limits };
   const counter = windowCounter(deps.now ?? (() => Date.now()));
   const Text = (max: number) => z.string().trim().min(1).max(max);
@@ -70,7 +70,7 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
     const existing = req.cookies[VOTER_COOKIE];
     if (existing && /^[A-Za-z0-9_-]{22}$/.test(existing)) return existing;
     const voter = randomBytes(16).toString("base64url");
-    reply.setCookie(VOTER_COOKIE, voter, { path: "/api/portal", httpOnly: true, sameSite: "strict", secure: deps.secureCookies, maxAge: 365 * 86_400 });
+    reply.setCookie(VOTER_COOKIE, voter, { path: "/api/portal", httpOnly: true, sameSite: "strict", secure: deps.secureCookies === "auto" ? req.protocol === "https" : deps.secureCookies, maxAge: 365 * 86_400 });
     return voter;
   }
   function allowWrite(req: FastifyRequest, reply: FastifyReply, companyId: string) {
@@ -153,8 +153,13 @@ export async function buildPortalApp(opts: { feedback: Feedback; webDir?: string
       index: false,
       // The portal page and assets, but not the owner app's own bundle.
       allowedPath: (p) => p === "/portal.html" || (p.startsWith("/assets/") && !p.startsWith("/assets/main-")),
+      // Serves the build's .br/.gz sidecars (BOS-411) with no CPU per request. Only the negotiation may
+      // pick one: a sidecar is never a route of its own. setHeaders sees the sibling's path, so the
+      // suffix is stripped before the immutable rule.
+      preCompressed: true,
+      globIgnore: PRECOMPRESSED_SUFFIX_LIST.map((suffix) => `**/*${suffix}`),
       setHeaders(res, file) {
-        res.header("cache-control", file.includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
+        res.header("cache-control", assetPathOf(file).includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
       },
     });
     app.get("/", async (_req, reply) => reply.redirect("/portal.html"));

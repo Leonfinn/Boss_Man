@@ -336,4 +336,67 @@ describe("stale requests (BOS-123)", () => {
     const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d.id));
     expect(after!.status).toBe("withdrawn");
   });
+
+  it("never quotes one card's owner answer on another card about the same ticket (BOS-470, Jane/Rod)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Security review on the payments page", c.worker.id);
+    // Jane's answer settles her own card on the ticket.
+    const jane = await c.decisions.raise({ companyId: c.company.id, agentId: c.other.id, question: "Jane - Security Reviewer has sent nothing for 5 minutes while working on this.", options: ["Keep waiting", "Cancel run"], recommended: "Keep waiting", blocksTicketId: t.id, triedFirst: "Checked the run's events" });
+    // Rod's stalled-run card is Boss Man's own card (raised on the ladder, no author). It must not be
+    // flagged by Jane's answer, nor have her answer quoted on it.
+    const [rod] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "stalled_run",
+        question: 'Rod has sent nothing for 5 minutes while working on "Security review on the payments page".',
+        options: ["Keep waiting", "Cancel run"],
+        recommendedOption: "Keep waiting",
+        tier: "owner",
+        dedupeKey: `stalled:${randomUUID()}`,
+        raisedByAgentId: c.worker.id,
+        context: { type: "stalled_run", runnerId: randomUUID(), runId: randomUUID(), ladder: { rung: "owner", since: new Date().toISOString(), ticketId: t.id, about: [c.worker.id], hops: [] } },
+      })
+      .returning();
+
+    await c.decisions.answer(jane.id, "Keep waiting");
+
+    const [after] = await c.db.select().from(decisions).where(eq(decisions.id, rod!.id));
+    expect(after!.staleAt).toBeNull();
+    expect(after!.staleReason).toBeNull();
+    // Rod is not woken about a card an owner answer never made out of date.
+    const stale = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, STALE_REASON)));
+    expect(stale).toHaveLength(0);
+  });
+});
+
+describe("submit_plan (BOS-531)", () => {
+  it("saves the plan on a plan-first ticket and approving the card sets planApprovedAt", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Plan me", c.worker.id);
+    await c.db.update(tickets).set({ planFirst: true }).where(eq(tickets.id, t.id));
+    const client = await c.mcp(c.worker.id);
+    const r = await client.callTool({ name: "submit_plan", arguments: { ticketId: t.id, plan: "Step 1: do the thing." } });
+    expect(isError(r), textOf(r)).toBe(false);
+    const [mid] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(mid!.plan).toBe("Step 1: do the thing.");
+    expect(mid!.planApprovedAt).toBeNull();
+    const [card] = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    expect(card!.question).toContain("Step 1: do the thing.");
+    await c.decisions.answer(card!.id, "Keep planning");
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.planApprovedAt).toBeNull();
+    const again = await client.callTool({ name: "submit_plan", arguments: { ticketId: t.id, plan: "Step 1 revised." } });
+    expect(isError(again), textOf(again)).toBe(false);
+    const [card2] = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    await c.decisions.answer(card2!.id, "Approve plan");
+    const [after] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(after!.planApprovedAt).not.toBeNull();
+    expect(after!.plan).toBe("Step 1 revised.");
+  });
+  it("refuses a ticket that is not plan-first", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Plain", c.worker.id);
+    const r = await (await c.mcp(c.worker.id)).callTool({ name: "submit_plan", arguments: { ticketId: t.id, plan: "x" } });
+    expect(isError(r)).toBe(true);
+  });
 });

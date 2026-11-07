@@ -53,13 +53,14 @@ afterEach(async () => {
   await ctx.close();
 });
 
-async function agent() {
-  const token = await issueRunToken(ctx.db, { companyId: ctx.co.company.id, agentId: ctx.dev.id, runId: randomUUID() });
+async function agentAs(agentId: string) {
+  const token = await issueRunToken(ctx.db, { companyId: ctx.co.company.id, agentId, runId: randomUUID() });
   const c = new Client({ name: "test", version: "0" });
   await c.connect(new StreamableHTTPClientTransport(new URL(`http://${ctx.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
   clients.push(c);
   return c;
 }
+const agent = () => agentAs(ctx.dev.id);
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
 const row = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
 const toReview = async (id: string) => textOf(await (await agent()).callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "review", summary: "Built it." } }));
@@ -135,6 +136,17 @@ describe("a ticket that changed nothing", () => {
     expect((await approveAndWait(ctx.req, t.id)).json()).toMatchObject({ verdict: "approved", outcome: "merged" });
   });
 
+  it("a merged no-code ticket reopened with a real commit on its branch is a code ticket again", async () => {
+    // Sent back after its merge as no-code to report a live check (DR-024 #5), then reopened for real
+    // work: the fresh commit on its branch (BOS-532) clears the mark, so the review checks code and merges.
+    ctx.diff.current = REAL;
+    const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review", mergeCommit: EMPTY.head });
+    expect((await approveAndWait(ctx.req, t.id)).json()).toMatchObject({ verdict: "approved", outcome: "merged" });
+    expect((await row(t.id)).noCode).toBe(false);
+    const logged = (await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary);
+    expect(logged.some((s) => s.includes("Reopened for code"))).toBe(true);
+  });
+
   it("create_ticket and the ticket patch set the flag", async () => {
     const c = await agent();
     const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 3, project: "Customer app", title: "Research limits", noCode: true } }));
@@ -205,10 +217,38 @@ describe("a no-code ticket in review", () => {
     expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed" });
   });
 
-  it("a worker is still told to ask the CEO or a manager", async () => {
+  // BOS-304: no-code work has nothing to merge, so its own assignee closes it instead of the CEO doing it by hand.
+  it("its assignee closes it as done, without needing a manager", async () => {
     const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
-    expect(await toDone(t.id)).toMatch(/ask your CEO or manager/);
-    expect((await row(t.id)).systemState).toBe("review");
+    ctx.diff.current = REAL; // no code wins even when the branch has a real diff
+    expect(await toDone(t.id)).toContain("is now done");
+    expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed", stateNote: "QA check passed." });
+  });
+
+  // Rex (BOS-304 review): the old code let a manager close any no-code ticket; the assignee rule
+  // must not take that away, even when the branch holds a real diff the manager may not merge.
+  it("a manager who is not the assignee can still close it, even with a real diff on the branch", async () => {
+    const [boss] = await ctx.db
+      .insert(agents)
+      .values({ companyId: ctx.co.company.id, name: "Boss", role: "manager", agentKind: "claude" })
+      .returning();
+    const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
+    ctx.diff.current = REAL;
+    const out = textOf(await (await agentAs(boss!.id)).callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Closed by the manager." } }));
+    expect(out).toContain("is now done");
+    expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed" });
+  });
+
+  it("someone else still can't close it, and a code ticket still has to go through review", async () => {
+    const theirs = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
+    await ctx.db.update(tickets).set({ assigneeAgentId: null, createdByAgentId: null }).where(eq(tickets.id, theirs.id));
+    expect(await toDone(theirs.id)).toMatch(/isn't yours/);
+    expect((await row(theirs.id)).systemState).toBe("review");
+    // A ticket with code is not closed by its assignee: it goes to review and merge as before.
+    const code = await ctx.ticket(ctx.withRepo.id);
+    ctx.diff.current = REAL;
+    expect(await toDone(code.id)).toMatch(/move the ticket to "review" instead/);
+    expect((await row(code.id)).systemState).toBe("in_progress");
   });
 
   it("gets a review requested when it moves to review", async () => {

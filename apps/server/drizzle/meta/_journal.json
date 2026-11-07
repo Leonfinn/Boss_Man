@@ -582,6 +582,132 @@
       "when": 1793400001000,
       "tag": "0083_agent_picture_source",
       "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1793610910154,
+      "tag": "0085_runner_harness_versions",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1793646056196,
+      "tag": "0088_runner_sandbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1793650814895,
+      "tag": "0092_checked_commit",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1793659340000,
+      "tag": "0097_runner_boot_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1793660000000,
+      "tag": "0091_permission_judge",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1793690000000,
+      "tag": "0099_claude_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1793696000000,
+      "tag": "0089_progress_contract",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1793696100000,
+      "tag": "0094_reviewer_marks_to_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1793734891370,
+      "tag": "0101_ticket_owner_setup",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1793802700000,
+      "tag": "0102_owner_replies",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1793937277960,
+      "tag": "0103_run_query_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1793941639218,
+      "tag": "0104_standing_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1793941639220,
+      "tag": "0106_decision_company_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1793987256267,
+      "tag": "0110_check_results_company_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1794026000061,
+      "tag": "0111_check_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1794055591601,
+      "tag": "0112_awesome_raider",
+      "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1794071883744,
+      "tag": "0113_ticket_fixes_live",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1794082537076,
+      "tag": "0114_company_fence_mode",
+      "breakpoints": true
     }
   ]
 }

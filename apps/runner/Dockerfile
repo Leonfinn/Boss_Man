@@ -57,7 +57,11 @@ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     NODE_PATH=/usr/local/lib/node_modules
 
-ARG CLAUDE_CODE_VERSION=latest
+# Harness versions are pinned to exact versions so a rebuild never silently changes
+# behaviour. To update: check the new version (npm view <package> version), change the
+# number here, rebuild with Settings > Server and runner > Updates > Build and update runners,
+# and confirm it in server_status (runners show their harness versions).
+ARG CLAUDE_CODE_VERSION=2.1.316
 ARG OPENCODE_VERSION=1.19.3
 USER node
 ENV HOME=/home/node \
@@ -86,6 +90,11 @@ RUN --mount=type=secret,id=extra_ca,uid=1000,required=false \
  && pnpm install --frozen-lockfile --package-import-method=hardlink --prod --filter "@boss-man/runner..."
 COPY --chown=node packages/shared/src packages/shared/src
 COPY --chown=node apps/runner/src apps/runner/src
+# The check line's one copy of the queue rules (BOS-614): agents' checks and the merge gate wait for a check slot through
+# this file, not through the copy in the branch being checked. Root-owned, so no session can change it; a new copy goes
+# live with "Build and update runners".
+COPY --chmod=0755 scripts/check-slot.sh /usr/local/lib/bossman/check-slot.sh
+ENV BOSSMAN_CHECK_SLOT=/usr/local/lib/bossman/check-slot.sh
 
 # Workspaces (one directory per ticket) and the event journal live on volumes, so a
 # restart replays unacknowledged events and keeps work in progress (R31).

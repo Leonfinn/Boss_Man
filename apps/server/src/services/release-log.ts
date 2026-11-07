@@ -1,0 +1,274 @@
+// Wake the Release Manager whenever the live commit changes (BOS-284). Most releases go live through
+// the blue/green deployer, "Deploy latest" or a hand-apply, with no Release Manager ticket, so nothing
+// woke it and its Releases page fell behind. The server watches the live commit it already knows (the
+// host deployer's status.json, and the commit this process was built from) and queues a wake on a
+// small no-code ticket, so the work is visible and isn't dropped by the ticketless-wake cap (BOS-272).
+import { and, asc, desc, eq, inArray, isNull, ne } from "drizzle-orm";
+import type { Db } from "../db/client.js";
+import { agents, decisions, projects, settings, tickets, wakes } from "../db/schema.js";
+import { ownerSetupKey, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
+
+/** The Release Manager's wake reason. */
+export const RELEASE_REASON = "live release";
+const SEEN_PREFIX = "live_release:";
+const RELEASES_PROJECT = "Releases";
+
+/** How a new live commit went live, in plain words, for the wake note. */
+export type ReleaseHow = "deployed" | "deployed-bluegreen" | "switched-back" | "rolled-back" | "restarted";
+
+const HOW_WORDS: Record<ReleaseHow, string> = {
+  deployed: "the host deployer",
+  "deployed-bluegreen": "a blue/green switch",
+  "switched-back": "a blue/green switch-back",
+  "rolled-back": "a rollback",
+  restarted: "a restart after a hand-apply",
+};
+
+/** A ticket's setup steps as lines: one per step, blank lines and a leading "1." left off. */
+const splitSteps = (text: string) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+const short = (sha: string) => sha.slice(0, 8);
+const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
+
+/** What each company's last pass recorded: the commit before `pending` and the one being reconciled. */
+type Seen = { old?: string; new?: string; ticketId?: string | null };
+
+/**
+ * How each deployer result names what went live. A switch-back and a rollback both end on the older
+ * commit, so `to_commit` is the live one and `from_commit` the one that was live just before.
+ */
+const TO_LIVE: Record<string, ReleaseHow> = {
+  deployed: "deployed",
+  rolled_back: "rolled-back",
+};
+
+export const releaseLogService = (
+  db: Db,
+  deps: {
+    /** Creates the ticket on the company's board (work.createTicket), returning the full row. */
+    createTicket: (projectId: string, input: { title: string; body: string; assigneeAgentId: string; state: "ready"; noCode: true; risk: "trivial" }) => Promise<{ id: string; title: string }>;
+    /** Queues the wake on that ticket (scheduler.notify). */
+    notify: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<{ status?: string; statusReason?: string | null } & Record<string, unknown>>;
+    log?: (msg: string) => void;
+  },
+) => {
+  const log = deps.log ?? (() => {});
+  // shortcut: one pass at a time, so two observations of the same change can't both open a ticket.
+  let busy = false;
+
+  /** The company's live Release Manager: the template it was hired from, else its title, else its name. */
+  async function releaseManagerOf(companyId: string) {
+    const team = await db
+      .select({ id: agents.id, name: agents.name, title: agents.title, template: agents.template })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt)))
+      .orderBy(asc(agents.createdAt));
+    return team.find((a) => a.template === "release-manager") ?? team.find((a) => a.title === "Release Manager") ?? team.find((a) => /^release manager$/i.test(a.name.split(" - ")[0]!.trim())) ?? null;
+  }
+
+  /** Where the ticket goes: a project called Releases, else the company's newest open project. */
+  async function releasesProjectId(companyId: string) {
+    const open = await db
+      .select({ id: projects.id, name: projects.name })
+      .from(projects)
+      .where(and(eq(projects.companyId, companyId), isNull(projects.archivedAt)))
+      .orderBy(desc(projects.createdAt));
+    return (open.find((p) => p.name.trim().toLowerCase() === RELEASES_PROJECT.toLowerCase()) ?? open[0])?.id ?? null;
+  }
+
+  async function seenOf(companyId: string): Promise<Seen> {
+    const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, `${SEEN_PREFIX}${companyId}`));
+    return (row?.value as Seen | undefined) ?? {};
+  }
+
+  async function saveSeen(companyId: string, value: Seen) {
+    await db.insert(settings).values({ key: `${SEEN_PREFIX}${companyId}`, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+  }
+
+  /**
+   * Records that `commit` is what this company's server runs now (or was built from), and says whether
+   * that is a change. No ticket and no wake here: `releaseManagerWakes` does both, on the leader.
+   * The first observation only records, so installing this never wakes anyone for the commit already live.
+   */
+  async function noteLiveCommit(companyId: string, commit: string) {
+    const next = commit.toLowerCase();
+    if (!isSha(next)) return { changed: false };
+    const seen = await seenOf(companyId);
+    if (seen.new === next) return { changed: false };
+    // Another pass reconciled this commit already (seen.old === next): the record is ahead of what
+    // this process was built from, so it never rewinds.
+    if (seen.new && seen.old === next) return { changed: false };
+    if (!seen.new) {
+      await saveSeen(companyId, { old: next, new: next });
+      return { changed: false };
+    }
+    await saveSeen(companyId, { old: seen.new, new: next });
+    return { changed: true };
+  }
+
+  /** Opens the ticket for this company and change, reusing an open one, and queues the wake on it. */
+  async function wakeOne(companyId: string, from: string, to: string, how: ReleaseHow, ticketId?: string | null) {
+    const rm = await releaseManagerOf(companyId);
+    if (!rm) return false;
+    const title = `Release log: record ${short(to)}`;
+    let ticket = ticketId ? await db.select({ id: tickets.id, title: tickets.title }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId))).then((r) => r[0] ?? null) : null;
+    if (!ticket) {
+      const open = await db
+        .select({ id: tickets.id, title: tickets.title })
+        .from(tickets)
+        .where(and(eq(tickets.companyId, companyId), ne(tickets.systemState, "done")))
+        .orderBy(desc(tickets.createdAt));
+      ticket = open.find((t) => t.title === title) ?? null;
+    }
+    // A wake already waiting for this ticket is the one that will run: don't stack a second.
+    // Creating the ticket queues its own "assigned" wake, which is reused rather than doubled.
+    const note = `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record it in the Releases/Release log, then finish this ticket.`;
+    if (!ticket) {
+      const projectId = await releasesProjectId(companyId);
+      if (!projectId) return false;
+      const body = [
+        `The live commit changed from ${short(from)} to ${short(to)}, and it went live by ${HOW_WORDS[how]}.`,
+        "",
+        `Update the Releases/Release log for ${short(to)}: add the entry, say what shipped since ${short(from)}, and say whether the owner has to do anything.`,
+        "",
+        `Old commit: ${from}`,
+        `New commit: ${to}`,
+        `This ticket is the wake, not the work: the detail comes from the release notes and the deployer's history.`,
+      ].join("\n");
+      ticket = await deps.createTicket(projectId, { title, body, assigneeAgentId: rm.id, state: "ready", noCode: true, risk: "trivial" });
+    }
+    const waitingAll = await db
+      .select({ id: wakes.id, reason: wakes.reason })
+      .from(wakes)
+      .where(and(eq(wakes.ticketId, ticket.id), eq(wakes.agentId, rm.id), inArray(wakes.status, ["queued", "deferred"])));
+    const already = waitingAll.find((w) => w.reason === RELEASE_REASON);
+    if (already) {
+      // A release wake is already waiting: the "assigned" one it was created with is redundant.
+      for (const w of waitingAll) if (w.reason === "assigned") await db.delete(wakes).where(eq(wakes.id, w.id));
+      return false;
+    }
+    const assigned = waitingAll.find((w) => w.reason === "assigned");
+    if (assigned) {
+      await db.update(wakes).set({ reason: RELEASE_REASON, note }).where(eq(wakes.id, assigned.id));
+      return true;
+    }
+    const w = await deps.notify(rm.id, {
+      ticketId: ticket.id,
+      reason: RELEASE_REASON,
+      priority: 2,
+      note,
+    });
+    if (w?.status === "dropped") {
+      log(`release log: the wake for ${short(to)} on ticket ${ticket.id} was dropped (${String(w.statusReason ?? "unknown")})`);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * The owner's setup cards (DR-011), run on the same live-commit change as the Release Manager's wake:
+   * once the live commit is `to`, every finished ticket whose merge commit is at or before it and that
+   * has setup steps but no card yet gets one. A step-back (a switch-back to an older commit) withdraws
+   * the cards for tickets merged after it, so they come back on the next go-live. The merge gate merges
+   * one ticket at a time and the deployer reports only finished deploys, so merge time is merge order
+   * (DR-011 point 4). A human push whose commit is unknown to Boss Man changes nothing here.
+   */
+  async function ownerSetupPass(companyId: string, to: string, how: ReleaseHow) {
+    const order = await mergeOrder(companyId);
+    const liveAt = order.indexOf(to);
+    // A rollback lands back on an older commit, so nothing it went past is running. A deploy or a hand-apply
+    // that lands on a commit Boss Man doesn't know (a human push) is newer, so nothing here is withdrawn.
+    const steppedBack = how === "rolled-back" || how === "switched-back";
+    const withSetup = await ticketsWithSetup(companyId);
+    let raised = 0;
+    let withdrew = 0;
+    for (const t of withSetup) {
+      const at = order.indexOf(t.mergeCommit);
+      // Not live any more: a step-back to before its merge (the live commit is an earlier merge, or not a
+      // merge at all, so a rollback went back past it). A ticket whose own merge commit Boss Man can't
+      // place is left alone rather than guessed at.
+      if (at >= 0 && (steppedBack || (liveAt >= 0 && at > liveAt))) {
+        if (t.ownerSetupDecisionId && (await withdrawOwnerSetup(db, t.id, `Switched back: "${t.title}" isn't running any more. You'll get this card again if it goes live once more.`))) withdrew++;
+        continue;
+      }
+      if (!t.ownerSetupDecisionId) {
+        const card = await raiseOwnerSetup(db, { companyId, ticketId: t.id, title: t.title, steps: t.steps, commit: to });
+        if (card) {
+          await db.update(tickets).set({ ownerSetupDecisionId: card.id }).where(eq(tickets.id, t.id));
+          raised++;
+        }
+      }
+    }
+    if (raised || withdrew) log(`owner setup for company ${companyId}: raised ${raised}, withdrew ${withdrew} (live ${short(to)})`);
+    return { raised, withdrew };
+  }
+
+  /**
+   * This company's merge commits, oldest merge first, from its done tickets. The merge gate sets a
+   * ticket's merge commit when it merges it and merges one at a time, so the order of merges is the
+   * order of merge times. It includes tickets whose setup card is already raised, so a switch-back can
+   * still place them.
+   */
+  async function mergeOrder(companyId: string) {
+    const rows = await db
+      .select({ mergeCommit: tickets.mergeCommit, mergedAt: tickets.lastActivityAt })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")))
+      .orderBy(asc(tickets.lastActivityAt));
+    return [...new Set(rows.map((r) => r.mergeCommit).filter((c): c is string => !!c))];
+  }
+
+  /** Done tickets in this company that carry setup steps and a merge commit, with their card if raised. */
+  async function ticketsWithSetup(companyId: string) {
+    const rows = await db
+      .select({ id: tickets.id, title: tickets.title, ownerSetup: tickets.ownerSetup, mergeCommit: tickets.mergeCommit, ownerSetupDecisionId: tickets.ownerSetupDecisionId })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")));
+    return rows
+      .filter((t) => !!t.mergeCommit && !!t.ownerSetup?.trim())
+      .map((t) => ({ id: t.id, title: t.title, mergeCommit: t.mergeCommit!, ownerSetupDecisionId: t.ownerSetupDecisionId, steps: splitSteps(t.ownerSetup!) }));
+  }
+
+  return {
+    /** Records the live commit it is given (see noteLiveCommit). Nothing else happens until the leader's pass. */
+    async note(companyId: string, commit: string) {
+      return noteLiveCommit(companyId, commit);
+    },
+
+    /**
+     * One pass: for every company whose recorded live commit isn't the one noted at its start, wakes
+     * the Release Manager on a ticket for the new commit. A company with no Release Manager is left
+     * alone (its record still catches up, so a Release Manager hired later isn't woken for old news).
+     */
+    async releaseManagerWakes(how: ReleaseHow) {
+      if (busy) return 0;
+      busy = true;
+      try {
+        const rows = (await db.select().from(settings)).filter((r) => r.key.startsWith(SEEN_PREFIX));
+        let woken = 0;
+        for (const row of rows) {
+          const companyId = row.key.slice(SEEN_PREFIX.length);
+          const seen = (row.value as Seen | undefined) ?? {};
+          if (!isSha(seen.old) || !isSha(seen.new) || seen.old === seen.new) continue;
+          // The record moves on whatever happens below, so a retry (or the next pass) can't double the ticket.
+          await saveSeen(companyId, { old: seen.new, new: seen.new });
+          // The owner's setup cards (DR-011) go on the same change, and don't need a Release Manager.
+          try {
+            await ownerSetupPass(companyId, seen.new, how);
+          } catch (err) {
+            log(`owner setup for company ${companyId}: ${(err as Error).message}`);
+          }
+          try {
+            if (await wakeOne(companyId, seen.old, seen.new, how, seen.ticketId)) woken++;
+          } catch (err) {
+            log(`release log for company ${companyId}: ${(err as Error).message}`);
+          }
+        }
+        return woken;
+      } finally {
+        busy = false;
+      }
+    },
+  };
+};
+export type ReleaseLog = ReturnType<typeof releaseLogService>;

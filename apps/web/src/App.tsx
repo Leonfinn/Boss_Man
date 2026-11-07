@@ -4,12 +4,14 @@ import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
 import { usePoll, useRoute } from "./hooks";
+import { useNewBuild } from "./new-build";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
 import { Decisions } from "./pages/Decisions";
 import { Engagement, Engagements } from "./pages/Engagements";
 import { Run } from "./pages/Run";
 import { Runs } from "./pages/Runs";
+import { MergeQueue } from "./pages/MergeQueue";
 import { ProjectsPage, Settings } from "./pages/Settings";
 import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
@@ -61,7 +63,7 @@ function useFeedNotifications(feed: NoticeFeed | null) {
 }
 
 /** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
-const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "rules", "settings", "projects"]);
+const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "merge-queue", "rules", "settings", "projects"]);
 const CHOSEN = "bm-company";
 function remember(id: string, set: (id: string) => void) {
   set(id);
@@ -72,7 +74,7 @@ function remember(id: string, set: (id: string) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; reason: string; since: string; deadline: string; runs: number; companies: number };
+type Maintenance = { on: false } | { on: true; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -81,6 +83,19 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
       Update pending: {waiting}. Nothing new starts until it is done.
+    </p>
+  );
+}
+
+/** On every page once the server serves newer screens than this tab is running (BOS-550): the owner reloads when ready. */
+export function NewBuildBanner({ newer }: { newer: boolean }) {
+  if (!newer) return null;
+  return (
+    <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span>Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.</span>
+      <button className="btn" type="button" onClick={() => window.location.reload()}>
+        Reload
+      </button>
     </p>
   );
 }
@@ -97,6 +112,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const feed = usePoll((signal) => api<NoticeFeed>("/api/notifications", { signal }), 10_000, "notifications");
   const maintenance = usePoll((signal) => api<Maintenance>("/api/maintenance", { signal }), 5_000, "maintenance");
   const unprocessed = usePoll((signal) => api<Record<string, number>>("/api/feedback/unprocessed", { signal }), 30_000, "unprocessed");
+  const newer = useNewBuild();
   useFeedNotifications(feed.data);
   // Moving between screens refreshes the company list, so names and agents are never stale.
   const reloadCompanies = companies.reload;
@@ -122,6 +138,13 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   });
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
+  // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
+  // the badge and the page share one request. A failure just leaves the badge off.
+  const mergeQueue = usePoll(
+    (signal) => (current ? api<{ waitingCount: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
+    20_000,
+    `merge-badge-${current?.id}`,
+  );
   useEffect(() => {
     if (inRoute && inRoute !== chosen) remember(inRoute, setChosen);
   }, [inRoute, chosen]);
@@ -161,12 +184,14 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         decisions={decisions.data ?? []}
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
+        mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
         {lost ? (
           <State img={art.stuck} alt="Lost connection to the server" title="Lost connection to the server">
@@ -175,7 +200,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "board" ? (
           <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
-          <ChatPage companies={list} companyId={companyId} agentId={route[2]} go={go} onChanged={companies.reload} />
+          <ChatPage companies={list} companyId={companyId} agentId={route[2]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
         ) : page === "wiki" ? (
           <Wiki companies={list} companyId={companyId} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "agents" ? (
@@ -192,6 +217,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Plan companies={list} companyId={companyId} go={go} />
         ) : page === "runs" ? (
           route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
+        ) : page === "merge-queue" ? (
+          <MergeQueue companies={list} companyId={companyId} />
         ) : page === "tickets" && route[1] ? (
           <Ticket key={route[1]} id={route[1]} companies={list} />
         ) : page === "scrum-master" ? (

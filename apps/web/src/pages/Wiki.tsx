@@ -1,15 +1,17 @@
 // The company wiki (R69): Markdown pages the owner and agents share. Pages written for a
 // ticket link back to it, and every save is kept, so an older version can be put back.
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Menu as MenuIcon } from "lucide-react";
 import { api, type Company } from "../api";
 import { Markdown, headingId } from "../components/Markdown";
-import { usePoll } from "../hooks";
+import { useMediaQuery, usePoll } from "../hooks";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
-type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null };
-type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; tickets: Array<{ id: string; title: string }> };
+type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
+// revisionCount is every version, which can be more than the first page the page carries (BOS-496).
+type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; revisionCount?: number; tickets: Array<{ id: string; title: string }> };
 type OldVersion = { id: string; title: string; body: string; createdAt: string; agent: string | null };
 
 type Draft = { title: string; body: string; folder: string };
@@ -75,14 +77,72 @@ function Editor({ initial, folders, onSave, onCancel, saveLabel }: { initial: Dr
   );
 }
 
+/** An address whose page doesn't exist: say so plainly and offer a search, rather than an empty wiki (BOS-356). */
+function NotFound({ companyId, slug, go }: { companyId: string; slug: string; go: (to: string) => void }) {
+  const [q, setQ] = useState("");
+  const hits = usePoll(
+    (signal) => (q.trim() ? api<PageRow[]>(`/api/companies/${companyId}/wiki?q=${encodeURIComponent(q.trim())}`, { signal }) : Promise.resolve([])),
+    30_000,
+    `not-found/${companyId}/${q}`,
+  );
+  const found = hits.data ?? [];
+  const name = decodeURIComponent(slug) || slug;
+  return (
+    <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <h2 style={{ fontSize: 22, fontWeight: 600 }}>Page not found</h2>
+      <p className="muted">
+        There's no wiki page at <code>{name}</code>. It may have been deleted or renamed, or the link may be from another company.
+      </p>
+      <div className="field">
+        <label htmlFor="wiki-missing-q">Search the wiki</label>
+        <input id="wiki-missing-q" type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Titles and text" />
+      </div>
+      {q.trim() ? (
+        found.length ? (
+          <ul>
+            {found.map((p) => (
+              <li key={p.id} style={{ fontSize: 14 }}>
+                <a href={`#/wiki/${companyId}/${p.slug}`}>{p.title}</a> <small className="muted">{p.slug}</small>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="muted">No page matches "{q.trim()}".</p>
+        )
+      ) : (
+        <p>
+          <a href={`#/wiki/${companyId}`} onClick={() => go(`wiki/${companyId}`)}>
+            See all pages
+          </a>
+        </p>
+      )}
+    </article>
+  );
+}
+
 function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere }: { companyId: string; slug: string; section?: string; folders: string[]; go: (to: string) => void; onChanged: () => void; onNewHere: (folder: string) => void }) {
   const page = usePoll((signal) => api<PageDetail>(`/api/companies/${companyId}/wiki/${slug}`, { signal }), 30_000, `${companyId}/${slug}`);
   const [editing, setEditing] = useState(false);
   const [history, setHistory] = useState(false);
+  // Versions opened from "Show older versions", older than the first page the page carries (BOS-496).
+  const [older, setOlder] = useState<{ rows: Revision[]; busy: boolean; error: string | null }>({ rows: [], busy: false, error: null });
   const [old, setOld] = useState<OldVersion | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => (setEditing(false), setHistory(false), setOld(null)), [slug]);
+  useEffect(() => (setEditing(false), setHistory(false), setOlder({ rows: [], busy: false, error: null }), setOld(null)), [slug]);
   const p = page.data;
+  const versions = [...(p?.revisions ?? []), ...older.rows];
+  const hasMore = !!p && versions.length < (p.revisionCount ?? p.revisions.length);
+  const showMore = async () => {
+    if (!p) return;
+    setOlder((o) => ({ ...o, busy: true, error: null }));
+    try {
+      const rows = await api<Revision[]>(`/api/companies/${companyId}/wiki/${slug}?versions=1&offset=${versions.length}`);
+      // Drop any overlap, so a save made while paging can't list a version twice.
+      setOlder((o) => ({ rows: [...o.rows, ...rows.filter((r) => !p.revisions.some((x) => x.id === r.id) && !o.rows.some((x) => x.id === r.id))], busy: false, error: null }));
+    } catch (err) {
+      setOlder((o) => ({ ...o, busy: false, error: (err as Error).message }));
+    }
+  };
   // A link can name a section (slug#Heading); land on that heading once the page has rendered.
   useEffect(() => {
     if (!p || !section) return;
@@ -92,7 +152,8 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   }, [p?.id, section]);
 
   const save = async (v: Draft) => {
-    const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: v });
+    // The owner is replacing the page they just edited, so the agent shrink guard never blocks their own save.
+    const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: { ...v, replace: true } });
     setEditing(false);
     setOld(null);
     onChanged();
@@ -110,9 +171,31 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
       setError((err as Error).message);
     }
   };
-  const showOld = async (id: string) => setOld(await api<OldVersion>(`/api/companies/${companyId}/wiki-revisions/${id}`));
+  // A version that fails to open says so, instead of the click looking dead (BOS-430).
+  const showOld = async (id: string) => {
+    setError(null);
+    try {
+      setOld(await api<OldVersion>(`/api/companies/${companyId}/wiki-revisions/${id}`));
+    } catch {
+      setError("Couldn't open that version. Try again; nothing on the page has changed.");
+    }
+  };
+  // Putting a version back goes through restore, so the old text comes back even if it looks like a shrink,
+  // and the restore is a new version of its own that can be undone (BOS-430).
+  const restoreOld = async (revisionId: string) => {
+    setError(null);
+    try {
+      await api(`/api/companies/${companyId}/wiki-restore`, { method: "POST", body: { slug, revisionId } });
+      setOld(null);
+      setHistory(true);
+      onChanged();
+      page.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
 
-  if (page.error) return <p className="error" role="alert">{page.error.status === 404 ? "There's no such page. It may have been deleted or renamed." : page.error.message}</p>;
+  if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} go={go} /> : <p className="error" role="alert">{page.error.message}</p>;
   if (!p) return null;
   if (editing) return <Editor initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
   return (
@@ -148,7 +231,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
             New page here
           </button>
           <button type="button" className="btn" aria-expanded={history} onClick={() => setHistory((h) => !h)}>
-            History ({p.revisions.length})
+            History ({p.revisionCount ?? p.revisions.length})
           </button>
           <button type="button" className="btn" onClick={() => void remove()}>
             Delete
@@ -158,12 +241,13 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
       {history && (
         <section aria-label="History" style={{ borderTop: "1px solid var(--line)", paddingTop: 10 }}>
           <ul style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {p.revisions.map((r, i) => (
+            {versions.map((r, i) => (
               <li key={r.id} style={{ fontSize: 14 }}>
                 <button type="button" className="link" onClick={() => void showOld(r.id)}>
                   {when(r.createdAt)}
                 </button>{" "}
                 by {r.agent ?? "you"}
+                {typeof r.size === "number" && <span className="muted"> · {r.size.toLocaleString("en-GB")} characters</span>}
                 {i === 0 && " (current)"}
                 {r.runId && (
                   <>
@@ -174,6 +258,17 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
               </li>
             ))}
           </ul>
+          {/* Every save is kept, so the oldest is always reachable: page further back to find it (BOS-496). */}
+          {hasMore && (
+            <button type="button" className="btn" disabled={older.busy} onClick={() => void showMore()}>
+              {older.busy ? "Loading…" : `Show older versions (${(p.revisionCount ?? versions.length) - versions.length} more)`}
+            </button>
+          )}
+          {older.error && (
+            <p className="error" role="alert">
+              {older.error}
+            </p>
+          )}
         </section>
       )}
       {old && (
@@ -181,7 +276,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           <span>
             You're looking at the version from {when(old.createdAt)} by {old.agent ?? "you"}.
           </span>
-          <button type="button" className="btn primary" onClick={() => void save({ title: old.title, body: old.body, folder: p.folder }).catch((err: Error) => setError(err.message))}>
+          <button type="button" className="btn primary" onClick={() => void restoreOld(old.id)}>
             Put this version back
           </button>
           <button type="button" className="btn" onClick={() => setOld(null)}>
@@ -189,7 +284,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           </button>
         </div>
       )}
-      <Markdown text={(old ?? p).body} wikiCompanyId={companyId} />
+      <Markdown text={(old ?? p).body} linkContext={{ companyId }} />
       {error && (
         <p className="error" role="alert">
           {error}
@@ -298,7 +393,7 @@ function BriefView({ companyId }: { companyId: string }) {
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <h2 style={{ fontSize: 22, fontWeight: 600 }}>Company brief</h2>
-      <Markdown text={brief.data.markdown} />
+      <Markdown text={brief.data.markdown} linkContext={{ companyId }} />
     </article>
   );
 }
@@ -329,16 +424,30 @@ function tree(pages: PageRow[]): Folder {
 
 const countPages = (f: Folder): number => f.pages.length + f.folders.reduce((n, x) => n + countPages(x), 0);
 
-function TreeList({ folder, companyId, current, currentFolder, open, onPick }: { folder: Folder; companyId: string; current: string | undefined; currentFolder: string; open: boolean; onPick: () => void }) {
+/** The folders the reader has opened or closed by hand; until they do, open ones are picked for them. */
+type OpenFolders = Record<string, boolean>;
+
+/** Which folders are open. A folder the reader has touched keeps their choice; the rest open when the page in them is open. */
+function folderOpen(over: OpenFolders, key: string, currentFolder: string): boolean {
+  return over[key] ?? `${currentFolder}/`.startsWith(`${key.slice(1)}/`);
+}
+
+function TreeList({ folder, companyId, current, currentFolder, openAll, over, onToggle, onPick }: { folder: Folder; companyId: string; current: string | undefined; currentFolder: string; openAll: boolean; over: OpenFolders; onToggle: (key: string, open: boolean) => void; onPick: () => void }) {
   return (
     <ul>
       {folder.folders.map((f) => (
         <li key={f.key}>
-          <details open={open || `${currentFolder}/`.startsWith(`${f.key.slice(1)}/`) || undefined}>
+          <details
+            open={openAll || folderOpen(over, f.key, currentFolder) || undefined}
+            onToggle={(e) => {
+              const open = (e.target as HTMLDetailsElement).open;
+              if (open !== folderOpen(over, f.key, currentFolder)) onToggle(f.key, open);
+            }}
+          >
             <summary>
               {f.name} <span className="muted">({countPages(f)})</span>
             </summary>
-            <TreeList folder={f} companyId={companyId} current={current} currentFolder={currentFolder} open={open} onPick={onPick} />
+            <TreeList folder={f} companyId={companyId} current={current} currentFolder={currentFolder} openAll={openAll} over={over} onToggle={onToggle} onPick={onPick} />
           </details>
         </li>
       ))}
@@ -372,8 +481,30 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
     : undefined;
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const [q, setQ] = useState("");
+  // The page list is a drawer below 1180px, the same mark the rest of the app calls a tablet or folded phone.
+  const narrow = useMediaQuery("(max-width: 1180px)");
+  const [drawer, setDrawer] = useState(false);
+  const drawerRef = useRef<HTMLElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  // Folders the reader has opened or closed by hand, so the drawer reopens with the same ones open.
+  const [over, setOver] = useState<OpenFolders>({});
   // The folder a new page starts in, or null when no page is being created.
   const [creating, setCreating] = useState<string | null>(null);
+  const closeDrawer = () => setDrawer(false);
+  const onToggleFolder = (key: string, open: boolean) => setOver((o) => ({ ...o, [key]: open }));
+  useEffect(() => {
+    if (!narrow) setDrawer(false);
+  }, [narrow]);
+  useEffect(() => {
+    if (!drawer) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setDrawer(false);
+      toggleRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawer]);
   const list = usePoll(
     (signal) => (company ? api<PageRow[]>(`/api/companies/${company.id}/wiki${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`, { signal }) : Promise.resolve([])),
     30_000,
@@ -407,8 +538,26 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
         <p>Create a company on the Kanban first.</p>
       ) : (
         <div className="wiki">
-          <nav className="card wiki-list" aria-label="Pages">
-            <button type="button" className="btn primary" onClick={() => setCreating("")}>
+          {narrow && (
+            <button ref={toggleRef} type="button" className="btn wiki-menu-toggle" aria-expanded={drawer} aria-controls="wiki-pages" aria-label={drawer ? "Hide pages" : "Show pages"} onClick={() => setDrawer((d) => !d)}>
+              <MenuIcon size={18} strokeWidth={2} aria-hidden="true" />
+              <span>{drawer ? "Hide pages" : "Show pages"}</span>
+            </button>
+          )}
+          {narrow && drawer && <div className="wiki-scrim" onClick={closeDrawer} aria-hidden="true" />}
+          <nav
+            ref={drawerRef}
+            id="wiki-pages"
+            className={`card wiki-list${narrow ? " wiki-drawer" : ""}${narrow && drawer ? " open" : ""}`}
+            aria-label="Pages"
+            aria-hidden={narrow && !drawer ? true : undefined}
+            onClick={(e) => {
+              // Picking a page closes the drawer; so does starting a new one.
+              if (!narrow || !(e.target as HTMLElement).closest("a")) return;
+              setDrawer(false);
+            }}
+          >
+            <button type="button" className="btn primary" onClick={() => (setCreating(""), closeDrawer())}>
               New page
             </button>
             <div className="field">
@@ -418,7 +567,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
             {!q.trim() && (
               <ul>
                 <li>
-                  <a href={`#/wiki/${company.id}/${BRIEF}`} aria-current={pageSlug === BRIEF && creating === null ? "page" : undefined} onClick={() => setCreating(null)}>
+                  <a href={`#/wiki/${company.id}/${BRIEF}`} aria-current={pageSlug === BRIEF && creating === null ? "page" : undefined} onClick={() => (setCreating(null), closeDrawer())}>
                     Company brief
                     <small>read-only, as of now</small>
                   </a>
@@ -432,8 +581,10 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
               companyId={company.id}
               current={creating === null ? pageSlug : undefined}
               currentFolder={(creating ?? pages.find((p) => p.slug === pageSlug)?.folder ?? "").toLowerCase()}
-              open={!!q.trim()}
-              onPick={() => setCreating(null)}
+              openAll={!!q.trim()}
+              over={over}
+              onToggle={onToggleFolder}
+              onPick={() => (setCreating(null), closeDrawer())}
             />
           </nav>
           <div>

@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -64,6 +64,15 @@ export const companies = pgTable("companies", {
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
+  /** Company-wide rules every agent reads at the start of every run (BOS-353); set by the owner or the CEO, capped in code. */
+  standingRules: text("standing_rules"),
+  /** Who last changed the standing rules ("owner" or the CEO's name), and when. */
+  standingRulesBy: text("standing_rules_by"),
+  standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
+  /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
+  permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
+  /** The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323). Existing companies stay off. */
+  fenceMode: text("fence_mode", { enum: FENCE_MODES }).notNull().default("off"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -71,6 +80,10 @@ export const companies = pgTable("companies", {
   watchdogTrippedReason: text("watchdog_tripped_reason"),
   /** Written by the sweep only, so it never overwrites the owner's settings. */
   watchdogLastSweepAt: timestamp("watchdog_last_sweep_at", { withTimezone: true }),
+  /** Spare-capacity rules (BOS-659): when the sweep first found the company under-used while work waits; null once it is busy again. */
+  watchdogSpareAt: timestamp("watchdog_spare_at", { withTimezone: true }),
+  /** ...and when it last told the CEO about it, so it says so once per quiet stretch. */
+  watchdogSpareAlertedAt: timestamp("watchdog_spare_alerted_at", { withTimezone: true }),
   /** Tickets are referred to as PREFIX-number (e.g. HOL-12); one sequence per company, handed out by a database trigger. */
   ticketPrefix: text("ticket_prefix"),
   nextTicketNumber: integer("next_ticket_number").notNull().default(1),
@@ -102,7 +115,11 @@ export const agents = pgTable(
     starred: boolean("starred").notNull().default(false),
     /** A standing job Boss Man gives the agent: "wiki" keeps the company wiki in order (R73). */
     duty: text("duty"),
-    /** Marks the agent as the company's reviewer of one kind (security, infra, adversarial); a review policy can name "the marked agent". */
+    /**
+     * Deprecated (BOS-198): the old agent-page mark as one kind's reviewer. Nothing writes it now;
+     * migration 0094 moved every use into the review policy, and it is read only for a leftover
+     * "marked" cell. Kept one release so a rollback has it; drop it after.
+     */
     reviewKind: text("review_kind"),
     /** Job title (e.g. "Scrum Master"), the template it was hired from, and its standing instructions (R62). */
     title: text("title"),
@@ -147,12 +164,21 @@ export const runners = pgTable("runners", {
   companyId: uuid("company_id").notNull().unique().references(() => companies.id, { onDelete: "cascade" }),
   tokenHash: text("token_hash").notNull(),
   imageVersion: text("image_version"),
+  /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
+  harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  /** The boot id from the runner's last hello (BOS-352); a different id means the runner restarted. */
+  bootId: text("boot_id"),
+  /** When a restart last pulled parked checks forward, so a restart loop doesn't do it again straight away. */
+  bootPulledAt: timestamp("boot_pulled_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
   diskCheckedAt: timestamp("disk_checked_at", { withTimezone: true }),
   /** The runner's last report on its add-ons (docs/12); null until it reports one. */
   addons: jsonb("addons").$type<AddonReport[]>(),
+  /** What the runner can fence agents with, from its start-up self-test (BOS-321); null until it reports. */
+  sandbox: jsonb("sandbox").$type<SandboxReport>(),
+  sandboxCheckedAt: timestamp("sandbox_checked_at", { withTimezone: true }),
   createdAt: createdAt(),
 });
 
@@ -196,6 +222,11 @@ export const projects = pgTable("projects", {
   verifyCommand: text("verify_command"),
   /** An extra, slower check run before merging high and critical risk tickets (R48). */
   deepVerifyCommand: text("deep_verify_command"),
+  /** Whether the default branch passes its check: green, red or unknown. Set by the merge gate (BOS-316). While red, only fixes for main are checked. */
+  mainState: text("main_state").notNull().default("unknown"),
+  mainStateSince: timestamp("main_state_since", { withTimezone: true }),
+  /** The commit on the default branch that the gate last found red (or green). */
+  mainStateCommit: text("main_state_commit"),
   /** Default spend ceiling per ticket across all its runs (R53). */
   ticketCostCapMicros: micros("ticket_cost_cap_micros"),
   /** Starred projects show under Projects in the sidebar. */
@@ -280,6 +311,8 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
+    checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
     pullRequestUrl: text("pull_request_url"),
     pullRequestNumber: integer("pull_request_number"),
@@ -318,18 +351,32 @@ export const tickets = pgTable(
     monitorNote: text("monitor_note"),
     monitorAttempts: integer("monitor_attempts").notNull().default(0),
     monitorMax: integer("monitor_max").notNull().default(5),
+    /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
+    monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
-    /** The ticket's acceptance criteria (1 to 10 non-empty strings), checked against at review; empty means none. */
-    acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
+    /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
+    acceptanceCriteria: jsonb("acceptance_criteria").$type<Criterion[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
+    /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
+    ownerSetup: text("owner_setup"),
+    /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
+    ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /**
+     * "Fixes live" (BOS-639): one sentence naming the live symptom this ticket fixes, e.g. "server freezes
+     * as memory climbs". Set by hand (CEO, author or reviewer), never guessed from priority or urgency.
+     * A deploy card whose range carries a marked merge leads with it and pages the owner once.
+     */
+    fixesLive: text("fixes_live"),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
     stateNote: text("state_note"),
     stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
+    /** When an agent last posted on this ticket, a reply or a state note (BOS-314). */
+    lastPostAt: timestamp("last_post_at", { withTimezone: true }),
     /** When an owner action made the state note possibly out of date (BOS-123). */
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
@@ -342,7 +389,14 @@ export const tickets = pgTable(
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number), check("tickets_size_scale", sql`${t.size} is null or ${t.size} in (1, 2, 3, 5, 8)`)],
+  (t) => [
+    index("tickets_company_state").on(t.companyId, t.systemState),
+    uniqueIndex("tickets_company_number").on(t.companyId, t.number),
+    check("tickets_size_scale", sql`${t.size} is null or ${t.size} in (1, 2, 3, 5, 8)`),
+    // Read on every scheduler pass (watchDue and monitorDue, every 5 s). BOS-407.
+    index("tickets_watcher").on(t.watcherAgentId).where(sql`${t.watcherAgentId} is not null`),
+    index("tickets_monitor_at").on(t.monitorAt).where(sql`${t.monitorAt} is not null`),
+  ],
 );
 
 // ---------- Decisions and engagements ----------
@@ -374,7 +428,11 @@ export const decisions = pgTable("decisions", {
   /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
   staleAt: timestamp("stale_at", { withTimezone: true }),
   staleReason: text("stale_reason"),
-});
+},
+  // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
+  // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.
+  (t) => [index("decisions_status").on(t.status), index("decisions_company_status").on(t.companyId, t.status)],
+);
 
 export const engagementStatus = pgEnum("engagement_status", [
   "requested",
@@ -432,6 +490,8 @@ export const ticketDependencies = pgTable(
       "ticket_dependencies_one_blocker",
       sql`num_nonnulls(${t.blockerTicketId}, ${t.blockerEngagementId}, ${t.blockerDecisionId}) = 1`,
     ),
+    index("ticket_dependencies_blocked").on(t.blockedTicketId),
+    index("ticket_dependencies_blocker").on(t.blockerTicketId),
   ],
 );
 
@@ -491,6 +551,8 @@ export const runTokens = pgTable("run_tokens", {
 
 export const runs = pgTable("runs", {
   id: id(),
+  /** The funding source this run was started on, when the scheduler chose one from the owner's list of subscriptions (BOS-383). */
+  fundingSourceId: uuid("funding_source_id").references(() => fundingSources.id, { onDelete: "set null" }),
   companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
   agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
   ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
@@ -524,7 +586,19 @@ export const runs = pgTable("runs", {
   outcome: text("outcome"),
   /** When the owner asked to stop the run; the sweep ends it if the runner never confirms. */
   cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
-});
+  /** When the run last posted on its ticket (a reply or a state note); silence is measured from it (BOS-314). */
+  lastPostAt: timestamp("last_post_at", { withTimezone: true }),
+  /** When Boss Man asked the silent run for a status, so it is asked once (BOS-314). */
+  silentSteeredAt: timestamp("silent_steered_at", { withTimezone: true }),
+}, (t) => [
+    index("runs_ticket_open").on(t.ticketId, t.endedAt),
+    // The hot reads (BOS-407): who is working now, a ticket's runs, each agent's latest run and the recent list.
+    index("runs_live").on(t.companyId).where(sql`${t.endedAt} is null`),
+    index("runs_ticket_started").on(t.ticketId, t.startedAt),
+    index("runs_agent_started").on(t.agentId, t.startedAt.desc()),
+    index("runs_ended").on(t.endedAt.desc()).where(sql`${t.endedAt} is not null`),
+  ],
+);
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
 export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
@@ -542,6 +616,8 @@ export const fundingSources = pgTable("funding_sources", {
   cycleAnchor: timestamp("cycle_anchor", { withTimezone: true }),
   /** The credential agents on this source use. */
   secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /** Position in the owner's ordered list of Claude subscriptions (1 = preferred). Null: not part of the list (BOS-383). */
+  fallbackRank: integer("fallback_rank"),
   /** Subscription utilisation at which routine work is held (0.8–1, default 0.95). */
   quotaHoldAt: real("quota_hold_at").notNull().default(0.95),
   /** Whether extra usage may be spent, and for which work: pause (default), urgent, or all. */
@@ -819,7 +895,49 @@ export const checkResults = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     detail: text("detail"),
   },
-  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at)],
+  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at), index("check_results_company_at").on(t.companyId, t.at)],
+);
+
+/**
+ * The server-owned check queue (DR-003, BOS-316). One row per requested check; the runner runs it in a process it owns,
+ * outside any agent session. kind: merge (the gate's one full check) or pre_review (an author's or reviewer's quick or full check).
+ * state: queued, running, passed, failed, stuck (with a reason), cancelled (with a reason). A job never leaves the queue without a reason.
+ */
+export const checkJobs = pgTable(
+  "check_jobs",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    /** quick or full: how wide the check is. A passed full check satisfies a quick request on the same tree. */
+    scope: text("scope").notNull().default("full"),
+    commit: text("commit").notNull(),
+    tree: text("tree").notNull(),
+    state: text("state").notNull().default("queued"),
+    /** 0 urgent, 1 normal (see check-gate.ts checkPriority); lower goes first within a kind. */
+    priority: integer("priority").notNull().default(1),
+    /** True for a ticket that fixes a red main: it goes before every other job while main is red. */
+    fixesMain: boolean("fixes_main").notNull().default(false),
+    /** The agent to wake with the result. */
+    requestedBy: uuid("requested_by").references(() => agents.id, { onDelete: "set null" }),
+    runnerId: uuid("runner_id").references(() => runners.id, { onDelete: "set null" }),
+    command: text("command"),
+    exitCode: integer("exit_code"),
+    /** Why the job is stuck or cancelled, or how it ended. Set whenever the state is stuck or cancelled. */
+    reason: text("reason"),
+    logTail: text("log_tail"),
+    queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    lastOutputAt: timestamp("last_output_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("check_jobs_state_queued").on(t.state, t.queuedAt),
+    index("check_jobs_ticket").on(t.ticketId, t.queuedAt),
+    index("check_jobs_project_tree").on(t.projectId, t.tree),
+  ],
 );
 
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
@@ -912,7 +1030,8 @@ export const nudges = pgTable(
     dropped: boolean("dropped").notNull().default(false),
     createdAt: createdAt(),
   },
-  (t) => [index("nudges_pair").on(t.fromAgentId, t.toAgentId, t.createdAt)],
+  // A run's origin asks which nudge delivered its wake (BOS-407).
+  (t) => [index("nudges_pair").on(t.fromAgentId, t.toAgentId, t.createdAt), index("nudges_wake").on(t.wakeId)],
 );
 
 // ---------- Notifications (R44) ----------
@@ -941,7 +1060,12 @@ export const notifications = pgTable(
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
-  (t) => [index("notifications_agent_time").on(t.agentId, t.createdAt), index("notifications_time").on(t.createdAt)],
+  (t) => [
+    index("notifications_agent_time").on(t.agentId, t.createdAt),
+    index("notifications_time").on(t.createdAt),
+    // Every /api/notifications GET marks the unread ones for settled decisions (BOS-407).
+    index("notifications_unread_decision").on(t.decisionId).where(sql`${t.readAt} is null`),
+  ],
 );
 
 /**
@@ -1093,6 +1217,38 @@ export const ticketMessages = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("ticket_messages_ticket_time").on(t.ticketId, t.createdAt)],
+);
+
+/**
+ * An owner message on a ticket that is waiting for an answer (BOS-425). One row per message; it
+ * stays open until an agent replies on the ticket, the owner's message needs no reply, or the
+ * CEO has answered on the target's behalf. `state` is what the ticket shows under the message.
+ */
+export const ownerReplies = pgTable(
+  "owner_replies",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id").notNull().references(() => ticketMessages.id, { onDelete: "cascade" }),
+    /** Who the owner wrote to: the agent working the ticket, or the one they picked. */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** How it reached them: "delivered" into a live run or woken now, or "queued" behind their other work. */
+    state: text("state").notNull(),
+    /** The run it went into, if any. */
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    /** Reminders sent so far: 1 the top-priority one after a run ended without a reply, then the 5 and 10 minute ones. */
+    reminders: integer("reminders").notNull().default(0),
+    /** Set when it is not the target but a stand-in who answered, or who was asked to (the CEO, or the Scrum Master). */
+    standInAgentId: uuid("stand_in_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The CEO/SM alert raised at 10 minutes, if any (BOS-425). */
+    alertDecisionId: uuid("alert_decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    /** Set when an agent replied on the ticket (the message is answered), or the CEO answered for the target. */
+    clearedAt: timestamp("cleared_at", { withTimezone: true }),
+    clearedBy: text("cleared_by"),
+  },
+  (t) => [index("owner_replies_open").on(t.companyId, t.clearedAt, t.createdAt)],
 );
 
 // ---------- Feature requests ----------

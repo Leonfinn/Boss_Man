@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq, ne } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
+import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
-import { agentChanges, agentSkills, agents, companies, decisions, retros, skillProposals, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
+import { activity, agentChanges, agentSkills, agents, companies, decisions, retros, skillProposals, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { LESSON_ADD, LESSON_DROP } from "../src/services/project-brief.js";
 import { SKILL_ADD, SKILL_REJECT } from "../src/services/decisions.js";
@@ -28,8 +30,7 @@ async function setup(opts: { pm?: boolean; reviewer?: boolean } = {}) {
   const built = await buildApp({ db: pg, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", tickOnWake: false });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const cookie = await signedInOwner(pg);
   const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "Retro Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const db = pg;
@@ -40,7 +41,8 @@ async function setup(opts: { pm?: boolean; reviewer?: boolean } = {}) {
   const eng = await hire("Eve", "engineer");
   const eng2 = await hire("Ed", "engineer");
   const reviewer = opts.reviewer === false ? null : await hire("Sam", "security-reviewer");
-  if (reviewer) await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
+  // Skill security reviewers come from the Security cells (BOS-198); name Sam at critical only, so no ticket here gains a review.
+  if (reviewer) await db.update(companies).set({ reviewPolicy: { ...DEFAULT_REVIEW_POLICY, critical: { ...DEFAULT_REVIEW_POLICY.critical, kinds: { security: reviewer.id } } } }).where(eq(companies.id, company.id));
   const clients: Client[] = [];
   const mcp = async (agentId: string) => {
     const token = await issueRunToken(pg, { companyId: company.id, agentId, runId: randomUUID() });
@@ -771,6 +773,18 @@ describe("checking a change's result (part 4)", () => {
     // The engineer who had it keeps it; the one who only gained it from the update loses it.
     expect((await c.db.select().from(agentSkills).where(eq(agentSkills.skillId, existing!.id))).map((r) => r.agentId)).toEqual([c.eng.id]);
     expect((await changeRow(c, id)).status).toBe("reverted");
+    // BOS-181: both the update and the Revert leave an old/new trace, like an owner edit (BOS-178).
+    const [updated] = await c.db.select().from(activity).where(eq(activity.kind, "skill.updated"));
+    expect(updated!.summary).toMatch(/update to the skill null-checks from [0-9a-f]{12} to [0-9a-f]{12}\. Old: "Old.*OLD" New: "New.*NEW"\./);
+    expect(updated!.detail).toMatchObject({ skillId: existing!.id, description: { before: "Old", after: "New" } });
+    expect((updated!.detail as { skillMd: { before: string; after: string } }).skillMd.after).toContain("NEW");
+    const [reverted] = await c.db.select().from(activity).where(eq(activity.kind, "skill.reverted_by_retro"));
+    expect(reverted!.summary).toMatch(/Revert put the playbook null-checks back from [0-9a-f]{12} to [0-9a-f]{12}\. Old: "New.*NEW" New: "Old.*OLD"\./);
+    const rd = reverted!.detail as { skillId: string; skillMd: { before: string; after: string }; description: { before: string; after: string } };
+    expect(rd.skillId).toBe(existing!.id);
+    expect(rd.description).toEqual({ before: "New", after: "Old" });
+    expect(rd.skillMd.before).toContain("NEW");
+    expect(rd.skillMd.after).toContain("OLD");
   });
 
   it("Revert drops a lesson from the brief, and refuses when it is no longer there", async () => {

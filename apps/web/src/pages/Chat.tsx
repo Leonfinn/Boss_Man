@@ -3,46 +3,39 @@
 // directly. On a phone the list and the conversation take turns.
 import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { api, type Company } from "../api";
-import { usePoll } from "../hooks";
+import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
+import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
+import { linkPieces, type LinkContext } from "../links";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
 type Chat = { agentId: string; items: Message[]; state: string };
+/** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
+type Maintenance = { on: false } | { on: true; runs: number; chatOpen: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
-/** Plain text with in-app links (#/tickets/<id> and the like, or [title](#/tickets/<id>)) made clickable. */
-export function linked(text: string, wikiCompanyId?: string): ReactNode {
-  const out: ReactNode[] = [];
-  let at = 0;
-  // [[slug]] and [[slug#Section]] link to the company's wiki page when the company is known.
-  for (const m of text.matchAll(/(!?)\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)|\[([^\]]+)\]\((#\/[a-z]+\/[0-9a-f-]{36})\)|`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?|\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g)) {
-    // A pasted image shows as a thumbnail that opens full size.
-    if (m[3]) {
-      out.push(
-        <Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>,
-        m[1] ? (
-          <a key={`i${m.index}`} href={m[3]} target="_blank" rel="noreferrer" className="msg-img">
-            <img src={m[3]} alt={m[2] || "image"} loading="lazy" />
-          </a>
-        ) : (
-          <a key={`f${m.index}`} href={m[3]} download className="file-chip">
-            {m[2]}
-          </a>
-        ),
-      );
-      at = m.index + m[0].length;
-      continue;
-    }
-    if (m[7] && !wikiCompanyId) continue;
-    const href = m[7] ? `#/wiki/${wikiCompanyId}/${m[7].trim()}` : (m[5] ?? m[6])!;
-    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[7] ? `${m[7].trim()}${m[8] ?? ""}` : (m[4] ?? (href.startsWith("#/tickets/") ? "task" : href.slice(2)))}</a>);
-    at = m.index + m[0].length;
-  }
-  out.push(<Fragment key="end">{text.slice(at)}</Fragment>);
-  return out;
+/** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
+export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = {}): ReactNode {
+  return linkPieces(text, { ...ctx, companyId: wikiCompanyId ?? ctx.companyId }).map((p, i) =>
+    p.kind === "text" ? (
+      <Fragment key={i}>{p.text}</Fragment>
+    ) : p.kind === "image" ? (
+      <a key={i} href={p.src} target="_blank" rel="noreferrer" className="msg-img">
+        <img src={p.src} alt={p.alt} loading="lazy" />
+      </a>
+    ) : p.kind === "file" ? (
+      <a key={i} href={p.href} download className="file-chip">
+        {p.text}
+      </a>
+    ) : (
+      <a key={i} href={p.href}>
+        {p.text}
+      </a>
+    ),
+  );
 }
 
 const ROLE: Record<Thread["role"], string> = { ceo: "CEO", manager: "Manager", worker: "Worker" };
@@ -73,7 +66,19 @@ function busyText(state: string, name: string) {
   return state.replace(/^waiting: /, "Waiting: ");
 }
 
-export function ChatPage({ companies, companyId, agentId, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; go: (to: string) => void; onChanged: () => void }) {
+/** One plain line while a runner update waits (BOS-349): chat stays open while agents work, then holds briefly for the swap. */
+export function UpdateNote({ m }: { m: Maintenance | null }) {
+  if (!m?.on) return null;
+  return (
+    <p className="banner" role="status">
+      {m.chatOpen
+        ? `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish: chat stays open until then.`
+        : "Updating, back in a moment. New messages are saved and answered when it is done."}
+    </p>
+  );
+}
+
+export function ChatPage({ companies, companyId, agentId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const threads = usePoll((signal) => (company ? api<Thread[]>(`/api/companies/${company.id}/chat/threads`, { signal }) : Promise.resolve([])), 5000, company?.id ?? "none");
   const team = threads.data ?? [];
@@ -125,7 +130,26 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
       (err: Error) => setError(err.message),
     );
   };
+  // Too long for a message: send it as a .txt file, which the agent opens whole.
+  const sendAsFile = async (long: string) => {
+    if (!company || !current) return;
+    try {
+      const markdown = await img.uploadText(long, "message.txt");
+      await api(`/api/companies/${company.id}/chat`, { method: "POST", body: { text: withAttachments("I've sent the text as a file (below); please read it before answering.", [markdown]).trim(), agentId: current.id } });
+      setText("");
+      img.clear();
+      setError(null);
+      setBusy(true);
+      threads.reload();
+      chat.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  // A phone keyboard has no Shift, so there Return adds a line and Send sends.
+  const coarse = useCoarsePointer();
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (coarse) return;
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       send();
@@ -134,7 +158,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
   const unread = (t: Thread) => !!t.last && t.last.role !== "owner" && t.id !== current?.id && (!seen[t.id] || seen[t.id]! < t.last.createdAt);
 
   return (
-    <>
+    <div className="chat-page">
       <header className="page-head">
         <div>
           <h1>Chat</h1>
@@ -166,6 +190,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
           </nav>
           {current && (
             <div className="messenger-chat">
+              <UpdateNote m={maintenance} />
               <header className="messenger-head">
                 <a className="back" href={`#/chat/${company.id}`} aria-label="Back to the team">
                   ←
@@ -205,28 +230,33 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
                 <div ref={end} />
               </div>
               <form onSubmit={send} className="chat-form">
-                <label htmlFor="chat-text" className="sr-only">
-                  Message to {current.name}
-                </label>
-                <textarea id="chat-text" rows={2} maxLength={4000} placeholder={`Message ${current.name}. Enter sends, Shift+Enter adds a line.`} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey} onPaste={img.onPaste} />
+                <OwnerMessageBox
+                  id="chat-text"
+                  label={`Message to ${current.name}`}
+                  className="chat-text"
+                  rows={2}
+                  enterKeyHint={NEWLINE_KEY_HINT}
+                  placeholder={coarse ? `Message ${current.name}` : `Message ${current.name}. Enter sends, Shift+Enter adds a line.`}
+                  value={text}
+                  onChange={setText}
+                  onKeyDown={onKey}
+                  onPaste={img.onPaste}
+                  onSendAsFile={sendAsFile}
+                  attaching={img.busy}
+                  error={img.error}
+                >
+                  {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+                </OwnerMessageBox>
                 {img.button}
                 {current.duty === "assistant" && ceo && (
                   <button className="btn" type="button" disabled={!text.trim()} onClick={() => send(undefined, ceo)}>
                     Ask the CEO
                   </button>
                 )}
-                <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy}>
+                <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)}>
                   Send
                 </button>
               </form>
-              <div style={{ padding: "0 20px" }}>
-                <ImagePreviews attached={img.attached} onRemove={img.remove} />
-              </div>
-              {img.error && (
-                <p className="error" role="alert" style={{ padding: "0 20px 14px" }}>
-                  {img.error}
-                </p>
-              )}
               {error && (
                 <p className="error" role="alert" style={{ padding: "0 20px 14px" }}>
                   {error}
@@ -236,6 +266,6 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
           )}
         </section>
       )}
-    </>
+    </div>
   );
 }

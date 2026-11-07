@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { notifications } from "../src/db/schema.js";
-import { slugify } from "../src/services/launcher.js";
+import { gitHostAddress, slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -59,7 +59,7 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
     const put = c.fake.calls.find((x) => x.method === "PUT")!;
     expect(put).toMatchObject({ path: "/runners/app-co", auth: `Bearer ${KEY}` });
-    expect(Object.keys(put.body as object)).toEqual(["token"]);
+    expect(Object.keys(put.body as object)).toEqual(["token", "allow"]);
     // The token the launcher got is the runner's real one.
     expect(await c.runners.authenticate((put.body as { token: string }).token)).toMatchObject({ companyId: company.id });
 
@@ -98,6 +98,66 @@ describe("runners through the launcher (R55)", () => {
     expect(slugify("  Ünïcode & Co!  ")).toBe("unicode-co");
     expect(slugify("***")).toBe("company");
     expect(slugify("x".repeat(80))).toHaveLength(34);
+  });
+
+  it("tells the launcher the company's tool servers, so the network guard keeps them reachable", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    const added = await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "crawl", url: "http://192.168.68.20:11235/mcp", transport: "http" });
+    expect(added.statusCode).toBe(201);
+    await vi.waitFor(() => expect(c.fake.calls.find((x) => x.path === "/runners/app-co/allow")?.body).toEqual({ allow: ["192.168.68.20:11235"] }));
+    await c.req("DELETE", `/api/mcp-servers/${(added.json() as { id: string }).id}`);
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [] }));
+    expect(toolServerAddress("https://tools.lan/mcp")).toBe("tools.lan:443");
+    expect(toolServerAddress("http://[fd00::1]/mcp")).toBeNull();
+  });
+
+  it("lets the runner reach the company's own git host only, and follows a changed repo address", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
+    const last = () => c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body;
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["192.168.68.67:3003"] }));
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "https://github.com/o/r.git" });
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["github.com:443"] }));
+    expect(gitHostAddress("http://192.168.68.67:3003/o/r.git")).toBe("192.168.68.67:3003");
+    expect(gitHostAddress("git@git.lan:o/r.git")).toBe("git.lan:22");
+    expect(gitHostAddress("ssh://git@h.lan:2222/o/r")).toBe("h.lan:2222");
+    expect(gitHostAddress("http://gitea.lan/o/r")).toBe("gitea.lan:80");
+    expect(gitHostAddress("/srv/repos/r")).toBeNull();
+    expect(gitHostAddress("file:///srv/r")).toBeNull();
+    // The launcher refuses a whole list over one bad entry, so these are never sent.
+    expect(gitHostAddress("https://my_git.lan/o/r")).toBeNull();
+    expect(gitHostAddress("http://h.lan:0/o/r")).toBeNull();
+    expect(gitHostAddress("https://h.lan./o/r")).toBeNull();
+  });
+
+  it("sends every launched company its allow list once at server start, and keeps the good entries next to a bad host", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
+    const q = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Odd" })).json() as { id: string };
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
+    await c.req("PATCH", `/api/projects/${q.id}`, { repoUrl: "https://my_git.lan/o/r" });
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").length).toBeGreaterThan(0));
+    c.fake.calls.length = 0;
+    await c.launcher.syncAll(1);
+    expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow")).toEqual([expect.objectContaining({ method: "PUT", body: { allow: ["192.168.68.67:3003"] } })]);
+  });
+
+  it("start-up sync tries again while the launcher is coming up, and never throws", async () => {
+    const c = (ctx = await setup());
+    await c.req("POST", "/api/companies", { name: "App Co" });
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    c.fake.calls.length = 0;
+    c.fake.fail(true);
+    const done = c.launcher.syncAll(1, 3);
+    await vi.waitFor(() => expect(c.fake.calls.length).toBe(3));
+    await expect(done).resolves.toBeUndefined();
   });
 
   it("does nothing without the launcher", async () => {

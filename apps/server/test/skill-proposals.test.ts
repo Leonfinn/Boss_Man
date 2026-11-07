@@ -1,3 +1,4 @@
+import { nameSecurityReviewer } from "./helpers.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -6,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
+import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agentSkills, agents, companies, decisions, skillProposals, skills, tickets } from "../src/db/schema.js";
 import { checkVerdict, hashFiles, numbered, RECONCILE_GRACE_MS, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
@@ -44,13 +46,12 @@ async function setup() {
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", fetch: fakeFetch });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const reviewer = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Security Reviewer" })).json() as { id: string };
-  await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
+  await nameSecurityReviewer(db, reviewer.id);
   await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" });
   const svc = built.skillProposals;
   const mcp = async (agentId: string) => {
@@ -197,9 +198,30 @@ describe("review", () => {
 
   it("refuses a script draft when there is no Security Reviewer, and stores nothing", async () => {
     const c = (ctx = await setup());
-    await c.db.update(agents).set({ reviewKind: null }).where(eq(agents.id, c.reviewer.id));
+    await nameSecurityReviewer(c.db, c.reviewer.id, false);
     await expect(withScript(c)).rejects.toThrow(/no Security Reviewer/);
     expect(await c.svc.list(c.company.id)).toHaveLength(0);
+  });
+
+  // BOS-198: the Security Reviewer is whoever Settings > Reviews names for security, a list included.
+  it("gives the review to an available agent from the Security cell, and only listed agents may judge", async () => {
+    const c = (ctx = await setup());
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Second Reviewer" })).json() as { id: string };
+    const [co] = await c.db.select().from(companies).where(eq(companies.id, c.company.id));
+    await c.db.update(companies).set({ reviewPolicy: { ...co!.reviewPolicy, high: { ...co!.reviewPolicy.high, kinds: { security: [c.reviewer.id, second.id] } } } }).where(eq(companies.id, c.company.id));
+    await c.db.update(agents).set({ paused: true }).where(eq(agents.id, c.reviewer.id));
+    const p = await withScript(c);
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
+    expect(t!.assigneeAgentId).toBe(second.id);
+    const verdict = { bundleHash: p.bundleHash, verdict: "recommend" as const, summary: "Fine.", findings: [] };
+    await expect(c.svc.recordVerdict(c.company.id, c.worker.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
+    await expect(c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, verdict)).rejects.toThrow(/given to another reviewer/);
+    // The CEO proposes skills, so naming it in the list never makes it a Security Reviewer.
+    await c.db.update(companies).set({ reviewPolicy: { ...co!.reviewPolicy, critical: { ...co!.reviewPolicy.critical, kinds: { security: [c.ceo.id] } } } }).where(eq(companies.id, c.company.id));
+    await expect(c.svc.recordVerdict(c.company.id, c.ceo.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
+    // Taken off the list mid-review: no longer a Security Reviewer, so no verdict.
+    await c.db.update(companies).set({ reviewPolicy: co!.reviewPolicy }).where(eq(companies.id, c.company.id));
+    await expect(c.svc.recordVerdict(c.company.id, second.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
   });
 
   // BOS-220: the owner chose the Security Reviewer in Settings > Reviews, and the agent-page mark was gone.
@@ -248,6 +270,10 @@ describe("review", () => {
     expect((await c.svc.get(c.company.id, p.id)).status).toBe("in_review");
     const done = await c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, v);
     expect(done).toMatchObject({ status: "awaiting_owner", verdict: "advise_against", reviewedBundleHash: p.bundleHash });
+    // BOS-304: the verdict ends the review, so the review task closes itself as done, with the verdict as its note.
+    const [closed] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
+    expect(closed).toMatchObject({ systemState: "done", outcome: "completed" });
+    expect(closed!.stateNote).toMatch(/Security review of tidy: advise against \(1 finding\)\./);
     await expect(c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, v)).rejects.toThrow(/isn't waiting/);
     const log = await c.db.select().from(activity);
     expect(log.map((l) => l.kind)).toEqual(expect.arrayContaining(["skill.proposed", "skill.review_requested", "skill.reviewed"]));

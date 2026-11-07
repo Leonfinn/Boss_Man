@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import type { Company } from "../src/api";
 import { Board } from "../src/pages/Board";
 import { Features } from "../src/pages/Features";
@@ -142,16 +143,23 @@ describe("board lanes", () => {
     expect(puts[0]).toEqual(["/api/projects/p1/columns", [{ name: "Soon", systemState: "ready", wipLimit: null }, { name: "In progress", systemState: "in_progress", wipLimit: 3 }]]);
   });
 
-  it("splits review into agent review and your review, and flags what waits on the owner", async () => {
-    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low" }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" }), card({ id: "t7", title: "Nobody else can review", waitingOnOwner: true, noReviewer: true })] });
+  it("splits review into awaiting review, approved and merging, and your review, and flags what waits on the owner", async () => {
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low", reviewStage: "awaiting_review" }), card({ id: "t8", title: "Approved, in the merge line", reviewStage: "merging", mergeNote: "Waiting for a check slot." }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" }), card({ id: "t7", title: "Nobody else can review", waitingOnOwner: true, noReviewer: true })] });
     withColumns([]);
     render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
     const strip = await screen.findByRole("link", { name: /2 tasks are waiting on you/ });
     expect(strip.textContent).toContain("Needs your sign-off");
     expect(strip.getAttribute("href")).toBe("#your-review");
-    const agent = screen.getByRole("region", { name: "Agent review" });
+    const agent = screen.getByRole("region", { name: "Awaiting review" });
     expect(within(agent).getByText("Agent still reviewing")).toBeTruthy();
     expect(within(agent).queryByText("Needs your sign-off")).toBeNull();
+    // BOS-667: approved work only waiting to merge is in its own lane, not counted as awaiting review.
+    expect(within(agent).queryByText("Approved, in the merge line")).toBeNull();
+    const merging = screen.getByRole("region", { name: "Approved, merging" });
+    expect(within(merging).getByText("Approved, in the merge line")).toBeTruthy();
+    expect(within(merging).getByText("Waiting for a check slot.")).toBeTruthy();
+    expect(within(merging).getByRole("link", { name: "See the merge queue" }).getAttribute("href")).toBe("#/merge-queue/c1");
+    expect(within(merging).queryByText("Agent still reviewing")).toBeNull();
     const mine = screen.getByRole("region", { name: "Your review" });
     expect(mine.id).toBe("your-review");
     expect(within(mine).getByText("Senior Developer approved. Needs your sign-off to merge.")).toBeTruthy();
@@ -279,6 +287,20 @@ describe("add feature or task", () => {
     fireEvent.click(screen.getByRole("button", { name: "Let the CEO question me first" }));
     await waitFor(() => expect(go).toHaveBeenCalledWith("chat/c1/a1"));
     expect(posts).toEqual([{ url: "/api/companies/c1/chat/grill", body: { kind: "task", title: "Add SSO", description: "Acme needs it", projectId: "p1" } }]);
+  });
+
+  it("takes a 200,000-character description whole, instead of cutting the paste (BOS-502)", async () => {
+    const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Add task" }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Big paste" } });
+    const box = screen.getByLabelText("Description") as HTMLTextAreaElement;
+    expect(box.getAttribute("maxLength")).toBeNull();
+    const big = "x".repeat(OWNER_MESSAGE_MAX);
+    fireEvent.change(box, { target: { value: big } });
+    expect(box.value).toHaveLength(OWNER_MESSAGE_MAX);
+    fireEvent.click(screen.getByRole("button", { name: "Add to backlog" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]!.body.body).toHaveLength(OWNER_MESSAGE_MAX);
   });
 
   it("opens New task with the feature preselected from a feature card", async () => {

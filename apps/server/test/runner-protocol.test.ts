@@ -3,14 +3,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import WebSocket from "ws";
 import { Journal, RunnerConnection } from "@boss-man/runner";
 import type { RunnerCommand } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import { buildApp } from "../src/app.js";
+import { runnerIngestWaiting } from "../src/routes/runner-socket.js";
+import { PROTOCOL_VERSION } from "@boss-man/shared";
 import { openPglite } from "../src/db/client.js";
-import { costEvents, runnerEvents, runs } from "../src/db/schema.js";
+import { agents, costEvents, runnerEvents, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
 const HEARTBEAT = 100;
 
@@ -59,6 +61,17 @@ describe("runner protocol (R31)", () => {
     const ws = new WebSocket(ctx.url, { headers: { authorization: "Bearer nope" } });
     const status = await new Promise<number>((resolve) => ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0)));
     expect(status).toBe(401);
+  });
+
+  it("stores the harness versions from hello and shows them per runner in server status (BOS-305)", async () => {
+    const journal = new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-runner-")), "j.jsonl"));
+    const harnessVersions = { "claude-code": "2.1.316", opencode: "1.19.3" };
+    const conn = new RunnerConnection({ url: ctx.url, token: ctx.reg.token, journal, runnerVersion: "test", heartbeatMs: HEARTBEAT, harnessVersions, onCommand: () => {} });
+    conn.start();
+    await waitFor(async () => conn.isLive, Boolean);
+    const status = await waitFor(() => ctx.built.serverStatus.status(ctx.companyId), (s) => !!s.runner?.harnessVersions);
+    expect(status.runner?.harnessVersions).toEqual(harnessVersions);
+    conn.stop();
   });
 
   it("delivers every event exactly once across a dropped connection", async () => {
@@ -181,6 +194,18 @@ describe("runner protocol (R31)", () => {
     await waitFor(async () => conn.isLive, Boolean, 5000);
     conn.stop();
   });
+
+  it("counts an event as no longer waiting when the hello ahead of it failed (BOS-410, Jane on BOS-472)", async () => {
+    const before = runnerIngestWaiting();
+    ctx.built.runners.touch = async () => { throw new Error("database gone"); };
+    const ws = new WebSocket(ctx.url, { headers: { authorization: `Bearer ${ctx.reg.token}` } });
+    await new Promise((r) => ws.once("open", r));
+    const closed = new Promise<number>((r) => ws.once("close", (code) => r(code)));
+    ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "test", imageVersion: null }));
+    ws.send(JSON.stringify({ type: "event", entry: { seq: 1, at: new Date().toISOString(), event: { type: "run.ended", runId: randomUUID(), stopReason: "end_turn", error: null } } }));
+    expect(await closed).toBe(1011);
+    await waitFor(async () => runnerIngestWaiting(), (n) => n === before);
+  });
 });
 
 describe("runner env endpoint", () => {
@@ -199,5 +224,76 @@ describe("runner env endpoint", () => {
     const { secretAccessLog } = await import("../src/db/schema.js");
     const logRows = await ctx.db.select().from(secretAccessLog);
     expect(logRows).toEqual([expect.objectContaining({ companyId: ctx.companyId, runId, purpose: "run" })]);
+  });
+});
+
+describe("runner restart wakes parked agents (BOS-352)", () => {
+  const monitorAtOf = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
+  async function parked(n = 1) {
+    const ceo = (await ctx.db.select().from(agents).where(eq(agents.companyId, ctx.companyId)))[0]!;
+    const p = await ctx.built.work.createProject(ctx.companyId, "App");
+    const out: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const t = await ctx.built.work.createTicket(p.id, { title: `Ship ${i}`, assigneeAgentId: ceo.id });
+      await ctx.built.work.updateTicket(t.id, { state: "in_progress" });
+      await ctx.built.work.setMonitor(t.id, { at: new Date(Date.now() + 45 * 60_000), note: "my check-all run" });
+      out.push(t.id);
+    }
+    return out;
+  }
+  async function connect() {
+    const r = runner();
+    r.conn.start();
+    await waitFor(async () => r.conn.isLive, Boolean);
+    // hello is handled after the link is live: wait until the server has stored a boot id.
+    await waitFor(async () => (await ctx.db.select().from(runners))[0]!.bootId, (v) => !!v);
+    return r;
+  }
+
+  it("pulls a pending check forward, with a note, when the runner restarts", async () => {
+    const first = await connect();
+    const [id] = await parked();
+    first.conn.stop();
+    const second = runner();
+    second.conn.start();
+    const t = await waitFor(() => monitorAtOf(id!), (x) => !!x.monitorAt && x.monitorAt.getTime() < Date.now() + 5000);
+    expect(t.monitorRestartAt).not.toBeNull();
+    await ctx.built.scheduler.slow();
+    const w = (await ctx.db.select().from(wakes).where(and(eq(wakes.ticketId, id!), eq(wakes.reason, "check due"))))[0]!;
+    expect(w.note).toMatch(/The runner restarted at .*any background check you started is gone\. Check its log and rerun only what you need\./);
+    second.conn.stop();
+  });
+
+  it("leaves a pending check alone on a plain reconnect", async () => {
+    const first = await connect();
+    const [id] = await parked();
+    const before = (await monitorAtOf(id!)).monitorAt!.getTime();
+    first.conn.breakConnection();
+    await new Promise((r) => setTimeout(r, 1500));
+    await waitFor(async () => first.conn.isLive, Boolean);
+    await ctx.built.scheduler.slow();
+    expect((await monitorAtOf(id!)).monitorAt!.getTime()).toBe(before);
+    first.conn.stop();
+  });
+
+  it("pulls at most 20 forward, and a second restart straight after pulls none", async () => {
+    const first = await connect();
+    const ids = await parked(22);
+    first.conn.stop();
+    const second = runner();
+    second.conn.start();
+    await waitFor(() => ctx.db.select().from(tickets), (rows) => rows.filter((x) => x.monitorRestartAt).length === 20);
+    const pulled = (await ctx.db.select().from(tickets)).filter((x) => x.monitorRestartAt).length;
+    expect(pulled).toBe(20);
+    second.conn.stop();
+    // A restart loop: more parked checks, another new boot id within minutes.
+    await ctx.db.update(tickets).set({ monitorRestartAt: null });
+    const third = runner();
+    third.conn.start();
+    await waitFor(async () => (await ctx.db.select().from(runners))[0]!.bootId, (v) => !!v && v !== undefined);
+    await new Promise((r) => setTimeout(r, 500));
+    expect((await ctx.db.select().from(tickets)).filter((x) => x.monitorRestartAt)).toHaveLength(0);
+    expect(ids).toHaveLength(22);
+    third.conn.stop();
   });
 });

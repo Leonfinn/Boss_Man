@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { branchFor, gitAuthEnv, Workspaces } from "../src/workspace.js";
+import { branchFor, gitAuthEnv, safeGitEnv, Workspaces } from "../src/workspace.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
 
@@ -69,6 +69,53 @@ describe("git workspaces (R38)", () => {
     expect(ws.savedPatch(ids.a)).toBeNull();
   });
 
+  it("recovers by itself when the ticket's branch is checked out in another ticket's folder, or a half-made folder is in the way (BOS-634)", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const specA = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const specB = { projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" };
+    const a = await ws.ensure(specA);
+    const b = await ws.ensure(specB);
+    git(a.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work on A");
+    await ws.release(specA);
+    // An agent working on B switches B's folder onto A's branch, so A's branch is taken.
+    git(b.path, "switch", "-q", branchFor(ids.a));
+    writeFileSync(path.join(b.path, "b-note.txt"), "uncommitted\n");
+    // A half-made folder for A is in the way as well.
+    mkdirSync(ws.ticketDir(ids.a), { recursive: true });
+    writeFileSync(path.join(ws.ticketDir(ids.a), "junk"), "x");
+
+    const back = await ws.ensure(specA);
+    expect(back.created).toBe(true);
+    expect(git(back.path, "log", "-1", "--format=%s")).toBe("work on A");
+    expect(git(back.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branchFor(ids.a));
+    // B's folder keeps its files and uncommitted work, now on a detached HEAD.
+    expect(git(b.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+    expect(readFileSync(path.join(b.path, "b-note.txt"), "utf8")).toBe("uncommitted\n");
+  });
+
+  it("does not run hooks or a filesystem monitor named in the shared repo's config", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const specA = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    await ws.ensure(specA);
+    const evil = mkdtempSync(path.join(tmpdir(), "bm-evil-"));
+    const marker = path.join(evil, "ran");
+    mkdirSync(path.join(evil, "hooks"));
+    for (const hook of ["post-checkout", "reference-transaction"]) {
+      writeFileSync(path.join(evil, "hooks", hook), `#!/bin/sh\necho ${hook} >> ${marker}\n`, { mode: 0o755 });
+    }
+    writeFileSync(path.join(evil, "fsmonitor"), `#!/bin/sh\necho fsmonitor >> ${marker}\n`, { mode: 0o755 });
+    git(ws.repoDir(ids.project), "config", "core.hooksPath", path.join(evil, "hooks"));
+    git(ws.repoDir(ids.project), "config", "core.fsmonitor", path.join(evil, "fsmonitor"));
+
+    const specB = { ...specA, ticketId: ids.b };
+    const b = await ws.ensure(specB);
+    writeFileSync(path.join(b.path, "x.txt"), "x\n");
+    await ws.release(specB);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("serialises concurrent creation on one repo", async () => {
     const r = remote();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
@@ -80,11 +127,35 @@ describe("git workspaces (R38)", () => {
     expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
   });
 
+  it("lets seven runs start at once on one repo and all get a workspace", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const tickets = Array.from({ length: 7 }, (_, i) => `${i}0000000-0000-4000-8000-000000000000`);
+    const made = await Promise.all(tickets.map((ticketId) => ws.ensure({ projectId: ids.project, ticketId, repoUrl: r.dir, baseRef: "main" })));
+    expect(made.every((m) => m.created)).toBe(true);
+    expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(8);
+  });
+
   it("passes a git token through the environment only", () => {
     const env = gitAuthEnv({ GIT_TOKEN: "ghp_x" });
     expect(env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader" });
     expect(Buffer.from(env.GIT_CONFIG_VALUE_0!.replace("Authorization: Basic ", ""), "base64").toString()).toBe("x-access-token:ghp_x");
     expect(gitAuthEnv({})).toEqual({ GIT_TERMINAL_PROMPT: "0" });
+  });
+
+  it("keeps the hook and fsmonitor settings when a git token adds its own config entry", () => {
+    const env = safeGitEnv(gitAuthEnv({ GIT_TOKEN: "ghp_x" }));
+    expect(env).toMatchObject({
+      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: "/dev/null",
+      GIT_CONFIG_KEY_1: "core.fsmonitor",
+      GIT_CONFIG_VALUE_1: "false",
+      GIT_CONFIG_KEY_2: "http.extraHeader",
+      GIT_TERMINAL_PROMPT: "0",
+    });
+    expect(env.GIT_CONFIG_VALUE_2).toMatch(/^Authorization: Basic /);
+    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "2" });
   });
 
   it("reports a clone that fails", async () => {
@@ -115,6 +186,32 @@ describe("git workspaces (R38)", () => {
     // The agent's own staging area is exactly as it was.
     expect(git(w.path, "diff", "--cached", "--name-only")).toBe(stagedBefore);
     expect((await ws.diff(spec, 50)).truncated).toBe(true);
+  });
+
+  it("reports the tree of the head it read, even when a commit lands mid-diff", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    const headA = git(w.path, "rev-parse", "HEAD");
+    const treeA = git(w.path, "rev-parse", "HEAD^{tree}");
+    // A commit lands right after the head is read (during the slow steps).
+    const real = (ws as any).git.bind(ws);
+    let landed = false;
+    (ws as any).git = async (args: string[], opts?: unknown) => {
+      const out = await real(args, opts);
+      if (!landed && args[0] === "rev-parse" && args[1] === "HEAD") {
+        landed = true;
+        writeFileSync(path.join(w.path, "later.txt"), "B\n");
+        git(w.path, "add", "later.txt");
+        git(w.path, "commit", "-qm", "later");
+      }
+      return out;
+    };
+    const d = await ws.diff(spec);
+    expect(landed).toBe(true);
+    expect(d.head).toBe(headA);
+    expect(d.tree).toBe(treeA);
   });
 });
 

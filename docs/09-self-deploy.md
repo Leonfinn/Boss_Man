@@ -16,14 +16,23 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
       │                  server writes inbox/request.json (tmp + rename)
       └─ checks it, runs deploy.sh or update-runner.sh ─▶ outbox/status.json
                                        │
-            server poller (5 s) ◀──────┘  notification + Settings "last deploy" + webhook on failure
+            server poller (30 s) ◀──────┘  notification + Settings "last deploy" + webhook on failure
 ```
 
 ## Decisions made
 
 1. **Host script plus a one-minute TrueNAS cron job.** No container, no socket.
 2. **It reuses `scripts/deploy.sh`** (backup, build, restart, health) and `scripts/update-runner.sh`, so there is one deploy path. `deploy.sh` gained `--commit SHA` so it deploys exactly the commit that was checked, not whatever main is by then.
-3. **GitHub is the source of truth.** The `src` checkout pulls from the public `https://github.com/Leonfinn/Boss_Man.git`, no credential needed (`docs/06`, step 2). Installs made earlier with a read-only deploy key set as `core.sshCommand` keep working unchanged. The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no credential.
+3. **The git remote is the source of truth.** The `src` checkout pulls from its `origin`: https for a public repo, or an SSH remote with a read-only deploy key set as `core.sshCommand` for a private one (`docs/00`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no extra credential. On a new host, the move guide (`docs/21-move-to-new-host.md`) sets up the same key.
+
+   Exact clone commands (full steps in `docs/00`, step 2), with `$B` as the install folder:
+
+   ```sh
+   # public repo
+   git clone <repo-https-url> $B/src
+   # private repo, read-only deploy key
+   git clone -c core.sshCommand="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" <repo-ssh-url> $B/src
+   ```
 4. **Server deploys and runner updates are separate approvals.** A runner update drains first (phase 2 below), so it no longer cuts off agent runs unless the owner says so.
 5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, the deploy scripts and the like (the exact list is in step 6 below) only deploy when the owner runs `scripts/deploy.sh` by hand on the host that runs Boss Man.
 6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at a Home Assistant webhook automation; ntfy works too.
@@ -122,11 +131,12 @@ Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that c
 
 - A decision of kind `approval` with context type `self_deploy` (no migration: no new enum value), tier `owner`, so only the owner's session can answer it; the CEO tool only answers `ceo`-tier decisions. Decisions belong to a company, so it is raised under the oldest one.
 - **Server:** raised by the poller when `available.json` shows `tip` differs from `deployed`, one per tip (`dedupeKey`); an older open one is withdrawn when main moves again, or when the owner hand-deploys. `available.json` lags `main`: the host rewrites it at most every 5 minutes and only in a minute with no request waiting. So the poller does not offer a commit the latest `status.json` already settled (refused, deployed or nothing new) until `checkedAt` is later than that status. After a not-the-tip refusal the host also deletes `available.json`, so the next minute writes a fresh one. Without both, two merges a few minutes apart made a loop: the stale offer was approved, refused and raised again. The migrations count in the question counts `apps/server/drizzle/*.sql` only, not Drizzle's `meta/` files. Options `Deploy` / `Not now`. The text shows the commit range, subjects, file count, migrations, and whether runner code changed. If the range touches infra files it is only an alert (`Got it`) saying to run `scripts/deploy.sh` on the host. Settings > Server and runner > Updates > **Deploy latest** raises it again for the current tip even if it was put off.
-- **Runner:** after a server deploy of a range that changed runner paths succeeds, the poller raises a separate `Update runners` / `Not now` decision for the deployed commit, whose text explains the drain (phase 2).
+- **Runner:** after a server deploy of a range that changed runner paths succeeds, the poller raises a separate `Update runners` / `Not now` decision for the deployed commit, whose text explains the drain (phase 2). **It waits for the server update trial first (BOS-368).** A blue/green server update reports `deployed` when it switches in, but the host can still switch it back during its standby window (`SOAK_SECONDS` on the host, default 900). The host writes the window it really uses into `status.json` as `soak_seconds` (0 when the install is not blue/green), and the server takes the length from there, never from its own environment. If it is missing (an older host), the server uses the `soakSeconds` the host publishes in `available.json` (BOS-384), and failing that 900 (BOS-401). So the poller holds the runner offer in the `self_deploy_runner_due` setting until the window plus 120 seconds has passed, and raises it only if the last server result is still `deployed` for that commit and `available.json` reports it running. Otherwise it drops the offer and logs why. A `rolled_back` or `failed` server result clears the held offer and withdraws every open runner card, whichever way round the host names the two commits. Every server update that ends `deployed` sets the hold, including deploy latest, a hand-apply and a rollback that have no self-deploy decision; the hold only becomes a card if a runner change is known (the decision said so, or an earlier held update did). A newer server update inside the window keeps the older held range and offer, so the one card covers from the older `fromCommit` to the newer commit. During the window, Settings > Server and runner > Updates > **Build and update runners** and answering a runner card both refuse with a message naming the trial length ("The server update is still in its 15-minute trial…", or the host's length); the wording is built from the value, never hard-coded.
 - Approving checks that no deploy is running and no request is waiting, then writes the request. If the write fails the decision stays open.
 - **Notifications** (from the poller, once per result; the ladder): deployed = note, refused = flag, failed / partial / rolled back = page (phone through ntfy if configured). They link to Settings. The result is also stored on the decision and in the activity feed. `notifications.decision_id` is unique and already used by the "ask" notification, so the result notification is not linked to the decision row.
 - **Settings > Server and runner > Updates** shows the last deploy (result, commit, time, message), what is waiting, and the button.
 - The poller and the request writer are marked `// leader-only` in the code (`main.ts`, `self-deploy.ts`) for phase 3.
+- The poller runs every 30 s, and skips the pass when neither `available.json` nor `status.json` (nor a waiting request) has changed by mtime and size, and it is under a minute since the last pass that ran (BOS-414). The host replaces those files by rename, so their identity moves with their content; the minute-long forced pass covers anything that doesn't show in a file.
 
 ## Security: what a merged PR could and could not do
 
@@ -230,6 +240,9 @@ Built ahead of blue/green; on today's single server nothing changes. Nothing her
 |---|---|---|
 | `BOSSMAN_ROLE` | `auto` | `auto` contests the lock at boot. `standby` does not contest until `SIGUSR2`. |
 | `BOSSMAN_LEADER_LOCK` | on | `0` is the kill switch: no lock, always the leader, exactly as before. |
+| `BOSSMAN_LEADER_MISSES` | `2` | Heartbeats in a row with no reply (3 s each, counted only while the server is not frozen) before the leader steps down. A connection or query error still steps down at once. `1` is the old behaviour. Read at start, so a change needs a server restart. |
+| `BOSSMAN_STALL_PROFILE` | on | The server samples its own CPU profile every 10 ms, so each `STALL:` line (and server_status `stalls`) names the functions that ran during the freeze. `0` turns the sampler off; the stall line then has CPU and cgroup figures only. Read at start. |
+| `BOSSMAN_SERVER_HEALTH_MS` | `60000` | How often the leader checks its own memory and freezes for the server-health cards (below). |
 | `BOSSMAN_MIGRATE_ON_START` | on | `0` skips migrating at start (only checks the database is current). |
 | `BOSSMAN_MIGRATE_LOCK_TIMEOUT_MS` | `60000` | How long `migrate.js` waits for another migration. |
 
@@ -238,6 +251,13 @@ PGlite (no `DATABASE_URL`) has no cross-process locks, so it is always the leade
 **How to check the role.** `GET /api/health` and `GET /api/ready` return `role`: `"leader"`, `"standby"`, or `"single"` (lock off or PGlite). Settings > Server and runner > Server shows it, with both colours when blue/green is on. Every change is logged as a line starting `LEADER: ***` (`docker logs <server> | grep LEADER`).
 
 **If the only server shows `standby`:** its role should be `leader` within about 2 s of boot. If it stays `standby`, another connection still holds the lock (look in `pg_locks` for `locktype = 'advisory'`; the leader connection sets `idle_session_timeout = 30s`, so Postgres ends a dead holder within about 30 s) or someone sent `SIGUSR1` or booted it with `BOSSMAN_ROLE=standby`. Fix: send `SIGUSR2`; or set `BOSSMAN_LEADER_LOCK=0` and restart to run exactly as before.
+
+**Server-health cards (BOS-640).** Once a minute the leader compares its own memory and freezes with two levels and raises a card when one is passed (`apps/server/src/services/server-health.ts`):
+
+- **Memory, to the CEO:** rss above 60% of the memory the server may use, or more than 1 GiB of growth in each of the last two hours. "The memory the server may use" is the smallest of the container's cgroup limit (v2 `memory.max`, v1 `memory.limit_in_bytes`, when one is set), the total the kernel reports, and a host-reported total when one is wired in. All of them are read inside the container, so nothing is fixed per host. On an LXC without lxcfs the kernel total is the whole Proxmox host's, so the share rule then trips late; set a container memory limit, or rely on the growth rule.
+- **Freezes, to the owner:** more than 10 freezes over the stall threshold (1 s) in 10 minutes, whatever the memory figure.
+
+Each card names what to do: approve the open server update card if there is one, otherwise restart the server. There is one card per rule while it is open. A card answered while the problem goes on is not raised again until the rule has been calm for 30 minutes. Each card closes itself (DR-016, `serverCalm`) once its rule has stayed under its level for 30 minutes. The readings belong to the process that leads: after a restart or a change of leader, the 30 minutes count from that process's first reading.
 
 ## Phase 3, part 2: blue/green swap (optional)
 
@@ -273,6 +293,8 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
 
 - **During the swap** (step 8 onwards fails): reverse it: SIGUSR1 the new colour, SIGUSR2 the old, restore the include, reload, check through the proxy, stop the new colour, put the checkout back. Status `rolled_back`, webhook.
 - **During the 15 minutes**: every cron tick re-checks through the proxy (leader, target commit, portal; it retries for 10 s first). If that fails, the same reversal runs on its own. Status `rolled_back`, webhook. After the deadline a tick stops the old colour and the soak ends. Approving a new deploy during the soak ends it (the old colour's container is about to be rebuilt).
+- **"Healthy" is a checklist, not one answer (DR-020 D, BOS-488).** At the swap, on every tick of the window, at the end of the window and at the end of a rollback the deployer checks five items and records each as `pass` or `fail`: (1) **live**: the live colour's container runs, answers `/api/ready` as leader at the target commit and loads the portal, through the proxy; (2) **other**: the other colour is in its planned state, running as a standby during the window, and afterwards stopped *by plan* (exit code 0 and listed in `state/stopped-by-plan`, which the deployer writes whenever it stops a colour on purpose); a crash or a stop it did not do fails; (3) **leader**: exactly one of the two colours leads (not zero, not two); (4) **db**: the database container has the same ID and start time as before the deploy (`state/baseline`, taken before anything is touched) and `pg_postmaster_start_time()` is unchanged; a recreated or restarted database is a failure; (5) **restarts**: neither colour, the database nor the proxy restarted, was recreated or was OOM-killed since the baseline (`RestartCount`, `OOMKilled`). A colour the deploy rebuilds on purpose gets its baseline renewed. A hand-applied database step that is planned drops an empty file `state/planned-db`; the next check renews the database baseline once and removes it.
+  The result is in `outbox/health.json` (`stack` = `healthy`/`degraded`, `check_<item>`, `detail_<item>`, `phase`, `commit`, `at`) and the same `stack` and `check_*` fields ride in `status.json`. What a failure does: a failed **live** item (or any item at swap time) switches back as before; a failed other item during the window leaves the live colour alone (switching could make it worse), writes status `partial` and posts the webhook once for that problem (`state/last-health-alert`), and the window still ends at its deadline: the old colour is stopped by plan, the end check records the problem and pages once (a failed item never keeps a second server running for ever). The page names the way to accept the new state: `host-deployer.sh --ack-health` as root records every container as it is now (new baseline) and re-runs the checklist. The database's start time is read with a 15-second limit, so a hung database cannot hold the deployer's lock: no answer is a failed db item. A window that began before this version has no baseline: one is taken at the first tick, with a note.
 - **After the 15 minutes**: `host-deployer.sh --rollback`, run by hand as root, does the same hand-over towards the stopped colour (start it from its existing image, smoke test, USR1/USR2, flip, verify, stop the bad colour, back up first, move the checkout to the code that runs). It fails safe the same way. Not yet run on the real NAS; see the wiki page "Database restore and blue/green rollback".
 - If the reversal itself fails, status `failed` and the webhook say so: the NAS needs a person.
 - A colour that was demoted (SIGUSR1) does not contest the lock until promoted, so during the soak there is no automatic fail-over from a crashed new colour to the old one; the tick's check is what notices it, within a minute.
@@ -315,7 +337,14 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
 2. **To verify on the NAS:** the cron job survives a TrueNAS upgrade (stored in the TrueNAS configuration database, which carries across updates; UNVERIFIED for 25.10). Verified on the NAS in Oct 2026:
    - the bind mount ownership with the TrueNAS override;
    - `python3` and `flock` on root's cron PATH;
-   - `git ls-remote` over https (or the deploy key on older installs) from cron;
+   - `git ls-remote` from cron, over https or with the deploy key (whichever `origin` uses);
    - the cron schedule needs every field set to `*`, because the UI's Hourly preset runs once an hour.
 3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any Home Assistant restore.
 4. The first deploy of this phase is by hand: it adds `--commit` to `deploy.sh` and changes `scripts/` and `deploy/`.
+
+## Why a runner update can be refused, and what the status shows (BOS-364)
+
+- Runners are rebuilt from the deployer's checkout, so a runner request is accepted only for the commit the checkout is on (the version the server runs). While a server swap runs, the deployer holds its lock and does not read the request; it is read on a later minute. If the server update was switched back in between (for example by the automatic switch-back during the standby window), the checkout is back on the old commit and the runner request is refused with a plain message. Nothing is broken; offer the runner update again once the server runs the version you want.
+- Boss Man shows that refusal as a quiet note ("Runner update not started"), not an alert, and withdraws a runner offer for a commit the server never reached.
+- `server_status` `deploy.liveCommit` / `liveSince` come only from a finished **server** deploy (otherwise from the host's deployed commit, then the server's own commit). A refused or failed request never counts as live.
+- This is generic to any Docker host; nothing here depends on paths or names. Host-specific notes belong in the install guide for that host.

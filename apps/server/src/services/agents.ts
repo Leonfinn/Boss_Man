@@ -1,13 +1,15 @@
 // The Agents tab (R62): who works for each company, what they cost this month, and every change
 // to them, with what it was before so it can be undone.
 import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, harnessLabel, providerLabel, speakerNameProblem } from "@boss-man/shared";
+import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, harnessLabel, isClaudeModel, modelFitProblem, providerLabel, speakerNameProblem } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
 import { pictureType } from "./company-import.js";
+import { shrinkPicture } from "./picture-shrink.js";
 import { MODEL_APPROVE, MODEL_EDIT, MODEL_REJECT, TEAM_HIRE, TEAM_NOT_NOW, type AgentModelConfig, type HireProposal, type TeamHire } from "./decisions.js";
 import type { ModelChoice } from "./models.js";
+import { getStandingRules, normalizeStandingRules, setStandingRules, standingRulesError, StandingRulesError } from "./standing-rules.js";
 
 export class AgentError extends Error {
   constructor(
@@ -58,7 +60,6 @@ const HARNESS_PROVIDERS: Record<string, readonly string[]> = {
   codex: ["openai", "bedrock", "foundry", "gateway"],
   opencode: FUNDING_PROVIDERS,
 };
-const CLAUDE_ALIASES = new Set(["default", "opus", "sonnet", "haiku", "fable"]);
 const labelConfig = (c: AgentModelConfig) => `Harness: ${harnessLabel(c.harness)} · Provider: ${c.provider ? providerLabel(c.provider) : "not set"} · Model: ${c.model || "default"} · Paid from: ${c.fundingSourceName || (c.fundingSourceId ? c.fundingSourceId : "not set")}`;
 
 export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify; assignPlanned?: (companyId: string, hired: AgentRow, ticketIds: string[]) => Promise<unknown>; catalog?: Catalog } = {}) {
@@ -109,20 +110,31 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     const allowed = HARNESS_PROVIDERS[harness] ?? [];
     if (!allowed.includes(provider)) throw new AgentError(422, `${harnessLabel(harness)} can't run on ${providerLabel(provider)}. Use ${allowed.map(providerLabel).join(", ")}, or choose OpenCode for this provider.`);
     if (!model) throw new AgentError(422, "Choose a model. Call model_options to see the models the harness and funding source offer.");
+    // A model the account doesn't serve can't run, whatever lists are (or aren't) reported (BOS-477):
+    // a DeepSeek model on a Claude account was the card that reached the owner before this check.
+    const misfit = modelFitProblem(harness, provider, model);
+    if (misfit) throw new AgentError(422, misfit);
     if (opts.catalog) {
       const catalog = await opts.catalog(companyId);
       const offered = [...(catalog.runner[harness]?.models ?? []), ...(catalog.api.find((a) => a.fundingSourceId === fundingSourceId)?.models ?? [])].filter((m) => m.value !== "default");
-      const known = offered.some((m) => m.value === model) || (harness === "claude" && (CLAUDE_ALIASES.has(model) || /^claude[-.]/i.test(model)));
+      const known = offered.some((m) => m.value === model) || (harness === "claude" && isClaudeModel(model));
       if (offered.length && !known) throw new AgentError(422, `That model (${model}) isn't in the list for ${harnessLabel(harness)} on ${source.name}. Call model_options to see the valid models.`);
     }
     return { harness, provider, model, fundingSourceId, fundingSourceName: source.name };
   }
 
-  /** Valid choices for the CEO, with the same names the Agents page shows. */
+  /** Valid choices for the CEO, with the same names the Agents page shows, and what each agent runs on now. */
   async function modelOptions(companyId: string) {
     const sources = await db.select().from(fundingSources).orderBy(fundingSources.name);
     const catalog: ModelCatalog = opts.catalog ? await opts.catalog(companyId) : { runner: {}, api: [] };
+    // Every live agent's current setup, so moving people off one account is a check per agent, not a guess (BOS-477).
+    const rows = await db.select({ a: agents, funding: fundingSources.name }).from(agents).leftJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId)).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt)));
+    const current = rows.map(({ a, funding }) => {
+      const source = sources.find((s) => s.id === a.fundingSourceId);
+      return { id: a.id, name: a.name, role: a.role, harness: a.agentKind, harnessLabel: harnessLabel(a.agentKind), provider: source?.provider ?? null, providerLabel: source?.provider ? providerLabel(source.provider) : "not set", model: a.model, fundingSourceId: a.fundingSourceId, fundingSourceName: funding ?? null };
+    }).sort((x, y) => (x.role === "ceo" ? -1 : y.role === "ceo" ? 1 : x.name.localeCompare(y.name)));
     return {
+      current,
       harnesses: HARNESSES.map((h) => ({ value: h.value, label: h.label })),
       providers: FUNDING_PROVIDERS.map((value) => ({ value, label: providerLabel(value) })),
       fundingSources: sources.map((s) => ({ id: s.id, name: s.name, kind: s.kind, provider: s.provider, providerLabel: providerLabel(s.provider) })),
@@ -130,7 +142,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         runner: Object.fromEntries(Object.entries(catalog.runner).map(([kind, list]) => [kind, list.models.filter((m) => m.value !== "default")])),
         byFundingSource: catalog.api.map((a) => ({ fundingSourceId: a.fundingSourceId, name: a.name, provider: a.provider, providerLabel: providerLabel(a.provider), models: a.models, error: a.error })),
       },
-      note: "Pick a harness, a provider, a model and a funding source whose provider is the same. If a model list is empty, the runner or provider hasn't reported one; a valid model ID can still be used. Every hire and model change waits for the owner's approval.",
+      note: "Pick a harness, a provider, a model and a funding source whose provider is the same, and a model the funding source serves (Claude models on a Claude account, OpenAI models on OpenAI, and so on). If a model list is empty, the runner or provider hasn't reported one; a valid model ID can still be used. `current` lists what every live agent runs on now. Every hire and model change waits for the owner's approval.",
     };
   }
 
@@ -267,6 +279,51 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     },
 
     /**
+     * The CEO changes the company's standing rules (BOS-353). Like an instruction change it is
+     * applied at once with a notification and Undo in the history, unless the owner wants to
+     * approve edits too, in which case it waits in Decisions. Nobody else can change them.
+     */
+    async proposeStandingRules(companyId: string, ceoId: string, text: string, reason?: string): Promise<{ saved: Awaited<ReturnType<typeof getStandingRules>> } | { decisionId: string }> {
+      // Normalise and check once, before anything is shown or saved: the text the owner reads on the
+      // card is exactly the text that gets saved, so blank space can't hide the real rules (security review).
+      const rules = normalizeStandingRules(text);
+      const problem = standingRulesError(rules);
+      if (problem) throw new AgentError(422, problem);
+      if ((await approvals(companyId)) === "hires_and_edits") {
+        const [d] = await db
+          .insert(decisions)
+          .values({
+            companyId,
+            raisedByAgentId: ceoId,
+            kind: "approval",
+            tier: "owner",
+            question: [rules ? "The CEO wants to change the company's standing rules." : "The CEO wants to clear the company's standing rules.", reason ? `Why: ${reason}` : null].filter(Boolean).join("\n\n"),
+            options: [APPLY, KEEP],
+            recommendedOption: APPLY,
+            context: { type: "standing_rules", text: rules, byAgentId: ceoId },
+          })
+          .returning({ id: decisions.id });
+        return { decisionId: d!.id };
+      }
+      const saved = await this.applyStandingRules(companyId, ceoId, rules);
+      await notify({ companyId, agentId: ceoId, level: "note", title: saved.text ? "The CEO changed the standing rules" : "The CEO cleared the standing rules", body: `${reason ? `${reason}\n` : ""}Every run from now on reads them. See them, or undo the change, on the Settings page.`, link: "#/settings" });
+      return { saved };
+    },
+
+    /** Saves the standing rules as the CEO (or the owner's approval of the CEO's proposal). */
+    async applyStandingRules(companyId: string, ceoId: string, text: string) {
+      const [ceo] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, ceoId));
+      try {
+        const saved = await setStandingRules(db, companyId, { text, by: ceo?.name ?? "the CEO", byAgentId: ceoId });
+        await logActivity(db, { companyId, agentId: ceoId, kind: "settings", summary: saved.text ? `${ceo?.name ?? "The CEO"} updated the standing rules` : `${ceo?.name ?? "The CEO"} cleared the standing rules` });
+        return saved;
+      } catch (err) {
+        if (err instanceof StandingRulesError) throw new AgentError(422, err.message);
+        throw err;
+      }
+    },
+
+    /**
      * The CEO renames an agent (BOS-265). The name is display only: the id ties tickets, runs,
      * notes and history to the agent, so nothing else moves. The CEO can't be renamed this way,
      * and the name must be new to the company. Like an instruction change it is applied with a
@@ -358,20 +415,21 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
 
     /**
      * Sets an agent's picture from an image already on one of the company's tickets (BOS-265), or
-     * clears it back to the template's portrait. Only PNG, JPEG or WebP bytes are taken, sized as an
-     * owner's upload; the bytes are kept once per image and shared by every agent that uses it.
+     * clears it back to the template's portrait. Only PNG, JPEG or WebP bytes are taken; a picture
+     * over the cap is shrunk to fit on the server rather than refused (BOS-320), and the bytes are
+     * kept once per image and shared by every agent that uses it.
      */
-    async setPicture(companyId: string, ceoId: string, agentId: string, choice: { imageId?: string | null; clear?: boolean }, reason?: string): Promise<{ agent: AgentRow; cleared: boolean }> {
+    async setPicture(companyId: string, ceoId: string, agentId: string, choice: { imageId?: string | null; clear?: boolean }, reason?: string): Promise<{ agent: AgentRow; cleared: boolean; shrunk: boolean }> {
       const a = await agent(agentId);
       if (a.companyId !== companyId) throw new AgentError(404, "No such agent.");
       const why = reason?.trim().slice(0, REASON_MAX) || null;
       if (choice.clear) {
-        if (!a.avatarAt) return { agent: a, cleared: true };
+        if (!a.avatarAt) return { agent: a, cleared: true, shrunk: false };
         await db.delete(agentAvatars).where(eq(agentAvatars.agentId, agentId));
         const [after] = await db.update(agents).set({ avatarAt: null }).where(eq(agents.id, agentId)).returning();
         await logActivity(db, { companyId, agentId: ceoId, kind: "agent_picture", summary: `${a.name}'s picture went back to the default${why ? `: ${why}` : ""}` });
         await notify({ companyId, agentId: ceoId, level: "note", title: `The CEO set ${a.name}'s picture back to the default`, body: `${why ? `${why}\n` : ""}See it, or undo it, on the Agents page.`, link: "#/agents" });
-        return { agent: after!, cleared: true };
+        return { agent: after!, cleared: true, shrunk: false };
       }
       const imageId = choice.imageId?.trim();
       if (!imageId) throw new AgentError(422, "Give an image id (one attached to a ticket in this company) or set clear to go back to the default.");
@@ -380,15 +438,23 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       // The bytes decide, never the stored type or a name.
       const type = pictureType(img.bytes);
       if (!type) throw new AgentError(422, `${img.size} bytes that aren't a PNG, JPEG or WebP image. Pick a picture, not a document.`);
-      if (img.bytes.length > AVATAR_MAX_BYTES) throw new AgentError(413, `That picture is ${Math.round(img.bytes.length / 1024)} KB; a picture can be at most ${AVATAR_MAX_BYTES / 1024} KB. Pick a smaller one.`);
+      // Over the cap, shrink it here and keep its format rather than make the CEO go and find a smaller one (BOS-320).
+      let bytes = img.bytes;
+      let shrunk = false;
+      if (bytes.length > AVATAR_MAX_BYTES) {
+        const small = await shrinkPicture(bytes, type, AVATAR_MAX_BYTES);
+        if (!small || pictureType(small) !== type) throw new AgentError(413, `That picture is ${Math.round(bytes.length / 1024)} KB and couldn't be shrunk to ${AVATAR_MAX_BYTES / 1024} KB. It may be damaged; export it again as a PNG, JPEG or WebP and attach that.`);
+        bytes = small;
+        shrunk = true;
+      }
       await db
         .insert(agentAvatars)
-        .values({ agentId, bytes: img.bytes, type, imageId: img.id })
-        .onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes: img.bytes, type, imageId: img.id } });
+        .values({ agentId, bytes, type, imageId: img.id })
+        .onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type, imageId: img.id } });
       const [after] = await db.update(agents).set({ avatarAt: now() }).where(eq(agents.id, agentId)).returning();
-      await logActivity(db, { companyId, agentId: ceoId, kind: "agent_picture", summary: `${a.name}'s picture was set from a ticket image${why ? `: ${why}` : ""}` });
+      await logActivity(db, { companyId, agentId: ceoId, kind: "agent_picture", summary: `${a.name}'s picture was set from a ticket image${shrunk ? " (shrunk to fit)" : ""}${why ? `: ${why}` : ""}` });
       await notify({ companyId, agentId: ceoId, level: "note", title: `The CEO set ${a.name}'s picture`, body: `${why ? `${why}\n` : ""}It shows on the Agents page, the board and the runs list. You can undo it there.`, link: "#/agents" });
-      return { agent: after!, cleared: false };
+      return { agent: after!, cleared: false, shrunk };
     },
 
     /**
@@ -445,10 +511,11 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       return { hired, failed };
     },
 
-    /** The owner's answer to a hire, instructions or rename decision. */
-    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string } | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string }, companyId: string, approved: boolean) {
+    /** The owner's answer to a hire, instructions, rename or standing-rules decision. */
+    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string } | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string } | { type: "standing_rules"; text: string; byAgentId: string }, companyId: string, approved: boolean) {
       if (!approved) return null;
       if (ctx.type === "rename") return this.applyRename(ctx.agentId, ctx.newName, ctx.byAgentId, "The owner approved it.");
+      if (ctx.type === "standing_rules") return this.applyStandingRules(companyId, ctx.byAgentId, ctx.text);
       if (ctx.type === "hire") {
         const config = await validateModelConfig(companyId, ctx.proposal);
         const hired = await this.hire(companyId, { ...ctx.proposal, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ctx.byAgentId);

@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, companies, decisions, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
-import { MISSED_REASON, REVIEW_REASON } from "../src/services/scheduler.js";
+import { MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
 import type { Leader } from "../src/leader.js";
 
 const HOUR = 3_600_000;
@@ -209,7 +209,7 @@ describe("stalled review sweep", () => {
 describe("unmerged approvals sweep", () => {
   it("tries an interrupted merge once by itself, asks the owner once if that fails too, and leaves one waiting on sign-off", async () => {
     ctx = await setup();
-    const approve = (ticketId: string) => ctx.db.insert(reviewRequests).values({ ticketId, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved" });
+    const approve = (ticketId: string) => ctx.db.insert(reviewRequests).values({ ticketId, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", createdAt: new Date(Date.now() - 4 * HOUR), decidedAt: new Date(Date.now() - 3 * HOUR) });
     // No repo: trying again simply closes it.
     const plain = await ctx.forgotten("Ship it", { systemState: "review" });
     await approve(plain);
@@ -240,6 +240,32 @@ describe("unmerged approvals sweep", () => {
     expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
   });
 
+  it("raises a merge-stuck card with the stored refusal once the one retry is used up (BOS-684)", async () => {
+    ctx = await setup();
+    const id = await ctx.forgotten("Ship the API", { systemState: "review" });
+    const p2 = (await ctx.req("POST", `/api/companies/${ctx.company.id}/projects`, { name: "API" })).json() as { id: string };
+    await ctx.db.update(projects).set({ repoUrl: "https://github.com/Leonfinn/api.git" }).where(eq(projects.id, p2.id));
+    await ctx.db.update(tickets).set({ projectId: p2.id }).where(eq(tickets.id, id));
+    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", createdAt: new Date(Date.now() - 4 * HOUR), decidedAt: new Date(Date.now() - 3 * HOUR) });
+    // The sweep's one retry is used up; its card was answered, and the gate's refusal is what remains on the ticket.
+    await ctx.sweeps.run();
+    await new Promise((r) => setTimeout(r, 300));
+    await ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(like(decisions.dedupeKey, "merge-stuck:%"));
+    await ctx.db.update(tickets).set({ pullRequestNote: 'Waiting: its branch also carries unapproved work from "Permission gate" (high risk), which must merge first.' }).where(eq(tickets.id, id));
+    // The first attempt's heartbeat has gone quiet by now (a merge that is alive holds the sweep back).
+    const real = Date.now();
+    const spy = vi.spyOn(Date, "now").mockReturnValue(real + 2 * HOUR);
+    try {
+      expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    const [card] = await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "merge-stuck:%"));
+    expect(card!.question).toContain("sweep's one retry is used up");
+    expect(card!.question).toContain('"Permission gate"');
+    expect(card!.options).toContain("Run the check again");
+  });
+
   it("a server that handed over mid-merge leaves it to the one now in charge, without asking the owner", async () => {
     let leading = true;
     const leader: Leader = { role: () => (leading ? "leader" : "standby") as never, isLeader: () => leading, onPromote: () => {}, onDemote: () => {}, start: async () => {}, stop: async () => {}, demote: async () => {}, promote: async () => {} };
@@ -254,3 +280,26 @@ describe("unmerged approvals sweep", () => {
   });
 });
 
+
+describe("urgent-idle sweep (BOS-346)", () => {
+  it("wakes the idle assignee of an urgent in-progress ticket at once, once per ticket", async () => {
+    ctx = await setup();
+    const id = await ctx.forgotten("Fix prod", { systemState: "in_progress", urgent: true, lastActivityAt: new Date(Date.now() - 5 * 60_000) });
+    expect(await ctx.sweeps.run()).toMatchObject({ urgentIdle: { woken: 1 }, missedWork: { woken: 0 } });
+    const rows = await ctx.db.select().from(wakes).where(and(eq(wakes.reason, URGENT_IDLE_REASON), eq(wakes.ticketId, id)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ agentId: ctx.worker.id, status: "queued" });
+    await ctx.sweeps.run();
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.reason, URGENT_IDLE_REASON))).toHaveLength(1);
+  });
+
+  it("leaves alone non-urgent tickets, busy assignees and runs in progress", async () => {
+    ctx = await setup();
+    const old = new Date(Date.now() - 5 * 60_000);
+    await ctx.forgotten("Routine", { systemState: "in_progress", lastActivityAt: old });
+    const busy = await ctx.hire("Busy");
+    const t = await ctx.forgotten("Urgent but running", { systemState: "in_progress", urgent: true, lastActivityAt: old, assigneeAgentId: busy.id });
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: busy.id, ticketId: t });
+    expect(await ctx.sweeps.run()).toMatchObject({ urgentIdle: { woken: 0 } });
+  });
+});

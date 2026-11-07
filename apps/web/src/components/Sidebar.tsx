@@ -2,7 +2,7 @@
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
 import { useState, type FormEvent } from "react";
 import type { Company, Decision } from "../api";
-import { Activity, BookOpen, FolderGit2, Bell, Gavel, Handshake, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
+import { Activity, BookOpen, FolderGit2, Bell, GitMerge, Gavel, Handshake, LayoutDashboard, ListChecks, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 
 type Item = { id: string; label: string; icon: LucideIcon };
@@ -21,6 +21,7 @@ const GROUPS: Array<{ title: string; items: Item[] }> = [
     items: [
       { id: "projects", label: "Projects", icon: FolderGit2 },
       { id: "roadmap", label: "Roadmap", icon: Map },
+      { id: "merge-queue", label: "Merge queue", icon: GitMerge },
       { id: "plan", label: "Plan", icon: ListChecks },
       { id: "wiki", label: "Wiki", icon: BookOpen },
       { id: "features", label: "Features", icon: Sparkles },
@@ -120,6 +121,7 @@ export function Sidebar(props: {
   decisions: Decision[];
   unread: number;
   feedback: number;
+  mergeWaiting: number;
   notifications: NotificationPermission | "unsupported";
   onPickCompany: (id: string) => void;
   onCreateCompany: (name: string) => Promise<void>;
@@ -138,10 +140,13 @@ export function Sidebar(props: {
         <img src={art.mark64} alt="" />
         <span>Boss Man</span>
       </div>
-      <CompanySwitcher companies={props.companies} current={props.current} waiting={waiting} onPick={props.onPickCompany} onCreate={props.onCreateCompany} />
-      <button type="button" className="menu-toggle" aria-expanded={menu} aria-controls="nav-groups" onClick={() => setMenu((m) => !m)}>
-        {menu ? "Close menu" : `Menu · ${label}`}
-      </button>
+      <div className="side-bar">
+        <CompanySwitcher companies={props.companies} current={props.current} waiting={waiting} onPick={props.onPickCompany} onCreate={props.onCreateCompany} />
+        <button type="button" className="menu-toggle" aria-expanded={menu} aria-controls="nav-groups" onClick={() => setMenu((m) => !m)}>
+          <MenuIcon size={20} strokeWidth={1.75} aria-hidden="true" />
+          <span className="sr-only">{menu ? "Close menu" : `Menu, ${label}`}</span>
+        </button>
+      </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         {GROUPS.map((g) => (
           <section key={g.title} aria-label={g.title}>
@@ -154,6 +159,7 @@ export function Sidebar(props: {
                     <span className="nav-label">{n.label}</span>
                     {n.id === "decisions" && decisionsHere > 0 && <span className="count" aria-label={`${decisionsHere} waiting`}>{decisionsHere}</span>}
                     {n.id === "feedback" && props.feedback > 0 && <span className="count" aria-label={`${props.feedback} to process`}>{props.feedback}</span>}
+                    {n.id === "merge-queue" && props.mergeWaiting > 0 && <span className="count" aria-label={`${props.mergeWaiting} waiting to merge`}>{props.mergeWaiting}</span>}
                     {n.id === "notifications" && props.unread > 0 && <span className="count" aria-label={`${props.unread} unread`}>{props.unread}</span>}
                   </a>
                   {n.id === "chat" && starred.length > 0 && (
@@ -185,17 +191,18 @@ export function Sidebar(props: {
             </ul>
           </section>
         ))}
-      </div>
-      <div className="foot">
-        {props.notifications === "default" && (
-          <button type="button" onClick={props.onEnableNotifications}>
-            Turn on browser notifications
+        {/* On a phone these sit inside the folded menu, so the header stays one row. */}
+        <div className="foot">
+          {props.notifications === "default" && (
+            <button type="button" onClick={props.onEnableNotifications}>
+              Turn on browser notifications
+            </button>
+          )}
+          {props.notifications === "denied" && <small style={{ color: "var(--side-muted)" }}>Notifications are blocked in this browser.</small>}
+          <button type="button" onClick={props.onLogout}>
+            Log out
           </button>
-        )}
-        {props.notifications === "denied" && <small style={{ color: "var(--side-muted)" }}>Notifications are blocked in this browser.</small>}
-        <button type="button" onClick={props.onLogout}>
-          Log out
-        </button>
+        </div>
       </div>
     </nav>
   );

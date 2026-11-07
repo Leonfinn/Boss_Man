@@ -14,7 +14,8 @@ import type { NotifyInput } from "./notifications.js";
 export const MAINTENANCE_KEY = "maintenance";
 /** Said to every running agent when a runner update starts waiting, and after each ticket move while it waits. */
 export const WRAP_UP = "A runner update is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the update is done.";
-/** How the last runner update ended, for Settings: {at, startedAt, ok, title, body}. */
+/** How the last runner update ended, for Settings (BOS-465). `swapped` says which companies it swapped, so a later Settings visit knows which history belongs to which runner. */
+export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string; swapped?: Record<string, string> };
 export const MAINTENANCE_LAST_KEY = "maintenance:last";
 /** The status_reason a held wake carries; it stays queued (like a paused company's) and launches once the hold lifts. */
 export const HOLD_REASON = "update pending";
@@ -51,6 +52,8 @@ export type MaintenanceDeps = {
   notify: (n: NotifyInput) => Promise<unknown>;
   /** Sends a message into every run still going, so agents wrap up instead of looking for more work. */
   tellRunning?: (text: string) => Promise<unknown>;
+  /** The hold has lifted: wake the agents who ended their runs for it, as WRAP_UP promised (BOS-574). */
+  afterHold?: (since: Date) => Promise<unknown>;
   /** The deployer folder; update-runner.sh drops inbox/drain.json there to ask for a drain. */
   dir?: string;
   drainMinutes?: number;
@@ -67,8 +70,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
   const save = (h: Hold) => db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
 
-  async function activeByCompany() {
-    const rows = await db.select({ companyId: runs.companyId, n: sql<number>`count(*)::int` }).from(runs).where(isNull(runs.endedAt)).groupBy(runs.companyId);
+  /**
+   * Live runs per company. `workOnly` leaves out the owner's chat and the CEO's reply lane (BOS-349):
+   * those never hold a runner swap, and they are what the banner's "N agents" counts.
+   */
+  async function activeByCompany(workOnly = false) {
+    const live = isNull(runs.endedAt);
+    const rows = await db
+      .select({ companyId: runs.companyId, n: sql<number>`count(*)::int` })
+      .from(runs)
+      .where(workOnly ? and(live, sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from 'reply'`) : live)
+      .groupBy(runs.companyId);
     return new Map(rows.map((r) => [r.companyId, r.n]));
   }
 
@@ -81,11 +93,13 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
   async function end(title: string, level: NotifyInput["level"], body: string) {
     const h = await getHold(db);
-    const last = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body };
+    const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
     await db.insert(settings).values({ key: MAINTENANCE_LAST_KEY, value: last }).onConflictDoUpdate({ target: settings.key, set: { value: last } });
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
     await withdrawQuestion();
     await deps.notify({ companyId: null, level, title, body, link: "#/settings" });
+    // The agents that wrapped up for the update are woken again, as they were told they would be (BOS-574).
+    if (h && deps.afterHold) await deps.afterHold(new Date(h.since)).catch((err) => deps.log?.(`waking agents after the update failed: ${(err as Error).message}`));
     // Held wakes were only waiting; one pass starts them.
     await deps.tick();
   }
@@ -127,10 +141,22 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     async status() {
       const h = await getHold(db);
       const [l] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MAINTENANCE_LAST_KEY));
-      const last = (l?.value ?? null) as { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
-      if (!h) return { on: false as const, last };
-      const active = await activeByCompany();
-      return { on: true as const, reason: h.reason, since: h.since, deadline: h.deadline, runs: [...active.values()].reduce((a, b) => a + b, 0), companies: active.size, last };
+      const last = (l?.value ?? null) as LastUpdate | null;
+      // A past failure is history once every runner is connected on the new image: say so, not the old problem.
+      let healthy = false;
+      if (!h && last && !last.ok) {
+        try {
+          const fleet = await deps.fleet();
+          healthy = fleet.length > 0 && (await Promise.all(fleet.map(async (r) => r.current === true && !!r.companyId && (await deps.connected(r.companyId))))).every(Boolean);
+        } catch {
+          healthy = false;
+        }
+      }
+      if (!h) return last && !last.ok ? { on: false as const, last, healthy } : { on: false as const, last };
+      const active = await activeByCompany(true);
+      const runsTotal = [...active.values()].reduce((a, b) => a + b, 0);
+      // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
+      return { on: true as const, reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, last };
     },
 
     /** Lifts the hold without finishing the swap; runners already swapped stay on the new image. // leader-only */
@@ -178,7 +204,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         return;
       }
       const t = now();
-      let active = await activeByCompany();
+      let active = await activeByCompany(true);
       const total = [...active.values()].reduce((a, b) => a + b, 0);
       if (!h.force && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, total, active.size);
 
@@ -190,7 +216,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
         await deps.settled();
-        active = await activeByCompany();
+        active = await activeByCompany(true);
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         try {
           await deps.recreate(r.slug); // leader-only
@@ -214,6 +240,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         if (now().getTime() - new Date(at).getTime() < reconnectMs) return; // give it time to dial in
         slow.push(r.slug);
       }
+      // A runner that failed to swap but came back by itself on the new image needs nothing from the owner.
+      for (const r of after) if (failed[r.slug] && r.current && r.companyId && (await deps.connected(r.companyId))) delete failed[r.slug];
       const bad = [...Object.entries(failed).map(([s, m]) => `${s}: ${m}`), ...slow.map((s) => `${s}: has not reconnected`)];
       // The hold lifts either way: keeping every company stopped for one runner would cost more than it protects.
       if (bad.length) await end("Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);

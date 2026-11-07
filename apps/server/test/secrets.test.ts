@@ -155,3 +155,20 @@ describe("which agents get a key", () => {
     expect((await s.put(crypto.randomUUID(), [])).statusCode).toBe(404);
   });
 });
+
+describe("a run placed on a ranked Claude account (BOS-383)", () => {
+  it("carries that account's login, only for that run, and the access log never holds the value", async () => {
+    const c = await company("App Co");
+    const second = `${TOKEN.slice(0, -4)}7777`;
+    const defaultId = (await t.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name: "Claude one", kind: "claude_oauth_token", value: TOKEN } })).json().secret.id;
+    await t.app.inject({ method: "POST", url: `/api/secrets/${defaultId}/grants`, headers: { cookie }, payload: { companyId: c, envName: "CLAUDE_CODE_OAUTH_TOKEN" } });
+    const secondId = (await t.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name: "Claude two", kind: "claude_oauth_token", value: second } })).json().secret.id;
+    const src = (await t.app.inject({ method: "POST", url: "/api/funding-sources", headers: { cookie }, payload: { name: "Max two", kind: "subscription", provider: "anthropic", secretId: secondId, fallbackRank: 2 } })).json();
+    const [a] = await t.db.insert(agents).values({ companyId: c, name: "A", role: "worker", agentKind: "claude" }).returning();
+    const [plain] = await t.db.insert(runs).values({ companyId: c, agentId: a!.id }).returning();
+    const [onSecond] = await t.db.insert(runs).values({ companyId: c, agentId: a!.id, fundingSourceId: src.id }).returning();
+    expect(await t.secrets.resolveCompanyEnv(c, "run", plain!.id)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+    expect(await t.secrets.resolveCompanyEnv(c, "run", onSecond!.id)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: second });
+    expect(JSON.stringify(await t.db.select().from(secretAccessLog))).not.toContain(second);
+  });
+});

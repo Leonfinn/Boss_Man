@@ -5,15 +5,16 @@
 import { randomBytes } from "node:crypto";
 import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
-import { sh, step } from "./steps.js";
+import { sh, step, type HostFacts } from "./steps.js";
+import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
@@ -30,6 +31,8 @@ const Available = z.object({
   deployerDir: z.string().optional(),
   bluegreen: z.boolean().optional(),
   liveColour: z.string().optional(),
+  // The host's own standby window (SOAK_SECONDS in its host.conf), published since BOS-384. Absent from an older host script.
+  soakSeconds: z.number().int().nonnegative().nullish(),
 });
 export type Available = z.infer<typeof Available>;
 
@@ -43,17 +46,23 @@ const Status = z.object({
   started: z.string(),
   ended: z.string(),
   backup: z.string().default(""),
+  // The host's own standby window in seconds (BOS-401). The shell writes every value as a string; an older host omits it.
+  soak_seconds: z.union([z.number(), z.string()]).optional(),
 });
 export type DeployStatus = z.infer<typeof Status>;
 
 const short = (sha: string) => sha.slice(0, 8);
+/** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213): the ticket id, or null for any other commit. */
+const mergedTicket = (subject: string) => subject.match(/^Merge ".*" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i)?.[1]!.toLowerCase() ?? null;
 /** A folder the host reported, if it is safe to put in a command the owner pastes; otherwise null (never guessed). */
 const folder = (p: string | undefined) => (p && /^\/[\w.+@/-]+$/.test(p) && !p.split("/").includes("..") ? p.replace(/\/+$/, "") : null);
 const isSha = (s: string) => /^[0-9a-f]{7,64}$/.test(s);
 /** The ladder: success is a note, a refusal a flag, anything half-done or broken a page. */
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
+/** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
+const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -66,6 +75,39 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   const available = () => (dir ? readJson(path.join(dir, "outbox", "available.json"), Available) : Promise.resolve(null));
   const status = () => (dir ? readJson(path.join(dir, "outbox", "status.json"), Status) : Promise.resolve(null));
   const pending = async () => !!inboxFile && (await stat(inboxFile).then(() => true, () => false));
+  const availableFile = dir && path.join(dir, "outbox", "available.json");
+  const statusFile = dir && path.join(dir, "outbox", "status.json");
+
+  /**
+   * When the host last rewritten a file, and how big it was (BOS-414). The host replaces each file by
+   * rename, so both change with its content; a missing or unreadable file gets a token that never
+   * matches a stored one, so the next pass runs.
+   */
+  const fingerprint = (file: string | undefined) =>
+    file
+      ? stat(file).then(
+          (st) => `${st.mtimeMs}:${st.size}`,
+          () => "missing",
+        )
+      : Promise.resolve("off");
+  let seen: { print: string; at: number } | null = null;
+
+  /**
+   * Nothing a pass reads outside its database can change until the host writes a file, or a request
+   * is put in its inbox, so when all three have the same mtime and size as last time there is nothing
+   * to do (BOS-414). A pass still runs at least once a minute, which covers a missed rename and
+   * anything else a file token can't see. The minute is measured from the last pass that *ran*, not
+   * the last call: a skipped call keeps the old time, or the poller skipping every 30 s would push the
+   * forced pass back for ever (BOS-414 review). Tests set the time with fake timers, never a timer.
+   */
+  const unchanged = async () => {
+    const nowMs = Date.now();
+    const print = (await Promise.all([fingerprint(availableFile), fingerprint(statusFile), fingerprint(inboxFile)])).join("|");
+    const skip = seen !== null && seen.print === print && nowMs - seen.at < FORCED_SYNC_MS;
+    // On a skip only the print is refreshed: the clock for the forced pass stays on the last real pass.
+    seen = skip ? { print, at: seen!.at } : { print, at: nowMs };
+    return skip;
+  };
 
   /** Boss Man itself belongs to no company, but a decision needs one: the oldest. */
   async function homeCompany() {
@@ -81,11 +123,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   async function updateFor(commit: string, fromCommit: string, a: Available | null, extras: { handBecause?: string; handFiles?: string[]; handEffect?: DeployUpdate["handEffect"]; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean; risks: string[] }): Promise<DeployUpdate | undefined> {
     const commits = a?.commits ?? [];
     if (!commits.length) return undefined;
-    const entries = commits.flatMap((c) => {
-      if (!c.subject) return [];
-      const m = c.subject.match(/^Merge ".*" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i);
-      return [{ subject: c.subject, ticketId: m ? m[1]!.toLowerCase() : null }];
-    });
+    const entries = commits.flatMap((c) => (c.subject ? [{ subject: c.subject, ticketId: mergedTicket(c.subject) }] : []));
     const wanted = [...new Set(entries.flatMap((e) => (e.ticketId ? [e.ticketId] : [])))];
     const rows = wanted.length
       ? await db
@@ -126,6 +164,41 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     };
   }
 
+  /**
+   * The merged tickets in the range that fix a live problem (BOS-639): only those whose "fixes live" marker
+   * was set by hand, never guessed from priority. `repeat` when every one of them was already on an earlier
+   * deploy card (open, withdrawn or answered): main moving on raises a new card, and that must not page
+   * the owner again for the same fix.
+   */
+  async function urgentFor(a: Available | null): Promise<DeployUrgent | undefined> {
+    const ids = [...new Set((a?.commits ?? []).flatMap((c) => { const id = c.subject ? mergedTicket(c.subject) : null; return id ? [id] : []; }))];
+    if (!ids.length) return undefined;
+    const rows = await db
+      .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix, fixesLive: tickets.fixesLive })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(inArray(tickets.id, ids), isNotNull(tickets.fixesLive)));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    // In the range's own order; a ticket without a reference (another install's numbering) can't be named, so it is left out.
+    const fixes: LiveFix[] = ids.flatMap((id) => {
+      const r = byId.get(id);
+      const ref = r ? ticketRef(r.prefix, r.number) : null;
+      const symptom = r?.fixesLive?.trim();
+      return r && ref && symptom ? [{ ticketId: r.id, ref, symptom }] : [];
+    });
+    if (!fixes.length) return undefined;
+    let repeat = true;
+    for (const f of fixes) {
+      const [earlier] = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(sql`${decisions.context}->>'type' = 'self_deploy'`, sql`${decisions.context}->'urgent'->'fixes' @> ${JSON.stringify([{ ticketId: f.ticketId }])}::jsonb`))
+        .limit(1);
+      if (!earlier) repeat = false;
+    }
+    return { heading: fixesLiveHeading(fixes), fixes, ...(repeat ? { repeat } : {}) };
+  }
+
   async function openFor(target: string) {
     return db
       .select()
@@ -147,12 +220,30 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const changed = new Set([...(a?.infraPaths ?? []), ...(a?.paths ?? [])]);
     const hostDeployerChanged = changed.has("scripts/host-deployer.sh");
     const launcherChanged = [...changed].some((p) => p.startsWith("apps/launcher/"));
-    const src = folder(a?.srcDir);
-    const deployer = folder(a?.deployerDir);
+    // BOS-419: what the update file doesn't say comes from the settings record (the host's own report, kept with
+    // its source). The update file still wins, since it is written at the same moment as the update.
+    const rec = await deps.facts?.().catch(() => ({} as Record<string, string>)) ?? {};
+    const src = folder(a?.srcDir ?? rec["paths.src"]);
+    const deployer = folder(a?.deployerDir ?? rec["paths.deployer"]);
     const shaOk = isSha(commit) && isSha(fromCommit);
-    const bg = a?.bluegreen;
-    const colour = a?.liveColour === "blue" || a?.liveColour === "green" ? a.liveColour : null;
-    const noSrc = "Boss Man can't tell where it is installed, so no command is shown here. The folder is in docs/06-install-truenas.md; ask us on this ticket for the exact commands.";
+    const bg = a?.bluegreen ?? (rec["compose.bluegreen"] === "true" ? true : rec["compose.bluegreen"] === "false" ? false : undefined);
+    const liveColour = a?.liveColour ?? rec["compose.liveColour"];
+    const colour = liveColour === "blue" || liveColour === "green" ? liveColour : null;
+    // The machine's recorded name (BOS-427): every command's block says "on <host>, as root". Without it the
+    // card can't say where a command runs, so no command is shown (never a guessed name).
+    const host = (await deps.hosts?.())?.[0]?.name ?? null;
+    /** A command for a hand-apply card: always on the recorded host, as root (the deployer and deploy.sh run as root). */
+    const cmd = (c: string) => sh(c, { host: host!, as: "root" });
+    // git writes the checkout with the terminal's umask; under a root shell's 077 the image built from it can't
+    // read its own code (the 6 Nov outage, DR-028). A subshell, never a bare umask: 022 left set in the owner's root
+    // terminal would make their later hand-made backups world-readable. So the pin and the blue/green rollback below
+    // each run as one (umask 022 && cd <src> && git …) subshell, and the card lint's R14 refuses any other form.
+    // The single-server apply and rollback run deploy.sh, whose own git checkout/merge write the checkout too: they get
+    // the same subshell. (BOS-562 makes deploy.sh run its own git under 022 too; the subshell still covers an older
+    // deploy.sh on the host, which is the copy that runs the apply.)
+    // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
+    const noSrc = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
+    const noHost = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
     const handSteps: string[] = [];
     if (infra) {
       handSteps.push(
@@ -164,39 +255,61 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       );
       handSteps.push(
         src && shaOk
-          ? step(`On the machine that runs Boss Man, pin the approved commit ${commit} with this command. The last line it prints must be exactly that commit; if it prints anything else, stop and tell us.`, sh(`cd ${src} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD`))
+          ? host
+            ? step(`On the machine that runs Boss Man, pin the approved commit ${commit} with this command. The last line it prints must be exactly that commit; if it prints anything else, stop and tell us.`, cmd(`(umask 022 && cd ${src} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD)`))
+            : noHost
           : noSrc,
       );
       if (bg !== undefined)
         handSteps.push(
           src && shaOk
-            ? bg
-              ? step("Apply it with this command, on the same machine:", sh(`cd ${src} && scripts/rebuild-live.sh`))
-              : step(`Apply it with this command, on the same machine (it deploys exactly ${short(commit)}):`, sh(`cd ${src} && scripts/deploy.sh --commit ${commit}`))
+            ? host
+              ? bg
+                ? step("Apply it with this command, on the same machine:", cmd(`cd ${src} && scripts/rebuild-live.sh`))
+                : step(`Apply it with this command, on the same machine (it deploys exactly ${short(commit)}):`, cmd(`(umask 022 && cd ${src} && scripts/deploy.sh --commit ${commit})`))
+              : noHost
             : noSrc,
         );
       handSteps.push(
         hostDeployerChanged
           ? src && deployer
-            ? step("Copy the changed host-deployer script into the deployer folder with this command, on the same machine:", sh(`cp ${src}/scripts/host-deployer.sh ${deployer}/host-deployer.sh && chown root:root ${deployer}/host-deployer.sh && chmod 750 ${deployer}/host-deployer.sh`))
+            ? host
+              ? step("Copy the changed host-deployer script into the deployer folder with this command, on the same machine:", cmd(`cp ${src}/scripts/host-deployer.sh ${deployer}/host-deployer.sh && chown root:root ${deployer}/host-deployer.sh && chmod 750 ${deployer}/host-deployer.sh`))
+              : noHost
             : "host-deployer.sh changed and has to be copied into the deployer folder, but Boss Man can't tell where the install or deployer folder is, so no command is shown. Ask us on this ticket."
           : "host-deployer.sh didn't change; no copy needed.",
       );
+      // A server apply never restarts the database (BOS-458). Changed database settings need their own step, with a backup first.
+      if (a!.infraPaths.some((p) => /^docker-compose[^/]*\.ya?ml$|^deploy\//.test(p)))
+        handSteps.push(
+          src && host
+            ? step(
+                "This update changes a compose file. The steps above never restart the database, so changed database settings (memory, limits) are not applied by them. Only if the database settings changed: take a backup, then restart just the database (the server is unreachable for a few seconds). Run the backup first:",
+                cmd(`(set -o pipefail && umask 077 && cd ${src} && docker compose exec -T db pg_dump -U bossman bossman | gzip > db-backup-before-restart.sql.gz) && gzip -t "${src}/db-backup-before-restart.sql.gz" && ls -l "${src}/db-backup-before-restart.sql.gz"`),
+                "Then restart only the database:",
+                cmd(`cd ${src} && docker compose up -d --no-deps db`),
+              )
+            : `If database settings changed they need a separate restart, but ${src ? noHost : noSrc}`,
+        );
       if (launcherChanged)
         handSteps.push(
           src
-            ? step("Rebuild the launcher with this command, on the same machine. Runners keep their old limits until the next runner update.", sh(`cd ${src} && docker compose build launcher && docker compose up -d --no-deps launcher`))
+            ? host
+              ? step("Rebuild the launcher with this command, on the same machine. Runners keep their old limits until the next runner update.", cmd(`cd ${src} && docker compose build launcher && docker compose up -d --no-deps launcher`))
+              : `The launcher changed and has to be rebuilt, but ${noHost}`
             : `The launcher changed and has to be rebuilt, but ${noSrc}`,
         );
       if (bg === true)
         handSteps.push(
           src && colour
-            ? step(
-                `Check the new server has taken charge. Run this on the same machine; it asks the live copy (${colour}) whether it is ready:`,
-                sh(`cd ${src} && docker compose exec -T server-${colour} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`),
-                "If it says standby, run this next:",
-                sh(`cd ${src} && docker compose kill -s SIGUSR2 server-${colour}`),
-              )
+            ? host
+              ? step(
+                  `Check the new server has taken charge. Run this on the same machine; it asks the live copy (${colour}) whether it is ready:`,
+                  cmd(`cd ${src} && docker compose exec -T server-${colour} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`),
+                  "If it says standby, run this next:",
+                  cmd(`cd ${src} && docker compose kill -s SIGUSR2 server-${colour}`),
+                )
+              : noHost
             : "Check the new server has taken charge. Boss Man can't tell which copy is live or where it is installed, so no command is shown. Open Settings → Server and runner → Server and ask us on this ticket.",
         );
       // Only when the runner's files changed: the same flag drives the summary line on the card.
@@ -206,11 +319,13 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const rollbackNote = "Database restore isn't a fallback yet.";
     const rollback = infra
       ? src && shaOk && bg !== undefined
-        ? step(
-            bg ? "To go back, run this on the machine that runs Boss Man:" : "To go back, run this on the machine that runs Boss Man (code only, never the database):",
-            sh(bg ? `cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh` : `cd ${src} && scripts/deploy.sh --rollback`),
-            rollbackNote,
-          )
+        ? host
+          ? step(
+              bg ? "To go back, run this on the machine that runs Boss Man:" : "To go back, run this on the machine that runs Boss Man (code only, never the database):",
+              cmd(bg ? `(umask 022 && cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh)` : `(umask 022 && cd ${src} && scripts/deploy.sh --rollback)`),
+              rollbackNote,
+            )
+          : `To go back, ${noHost} ${rollbackNote}`
         : `To go back, Boss Man needs to know the install folder and layout, which it can't tell, so no command is shown. Ask us on this ticket. ${rollbackNote}`
       : undefined;
     const n = a?.paths.length ?? 0;
@@ -238,14 +353,38 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       ...(target === "server" ? { needsRunnerUpdate: !!a?.runnerChanged } : {}),
       risks,
     });
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}) };
+    // Only the server update carries the fix: the runner card that may follow it is unchanged (BOS-639).
+    const urgent = target === "server" ? await urgentFor(a) : undefined;
+    // (BOS-551) A server update restarts Boss Man, which resets anything a reading on the owner's queue
+    // would measure. Point the update card at the open owner cards a restart would disturb: a card the
+    // raising agent marked `resetsOnRestart`, and a hand-apply to-do that isn't itself a server or runner
+    // update. Unrelated setup cards are left out so the "Do after" list is not noise.
+    const doAfter = target === "server"
+      ? (await db
+          .select({ id: decisions.id, question: decisions.question, context: decisions.context })
+          .from(decisions)
+          .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner"))))
+          .filter((r) => {
+            const c = r.context as DecisionContext;
+            if (c.type === "self_deploy" || c.type === "deploy") return false;
+            if (c.type === "question") return !!c.steps?.length && c.resetsOnRestart === true;
+            if (c.type === "owner_todo") return !c.target;
+            return false;
+          })
+          .slice(0, 10)
+          .map((r) => ({ decisionId: r.id, label: r.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80) }))
+      : [];
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}), ...(urgent ? { urgent } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
+    // The heading is the card's first paragraph, so the card, its phone push and the CEO's view all lead with it.
+    const lead = urgent ? `${urgent.heading}.\n\n` : "";
     const question =
-      target === "runner"
+      lead +
+      (target === "runner"
         ? `Update the runners to ${short(commit)}?\n\nThis rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
           ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue until it's applied or you mark it done.`
-          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`;
+          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`);
     // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
     // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).
     const options = infra ? [APPROVE_HAND_APPLY, NOT_NOW] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
@@ -264,35 +403,121 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       .returning();
     if (row && target === "server") {
       // An older, still-open question about an earlier commit can no longer be answered: the host only deploys the tip.
-      for (const d of await openFor("server")) if (d.id !== row.id) await db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, d.id));
+      // Free each one's dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped (Freddy).
+      for (const d of await openFor("server")) if (d.id !== row.id) await withdrawOpen(d.id);
     }
     return row ?? null;
+  }
+
+  /** A card closed by the product, not answered: its notification is marked read here (BOS-413). */
+  async function withdrawOpen(id: string) {
+    await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, id));
+    await markDecisionNotificationRead(db, id);
   }
 
   async function saveSeen(key: string) {
     await db.insert(settings).values({ key: "self_deploy", value: { notified: key } }).onConflictDoUpdate({ target: settings.key, set: { value: { notified: key } } });
   }
 
-  /** A deploy has ended: tell the owner once, record it on the decision, and offer the runner update when it is due. */
-  async function finished(s: DeployStatus) {
+  // BOS-368: a server update reports "deployed" when it switches in, but it can still be switched back
+  // during its trial (the host's standby window). The runner update is only offered once that trial is
+  // over and the server is still on that commit; until then it is held here.
+  // BOS-384: the length is the host's own setting (SOAK_SECONDS in its host.conf), published in
+  // available.json as soakSeconds. It is not run through the server container, and the server can't read
+  // host.conf, so an older or single-server host (no value) falls back to the old 900 s.
+  const RUNNER_DUE = "self_deploy_runner_due";
+  const LAST_SERVER = "self_deploy_last_server";
+  /** `offer`: the runner needs updating once the window is over; without it the hold only blocks (a row from before BOS-401 is an offer). */
+  type RunnerDue = { commit: string; fromCommit: string; after: string; offer?: boolean };
+  const DEFAULT_SOAK_SECONDS = 900;
+  const TRIAL_MARGIN_SECONDS = 120;
+  type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };
+  /** The window for this deploy: what the host wrote into status.json for it (BOS-401), else the length it publishes in available.json (BOS-384), else 900. */
+  const statusSoak = (s?: DeployStatus | null) => {
+    const raw = s?.soak_seconds;
+    const n = typeof raw === "string" ? (raw.trim() === "" ? NaN : Number(raw)) : raw;
+    return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 86400 ? Math.floor(n) : null;
+  };
+  const soakSeconds = (a: Available | null, s?: DeployStatus | null) => statusSoak(s) ?? a?.soakSeconds ?? DEFAULT_SOAK_SECONDS;
+  const trialMs = (a: Available | null, s?: DeployStatus | null) => (soakSeconds(a, s) + TRIAL_MARGIN_SECONDS) * 1000;
+  const trialWords = (seconds: number) => {
+    const min = Math.round(seconds / 60);
+    if (seconds === DEFAULT_SOAK_SECONDS) return "15-minute";
+    if (seconds % 60 === 0) return `${min}-minute`;
+    return seconds === 0 ? "trial" : `${seconds}-second`;
+  };
+  const trialMessage = (seconds: number) =>
+    `The server update is still in its ${trialWords(seconds)} trial, so the runners can't be updated yet. Boss Man offers the runner update by itself when the trial ends.`;
+  /** The trial length as Settings and the cards should show it now (the last host report, if any). */
+  const currentTrial = async () => soakSeconds(await available());
+  async function getSetting<T>(key: string): Promise<T | null> {
+    const [row] = await db.select().from(settings).where(eq(settings.key, key));
+    return (row?.value as T | undefined) ?? null;
+  }
+  async function putSetting(key: string, value: object | null) {
+    if (value === null) await db.delete(settings).where(eq(settings.key, key));
+    else await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+  }
+  /** The held runner update, if its server update is still in its trial. */
+  async function inTrial() {
+    const due = await getSetting<RunnerDue>(RUNNER_DUE);
+    return due && Date.now() < Date.parse(due.after) ? due : null;
+  }
+  /** Raises the held runner update once its trial is over, if the server is still on that commit; otherwise drops it quietly. */
+  async function releaseRunnerDue(a: Available | null) {
+    const due = await getSetting<RunnerDue>(RUNNER_DUE);
+    if (!due || Date.now() < Date.parse(due.after)) return;
+    await putSetting(RUNNER_DUE, null);
+    if (due.offer === false) return;
+    const last = await getSetting<LastServer>(LAST_SERVER);
+    if (last?.result === "deployed" && last.to === due.commit && a?.deployed === due.commit) await raise("runner", due.commit, due.fromCommit, a);
+    else deps.log?.(`self-deploy: runner update for ${short(due.commit)} dropped; the server is not on it after its trial`);
+  }
+
+  /**
+   * A deploy has ended: tell the owner once, record it on the decision, and offer the runner update when it is due.
+   * BOS-384: the "seen" mark is saved last, after the notify and the withdraws, so a crash in between doesn't lose them.
+   * Re-running the rest is safe (Freddy): the notify dedupes on the same key, the withdraws only touch open cards and
+   * free their dedupe key, and the settings writes and decision update are idempotent.
+   */
+  async function finished(s: DeployStatus, a: Available | null) {
     const [row] = await db.select().from(settings).where(eq(settings.key, "self_deploy"));
     const key = `${s.id}:${s.result}:${s.ended}`;
     if ((row?.value as { notified?: string } | undefined)?.notified === key) return;
-    await saveSeen(key);
     // The host writes an empty id when it refused a file it could not read.
     const [d] = z.string().uuid().safeParse(s.id).success ? await db.select().from(decisions).where(eq(decisions.id, s.id)) : [];
     const ctx = d?.context as DecisionContext | undefined;
     const what = s.target === "runner" ? "The runners" : "Boss Man";
     // A runner "deploy" now only builds the image and asks for the drain; the swap's own result is reported by the drain (maintenance.ts).
-    const title = s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
+    // A refused runner update is not a failure and needs nothing from the owner (the message says why): a quiet note, not a flag.
+    const runnerRefused = s.target === "runner" && s.result === "rejected";
+    const title = runnerRefused ? `Runner update not started (${short(s.to_commit)})` : s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
     const changes = s.result === "deployed" && ctx?.type === "self_deploy" ? (ctx.changes ?? []) : [];
-    await deps.notify({ companyId: null, level: LEVEL[s.result], title, body: changes.length ? `${s.message}\n\nWhat changed:\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
+    await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: changes.length ? `${s.message}\n\nWhat changed:\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
+    // BOS-364 withdrew only cards for the commit it never reached; BOS-368 withdraws every open runner card, whichever way round the host names the commits.
+    if (s.target === "server") {
+      await putSetting(LAST_SERVER, { result: s.result, from: s.from_commit, to: s.to_commit, ended: s.ended } satisfies LastServer);
+      // Switched back or failed: no runner update is due, whichever way round the host names the commits.
+      if (s.result === "rolled_back" || s.result === "failed") {
+        await putSetting(RUNNER_DUE, null);
+        // Free the dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped.
+        for (const o of await openFor("runner")) await withdrawOpen(o.id);
+      }
+    }
+    // Every way a server update can end "deployed" starts a standby window (deploy latest, hand-apply and a rollback have no self_deploy decision), so the hold is set here, not on the decision path.
+    if (s.target === "server" && s.result === "deployed") {
+      const ended = Date.parse(s.ended);
+      const old = await getSetting<RunnerDue>(RUNNER_DUE);
+      const wants = ctx?.type === "self_deploy" && !!ctx.runnerChanged;
+      // A newer server update inside the window must not drop the older commit's runner change: keep its range and its offer.
+      const held = old && old.offer !== false;
+      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held } satisfies RunnerDue);
+    }
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
       await record(db, { companyId: d.companyId, kind: "self_deploy", summary: `${title}. ${s.message}` });
-      // The server is deployed; the runners are a separate question the owner answers on its own.
-      if (s.target === "server" && s.result === "deployed" && ctx.runnerChanged) await raise("runner", s.to_commit, s.from_commit, await available());
     }
+    await saveSeen(key);
   }
 
   return {
@@ -321,22 +546,44 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       return cleared;
     },
 
-    /** One pass of the poller. // leader-only: phase 3 runs this on the leader alone. */
+    /** One pass of the poller. Skips the pass when the host's files haven't changed (BOS-414). // leader-only: phase 3 runs this on the leader alone. */
     async sync() {
       if (!dir) return;
+      if (await unchanged()) return;
       const s = await status();
-      if (s && s.result !== "running") await finished(s);
       const a = await available();
+      if (s && s.result !== "running") await finished(s, a);
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
       if (a) await this.clearDoneOwnerTodos(a);
-      if (!a || !a.tip || s?.result === "running" || (await pending())) return;
+      if (s?.result !== "running") await releaseRunnerDue(a);
+      const woken = await this.noteLive(a, s);
+      if (!a || !a.tip || s?.result === "running" || (await pending())) return woken;
       // The host just refused or deployed this very commit: the offer is stale until the host rewrites it.
-      if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return;
+      if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return woken;
       if (a.tip === a.deployed) {
-        for (const d of await openFor("server")) await db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, d.id));
-        return;
+        // Free the dedupe key, as every other withdraw does, so a later offer for that commit is not silently dropped (Freddy).
+        for (const d of await openFor("server")) await withdrawOpen(d.id);
+        return woken;
       }
       await raise("server", a.tip, a.deployed, a);
+      return woken;
+    },
+
+    /**
+     * Tells the release log what is live now (BOS-284): the commit the host says it deployed (a deploy,
+     * a blue/green switch or switch-back, a rollback, or a hand-apply the host saw), then lets it wake
+     * each company's Release Manager on one small ticket. The commit is the same one server_status
+     * reports as live, so nothing here depends on where the host keeps its files. Returns how many
+     * Release Managers were woken.
+     */
+    async noteLive(a: Available | null, s: DeployStatus | null) {
+      if (!deps.releaseLog) return 0;
+      const live = a?.deployed || ((s && (s.result === "deployed" || s.result === "rolled_back") && s.to_commit) || "") || process.env.BOSSMAN_COMMIT || "";
+      if (!z.string().regex(/^[0-9a-f]{40}$/i).safeParse(live).success) return 0;
+      const rows = await db.select({ id: companies.id }).from(companies);
+      for (const c of rows) await deps.releaseLog.note(c.id, live);
+      const how: ReleaseHow = !s ? "restarted" : s.result === "rolled_back" ? "rolled-back" : "deployed";
+      return deps.releaseLog.releaseManagerWakes(how);
     },
 
     /** The "Deploy latest" button. Returns the open decision, or says why there is none. */
@@ -359,6 +606,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (!dir) return { error: "Self-deploy is not set up on this install." } as const;
       const a = await available();
       if (!a?.deployed) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
+      if (await inTrial()) return { error: trialMessage(soakSeconds(a)) } as const;
       const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
       const d = open ?? (await raise("runner", a.deployed, a.deployed, a, true));
       return d ? ({ decisionId: d.id } as const) : ({ error: "Create a company first: decisions belong to one." } as const);
@@ -375,6 +623,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const s = await status();
       if (s?.result === "running") throw new AnswerError("A deploy is running now. Wait for it to finish.");
       if (await pending()) throw new AnswerError("A deploy request is already waiting for the host. Try again in a minute.");
+      if (ctx.target === "runner" && (await inTrial())) throw new AnswerError(trialMessage(await currentTrial()));
       // Only the commit that failed to deploy is refused: after a rollback or a deploy by hand, what runs can still be built.
       if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed" && s.to_commit === ctx.commit) throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
     },
