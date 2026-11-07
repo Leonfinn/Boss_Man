@@ -46,6 +46,30 @@ readable_problem() { # checkout folder: prints nothing when all is readable, els
 step() { printf '\n== %s\n' "$*"; }
 die() { printf '\nSTOPPED: %s\n' "$*" >&2; exit 1; }
 
+# DR-020 G: take the host deployer's lock ($D/lock, the file host-deployer.sh flocks) before reading the live colour or
+# touching anything, so a hand rebuild can't race a deploy's switch-back. Held until this script exits (fd 9).
+[[ -d $D ]] || die "the deployer folder $D doesn't exist, so there is no lock to take. Set BOSSMAN_DEPLOYER to it, then run this again."
+LOCK_WAIT="${REBUILD_LOCK_WAIT_SECONDS:-120}"
+exec 9>"$D/lock" || die "can't open the deployer's lock file $D/lock. Nothing was changed."
+if ! flock -n 9; then
+  echo "The host deployer is running a deploy or a switch-back (it holds $D/lock). Waiting up to ${LOCK_WAIT}s for it to finish..."
+  flock -w "$LOCK_WAIT" 9 || die "the host deployer still holds $D/lock after ${LOCK_WAIT}s, so nothing was changed. Look at the end of $D/deployer.log and the files in $D/state to see what it is doing, wait for it to finish (a deploy or soak switch-back can take several minutes), then run this again."
+fi
+
+# DR-020 G: an update's trial window (the deployer's state/soak) is running. Its next tick re-checks the live colour
+# against the update's commit; a hand rebuild at another commit fails that check and gets switched back to the old
+# colour. So refuse, with the lock held, before anything changes. The file is read the way soak_tick reads it.
+soakfile="$D/state/soak"
+if [[ -f $soakfile && ! -L $soakfile ]]; then
+  soak_deadline="$(sed -n 's/^old=\(blue\|green\) new=\(blue\|green\) deadline=\([0-9]\{1,12\}\) commit=\([0-9a-f]\{40\}\) prev=\([0-9a-f]\{40\}\)$/\3/p' "$soakfile" | head -1)"
+  if [[ -n $soak_deadline ]]; then
+    left=$(((soak_deadline - $(date +%s) + 59) / 60))
+    ((left > 0)) || left=1
+    when="$(date -d "@$soak_deadline" '+%F %H:%M %Z' 2>/dev/null || echo "epoch $soak_deadline")"
+    die "an update's trial window is running until $when. The deployer would switch your rebuild back to the old version. Nothing was changed (no backup, no build). Wait until it ends (about $left min; $soakfile goes away), then run this again."
+  fi
+fi
+
 # The live colour, read the way host-deployer.sh reads it; the include is never followed through a symlink.
 colour="${1:-}"
 if [[ -z $colour ]]; then

@@ -10,5 +10,9 @@ for t in "${tests[@]}"; do
   # CADDY is the one named opt-in: caddy-edge.test.sh skips without it, and CI points it at the caddy binary.
   extra=()
   [ -z "${CADDY:-}" ] || extra+=("CADDY=$CADDY")
-  env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG=C.UTF-8 "${extra[@]}" "$t"
+  began=$SECONDS; rc=0
+  env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG=C.UTF-8 "${extra[@]}" "$t" || rc=$?
+  # BOSSMAN_SHELL_TIMES_FILE (set by check-all.sh): one "<script>\t<seconds>\t<exit>" line per test, for the result store (BOS-654).
+  [ -z "${BOSSMAN_SHELL_TIMES_FILE:-}" ] || printf '%s\t%s\t%s\n' "$t" "$((SECONDS - began))" "$rc" >>"$BOSSMAN_SHELL_TIMES_FILE" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || exit "$rc"
 done

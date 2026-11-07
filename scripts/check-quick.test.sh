@@ -27,6 +27,7 @@ if [ "$1" = "-p" ]; then
   exit 0
 fi
 echo "node $*" >>"$LOG"
+if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "boom"; exit 1; fi
 S
 chmod +x "$t/bin/pnpm" "$t/bin/node"
 unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED CHECK_QUICK_BROAD_FILES CHECK_ALL_FORCE
@@ -76,6 +77,19 @@ commit packages/shared/src/c.ts
 run 0 "shared change touches every package" env
 logged "pnpm --filter @boss-man/server typecheck" "shared"
 logged "pnpm --filter @boss-man/other typecheck" "shared"
+
+# The full check runs next (merge gate, high/critical, BOS-665): only the cheap steps run, and they still fail the run.
+commit apps/server/drizzle/0100_y.sql apps/web/src/d.ts scripts/y.sh scripts/z.mjs
+run 0 "full check next" env BOSSMAN_MERGE_CHECK=1 BOSSMAN_FULL_CHECK_NEXT=1
+grep -q "^PASS  merge with origin/main is clean" "$t/out" || fail "full check next: no merge step: $(cat "$t/out")"
+logged "node scripts/lint-migrations.mjs" "full check next keeps migration lint"
+logged "node --test" "full check next keeps script tests"
+for s in typecheck "vitest related" build check-shell; do notlogged "$s" "full check next"; done
+grep -q "^SKIP  typecheck, related tests, ShellCheck, web build: the full check runs next" "$t/out" || fail "no SKIP line: $(cat "$t/out")"
+run 1 "full check next, migration lint fails" env BOSSMAN_FULL_CHECK_NEXT=1 FAIL_ON=lint-migrations
+grep -q "^FAIL  migration lint" "$t/out" || fail "lint failure not reported: $(cat "$t/out")"
+grep -q "check-quick: FAILED" "$t/out" || fail "no FAILED summary: $(cat "$t/out")"
+notlogged "typecheck" "full check next, failing"
 
 run 1 "typecheck fails" env FAIL_ON=typecheck
 grep -q "^FAIL  typecheck" "$t/out" || fail "FAIL line: $(cat "$t/out")"
