@@ -2,6 +2,7 @@
 // model's own confidence can't be trusted, so every guard lives here, in code: what it may cite,
 // which questions it may answer at all, and what happens when it shouldn't. Anything it can't
 // stand behind goes to the CEO, and the owner is told so.
+import { formatDate } from "@boss-man/shared";
 import { and, desc, eq, gt, inArray, isNull, lte, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, decisions, ownerChatMessages, paAnswers, runs, tickets } from "../db/schema.js";
@@ -98,7 +99,7 @@ export function paService(
       }
       const [me] = await db.select({ model: agents.model }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
       const zone = (await deps.timeZone?.()) ?? "UTC";
-      const at = new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now());
+      const at = formatDate("en-GB", now(), { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
       const ticketIds = input.cites.filter((c) => c.kind === "ticket").map((c) => c.id);
       const titles = ticketIds.length ? await db.select({ id: tickets.id, title: tickets.title }).from(tickets).where(inArray(tickets.id, ticketIds)) : [];
       // A ticket shows as its title (the web page links it); brackets and parentheses would break the link.

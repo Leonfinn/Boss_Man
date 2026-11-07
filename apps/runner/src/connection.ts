@@ -21,6 +21,10 @@ export type ConnectionOptions = {
   pendingPermissions?: () => Array<{ runId: string; requestId: string }>;
   /** Why this process started, told to the server in every hello so it can record the restart's reason (BOS-594). */
   restart?: { previousExit?: "stopped" | "crashed" | null; hostBootAt?: string | null };
+  /** Check jobs running now (BOS-316), listed in hello. */
+  runningChecks?: () => string[];
+  /** Called after the server’s welcome: resend check results it may not have. */
+  onWelcome?: () => void;
   /** Ids of the runs the runner has now; the server closes any other open run (BOS-583). */
   liveRuns?: () => string[];
 };
@@ -73,6 +77,11 @@ export class RunnerConnection {
     this.ws?.terminate();
   }
 
+  /** A message that is not journalled (BOS-316 check progress and results); the caller resends what matters on reconnect. */
+  sendDirect(m: RunnerMessage) {
+    this.send(m);
+  }
+
   private send(m: RunnerMessage) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
   }
@@ -86,7 +95,7 @@ export class RunnerConnection {
       this.attempt = 0;
       const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
       const liveRuns = this.opts.liveRuns?.();
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");
@@ -128,6 +137,7 @@ export class RunnerConnection {
             this.opts.log?.(`server has seq ${msg.lastSeq} but this runner compacted up to ${this.opts.journal.ackedUpTo}; some events can't be replayed`);
           }
           for (const entry of this.opts.journal.pending(msg.lastSeq)) this.send({ type: "event", entry });
+          this.opts.onWelcome?.();
           this.live = true;
           return;
         }

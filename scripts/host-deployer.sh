@@ -237,8 +237,133 @@ write_host_facts() {
     for r in ${roles[$p]}; do rl+="$rlsep$(jstr "$r")"; rlsep=", "; done
     rows+="$sep{\"path\": $(jstr "$p"), \"owner\": $(jstr "$o"), \"group\": $(jstr "$g"), \"mode\": \"$m\", \"roles\": [$rl]}"; sep=", "
   done < <(printf '%s\n' "${!roles[@]}" | LC_ALL=C sort)
-  printf '{"version": 1, "name": %s, "writtenAt": %s, "ownership": [%s]}\n' "$(jstr "$name")" "$(jstr "$(now)")" "$rows" >"$f.tmp"
+  local extra; extra="$(host_extra_facts 2>/dev/null)" || extra=""
+  printf '{"version": 1, "name": %s, "writtenAt": %s, "ownership": [%s]%s}\n' "$(jstr "$name")" "$(jstr "$(now)")" "$rows" "$extra" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
+}
+
+# BOS-419 (DR-008, DR-023, DR-024): more allowlisted host facts, as a JSON fragment that starts with ", " so it can be
+# appended to host.json. Every section is optional and a section that fails is left out, so an older server (which
+# ignores unknown fields) and a host with no docker both still get a record. Nothing here reads a key, token, auth
+# file or the contents of .env: only the keys on the PORT_KEYS list below, and only values that look like an address
+# or a port. Everything the deployer runs is fixed in this file; nothing comes from a request or from the server.
+PORT_KEYS="BOSSMAN_BIND BOSSMAN_HOST_PORT BOSSMAN_PORTAL_BIND BOSSMAN_PORTAL_HOST_PORT PENPOT_BIND PENPOT_HOST_PORT NTFY_BIND NTFY_HOST_PORT"
+REPO_PROBE_SECONDS="${REPO_PROBE_SECONDS:-3600}"
+ADDON_SERVICES="tailscale:tailscale ntfy:ntfy penpot:penpot-frontend" # add-on name:Compose service label
+have_docker() { command -v docker >/dev/null 2>&1; }
+dk() { timeout 10 docker "$@" 2>/dev/null; }
+env_value() { # key: the value of KEY in the checkout's .env (environment first); only called for keys on PORT_KEYS
+  local v="${!1:-}"
+  [[ -n $v ]] || v="$(grep -s "^$1=" "$REPO/.env" | tail -1 | cut -d= -f2- || true)"
+  v="${v%\"}"; v="${v#\"}"
+  printf '%s' "$v"
+}
+host_extra_facts() {
+  local out="" sep=", "
+  # --- repo access: how origin is reached and whether a read works. The URL itself is never reported (it can carry a token).
+  local url kind="none" ohost="" creds=false probe="skipped" probed=""
+  url="$(g remote get-url origin 2>/dev/null)" || url=""
+  case $url in
+    https://*) kind=https ;;
+    http://*) kind=http ;;
+    ssh://* | *@*:*) kind=ssh ;;
+    "") kind=none ;;
+    *) kind=other ;;
+  esac
+  if [[ $kind != none && $kind != other ]]; then
+    ohost="${url#*://}"; [[ $url == *://* ]] || ohost="$url"
+    [[ $ohost == *@* && ${ohost%%@*} != *[/]* ]] && { [[ $kind == https || $kind == http ]] && creds=true; ohost="${ohost#*@}"; }
+    ohost="${ohost%%[/:]*}"
+    [[ $ohost =~ ^[A-Za-z0-9_.-]{1,255}$ ]] || ohost=""
+  fi
+  if [[ $kind != none ]]; then
+    local cache="$STATE/repo-probe" now_s; now_s="$(date +%s)"
+    if [[ -f $cache && $(stat -c %Y "$cache" 2>/dev/null || echo 0) -gt $((now_s - REPO_PROBE_SECONDS)) ]]; then
+      read -r probe probed <"$cache" || true
+    else
+      # A read over whatever origin uses: anonymous for https (no credential helper, no prompt), the host's own key for ssh
+      # (BatchMode: never asks). Only ok/failed is kept.
+      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>&1); then probe=ok; else probe=failed; fi
+      probed="$(now)"
+      printf '%s %s\n' "$probe" "$probed" >"$cache" 2>/dev/null || true
+    fi
+    [[ $probe =~ ^(ok|failed)$ ]] || probe=failed
+  fi
+  out+="$sep\"repo\": {\"origin\": $(jstr "$kind"), \"originHost\": $(jstr "$ohost"), \"embeddedCredentials\": $creds, \"probe\": $(jstr "$probe"), \"probedAt\": $(jstr "$probed")}"
+  # --- folders and the compose setup
+  local srcdir deployerdir installdir cf cfl="" cfsep="" f bg=false colour=""
+  srcdir="$(cd "$REPO" 2>/dev/null && pwd)" || srcdir=""
+  deployerdir="$(cd "$D" 2>/dev/null && pwd)" || deployerdir=""
+  installdir="$(cd "$D/.." 2>/dev/null && pwd)" || installdir=""
+  cf="${COMPOSE_FILE:-}"; [[ -n $cf ]] || cf="$(grep -s '^COMPOSE_FILE=' "$REPO/.env" | tail -1 | cut -d= -f2- || true)"
+  cf="${cf%\"}"; cf="${cf#\"}"
+  for f in ${cf//[:,]/ }; do [[ $f =~ ^[A-Za-z0-9_./-]{1,200}$ ]] && { cfl+="$cfsep$(jstr "$f")"; cfsep=", "; }; done
+  if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
+  out+="$sep\"paths\": {\"install\": $(jstr "$installdir"), \"src\": $(jstr "$srcdir"), \"deployer\": $(jstr "$deployerdir")}"
+  out+="$sep\"compose\": {\"files\": [$cfl], \"bluegreen\": $bg, \"liveColour\": $(jstr "$colour")}"
+  # --- addresses and ports
+  local addrs="" asep="" a n=0 ports="" psep="" k v
+  while IFS= read -r a; do
+    [[ $a =~ ^[0-9a-fA-F:.]{3,45}$ && $a != 127.* && $a != ::1 && $a != fe80:* ]] || continue
+    ((n < 16)) || break; addrs+="$asep$(jstr "$a")"; asep=", "; n=$((n + 1))
+  done < <(if command -v ip >/dev/null 2>&1; then ip -o addr show scope global 2>/dev/null | awk '{ sub("/.*", "", $4); print $4 }'; else hostname -I 2>/dev/null | tr ' ' '\n'; fi || true)
+  for k in $PORT_KEYS; do
+    v="$(env_value "$k")"; [[ $v =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] || continue
+    ports+="$psep$(jstr "$k"): $(jstr "$v")"; psep=", "
+  done
+  out+="$sep\"network\": {\"addresses\": [$addrs], \"ports\": {$ports}}"
+  # --- memory, in kB, from /proc/meminfo
+  local mt ma
+  mt="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null)" || mt=""
+  ma="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null)" || ma=""
+  if [[ $mt =~ ^[0-9]+$ && $ma =~ ^[0-9]+$ ]]; then out+="$sep\"memory\": {\"totalKb\": $mt, \"availableKb\": $ma}"; fi
+  # --- add-ons (DR-023): found by their Compose service label; only not_set_up | stopped | needs_login | running
+  local pair name svc state ids ts adds="" adsep=""
+  for pair in $ADDON_SERVICES; do
+    name="${pair%%:*}" svc="${pair#*:}" state=not_set_up
+    if have_docker; then
+      ids="$(dk ps -a --filter "label=com.docker.compose.service=$svc" --format '{{.ID}} {{.State}}')" || ids=""
+      if [[ -n $ids ]]; then
+        if grep -q ' running$' <<<"$ids"; then state=running; else state=stopped; fi
+      fi
+    fi
+    if [[ $name == tailscale ]]; then
+      ts=""
+      if command -v tailscale >/dev/null 2>&1; then ts="$(timeout 10 tailscale status --json 2>/dev/null | jfield BackendState)" || ts=""
+      elif [[ $state == running ]]; then
+        ts="$(dk exec "$(head -n1 <<<"$ids" | cut -d' ' -f1)" tailscale status --json | jfield BackendState)" || ts=""
+      fi
+      case $ts in
+        Running) state=running ;;
+        NeedsLogin | NeedsMachineAuth) state=needs_login ;;
+        Stopped | Starting) state=stopped ;;
+      esac
+    fi
+    adds+="$adsep$(jstr "$name"): $(jstr "$state")"; adsep=", "
+  done
+  out+="$sep\"addons\": {$adds}"
+  # --- read-only checks (DR-024), chosen by name from this fixed list
+  local checks="" csep="" total=0 notrun=0 unhealthy=0 maxrestart=0 line r
+  if have_docker; then
+    while IFS= read -r line; do
+      [[ -n $line ]] || continue
+      total=$((total + 1))
+      [[ $line == *' running '* ]] || notrun=$((notrun + 1))
+      [[ $line == *unhealthy* ]] && unhealthy=$((unhealthy + 1))
+    done < <(dk ps -a --filter label=com.docker.compose.project --format '{{.ID}} {{.State}} {{.Status}}' || true)
+    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy}"; csep=", "
+    maxrestart=0
+    while read -r r; do [[ $r =~ ^[0-9]+$ ]] && ((r > maxrestart)) && maxrestart=$r; done < <(dk ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.RestartCount}}' 2>/dev/null || true)
+    checks+="$csep\"restart_counts\": {\"max\": $maxrestart}"; csep=", "
+  fi
+  local sizes="" ssep="" sf sz
+  for sf in "$OUTBOX/history.jsonl" "$LOG" "$STATE/hold"; do
+    sz="$(stat -c %s "$sf" 2>/dev/null)" || continue
+    sizes+="$ssep$(jstr "$(basename "$sf")"): $sz"; ssep=", "
+  done
+  checks+="$csep\"state_file_sizes\": {$sizes}"
+  out+="$sep\"checks\": {$checks}"
+  printf '%s' "$out"
 }
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
@@ -327,7 +452,9 @@ write_include() { # colour
 		header_up X-Forwarded-For {client_ip}
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC
@@ -338,7 +465,9 @@ INC
 	reverse_proxy server-$1:{args[0]} {
 		health_uri {args[1]}
 		health_interval 2s
-		health_timeout 2s
+		health_timeout 5s
+		health_fails 3
+		lb_try_duration 15s
 	}
 }
 INC
@@ -382,7 +511,7 @@ backup_database() {
   local dir="${BOSSMAN_BACKUP_DIR:-$D/..}" old f
   mkdir -p "$dir"
   BG_BACKUP="$dir/bossman-$(date +%F-%H%M).sql.gz"
-  (umask 077; compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial") || { rm -f "$BG_BACKUP.partial"; return 1; }
+  (set -o pipefail; umask 077; compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial") || { rm -f "$BG_BACKUP.partial"; return 1; }
   { [[ -s $BG_BACKUP.partial ]] && gzip -t "$BG_BACKUP.partial"; } || { rm -f "$BG_BACKUP.partial"; return 1; }
   mv "$BG_BACKUP.partial" "$BG_BACKUP"
   # Same retention as deploy.sh: only bossman-*.sql.gz, newest 14 kept.
@@ -403,16 +532,29 @@ colour_log_tail() { # colour
 switch_back() {
   local ok=1
   log "Switching back from $BG_IDLE to $BG_LIVE."
+  # Never roll back to nothing: with the old colour not running there is nothing to go back to, so the new one is left alone.
+  [[ -n $(compose ps -q "server-$BG_LIVE" 2>/dev/null) ]] || { log "server-$BG_LIVE is not running; leaving server-$BG_IDLE as it is."; return 1; }
   compose kill -s USR1 "server-$BG_IDLE" >>"$LOG" 2>&1 || true
   compose kill -s USR2 "server-$BG_LIVE" >>"$LOG" 2>&1 || ok=0
   if ((ok)); then wait_ready "server-$BG_LIVE" leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
   if ((ok)); then flip_proxy "$BG_LIVE" || ok=0; fi
   if ((ok)); then wait_ready proxy leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
-  # Never roll back to nothing: the new colour is stopped only once the old one answers as the leader.
-  if ((ok)); then compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
-  else log "The old colour $BG_LIVE did not take over; leaving $BG_IDLE running so something still answers."; fi
-  ((ok)) && { g reset --quiet --hard "$BG_PREV" || true; }
+  if ((ok)); then
+    compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+    g reset --quiet --hard "$BG_PREV" || true
+  else
+    # The old colour did not take over: put the new one back in charge and keep it running (the checkout stays on what runs).
+    log "The switch-back to $BG_LIVE failed; keeping server-$BG_IDLE running."
+    flip_proxy "$BG_IDLE" >>"$LOG" 2>&1 || true
+    compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+  fi
   ((ok))
+}
+
+# What to type on the host when both automatic paths failed (generic: the configured checkout, no fixed paths or names).
+recovery_hint() {
+  printf 'Look at the host now. In %s run: docker compose ps. To start the colour that should be live and make it lead: docker compose up -d --no-deps server-%s, then docker compose kill -s USR2 server-%s. If server-%s is running, docker compose kill -s USR2 server-%s makes it lead instead. Log: %s' \
+    "$REPO" "$BG_LIVE" "$BG_LIVE" "$BG_IDLE" "$BG_IDLE" "$LOG"
 }
 
 # After the swap: the proxy answers as the new leader at the new commit, and the portal answers.
@@ -451,7 +593,7 @@ do_deploy_bluegreen() {
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
   BOSSMAN_COMMIT="$COMMIT" compose build "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Building $BG_IDLE failed."; return 1; }
   # Expand-only migrations: the live colour keeps working on the new schema.
-  BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
+  BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
   compose up -d --no-deps --force-recreate "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Starting $BG_IDLE failed."; return 1; }
   # It is a standby because the live colour holds the leader lock; seeing that also shows the lock works.
   wait_ready "server-$BG_IDLE" standby "$COMMIT" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby at ${COMMIT:0:8} within ${BG_READY_SECONDS}s.$(colour_log_tail "$BG_IDLE")"; return 1; }
@@ -468,7 +610,7 @@ do_deploy_bluegreen() {
   [[ -n $why ]] || verify_live "$COMMIT" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "$why Switched back to $BG_LIVE automatically. Backup: $BG_BACKUP"
-    else bg_fail failed "$why The switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "$why The switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
 
@@ -504,7 +646,7 @@ soak_tick() {
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
   rm -f "$f"
   if switch_back; then finish rolled_back "The update to ${commit:0:8} was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the previous version (${prev:0:8}) automatically and is running normally on it."
-  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the host now (docker compose ps; $LOG)."; fi
+  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: $(recovery_hint)"; fi
 }
 
 # By hand, any time (also after the soak window): go back to the other colour, i.e. the previous release.
@@ -546,7 +688,7 @@ do_rollback_bluegreen() {
   [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "Rollback failed ($why); $BG_LIVE is live again. Backup: $BG_BACKUP"
-    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.

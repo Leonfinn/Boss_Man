@@ -148,6 +148,29 @@ function usesIn(code: string): string[] {
   return out;
 }
 
+/** A `{{host.network.port.web}}`-style token: a recorded host fact (host-facts.ts) to fill in when a card is raised. */
+const HOST_TOKEN = /\{\{\s*host\.([A-Za-z0-9_.]{1,80})\s*\}\}/g;
+
+/** The fact names the steps use, without filling anything in. */
+export function hostTokensIn(steps: readonly string[]): string[] {
+  return [...new Set(steps.flatMap((s) => [...s.matchAll(HOST_TOKEN)].map((m) => m[1]!)))];
+}
+
+/** Fill each `{{host.KEY}}` with the recorded fact. `missing` names the facts with no usable value (not recorded, or
+ * a value that would break a command block: a newline or a backtick); those tokens are left as they are, so the lint
+ * and the card can't go out with a hole in it. */
+export function fillHostTokens(steps: readonly string[], values: Readonly<Record<string, string>>): { steps: string[]; missing: string[] } {
+  const missing = new Set<string>();
+  const filled = steps.map((s) =>
+    s.replace(HOST_TOKEN, (token, key: string) => {
+      const v = Object.hasOwn(values, key) ? values[key]! : undefined;
+      if (v === undefined || !v.trim() || /[\n\r`]/.test(v)) { missing.add(key); return token; }
+      return v;
+    }),
+  );
+  return { steps: filled, missing: [...missing] };
+}
+
 /**
  * Checks an agent's owner steps the way the owner will read them (BOS-417, DR-008 Q1): refuse what can't work
  * as written, warn about what might not. R1 a pointer to another document instead of the action; R2 a shell
@@ -213,6 +236,8 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
           refuse.push({ step, rule: "R13", problem: `${what}, which cuts off every agent run in progress with no drain and no wake afterwards. For a runner setting change use \`scripts/update-runner.sh --settings\` (it waits for runs to finish, then wakes the agents); for a new runner image use Settings → Server and runner → Updates → Build and update runners. In a real emergency only the CEO can raise it, with lintOverride saying why` });
           break;
         }
+    // A `{{host.…}}` token is filled in by `fillHostTokens` before this lint runs (checkAsk), so one left here had no
+    // recorded fact behind it, or the caller has no host facts; any other token never has a value.
     for (const m of text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) refuse.push({ step, rule: "R4", problem: `has {{${m[1]}}}, which Boss Man has no value for. Write the value itself` });
     const host = lintHost(blockPieces, step, given.hosts, staged, step === 1);
     refuse.push(...host.refuse);

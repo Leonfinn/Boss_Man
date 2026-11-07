@@ -429,6 +429,24 @@ describe("wiki append, history and restore (BOS-430)", () => {
     expect(back.page.body).toBe(log);
   });
 
+  it("a non-creator last writer can only undo their own latest change, not restore any old version (BOS-499)", async () => {
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { title: "Release log", body: log, agentId: c.worker.id, runId: null });
+    await c.wiki.write(c.company.id, { slug: "release-log", title: "Release log", body: `${log}\n- 10:00: a`, agentId: c.worker.id, runId: null });
+    const revs = (await c.wiki.history(c.company.id, "release-log")).revisions;
+    const oldest = revs.at(-1)!;
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Sneaky" })).json() as { id: string };
+    await c.wiki.append(c.company.id, { slug: "release-log", entry: "- 11:00: b", agentId: other.id, runId: null });
+    // Not the version just before their change: refused by the creator check.
+    await expect(c.wiki.restore(c.company.id, { slug: "release-log", revisionId: oldest.id, agentId: other.id, runId: null })).rejects.toThrow(/another agent created/);
+    // The version just before their own change: allowed.
+    const justBefore = (await c.wiki.history(c.company.id, "release-log")).revisions[1]!;
+    const back = await c.wiki.restore(c.company.id, { slug: "release-log", revisionId: justBefore.id, agentId: other.id, runId: null });
+    expect(back.page.body).toBe(`${log}\n- 10:00: a`);
+    // After that restore, going further back is still refused.
+    await expect(c.wiki.restore(c.company.id, { slug: "release-log", revisionId: oldest.id, agentId: other.id, runId: null })).rejects.toThrow(/another agent created/);
+  });
+
   it("the wiki tool exposes append, history and restore, and restore is the CEO's or the last writer's", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "t", assigneeAgentId: c.worker.id })).json() as { id: string };
