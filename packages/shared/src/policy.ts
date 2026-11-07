@@ -415,12 +415,16 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
 }
 
 /** A plain file name in the working folder: one component, no leading dot, no ~, $, glob or quote. */
-const PLAIN_NAME = /^[\w+@-][\w.+@-]*$/;
+const PLAIN_NAME = /^[\w+@][\w.+@-]*$/;
 
-/** A copy into the working folder, from a one-level /tmp file or a plain name: `cp /tmp/a.js a.js`, `mv x y`, `cat /tmp/a.js > a.js`. Records the new name and returns true; anything else is false. */
+/**
+ * A copy into the working folder from a one-level /tmp file: `cp /tmp/a.js a.js`, `cat /tmp/a.js > a.js`. Records the new name and returns true; anything else is false.
+ * Not `mv` and not an in-folder source (`mv README.md x` would make "x" stand for a real file), and no name or source may start with `-` (it would pass as a flag).
+ * Residual risk, accepted: a copy over an existing file is still read as making it.
+ */
 function makesOnlyPlainCopy(piece: string, made: Set<string>): boolean {
-  const src = String.raw`(?:\/tmp\/[\w.+@-]+|[\w+@-][\w.+@-]*)`;
-  const m = new RegExp(String.raw`^(?:cp|mv)\s+(?:-[A-Za-z]+\s+)*${src}\s+(\S+)$`).exec(piece) ?? new RegExp(String.raw`^cat\s+\/tmp\/[\w.+@-]+\s*>\s*(\S+)$`).exec(piece);
+  const src = String.raw`\/tmp\/[\w+@][\w.+@-]*`;
+  const m = new RegExp(String.raw`^cp\s+(?:-[npf]+\s+)*${src}\s+(\S+)$`).exec(piece) ?? new RegExp(String.raw`^cat\s+${src}\s*>\s*(\S+)$`).exec(piece);
   if (!m || !PLAIN_NAME.test(m[1]!)) return false;
   made.add(m[1]!);
   return true;
@@ -437,5 +441,5 @@ function removesOnlyMade(piece: string, made: Set<string>): boolean {
   const m = /^rm((?:\s+-f)*)((?:\s+\S+)+)$/.exec(piece);
   if (!m) return false;
   const names = m[2]!.trim().split(/\s+/);
-  return names.every((n) => made.has(n));
+  return names.every((n) => !n.startsWith("-") && made.has(n));
 }

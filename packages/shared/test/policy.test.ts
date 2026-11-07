@@ -164,6 +164,17 @@ describe("a script run in the working folder (BOS-328)", () => {
       "cp /tmp/b.js src/a.js; rm -f src/a.js",
       "cp /tmp/b.js copy.js; cd .. && rm -f copy.js",
       "cp /tmp/b.js copy.js; rm -f copy.js; shred x",
+      // Review round: a leading "-" passes as a flag (Rod 2, Jane F1)
+      "cp /tmp/b.js -r; cp /tmp/b.js apps; rm -r apps",
+      "cp /tmp/b.js -rf; cp /tmp/b.js src; rm -f -rf src",
+      "cp /tmp/b.js -r; cp /tmp/b.js apps; rm -f -r apps",
+      "cp /tmp/x -r; cp /tmp/x dir; rm -f -r dir",
+      // Review round: mv and in-folder sources do not make a file (Rod 1, Jane F2)
+      "mv README.md r; rm -f r",
+      "mv README.md x.js; rm -f x.js",
+      "mv package.json x; node x; rm -f x",
+      "cp README.md r; rm -f r",
+      "cp -t /tmp/x name; rm -f name",
     ]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
   });
 });
