@@ -1153,10 +1153,11 @@ export function reviewService(
       // A ticket sent back after its merge as no-code, then reopened for real work (BOS-532): a commit on its
       // branch now is that work. Clear the stale no-code mark and read the diff again (a diff read over the
       // old commit may show nothing), so the review checks code and the branch merges like any other.
-      if (t.noCode && changed?.commits.length) {
+      let noCode = t.noCode;
+      if (noCode && changed?.commits.length) {
         await db.update(tickets).set({ noCode: false }).where(eq(tickets.id, ticketId));
         await record(db, { companyId: t.companyId, ticketId, kind: "reopened", summary: "Reopened for code: its branch has new commits again, so it is no longer a no-code ticket." });
-        t = { ...t, noCode: false };
+        noCode = false;
         changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
       }
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
@@ -1164,7 +1165,7 @@ export function reviewService(
       await this.requireSignoff(t, changed ? changed.head : t.branch ? "" : null);
       if ((changed && !changed.commits.length && !changed.files.length) || (!changed && !t.branch)) {
         // Only a ticket marked "no code" closes on an empty diff; any other is sent back, not closed.
-        if (!t.noCode) {
+        if (!noCode) {
           const delivered = await sendBack(`The review was approved, but the ticket can't be closed: ${NOTHING_CHANGED} Then move the ticket back to review.`, "nothing changed");
           return { outcome: "empty", delivered };
         }

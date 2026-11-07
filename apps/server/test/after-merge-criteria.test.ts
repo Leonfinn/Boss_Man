@@ -228,9 +228,11 @@ describe("after-merge criteria", () => {
     now = await ctx.row(t.id);
     expect(now.systemState).toBe("in_progress");
     expect(now.noCode).toBe(false);
-    const refused = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: `${BEFORE} pass.` } }));
-    expect(refused).toContain("Nothing in the repository changed");
-    expect((await ctx.row(t.id)).systemState).toBe("in_progress");
+    // And a hand move to review from the reopened state is treated as code work (no-code stays cleared).
+    await ctx.req("POST", `/api/tickets/${t.id}/state`, { state: "review" });
+    now = await ctx.row(t.id);
+    expect(now.systemState).toBe("review");
+    expect(now.noCode).toBe(false);
   });
 
   it("a no-code ticket sent back after its merge, reopened for code, does not close on the live check's empty diff", { timeout: 120_000 }, async () => {
