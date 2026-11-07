@@ -759,6 +759,13 @@ describe("BOS-631: a file the command wrote (or a /tmp path) must not be loaded 
     "echo x > c.py; echo \"import c\" | uv run python",
     "echo x > c.py; python3 <<< \"import c\"",
     "echo x > c.js; node <<< \"require('./c.js')\"",
+    // round 11: flags that carry no code (bash -e, python3 -E, node -p) leave the program on stdin
+    "cat /tmp/x.sh | bash -e",
+    "cat /tmp/x.sh | sh -e",
+    "echo x > c.sh; cat c.sh | bash -e",
+    "echo 'import os' > c.py; echo \"import c\" | python3 -E",
+    "cat /tmp/x.py | python3 -E",
+    "echo x > c.js; echo 'require(\"./c.js\")' | node -p",
   ]);
   allows([
     "ls /tmp; python3 -c \"import json\"",

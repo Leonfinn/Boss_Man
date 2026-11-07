@@ -981,7 +981,11 @@ function usesScratchUnsafely(c: string): boolean {
       }
       if (!interpreters.test((words[ai] ?? "").replace(/^.*\//, ""))) continue;
       const rest = words.slice(ai + 1);
-      if (rest.some((a) => /^-[A-Za-z]*[cermEpM]/.test(a) || /^--(?:eval|print|require|import|exec)\b/.test(a))) continue;
+      // Only a flag that carries inline code (one with an operand after it) means the program is not on stdin; for shells
+      // only a cluster ending in `c` does (`bash -e` is errexit, `python3 -E` ignores the environment, `node -p` has no code).
+      const shellInterp = /^(?:sh|bash|zsh|dash|ksh)$/.test((words[ai] ?? "").replace(/^.*\//, ""));
+      const codeFlag = shellInterp ? /^-[A-Za-z]*c$/ : /^-[A-Za-z]*[cermEpM]|^--(?:eval|print|require|import|exec)\b/;
+      if (rest.some((a, k) => codeFlag.test(a) && k + 1 < rest.length)) continue;
       if (rest.some((a) => a !== "-" && /[./]/.test(a))) continue;
       piped.push({ index: m.index! });
     }
