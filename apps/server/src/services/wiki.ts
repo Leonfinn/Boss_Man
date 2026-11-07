@@ -669,7 +669,20 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       const mine = !!input.agentId && lastWriter === input.agentId;
       if (!isCeo && !mine)
         throw new WikiError(403, "Only the CEO or the page's last writer can put an old version back. Ask the CEO, or the agent who last wrote it.");
-      const r = await this.write(companyId, { slug: p.slug, folder: p.folder, title: rev.title, body: rev.body, replace: true, fromRestore: true, isCeo, agentId: input.agentId, runId: input.runId });
+      // A non-CEO may only undo their own latest change: the version just before it, while it is still
+      // the page's latest. Anything else is an ordinary replace and gets the creator check, so appending
+      // a line to become last writer no longer opens a way round that rule (BOS-499).
+      let undoOwn = isCeo;
+      if (!isCeo) {
+        const [latest, before] = await db
+          .select({ id: wikiRevisions.id, agentId: wikiRevisions.agentId, body: wikiRevisions.body })
+          .from(wikiRevisions)
+          .where(eq(wikiRevisions.pageId, p.id))
+          .orderBy(desc(wikiRevisions.createdAt))
+          .limit(2);
+        undoOwn = !!latest && latest.agentId === input.agentId && latest.body === p.body && before?.id === rev.id;
+      }
+      const r = await this.write(companyId, { slug: p.slug, folder: p.folder, title: rev.title, body: rev.body, replace: true, fromRestore: undoOwn, isCeo, agentId: input.agentId, runId: input.runId });
       return { ...r, size: rev.body.length };
     },
 
