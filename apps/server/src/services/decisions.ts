@@ -52,6 +52,7 @@ import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, les
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 import { commandProblem, parseStep, strayFence } from "./steps.js";
+import { openReviewProposal } from "./skill-proposals.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -879,6 +880,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [t] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId));
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, extra.assigneeAgentId), eq(agents.companyId, t?.companyId ?? "")));
       if (!a) throw new AnswerError("That person isn't on this ticket's team. Pick someone from the list.");
+      // Defence in depth for the security review's own tasks (BOS-176): the other ticket-writing tools all
+      // refuse to move an open skill-review ticket, so this route must too. The owner's own answer is the
+      // owner writing (settledBy is only ever an agent), so they stay allowed, as they are there.
+      if (t?.companyId && extra.settledBy && (await openReviewProposal(db, t.companyId, ctx.blockerTicketId))) {
+        throw new AnswerError("This is a security review task: only the Security Reviewer and the owner can move it. Pick another ticket to hand on, or chase it instead.");
+      }
     }
     if (ctx.type === "stale_blocker" && answer === LET_CEO_DECIDE) {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
