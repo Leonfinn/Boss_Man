@@ -6,7 +6,7 @@
 //  - while a project's main is red only jobs fixing main run (merge jobs of other tickets wait, they don't fail); pre-review jobs keep running;
 //  - a passed job on the same tree satisfies a request of equal or narrower scope, so the same tree is never checked twice;
 //  - a job never leaves the queue without a recorded reason (stuck / cancelled / re-queued all carry one).
-import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { checkJobs, projects, settings } from "../db/schema.js";
 
@@ -156,15 +156,18 @@ export function checkQueue(db: Db) {
   }
 
   /** Note output from a running job (for the no-output limit) and keep its log tail. */
-  async function progress(jobId: string, logTail: string, now = new Date()): Promise<void> {
-    await db.update(checkJobs).set({ lastOutputAt: now, logTail: logTail.slice(-8192) }).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running")));
+  async function progress(jobId: string, runnerId: string | null, logTail: string, now = new Date()): Promise<void> {
+    await db.update(checkJobs).set({ lastOutputAt: now, logTail: logTail.slice(-8192) }).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"), sentTo(runnerId)));
   }
+
+  /** Only the runner a job was sent to may answer for it (a job claimed with no runner id matches null). */
+  const sentTo = (runnerId: string | null) => (runnerId === null ? isNull(checkJobs.runnerId) : eq(checkJobs.runnerId, runnerId));
 
   /**
    * The runner's answer. Accepted only for a job that is still running and only for the commit that was checked,
    * so a late answer for a job that was re-queued or replaced is ignored. Returns the finished job, or null if ignored.
    */
-  async function complete(jobId: string, result: { commit: string; exitCode: number | null; logTail: string; timedOut?: boolean }, now = new Date()): Promise<CheckJob | null> {
+  async function complete(jobId: string, result: { runnerId: string | null; commit: string; exitCode: number | null; logTail: string; timedOut?: boolean }, now = new Date()): Promise<CheckJob | null> {
     const ok = result.exitCode === 0 && !result.timedOut;
     const [row] = await db
       .update(checkJobs)
@@ -175,7 +178,7 @@ export function checkQueue(db: Db) {
         reason: ok ? null : result.timedOut ? "The check ran past its time limit and was stopped." : `The check failed with exit code ${result.exitCode ?? "none"}.`,
         endedAt: now,
       })
-      .where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"), eq(checkJobs.commit, result.commit)))
+      .where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"), eq(checkJobs.commit, result.commit), sentTo(result.runnerId)))
       .returning();
     return row ?? null;
   }
