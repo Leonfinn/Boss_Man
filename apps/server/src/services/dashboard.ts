@@ -23,17 +23,18 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
    * Each agent's latest run, and why it started (BOS-407). The latest run is picked first, on the
    * runs table alone, and the origin subqueries run only on those rows: doing it the other way
    * round computed a nudge lookup for every run the company ever had, then threw them all away.
+   * One `limit 1` per agent on runs_agent_started (BOS-672): DISTINCT ON read and sorted every run
+   * of every agent (38 ms at 20k runs) to keep one row each. "nulls last" must match the index's
+   * order or Postgres sorts the agent's runs instead of reading one (started_at is never null).
    */
   const latestRunPerAgent = (agentIds: string[]) => {
-    const latest = db.selectDistinctOn([runs.agentId])
-      .from(runs)
-      .where(inArray(runs.agentId, agentIds))
-      .orderBy(runs.agentId, desc(runs.startedAt))
-      .as("latest");
+    const latest = db.select().from(runs).where(eq(runs.agentId, agents.id)).orderBy(sql`${runs.startedAt} desc nulls last`).limit(1).as("latest");
     return db
       .select({ agentId: latest.agentId, id: latest.id, ticketId: latest.ticketId, ticket: tickets.title, purpose: latest.purpose, startedAt: latest.startedAt, endedAt: latest.endedAt, outcome: latest.outcome, ...runOriginQuery("latest") })
-      .from(latest)
-      .leftJoin(tickets, eq(tickets.id, latest.ticketId));
+      .from(agents)
+      .innerJoinLateral(latest, sql`true`)
+      .leftJoin(tickets, eq(tickets.id, latest.ticketId))
+      .where(inArray(agents.id, agentIds));
   };
   return {
     async get(companyId: string) {
@@ -78,7 +79,10 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
         .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
         .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, monthStart), ne(fundingSources.kind, "subscription")));
       // A run was on the subscription if its costs went there, or its agent is paid that way.
-      const onSubscription = sql`(${runs.id} in (select ${costEvents.runId} from ${costEvents} inner join ${fundingSources} on ${fundingSources.id} = ${costEvents.fundingSourceId} where ${fundingSources.kind} = 'subscription' and ${costEvents.runId} is not null) or ${agents.fundingSourceId} in (select ${fundingSources.id} from ${fundingSources} where ${fundingSources.kind} = 'subscription'))`;
+      // Only this month's runs are counted, so only cost events from then on can name one (BOS-672: the
+      // unbounded lookup read every cost event ever). The day of slack covers a runner clock behind the server's.
+      const costsFrom = new Date(monthStart.getTime() - 86_400_000);
+      const onSubscription = sql`(${runs.id} in (select ${costEvents.runId} from ${costEvents} inner join ${fundingSources} on ${fundingSources.id} = ${costEvents.fundingSourceId} where ${fundingSources.kind} = 'subscription' and ${costEvents.runId} is not null and ${costEvents.occurredAt} >= ${costsFrom}) or ${agents.fundingSourceId} in (select ${fundingSources.id} from ${fundingSources} where ${fundingSources.kind} = 'subscription'))`;
       const [tokens] = await db
         .select({
           input: sql<string>`coalesce(sum(${runs.inputTokens}), 0)`,
@@ -93,20 +97,31 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
 
       // The last 14 days, one entry per day, oldest first.
       const days = Array.from({ length: DAYS }, (_, i) => day(new Date(since.getTime() + i * 86_400_000)));
-      const ended = await db.select({ endedAt: runs.endedAt, outcome: runs.outcome }).from(runs).where(and(eq(runs.companyId, companyId), gte(runs.endedAt, since)));
-      const made = await db.select({ createdAt: tickets.createdAt, state: tickets.systemState }).from(tickets).where(and(eq(tickets.companyId, companyId), gte(tickets.createdAt, since)));
-      const runsByDay = days.map((d) => {
-        const on = ended.filter((r) => r.endedAt && day(r.endedAt) === d);
-        const tally = { succeeded: 0, failed: 0, other: 0 };
-        for (const r of on) tally[runResult(r.outcome)]++;
-        return { day: d, ...tally };
-      });
-      const ticketsByDay = days.map((d) => {
-        const on = made.filter((x) => day(x.createdAt) === d);
-        const tally: Record<string, number> = {};
-        for (const x of on) tally[x.state] = (tally[x.state] ?? 0) + 1;
-        return { day: d, ...tally };
-      });
+      // Counted by UTC day in the database (BOS-672): reading every row and filtering it once per day
+      // was O(rows x days) in JS, the dateIn freeze pattern (BOS-643). Same day key as day() above.
+      const utcDay = (c: typeof runs.endedAt | typeof tickets.createdAt) => sql<string>`to_char(${c} at time zone 'UTC', 'YYYY-MM-DD')`;
+      const ended = await db
+        .select({ day: utcDay(runs.endedAt), outcome: runs.outcome, n: sql<number>`count(*)::int` })
+        .from(runs)
+        .where(and(eq(runs.companyId, companyId), gte(runs.endedAt, since)))
+        .groupBy(sql`1`, runs.outcome);
+      const made = await db
+        .select({ day: utcDay(tickets.createdAt), state: tickets.systemState, n: sql<number>`count(*)::int` })
+        .from(tickets)
+        .where(and(eq(tickets.companyId, companyId), gte(tickets.createdAt, since)))
+        .groupBy(sql`1`, tickets.systemState);
+      const runTally = new Map(days.map((d) => [d, { succeeded: 0, failed: 0, other: 0 }]));
+      for (const r of ended) {
+        const tally = runTally.get(r.day);
+        if (tally) tally[runResult(r.outcome)] += r.n;
+      }
+      const ticketTally = new Map(days.map((d) => [d, {} as Record<string, number>]));
+      for (const x of made) {
+        const tally = ticketTally.get(x.day);
+        if (tally) tally[x.state] = (tally[x.state] ?? 0) + x.n;
+      }
+      const runsByDay = days.map((d) => ({ day: d, ...runTally.get(d)! }));
+      const ticketsByDay = days.map((d) => ({ day: d, ...ticketTally.get(d)! }));
 
       const recentTickets = await db
         .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt })
