@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
@@ -702,7 +702,7 @@ export function reviewService(
       await skipPending(db, rows);
       const failed = rows.filter((r) => r.status === "changes_requested");
       const text = failed.map((r) => r.notes).join("\n\n");
-      const sent = await this.sendBackRound(t, { reviewer: failed.map((r) => (r.kind === "code" ? "the reviewer" : `the ${r.kind} reviewer`)).join(" and "), comments: failed.flatMap((r) => r.comments as ReviewComment[]), text, causedByRunId: o.causedByRunId });
+      const sent = await this.sendBackRound(t, { reviewer: failed.map((r) => (r.kind === "code" ? "the reviewer" : `the ${r.kind} reviewer`)).join(" and "), comments: failed.flatMap((r) => r.comments as ReviewComment[]), text, parts: failed.map((r) => ({ notes: r.notes ?? "", comments: r.comments as ReviewComment[] })), causedByRunId: o.causedByRunId });
       return sent;
     },
 
@@ -729,8 +729,8 @@ export function reviewService(
     },
 
     /** Changes requested: a review that keeps coming back goes to the owner instead of another round (R49). */
-    async sendBackRound(t: typeof tickets.$inferSelect, o: { reviewer: string; comments: ReviewComment[]; text: string; causedByRunId?: string | null }) {
-      const round = await deps.loops.reviewRound({ ticketId: t.id, reviewer: o.reviewer, comments: o.comments, message: o.text });
+    async sendBackRound(t: typeof tickets.$inferSelect, o: { reviewer: string; comments: ReviewComment[]; text: string; parts?: { notes: string; comments: ReviewComment[] }[]; causedByRunId?: string | null }) {
+      const round = await deps.loops.reviewRound({ ticketId: t.id, reviewer: o.reviewer, comments: o.comments, message: o.text, parts: o.parts });
       if (round.escalated) return { verdict: "changes_requested" as const, outcome: "escalated" as const, delivered: `held: the review looks stuck, so the CEO (or the owner, if the CEO can't settle it) decides what happens next (decision ${round.escalated})`, message: o.text, round: round.round };
       const delivered = await this.sendBack(t.id, o.text, o.reviewer, o.causedByRunId);
       return { verdict: "changes_requested" as const, outcome: "sent_back" as const, delivered, message: o.text, round: round.round };
@@ -761,6 +761,39 @@ export function reviewService(
       // Reviews that never ran now have to: the ticket goes back into review for them.
       if (evaluate(after) === "waiting" && t.systemState !== "review") await deps.work.updateTicket(ticketId, { state: "review", overLimit: true });
       return this.settle(t, { verdict: "approved", reviewer: "the CEO", reviewerAgentId: input.byAgentId, background: input.background, causedByRunId: input.causedByRunId, before });
+    },
+
+    /**
+     * The owner's (or CEO's) "move these checks to after the merge" on a stuck-review card (BOS-422): the named criteria become
+     * after-merge ones, the changes-requested reviews that only failed them are overruled, and the ticket goes on through review.
+     * Owner sign-off still applies, as it does after an overrule.
+     */
+    async moveAfterMerge(ticketId: string, criteria: string[]) {
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+      if (!t || t.systemState === "done") return;
+      // Re-check against the reviews as they are now (a stale card, or criteria edited since): every changes-requested review
+      // must fail only criteria in the moved set, with no line comments; otherwise nothing is moved or overruled.
+      const current = readCriteria(t.acceptanceCriteria);
+      const asked = new Set(criteria);
+      const open = (await latestRows(db, ticketId)).filter((r) => r.status === "changes_requested");
+      const ok = open.every((r) => {
+        const m = movableFailures(current, r.comments as ReviewComment[], r.notes ?? "");
+        return m.length > 0 && m.every((c) => asked.has(c));
+      });
+      if (!ok) return this.sendBack(ticketId, open.map((r) => r.notes ?? "").join("\n\n"), "the reviewer");
+      const move = new Set(criteria);
+      const next =readCriteria(t.acceptanceCriteria).map((c) => (!isAfterMerge(c) && move.has(criterionText(c)) ? { text: criterionText(c), after: "merge" as const } : c));
+      await db.update(tickets).set({ acceptanceCriteria: next }).where(eq(tickets.id, ticketId));
+      const rows = await latestRows(db, ticketId);
+      const before = activeRows(rows);
+      const failed = rows.filter((r) => r.status === "changes_requested");
+      for (const r of failed) await decide(db, r.id, { status: "overruled", overruleReason: `Moved to after the merge: ${criteria.map((c) => `"${c}"`).join(", ")}` });
+      await record(db, { companyId: t.companyId, ticketId, kind: "review_overruled", summary: `Stuck review: ${criteria.map((c) => `"${c}"`).join(", ")} moved to after the merge, so the changes requested on them no longer hold the ticket.` });
+      await reviveSkipped(db, rows);
+      const reviewer = failed.find((r) => r.reviewerAgentId)?.reviewerAgentId;
+      // A review the owner gave straight from the ticket page has no review rows: the move is the approval.
+      if (!reviewer) return failed.length ? undefined : this.approve(t, { reviewer: "the owner", background: true });
+      return this.settle(t, { verdict: "approved", reviewer: "the owner", reviewerAgentId: reviewer, before });
     },
 
     /**
