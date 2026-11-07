@@ -83,6 +83,24 @@ export function evaluate(rows: ReviewRow[]): "waiting" | "failed" | "passed" {
   return rows.every((r) => SETTLED.includes(r.status)) ? "passed" : "waiting";
 }
 
+/**
+ * The tickets, of those given, whose newest review round has passed: every reviewer approved (or was
+ * overruled), so all that is left is the merge or the owner's sign-off. One query for the lot. The
+ * board's "Approved, merging" lane and the dashboard's count use it (BOS-667), the same test the merge
+ * queue uses, so a ticket waiting on a reviewer is never counted as merging and the other way round.
+ */
+export async function passedReviewTickets(db: Db, ticketIds: string[]): Promise<Set<string>> {
+  if (!ticketIds.length) return new Set();
+  const rows = await db.select().from(reviewRequests).where(inArray(reviewRequests.ticketId, ticketIds));
+  const newest = new Map<string, ReviewRow[]>();
+  for (const r of rows) {
+    const cur = newest.get(r.ticketId);
+    if (!cur || cur[0]!.round < r.round) newest.set(r.ticketId, [r]);
+    else if (cur[0]!.round === r.round) cur.push(r);
+  }
+  return new Set([...newest].filter(([, round]) => evaluate(round) === "passed").map(([id]) => id));
+}
+
 const seqOf = (order: string[] | null | undefined, kind: string) => (order?.indexOf(kind) ?? -1) + 1;
 
 /** The ticket ids a review wake's note lists, in the order it lists them. The list is what the reviewer was asked to cover. */

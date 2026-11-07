@@ -70,6 +70,16 @@ describe("readPush", () => {
   });
 });
 
+describe("do-nothing sed -i (BOS-680)", () => {
+  it("reads sed -i on /dev/null or with no file as changing nothing", () => {
+    expect(explainCommand("sed -i 's/a/b/' /dev/null; git status").effect).toBe("reads");
+    expect(explainCommand("sed -i 's/a/b/'").effect).toBe("reads");
+  });
+  it("keeps the edit for w/e scripts, -f and real files", () => {
+    for (const c of ["sed -i 's/a/b/w out' /dev/null", "sed -i 's/a/b/e' /dev/null", "sed -i -f s.sed /dev/null", "sed -i 's/a/b/' /dev/null x.txt", "sed -i 's/a/b/' x.txt"]) expect(explainCommand(c).effect).toBe("changes");
+  });
+});
+
 describe("explainCommand", () => {
   it("says the owner's memory check only reads", () => {
     const r = explainCommand("grep -E 'MemTotal|MemAvailable' /proc/meminfo; cat /sys/fs/cgroup/memory.max 2>/dev/null; cat /sys/fs/cgroup/memory.current 2>/dev/null; cat /sys/fs/cgroup/memory.limit_in_bytes 2>/dev/null");

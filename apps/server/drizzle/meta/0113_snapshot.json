@@ -1,5 +1,5 @@
 {
-  "id": "08ae6324-7560-405e-9724-5bd1e8f1f11c",
+  "id": "0ec52a98-9721-489b-a0df-379d04ef2d37",
   "prevId": "a93cac06-54cc-43ee-8a03-9d64b57148ae",
   "version": "7",
   "dialect": "postgresql",
@@ -5181,24 +5181,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_by": {
-          "name": "created_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "source_decision_id": {
-          "name": "source_decision_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -5214,19 +5196,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "policy_rules_source_decision_id_decisions_id_fk": {
-          "name": "policy_rules_source_decision_id_decisions_id_fk",
-          "tableFrom": "policy_rules",
-          "tableTo": "decisions",
-          "columnsFrom": [
-            "source_decision_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -8551,6 +8520,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "fixes_live": {
+          "name": "fixes_live",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "version": {
           "name": "version",

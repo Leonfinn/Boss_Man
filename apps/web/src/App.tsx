@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
 import { usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
+import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
 import { Decisions } from "./pages/Decisions";
@@ -74,7 +75,7 @@ function remember(id: string, set: (id: string) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; reason: string; since: string; deadline: string; runs: number; companies: number };
+type Maintenance = { on: false } | { on: true; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -100,6 +101,41 @@ export function NewBuildBanner({ newer }: { newer: boolean }) {
   );
 }
 
+function useServerDown(): boolean {
+  const [down, setDown] = useState(serverDown);
+  useEffect(() => {
+    const update = () => setDown(serverDown());
+    const off = subscribeServer(update);
+    update();
+    // A check when the app is opened and whenever the tab comes back: a freeze may have missed the last probe.
+    if (!down) void checkNow();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void checkNow();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return down;
+}
+
+/**
+ * The server is restarting, stalled or unreachable: a small banner over the page, never in place of
+ * it (BOS-637). The page keeps what it had and catches up on its own once the server answers again.
+ */
+export function ServerBanner() {
+  const down = useServerDown();
+  if (!down) return null;
+  return (
+    <p className="banner server-banner" role="status" aria-live="polite">
+      Boss Man is restarting or switching versions for a moment. This page stays as it is and what you have typed is kept; it will catch up on its own when the server answers.
+    </p>
+  );
+}
+
 function Signed({ onLogout }: { onLogout: () => void }) {
   const [route, go] = useRoute();
   const page = route[0] ?? "dashboard";
@@ -121,6 +157,16 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   useEffect(() => reloadUnprocessed(), [route.join("/"), reloadUnprocessed]);
 
   const lost = [companies.error, decisions.error].find((e) => e && e.status === 0);
+  // An away server is the banner's to say, and it goes away by itself: this page keeps its place
+  // and catches up, rather than being swapped for an error (BOS-637).
+  useEffect(() => {
+    if (!lost) return;
+    const timer = setTimeout(() => {
+      companies.reload();
+      decisions.reload();
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [lost, companies.reload, decisions.reload]);
   const expired = [companies.error, decisions.error].some((e) => e?.status === 401);
   useEffect(() => {
     if (expired) onLogout();
@@ -191,16 +237,13 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
-        {lost ? (
-          <State img={art.stuck} alt="Lost connection to the server" title="Lost connection to the server">
-            <p>Boss Man keeps working on the server; this page will catch up as soon as it can reach it again.</p>
-          </State>
-        ) : page === "board" ? (
+        {page === "board" ? (
           <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
-          <ChatPage companies={list} companyId={companyId} agentId={route[2]} go={go} onChanged={companies.reload} />
+          <ChatPage companies={list} companyId={companyId} agentId={route[2]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
         ) : page === "wiki" ? (
           <Wiki companies={list} companyId={companyId} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "agents" ? (
@@ -263,6 +306,13 @@ export function App() {
     }
   }, []);
   useEffect(() => void check(), [check]);
+  // Can't reach the server when the page opens: keep trying quietly, and show it once it answers
+  // (BOS-637). A freeze at startup should cost a few seconds, not the "Try again" click.
+  useEffect(() => {
+    if (session.state !== "offline") return;
+    const timer = setInterval(() => void check(), 4000);
+    return () => clearInterval(timer);
+  }, [session.state, check]);
   const loggedOut = useCallback(() => setSession({ state: "login" }), []);
 
   switch (session.state) {
@@ -271,7 +321,9 @@ export function App() {
     case "offline":
       return (
         <main className="auth">
+          <ServerBanner />
           <State img={art.stuck} alt="Can't reach the server" title="Can't reach the Boss Man server">
+            <p>Trying again every few seconds; this page will open on its own as soon as the server answers.</p>
             <button className="btn primary" type="button" onClick={() => void check()}>
               Try again
             </button>

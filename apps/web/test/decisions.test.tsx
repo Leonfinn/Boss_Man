@@ -4,8 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Decision } from "../src/api";
 import { Decisions } from "../src/pages/Decisions";
 import { when } from "../src/pages/Runs";
+import { clearAllDrafts } from "../src/drafts";
 
 afterEach(() => {
+  clearAllDrafts();
   cleanup();
   vi.unstubAllGlobals();
 });
