@@ -36,6 +36,10 @@ export type LauncherConfig = {
   cpuShares?: number;
   /** BOSSMAN_RUNNER_CPUS: optional hard cap in CPUs (e.g. 4 or 1.5), shared by everything in the runner. Unset = no cap. */
   cpus?: number;
+  /** The threads runners are confined to (CpusetCpus, e.g. "0-9"), worked out at start by cpu-layout.ts. Unset = all threads. */
+  cpuset?: string;
+  /** What the CPU reserve decided, for the status call (cpu-layout.ts planReserve). */
+  cpuPlan?: import("./cpu-layout.js").CpuPlan;
   /** BOSSMAN_NETGUARD: "auto" (default) guards every runner, and lets a host that can't run the guard go without; "enforce" refuses runners there; "off" never guards. */
   guardMode?: GuardMode;
   /** BOSSMAN_NETGUARD_ALLOW: extra host:port entries every runner may reach on the private networks. */
@@ -108,6 +112,8 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
       OomScoreAdj: 500,
       // Priority, not a cap (BOS-412): when the host is busy the server and database win; when idle, runners use every core.
       CpuShares: cfg.cpuShares ?? DEFAULT_CPU_SHARES,
+      // A core kept back for the server, database and proxy (BOS-586): runners never run on the reserved threads.
+      ...(cfg.cpuset ? { CpusetCpus: cfg.cpuset } : {}),
       ...(cfg.cpus ? { NanoCpus: Math.round(cfg.cpus * 1e9) } : {}),
       RestartPolicy: { Name: "unless-stopped" },
     },
