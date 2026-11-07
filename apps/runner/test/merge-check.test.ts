@@ -154,3 +154,23 @@ describe("migration journal on the checked path (BOS-360)", () => {
     expect(o.mainSha()).toBe(before);
   });
 });
+
+describe("the merge gate's pnpm store (BOS-568 review)", () => {
+  // The gate runs unfenced as the runner's user, so it must install from its own store, never the shared one
+  // agents can write. This pins the wiring in main.ts: the 4th Workspaces argument is the gate's store.
+  it("installs from its own store, not the agents' shared one", async () => {
+    const o = origin();
+    const shared = mkdtempSync(path.join(tmpdir(), "bm-mc-shared-"));
+    const gate = `${shared}-gate`;
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-mc-root-")), process.env, undefined, gate);
+    const spec = { projectId: ids.project, ticketId: ids.t, repoUrl: o.url, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "b.txt"), "b\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "ticket work");
+    const out = path.join(mkdtempSync(path.join(tmpdir(), "bm-mc-seen-")), "store");
+    const r = await ws.merge(spec, "main", "Merge B", {}, { commands: [`echo "$npm_config_store_dir" > ${out}`] });
+    expect(r.status).toBe("merged");
+    expect(existsSync(out) ? execFileSync("cat", [out], { encoding: "utf8" }).trim() : "").toBe(gate);
+  });
+});

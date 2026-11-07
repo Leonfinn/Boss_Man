@@ -4,10 +4,12 @@ import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, 
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
-import { REVIEW_REASON, reviewWaits } from "./review-kinds.js";
+import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.js";
+import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, WorkError } from "./ticket-links.js";
 import { derivedSignoff } from "./signoff.js";
+import { fixesLiveProblem } from "./decisions.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
 export { WorkError };
@@ -54,6 +56,8 @@ type TicketPatch = {
   noCode?: boolean;
   /** What the owner has to do once this is live, in plain words by button path (DR-011); null clears it. */
   ownerSetup?: string | null;
+  /** "Fixes live" (BOS-639): one sentence naming the live symptom this fixes; null or blank clears it. */
+  fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
   urgent?: boolean;
   /** Move past a full column anyway. */
@@ -64,6 +68,9 @@ type TicketPatch = {
 
 /** Roles that may move a ticket into work whatever it waits on (BOS-254): the CEO, a manager, or the owner (no agent). */
 const START_OVERRIDE_ROLES = new Set(["ceo", "manager"]);
+
+/** Reopening a merged no-code ticket for code: moving it back into one of these clears the stale mark (BOS-532). The review state is left to review.ts: only a commit there is real code work. */
+const REOPEN_STATES = new Set<SystemState>(["ready", "in_progress"]);
 
 /**
  * Why a ticket may not start (BOS-254): it still waits on an unfinished ticket or engagement, or it is
@@ -98,6 +105,8 @@ export type WorkHooks = {
   onDone?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
   /** A task of this feature started, finished, reopened, moved or was added: its status may need to follow. */
   onFeature?: (featureId: string) => Promise<unknown>;
+  /** The merges this process is running, with their phase (the review service's markers), so an approved card can say where it is. */
+  runningMerges?: () => Array<{ ticketId: string; phase?: MergePhase }>;
   now?: () => Date;
 };
 
@@ -269,6 +278,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Runs with no ticket at all: the strip lists them, so the board never under-reports.
       const withoutCard = everyLive.filter((r) => about(r).size === 0);
       const waits = await reviewWaits(db, inReview);
+      // Approved by every reviewer, so only the merge is left (BOS-667): the board shows these apart from
+      // tickets still waiting on a reviewer, so a long merge line doesn't read as a reviewer shortage.
+      const passed = await passedReviewTickets(db, inReview);
+      const merging = new Map((hooks.runningMerges?.() ?? []).map((m) => [m.ticketId, m.phase ?? "checking"] as const));
+      const mergeNote = (t: typeof tickets.$inferSelect) => {
+        const phase = merging.get(t.id);
+        if (phase) return phase === "queued" ? "Waiting for a check slot." : `Now ${PHASE_LABEL[phase]}.`;
+        if (t.pullRequestUrl) return t.pullRequestNote ? `Pull request waiting on the git host: ${t.pullRequestNote.slice(0, 120)}` : "Pull request open; merges when the git host's checks pass.";
+        return "Waiting to be checked and merged.";
+      };
       // A held wake whose reason is the subscription quota (BOS-227), so the card can show it and offer Run now.
       // A ticket's wake can be merged into another of its assignee's wakes, so the assignee's held
       // wakes count too (BOS-253), not just ones naming the ticket.
@@ -286,9 +305,14 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
         // A sign-off still open on a ticket no longer in review (moved, blocked) must not vanish from the owner's lane.
         const askedId = t.systemState === "done" ? null : (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && (questions.has(d.blockerDecisionId) || (t.systemState !== "review" && signoffs.has(d.blockerDecisionId))))?.blockerDecisionId ?? null);
+        const waitingOnOwner = !!waitingDecisionId || signoffWaiting.has(t.id) || unreviewed.has(t.id) || !!askedId;
+        // Only for a ticket in review that isn't the owner's to act on: those are in Your review.
+        const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
         return {
         ...t,
-        waitingOnOwner: !!waitingDecisionId || signoffWaiting.has(t.id) || unreviewed.has(t.id) || !!askedId,
+        waitingOnOwner,
+        reviewStage,
+        mergeNote: reviewStage === "merging" ? mergeNote(t) : null,
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
         noReviewer: unreviewed.has(t.id),
         reviewWait: waits.get(t.id) ?? null,
@@ -333,6 +357,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (input.milestoneId) await assertLinkInCompany("milestone", input.milestoneId, p.companyId);
       if (input.keyResultId) await assertLinkInCompany("keyResult", input.keyResultId, p.companyId);
       if (input.featureId) await assertFeatureInCompany(input.featureId, p.companyId);
+      const badFix = input.fixesLive ? fixesLiveProblem(input.fixesLive) : null;
+      if (badFix) throw new WorkError(400, badFix);
       const parent = input.parentTicketId ? await parentOf(input.parentTicketId, p.companyId) : null;
       if (parent) await assertLinkWriteAllowed(p.companyId, [parent.id], input.createdByAgentId ?? null);
       const featureId = parent ? parent.featureId : (input.featureId ?? null);
@@ -356,6 +382,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           acceptanceCriteria: input.acceptanceCriteria ?? [],
           noCode: input.noCode ?? false,
           ownerSetup: input.ownerSetup?.trim() || null,
+          fixesLive: input.fixesLive?.trim() || null,
           urgent: input.urgent ?? false,
           lastActivityAt: now(),
           risk: input.risk ?? null,
@@ -536,7 +563,18 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       }
       // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
       if (patch.ownerSetup !== undefined) fields.ownerSetup = patch.ownerSetup?.trim() || null;
+      if (patch.fixesLive !== undefined) {
+        const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;
+        if (bad) throw new WorkError(400, bad);
+        fields.fixesLive = patch.fixesLive?.trim() || null;
+      }
       if (dest) Object.assign(fields, { projectId: dest.id });
+      // A merged ticket goes back to its assignee as no-code so a live check can be reported and it can
+      // close (DR-024 #5). If it is then reopened for real work (BOS-532), the flag is stale: moving a
+      // *merged* ticket back into ready or in_progress by hand clears it, so review and done ask for a diff
+      // again. Plain no-code tickets (never merged) keep it, and so do Boss Man's own move back from the
+      // merge (internal). A move into review is left to review.ts, where only a real commit clears it.
+      if (t.noCode && t.mergeCommit && patch.noCode === undefined && !patch.internal && col?.systemState && REOPEN_STATES.has(col.systemState) && col.systemState !== t.systemState) fields.noCode = false;
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
       // starts and before a plan is approved turns it on for high and critical, off otherwise.
       if (patch.risk !== undefined && patch.planFirst === undefined && !t.planApprovedAt && (t.systemState === "backlog" || t.systemState === "ready"))

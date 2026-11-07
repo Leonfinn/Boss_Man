@@ -30,9 +30,9 @@
 # Without that, nothing under the "Blue/green" heading runs.
 set -euo pipefail
 
-DRY=0 ROLLBACK=0
+DRY=0 ROLLBACK=0 ACK=0
 for arg in "$@"; do
-  case "$arg" in --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; *) echo "Usage: $0 [--dry-run] | --rollback [--dry-run]" >&2; exit 2 ;; esac
+  case "$arg" in --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; --ack-health) ACK=1 ;; *) echo "Usage: $0 [--dry-run] | --rollback [--dry-run] | --ack-health" >&2; exit 2 ;; esac
 done
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron's PATH is minimal
@@ -117,6 +117,7 @@ if ((ROLLBACK)); then flock -w 120 9 || { echo "ERROR: another deployer run hold
 else flock -n 9 || exit 0; fi # a run is already going; the next minute tries again
 
 REQ_ID="" TARGET="" COMMIT="" STARTED="" FROM=""
+HEALTH_KV=() # the latest whole-stack checklist as key=value pairs (stack, check_*), merged into the status file
 
 write_status() { # result message [backup]
   ((DRY)) && { log "[dry-run] status: $1: $2"; return 0; }
@@ -124,7 +125,7 @@ write_status() { # result message [backup]
   [[ $1 == running ]] || ended="$(now)"
   local soak=0 # the standby window this host really uses (BOS-401): the server holds the runner update for it
   if bluegreen_enabled; then soak="$SOAK_SECONDS"; fi
-  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" >"$OUTBOX/status.json.tmp"
+  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/status.json.tmp"
   chmod 644 "$OUTBOX/status.json.tmp"
   mv "$OUTBOX/status.json.tmp" "$OUTBOX/status.json"
   [[ $1 == running ]] || cat "$OUTBOX/status.json" >>"$OUTBOX/history.jsonl"
@@ -540,7 +541,7 @@ switch_back() {
   if ((ok)); then flip_proxy "$BG_LIVE" || ok=0; fi
   if ((ok)); then wait_ready proxy leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
   if ((ok)); then
-    compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+    if compose stop "server-$BG_IDLE" >>"$LOG" 2>&1; then plan_stopped "$BG_IDLE"; fi
     g reset --quiet --hard "$BG_PREV" || true
   else
     # The old colour did not take over: put the new one back in charge and keep it running (the checkout stays on what runs).
@@ -569,8 +570,149 @@ verify_live() { # commit seconds: on failure VERIFY_WHY says which check failed 
   done
 }
 
+# ---------------------------------------------------------------------------------------------------
+# The whole-stack checklist (DR-020 D, BOS-488). "Healthy" is not "the proxy answers": it is five items, each pass or fail,
+# recorded in outbox/health.json and in the status file: the live colour, the other colour in its planned state, exactly one
+# leader, the database untouched, and no restarts or OOM kills. Container names come from the compose project; nothing is
+# hardcoded beyond the service names the rest of this script already uses.
+# ---------------------------------------------------------------------------------------------------
+HC_NAMES=(live other leader db restarts)
+# shellcheck disable=SC2034 # set and read through printf -v / indirect expansion
+HC_live="" HC_other="" HC_leader="" HC_db="" HC_restarts="" HD_live="" HD_other="" HD_leader="" HD_db="" HD_restarts=""
+HEALTH_FAILS="" HEALTH_DETAIL=""
+hc_set() { printf -v "HC_$1" '%s' "$2"; printf -v "HD_$1" '%s' "$3"; } # item pass|fail detail
+
+# "id startedAt restartCount oomKilled running exitCode" of a service's container (stopped ones too), or "none".
+cstate() { # service
+  local id
+  id="$(compose ps -aq "$1" 2>/dev/null | head -1 || true)"
+  [[ $id =~ ^[0-9a-z]{4,64}$ ]] || { echo none; return 0; }
+  docker inspect -f '{{.Id}} {{.State.StartedAt}} {{.RestartCount}} {{.State.OOMKilled}} {{.State.Running}} {{.State.ExitCode}}' "$id" 2>/dev/null || echo none
+}
+running_of() { awk '{ print ($1 == "none") ? "absent" : $5 }' <<<"$1"; } # a cstate line: true, false or absent
+colour_role() { jfield role <<<"$(probe "server-$1" 3100 /api/ready 2>/dev/null || true)"; } # colour
+# A hung database must not hold the deployer's lock: the connect and the whole call are time-limited, and no answer counts as a failed db item.
+pg_start() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" timeout 15 docker compose exec -T db psql -U bossman -d 'dbname=bossman connect_timeout=5' -Atc 'select pg_postmaster_start_time()' 2>/dev/null | head -1 | tr ' ' '_') || true; }
+
+# What the containers looked like before the deploy: "service id startedAt restarts" lines and one "pg <time>" line.
+# The state folder is root-only; the file is only read with awk, never sourced.
+baseline_line() { awk -v s="$1" '$1 == s { print; exit }' "$STATE/baseline" 2>/dev/null || true; } # service
+baseline_set() { # service: record its container as it is now (also used for a colour the deploy recreated on purpose)
+  local st id started restarts f="$STATE/baseline"
+  st="$(cstate "$1")"; [[ $st != none ]] || return 0
+  read -r id started restarts _ <<<"$st"
+  { grep -v "^$1 " "$f" 2>/dev/null || true; } >"$f.tmp"
+  printf '%s %s %s %s\n' "$1" "$id" "${started// /_}" "$restarts" >>"$f.tmp"; mv "$f.tmp" "$f"
+}
+baseline_set_pg() {
+  local p f="$STATE/baseline"
+  p="$(pg_start)"; [[ -n $p ]] || return 0
+  { grep -v '^pg ' "$f" 2>/dev/null || true; } >"$f.tmp"
+  printf 'pg %s\n' "$p" >>"$f.tmp"; mv "$f.tmp" "$f"
+}
+take_baseline() {
+  local s
+  if ((DRY)); then return 0; fi
+  : >"$STATE/baseline"
+  for s in server-blue server-green db proxy; do baseline_set "$s" || true; done
+  baseline_set_pg || true
+}
+# Colours the deployer stopped on purpose (soak over, rollback, undone deploy): a stop that is not on this list is a crash.
+plan_stopped() { grep -qxs "$1" "$STATE/stopped-by-plan" || printf '%s\n' "$1" >>"$STATE/stopped-by-plan"; } # colour
+unplan_stopped() { { grep -vx "$1" "$STATE/stopped-by-plan" 2>/dev/null || true; } >"$STATE/stopped-by-plan.tmp"; mv "$STATE/stopped-by-plan.tmp" "$STATE/stopped-by-plan"; } # colour
+
+# Writes outbox/health.json and keeps the same fields for the status file (HEALTH_KV, read by write_status).
+hc_record() { # phase commit
+  local i v d kv=() stack=healthy det=()
+  HEALTH_FAILS="" HEALTH_DETAIL=""
+  for i in "${HC_NAMES[@]}"; do
+    v="HC_$i" d="HD_$i"
+    kv+=("check_$i=${!v}"); det+=("detail_$i=${!d}")
+    if [[ ${!v} != pass ]]; then stack=degraded; HEALTH_FAILS+=" $i"; HEALTH_DETAIL+="${HEALTH_DETAIL:+ }[$i] ${!d}."; fi
+  done
+  HEALTH_KV=("stack=$stack" "${kv[@]}" "check_detail=$HEALTH_DETAIL")
+  if ((DRY)); then return 0; fi
+  json at="$(now)" phase="$1" commit="$2" "${HEALTH_KV[@]}" "${det[@]}" >"$OUTBOX/health.json.tmp"
+  chmod 644 "$OUTBOX/health.json.tmp"; mv "$OUTBOX/health.json.tmp" "$OUTBOX/health.json"
+}
+
+# Runs the checklist. plan = what the other colour should be doing: standby (during the trial) or stopped (after it).
+# Returns 1 if any item fails; VERIFY_WHY then says which and what was seen (the live colour's own message first).
+stack_check() { # commit seconds phase plan
+  local commit=$1 secs=$2 phase=$3 plan=$4 live other st line s why="" bad="" n leaders=0 rolelist="" id started restarts oom running code bid bst bn p bp note=""
+  if [[ ! -s $STATE/baseline ]] && ! ((DRY)); then take_baseline; note=" (no baseline from before the deploy; taken now)"; fi
+  # 1. The live colour, through the proxy.
+  if verify_live "$commit" "$secs"; then
+    live="$(live_colour || true)"; st="$(cstate "server-${live:-none}")"
+    if [[ $(running_of "$st") == true ]]; then hc_set live pass "server-$live is running and leads at ${commit:0:8} through the proxy"
+    else hc_set live fail "server-${live:-?} answers through the proxy but its container is not running"; fi
+  else
+    why="$VERIFY_WHY"; live="$(live_colour || true)"; hc_set live fail "$VERIFY_WHY"
+  fi
+  # 2. The other colour in its planned state.
+  if [[ -z $live ]]; then hc_set other fail "no live colour is set in the proxy include"
+  else
+    other="$(other_colour "$live")"; st="$(cstate "server-$other")"; running=absent code=""
+    if [[ $st != none ]]; then read -r _ _ _ _ running code <<<"$st"; fi
+    if [[ $plan == standby ]]; then
+      if [[ $running != true ]]; then hc_set other fail "server-$other should be running as a standby but is $([[ $running == absent ]] && echo missing || echo "stopped (exit code $code)")"
+      elif [[ $(colour_role "$other") != standby ]]; then hc_set other fail "server-$other is running but not as a standby (role '$(colour_role "$other")')"
+      else hc_set other pass "server-$other is running as a standby"; fi
+    else
+      if [[ $running == true ]]; then hc_set other fail "server-$other is running but the plan says it should be stopped"
+      elif [[ $running == absent ]]; then hc_set other pass "server-$other has no container (nothing to run)"
+      elif [[ $code != 0 ]]; then hc_set other fail "server-$other stopped with exit code $code, so it crashed or was killed"
+      elif ! grep -qxs "$other" "$STATE/stopped-by-plan"; then hc_set other fail "server-$other is stopped but the deployer did not stop it"
+      else hc_set other pass "server-$other was stopped by plan (exit code 0)"; fi
+    fi
+  fi
+  # 3. Exactly one leader across both colours.
+  for s in blue green; do
+    st="$(cstate "server-$s")"
+    if [[ $(running_of "$st") == true ]]; then n="$(colour_role "$s")"; rolelist+="$s=${n:-unknown} "; [[ $n != leader ]] || leaders=$((leaders + 1)); else rolelist+="$s=not running "; fi
+  done
+  if ((leaders == 1)); then hc_set leader pass "one leader (${rolelist% })"; else hc_set leader fail "$leaders leaders where exactly one is needed (${rolelist% })"; fi
+  # 4. The database was neither recreated nor restarted. A planned database step drops state/planned-db to re-baseline once.
+  if [[ -f $STATE/planned-db && ! -L $STATE/planned-db ]] && ! ((DRY)); then baseline_set db || true; baseline_set_pg || true; rm -f "$STATE/planned-db"; note=" (a planned database step: baseline renewed)"; fi
+  st="$(cstate db)"; line="$(baseline_line db)"; bp="$(awk '$1 == "pg" { print $2; exit }' "$STATE/baseline" 2>/dev/null || true)"
+  if [[ $(running_of "$st") != true ]]; then hc_set db fail "the database container is not running"
+  elif [[ -z $line ]]; then hc_set db fail "no record of the database from before the deploy, so a restart could not be ruled out"
+  else
+    read -r id started _ <<<"$st"; read -r _ bid bst _ <<<"$line"; p="$(pg_start)"
+    if [[ $id != "$bid" || ${started// /_} != "$bst" ]]; then hc_set db fail "the database container was recreated or restarted (its ID or start time changed)"
+    elif [[ -z $p ]]; then hc_set db fail "could not read the database's start time"
+    elif [[ -n $bp && $p != "$bp" ]]; then hc_set db fail "the database server process restarted (start time was ${bp//_/ }, now ${p//_/ })"
+    else hc_set db pass "same container and start time as before the deploy; Postgres up since ${p//_/ }$note"; fi
+  fi
+  # 5. No restarts, recreations or OOM kills in the window.
+  for s in server-blue server-green db proxy; do
+    st="$(cstate "$s")"; [[ $st != none ]] || continue
+    read -r id _ restarts oom _ <<<"$st"; line="$(baseline_line "$s")"
+    [[ -n $line ]] || { baseline_set "$s" || true; continue; } # a container that did not exist at the start
+    read -r _ bid _ bn <<<"$line"
+    [[ $oom != true ]] || bad+=" $s was killed for running out of memory."
+    [[ $restarts -le $bn ]] || bad+=" $s restarted $((restarts - bn)) time(s)."
+    [[ $id == "$bid" ]] || bad+=" $s was recreated."
+  done
+  if [[ -z $bad ]]; then hc_set restarts pass "no restarts, recreations or OOM kills of either colour, the database or the proxy"; else hc_set restarts fail "${bad# }"; fi
+  hc_record "$phase" "$commit"
+  [[ -z $HEALTH_FAILS ]] && return 0
+  if [[ $HC_live == pass ]]; then VERIFY_WHY="the whole-stack check found:$HEALTH_DETAIL"; else VERIFY_WHY="$why"; fi
+  return 1
+}
+
+# The stack is degraded but the live colour still serves: switching to the other colour could make it worse, so nothing is
+# switched. One page per distinct problem (state/last-health-alert), not one per tick.
+health_degraded() { # commit prev
+  local sig="$HEALTH_FAILS $1"
+  if [[ -f $STATE/last-health-alert && $(cat "$STATE/last-health-alert") == "$sig" ]]; then log "Still degraded (${HEALTH_FAILS# }); already reported."; return 0; fi
+  printf '%s\n' "$sig" >"$STATE/last-health-alert"
+  REQ_ID="health-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$2" COMMIT="$1"
+  finish partial "Boss Man is answering, but the check after the update to ${1:0:8} found a problem:$HEALTH_DETAIL Nothing was switched back by itself. Look at the host: in $REPO run docker compose ps, then docker compose logs for the service named above. When you have looked and the current state is acceptable, run $D/host-deployer.sh --ack-health as root: it records the containers as they are now and re-checks. Log: $LOG"
+}
+
 pre_fail() { # message: undo what happened before the hand-over; the live colour was never touched
-  compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+  if compose stop "server-$BG_IDLE" >>"$LOG" 2>&1; then plan_stopped "$BG_IDLE"; fi
   g reset --quiet --hard "$BG_PREV" || true
   bg_fail failed "$1 The live colour ($BG_LIVE) was not touched. Backup: $BG_BACKUP"
 }
@@ -586,7 +728,9 @@ do_deploy_bluegreen() {
   # Files the server (user node) cannot read would crash the new colour at start (BOS-562): stop before the backup and build.
   problem="$(readable_problem "$REPO")"
   [[ -z $problem ]] || { bg_fail failed "$problem"$'\n'"Nothing was changed."; return 1; }
-  rm -f "$STATE/soak" # a swap while the last one is soaking ends that soak: its standby is about to be rebuilt
+  rm -f "$STATE/soak" "$STATE/last-health-alert" # a swap while the last one is soaking ends that soak: its standby is about to be rebuilt
+  unplan_stopped "$BG_IDLE" # it is about to be rebuilt and started on purpose
+  take_baseline # the containers as they are before this deploy touches anything (DR-020 D)
 
   log "Blue/green: $BG_LIVE is live; building $BG_IDLE at ${COMMIT:0:8}."
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
@@ -595,6 +739,7 @@ do_deploy_bluegreen() {
   # Expand-only migrations: the live colour keeps working on the new schema.
   BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
   compose up -d --no-deps --force-recreate "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Starting $BG_IDLE failed."; return 1; }
+  baseline_set "server-$BG_IDLE" || true # recreated on purpose: its new container is the baseline
   # It is a standby because the live colour holds the leader lock; seeing that also shows the lock works.
   wait_ready "server-$BG_IDLE" standby "$COMMIT" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby at ${COMMIT:0:8} within ${BG_READY_SECONDS}s.$(colour_log_tail "$BG_IDLE")"; return 1; }
   # A login-free read straight from the idle colour (not through the proxy).
@@ -607,7 +752,7 @@ do_deploy_bluegreen() {
   [[ -n $why ]] || compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || why="Could not signal $BG_IDLE."
   [[ -n $why ]] || wait_ready "server-$BG_IDLE" leader "$COMMIT" "$BG_HANDOVER_SECONDS" || why="$BG_IDLE did not become the leader."
   [[ -n $why ]] || flip_proxy "$BG_IDLE" || why="The proxy did not accept the switch to $BG_IDLE."
-  [[ -n $why ]] || verify_live "$COMMIT" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
+  [[ -n $why ]] || stack_check "$COMMIT" "$BG_READY_SECONDS" swap standby || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "$why Switched back to $BG_LIVE automatically. Backup: $BG_BACKUP"
     else bg_fail failed "$why The switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
@@ -622,6 +767,14 @@ do_deploy_bluegreen() {
   BG_MSG="Deployed ${BG_PREV:0:8} to ${COMMIT:0:8}: $BG_IDLE is live; $BG_LIVE stays up as a standby for $((SOAK_SECONDS / 60)) minutes, and the deployer switches back by itself if the checks fail."
 }
 
+soak_end() { # old commit prev soakfile: time is up and the live colour is fine
+  log "Soak over: stopping the old colour ($1)."
+  if compose stop "server-$1" >>"$LOG" 2>&1; then plan_stopped "$1"; else log "Could not stop server-$1."; fi
+  rm -f "$4"
+  # The end of the window: the same checklist with the old colour now planned to be stopped.
+  if ! stack_check "$2" "$SOAK_CHECK_SECONDS" end stopped; then log "End-of-window check: $VERIFY_WHY"; health_degraded "$2" "$3"; fi
+}
+
 # Runs every tick, before any request: while an old colour soaks, re-check the live one and switch back if it fails;
 # stop the old colour once the time is up.
 soak_tick() {
@@ -632,15 +785,20 @@ soak_tick() {
   [[ -n $commit && $old != "$new" ]] || { log "Ignoring a malformed $f."; ((DRY)) || rm -f "$f"; return 0; }
   if ((DRY)); then log "[dry-run] a soak is running: $new live, $old standby until $deadline"; return 0; fi
   [[ $(live_colour || true) == "$new" ]] || { log "The proxy no longer points at $new; ending the soak."; rm -f "$f"; return 0; }
-  if verify_live "$commit" "$SOAK_CHECK_SECONDS"; then
-    if (($(date +%s) >= deadline)); then
-      log "Soak over: stopping the old colour ($old)."
-      compose stop "server-$old" >>"$LOG" 2>&1 || log "Could not stop server-$old."
-      rm -f "$f"
-    fi
+  if stack_check "$commit" "$SOAK_CHECK_SECONDS" soak standby; then
+    rm -f "$STATE/last-health-alert"
+    if (($(date +%s) >= deadline)); then soak_end "$old" "$commit" "$prev" "$f"; fi
     return 0
   fi
   log "Check failed on $new at ${commit:0:8}: $VERIFY_WHY"
+  # The live colour still answers: something else is wrong, and a switch could make it worse. Report it once. The window
+  # still ends on time (a failed item the person has to look at must not keep a second server running for ever).
+  if [[ $HC_live == pass ]]; then
+    # (health_degraded records and exits, so the end of the window comes first: its own end check pages if the problem remains.)
+    # If control comes back from soak_end its end check passed (stopping the old colour fixed it): nothing to page.
+    if (($(date +%s) >= deadline)); then soak_end "$old" "$commit" "$prev" "$f"; return 0; fi
+    health_degraded "$commit" "$prev"; return 0
+  fi
   BG_LIVE="$old" BG_IDLE="$new" BG_PREV="$prev"
   # The record names the commit that failed (to_commit), as a swap-time rollback does, and the one we are back on (from_commit).
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
@@ -669,6 +827,8 @@ do_rollback_bluegreen() {
   log "Rollback: $BG_LIVE is live; going back to $BG_IDLE."
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
   # Not recreated: the stopped container keeps its old image.
+  unplan_stopped "$BG_IDLE"
+  take_baseline
   compose up -d --no-deps "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Starting $BG_IDLE failed."; return 1; }
   wait_ready "server-$BG_IDLE" standby "" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby within ${BG_READY_SECONDS}s."; return 1; }
   body="$(probe "server-$BG_IDLE" 3100 /api/ready 2>/dev/null)" || body=""
@@ -685,19 +845,21 @@ do_rollback_bluegreen() {
   [[ -n $why ]] || compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || why="Could not signal $BG_IDLE."
   [[ -n $why ]] || wait_ready "server-$BG_IDLE" leader "$ocommit" "$BG_HANDOVER_SECONDS" || why="$BG_IDLE did not become the leader."
   [[ -n $why ]] || flip_proxy "$BG_IDLE" || why="The proxy did not accept the switch to $BG_IDLE."
-  [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
+  [[ -n $why ]] || stack_check "$ocommit" "$BG_READY_SECONDS" rollback standby || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "Rollback failed ($why); $BG_LIVE is live again. Backup: $BG_BACKUP"
     else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.
-  compose stop "server-$BG_LIVE" >>"$LOG" 2>&1 || log "Could not stop server-$BG_LIVE."
+  if compose stop "server-$BG_LIVE" >>"$LOG" 2>&1; then plan_stopped "$BG_LIVE"; else log "Could not stop server-$BG_LIVE."; fi
   printf '%s\n' "$BG_PREV" >"$STATE/hold" # the release just rejected: refresh_available must not offer it again
   rm -f "$STATE/previous"
   if [[ -n $ocommit ]] && g cat-file -e "$ocommit^{commit}" 2>/dev/null; then g reset --quiet --hard "$ocommit" || log "Could not move the checkout to ${ocommit:0:8}."; fi
   BG_RESULT=rolled_back
   BG_MSG="Rolled back to ${ocommit:0:8}: $BG_IDLE is live; $BG_LIVE is stopped. The database was not changed. Backup: $BG_BACKUP"
+  # The end of the rollback: the bad colour is now planned to be stopped; anything else out of place is said in the result.
+  if ! stack_check "${ocommit:-$(g rev-parse HEAD)}" 10 end stopped; then BG_MSG+=" WARNING, the whole-stack check afterwards found:$HEALTH_DETAIL"; fi
 }
 
 # Reads a field of scripts/deploy.sh's own status file.
@@ -746,6 +908,15 @@ main() {
     write_status "${BG_RESULT:-failed}" "${BG_MSG:-Rollback stopped with an error. See $LOG on the host.}" "$BG_BACKUP"
     post_webhook "${BG_RESULT:-failed}" "${BG_MSG:-Rollback failed.}"
     exit "$rrc"
+  fi
+  if ((ACK)); then
+    bluegreen_enabled || { echo "ERROR: this install does not use blue/green." >&2; exit 1; }
+    ((!DRY)) || { echo "[dry-run] --ack-health would record every container as it is now and re-run the checklist."; exit 0; }
+    local ap=stopped
+    [[ -f $STATE/soak && ! -L $STATE/soak ]] && ap=standby
+    take_baseline; rm -f "$STATE/last-health-alert" "$STATE/planned-db"
+    if stack_check "$(g rev-parse HEAD)" "$SOAK_CHECK_SECONDS" ack "$ap"; then log "Health accepted: baseline renewed; the checklist passes."; exit 0; fi
+    log "Baseline renewed, but the checklist still fails: $VERIFY_WHY"; exit 1
   fi
   recover_interrupted
   if bluegreen_enabled; then soak_tick; fi
