@@ -429,7 +429,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const steps = (todo!.context as { steps: string[] }).steps;
     const text = steps.join("\n");
     expect(text).toContain(
-      "cp /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh && chown root:root /srv/bm/deployer/host-deployer.sh && chmod 750 /srv/bm/deployer/host-deployer.sh",
+      "cp -v /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh && chown root:root /srv/bm/deployer/host-deployer.sh && chmod 750 /srv/bm/deployer/host-deployer.sh",
     );
     expect(text).not.toContain("host-deployer.sh didn't change");
     expect(text).toContain("docker compose build launcher && docker compose up -d --no-deps launcher");

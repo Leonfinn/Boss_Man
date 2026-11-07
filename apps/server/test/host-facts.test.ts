@@ -151,7 +151,7 @@ describe("{{host.…}} tokens in card steps", () => {
 
   it("checkAsk fills the token, refuses a missing fact, and still refuses tokens when it has no facts", () => {
     const tried = "Checked the host from the runner; agents have no access to the owner's machine.";
-    const step = stepText("Open the source folder:", sh("cd {{host.paths.src}}", { host: "nas01", as: "root" }));
+    const step = stepText("Open the source folder. This prints nothing:", sh("cd {{host.paths.src}}", { host: "nas01", as: "root" }));
     const ok = checkAsk({ triedFirst: tried, steps: [step], hostValues: { "paths.src": "/srv/bm/src" } });
     expect(ok.error).toBeNull();
     expect(ok.steps?.[0]).toContain("cd /srv/bm/src");

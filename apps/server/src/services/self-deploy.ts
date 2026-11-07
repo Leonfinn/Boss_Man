@@ -274,7 +274,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         hostDeployerChanged
           ? src && deployer
             ? host
-              ? step("Copy the changed host-deployer script into the deployer folder with this command, on the same machine:", cmd(`cp ${src}/scripts/host-deployer.sh ${deployer}/host-deployer.sh && chown root:root ${deployer}/host-deployer.sh && chmod 750 ${deployer}/host-deployer.sh`))
+              ? step("Copy the changed host-deployer script into the deployer folder with this command, on the same machine. It prints the one file it copied:", cmd(`cp -v ${src}/scripts/host-deployer.sh ${deployer}/host-deployer.sh && chown root:root ${deployer}/host-deployer.sh && chmod 750 ${deployer}/host-deployer.sh`))
               : noHost
             : "host-deployer.sh changed and has to be copied into the deployer folder, but Boss Man can't tell where the install or deployer folder is, so no command is shown. Ask us on this ticket."
           : "host-deployer.sh didn't change; no copy needed.",

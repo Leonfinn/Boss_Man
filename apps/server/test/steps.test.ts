@@ -66,7 +66,7 @@ describe("the lint and the card read fences the same way (BOS-550)", () => {
   const hosts: HostFacts[] = [{ name: "app01", login: "owner", ownership: [] }];
 
   it("a labelled fence the lint accepts is a command block, never sentence text", () => {
-    const steps = ['Go to the install folder:\n```sh host="app01" as="root"\ncd /srv/app\n```', '1. List it:\n   ```sh host="app01" as="root"\n   ls -l /srv/app\n   ```'];
+    const steps = ['Go to the install folder. This prints nothing:\n```sh host="app01" as="root"\ncd /srv/app\n```', '1. List it:\n   ```sh host="app01" as="root"\n   ls -l /srv/app\n   ```'];
     expect(lintOwnerSteps(steps, hosts).refuse).toEqual([]);
     for (const s of steps) {
       const p = parseStep(s);
