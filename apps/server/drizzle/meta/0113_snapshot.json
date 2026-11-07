@@ -1,5 +1,5 @@
 {
-  "id": "66c38341-08a8-461d-a8f5-75619af5dab1",
+  "id": "0ec52a98-9721-489b-a0df-379d04ef2d37",
   "prevId": "a93cac06-54cc-43ee-8a03-9d64b57148ae",
   "version": "7",
   "dialect": "postgresql",
@@ -1562,13 +1562,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'watch'"
-        },
-        "fence_mode": {
-          "name": "fence_mode",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'off'"
         },
         "watchdog": {
           "name": "watchdog",
@@ -8527,6 +8520,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "fixes_live": {
+          "name": "fixes_live",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "version": {
           "name": "version",

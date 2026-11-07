@@ -364,6 +364,12 @@ export const tickets = pgTable(
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /**
+     * "Fixes live" (BOS-639): one sentence naming the live symptom this ticket fixes, e.g. "server freezes
+     * as memory climbs". Set by hand (CEO, author or reviewer), never guessed from priority or urgency.
+     * A deploy card whose range carries a marked merge leads with it and pages the owner once.
+     */
+    fixesLive: text("fixes_live"),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
