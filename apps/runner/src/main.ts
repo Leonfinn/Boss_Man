@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
-import { applyCheckSlots, runnerFence, sandboxSelfTest } from "./fence.js";
+import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
@@ -48,7 +48,11 @@ if (checkSlots > 1) {
     break;
   }
 }
-const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, { level: sandbox.level, pnpmStore: path.join(workspacesRoot, ".pnpm-store") });
+// The shared pnpm store (BOS-568), where PNPM_STORE_DIR moves it. Refused when it is the workspaces volume's root or
+// outside it (BOS-633): the fence grants everything beneath a rule, and the gate's store sits beside it.
+const storeDir = pnpmStoreDir(workspacesRoot, env.PNPM_STORE_DIR);
+mkdirSync(storeDir, { recursive: true });
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, { level: sandbox.level, pnpmStore: storeDir });
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
@@ -70,7 +74,7 @@ const sessions = new SessionManager({
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,
   checkJobs,
-  fence: runnerFence(sandbox.level, dataDir, workspacesRoot),
+  fence: { ...runnerFence(sandbox.level, dataDir, workspacesRoot), pnpmStore: storeDir },
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -114,6 +118,13 @@ const housekeeping = async () => {
 };
 void housekeeping();
 const sweep = setInterval(() => void housekeeping(), 3_600_000);
+// The pnpm stores only grow as lockfiles change (BOS-633). Pruned once at start-up and then daily: pnpm's store lock
+// makes each prune safe beside a running install, and it only drops packages no install references any more. The
+// prune runs asynchronously, so start-up and the daily tick never wait on it, and a slow prune can't stall
+// the connection or live sessions; it never rejects.
+void pruneStores(storeDir, log);
+const prune = setInterval(() => void pruneStores(storeDir, log), 24 * 3_600_000);
+prune.unref();
 
 // The container healthcheck reads this file: it's touched while the server connection is live.
 const marker = path.join(dataDir, "connected");
@@ -130,6 +141,7 @@ const stop = () => {
   markStopped(dataDir);
   clearInterval(beat);
   clearInterval(sweep);
+  clearInterval(prune);
   rmSync(marker, { force: true });
   sessions.shutdown();
   connection.stop();
