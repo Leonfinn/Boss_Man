@@ -53,6 +53,7 @@ let connection: RunnerConnection;
 const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log);
 const sessions = new SessionManager({
   mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
+  mcpPreflightMs: Number(env.BOSSMAN_MCP_PREFLIGHT_MS ?? 20_000),
   emit: (event) => connection.emit(event),
   resolveEnv: async (runId) => {
     const res = await fetch(`${httpBase}/api/runner/env?runId=${encodeURIComponent(runId)}`, { headers: { authorization: `Bearer ${token}` } });
