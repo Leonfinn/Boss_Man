@@ -377,13 +377,16 @@ export class Workspaces {
     const dir = await this.reopen(spec);
     const baseCommit = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
-    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..HEAD`], { cwd: dir });
+    // The tree is read from the same commit as head, before the slow steps: a commit landing
+    // mid-diff must not leave head A tagged with B's tree (the check queue reuses passes by tree).
+    const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: dir });
+    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`], { cwd: dir });
     const commits = log ? log.split("\n").map((l) => ({ sha: l.slice(0, 40), subject: l.slice(41) })) : [];
     const index = path.join(this.root, "tmp", `${spec.ticketId}.index`);
     mkdirSync(path.dirname(index), { recursive: true });
     const env = { GIT_INDEX_FILE: index };
     try {
-      await this.git(["read-tree", "HEAD"], { cwd: dir, env });
+      await this.git(["read-tree", head], { cwd: dir, env });
       await this.git(["add", "-A"], { cwd: dir, env });
       const numstat = await this.git(["diff", "--cached", "--numstat", baseCommit], { cwd: dir, env });
       const files = numstat
@@ -394,7 +397,6 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", baseCommit], { cwd: dir, env });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      const tree = await this.git(["rev-parse", "HEAD^{tree}"], { cwd: dir });
       return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
     } finally {
       rmSync(index, { force: true });

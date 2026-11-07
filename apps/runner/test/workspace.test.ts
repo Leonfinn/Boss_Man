@@ -162,6 +162,32 @@ describe("git workspaces (R38)", () => {
     expect(git(w.path, "diff", "--cached", "--name-only")).toBe(stagedBefore);
     expect((await ws.diff(spec, 50)).truncated).toBe(true);
   });
+
+  it("reports the tree of the head it read, even when a commit lands mid-diff", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    const headA = git(w.path, "rev-parse", "HEAD");
+    const treeA = git(w.path, "rev-parse", "HEAD^{tree}");
+    // A commit lands right after the head is read (during the slow steps).
+    const real = (ws as any).git.bind(ws);
+    let landed = false;
+    (ws as any).git = async (args: string[], opts?: unknown) => {
+      const out = await real(args, opts);
+      if (!landed && args[0] === "rev-parse" && args[1] === "HEAD") {
+        landed = true;
+        writeFileSync(path.join(w.path, "later.txt"), "B\n");
+        git(w.path, "add", "later.txt");
+        git(w.path, "commit", "-qm", "later");
+      }
+      return out;
+    };
+    const d = await ws.diff(spec);
+    expect(landed).toBe(true);
+    expect(d.head).toBe(headA);
+    expect(d.tree).toBe(treeA);
+  });
 });
 
 describe("a reviewer's own copy", () => {
