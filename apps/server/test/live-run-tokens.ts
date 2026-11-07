@@ -1,8 +1,12 @@
 // BOS-513: the server now accepts a run token only while its run row exists and is open. Most tests mint a token for a made-up run id,
 // so this setup gives that id a live run row first. A real run row, or one already ended, is left alone (insert does nothing on a clash).
 // Tests that need the strict behaviour (run-token-lifetime.test.ts) make their own rows and delete or end them.
-import { vi } from "vitest";
+import { afterAll, vi } from "vitest";
+import { closePglitePool } from "../src/db/client.js";
 import { runs } from "../src/db/schema.js";
+
+// BOS-657: openPglite() parks emptied databases for the next test; close them when the file is done.
+afterAll(() => closePglitePool());
 
 vi.mock("../src/mcp.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../src/mcp.js")>();

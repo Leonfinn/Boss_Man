@@ -1,5 +1,5 @@
 {
-  "id": "53900eee-0f1e-4d8c-b358-b6be61861276",
+  "id": "a93cac06-54cc-43ee-8a03-9d64b57148ae",
   "prevId": "cbf940bf-e22d-4f45-9b93-6b93ff755ee8",
   "version": "7",
   "dialect": "postgresql",
@@ -1568,7 +1568,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2}'::jsonb"
+          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2,\"idleAgentMinutes\":15,\"spareCapacityMinutes\":20}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -1584,6 +1584,18 @@
         },
         "watchdog_last_sweep_at": {
           "name": "watchdog_last_sweep_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "watchdog_spare_at": {
+          "name": "watchdog_spare_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "watchdog_spare_alerted_at": {
+          "name": "watchdog_spare_alerted_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -8562,36 +8574,6 @@
         "blocked_until_reason": {
           "name": "blocked_until_reason",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "progress_head": {
-          "name": "progress_head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "progress_at": {
-          "name": "progress_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ceo_plan": {
-          "name": "ceo_plan",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ceo_plan_deadline": {
-          "name": "ceo_plan_deadline",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ceo_plan_alerted_at": {
-          "name": "ceo_plan_alerted_at",
-          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

@@ -119,7 +119,9 @@ describe("CEO-tier cards on the alert ladder (BOS-119)", () => {
     expect((moved.context as { triedFirst?: string }).triedFirst).toMatch(/the CEO/);
     expect(await queueIds()).toContain(d.id);
     expect((await ownerNotified(d.id)).map((n) => n.level)).toEqual(["ask"]);
-    expect(ctx.sent).toEqual([]);
+    // It reached the owner without the CEO's advice (the handover ran out), so the CEO is woken to add
+    // it (BOS-233); nothing was decided for the runner.
+    expect(ctx.sent.filter((c) => c.type === "permission.decide")).toEqual([]);
   });
 
   it("the CEO settles it with a reason, and the owner sees who, what and why", async () => {

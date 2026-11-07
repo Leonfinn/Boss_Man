@@ -128,6 +128,32 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     expect(run!.endedAt).not.toBeNull();
   });
 
+  it("marks a failed apply with only the error code and constraint, never the SQL or its values (BOS-605)", async () => {
+    const c = (ctx = await setup());
+    // A cost for a funding source that doesn't exist: a foreign-key violation (SQLSTATE 23503) on every resend.
+    const missing = crypto.randomUUID();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: missing, model: "opus", costMicrosDelta: 5_000 } as never };
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+
+    const [failed] = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")));
+    expect(failed).toBeDefined();
+    // The code and the constraint name are kept, so the cause is still legible.
+    expect(failed!.summary).toContain("23503");
+    expect(failed!.summary).toMatch(/constraint \w+/);
+    expect(failed!.summary).toContain("run.cost");
+    expect((failed!.detail as { seq?: number }).seq).toBe(2);
+    expect((failed!.detail as { type?: string }).type).toBe("run.cost");
+    expect((failed!.detail as { error?: string }).error).toContain("23503");
+    expect((failed!.detail as { error?: string }).error).toMatch(/constraint \w+/);
+    // The SQL, its table and the missing parameter value are never stored.
+    expect(failed!.summary).not.toMatch(/insert into/i);
+    expect(failed!.summary).not.toMatch(/Failed query/i);
+    expect(failed!.summary).not.toContain(missing);
+    expect((failed!.detail as { error?: string }).error).not.toContain(missing);
+    // The short message stays within the ~200-character cap.
+    expect(failed!.summary.length).toBeLessThanOrEqual(240);
+  });
+
   it("still retries a connection-style failure on the resend (not marked as failed)", async () => {
     const c = (ctx = await setup());
     const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
