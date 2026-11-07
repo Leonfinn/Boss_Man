@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, type Company, type Notice, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
 import { SaveButton, useSaveState } from "../components/SaveButton";
@@ -381,7 +382,7 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
           </button>
         </div>
       )}
-      {active && filtered.error && (
+      {active && filtered.error && !away(filtered.error) && (
         <p className="error" role="alert">
           Couldn't load notifications: {filtered.error.message}. Your filters are kept.{" "}
           <button type="button" className="btn small" onClick={filtered.reload}>

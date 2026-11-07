@@ -115,7 +115,7 @@ describe("rule 1: every writer of a decision card is classified", () => {
  * Beyond the reason given, none of them stores an approveSummary (checked below), which rule 1 needs.
  */
 const WRITERS: Record<string, { counts: Record<string, number>; why: string }> = {
-  "src/app.ts": { counts: { raise: 10 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425, the watchdog's alertCeo hook and the server-health hook) and decisionsSvc.raise with agentId null (import checklist; the sign-off merge-failed card moved to startLanding)" },
+  "src/app.ts": { counts: { raise: 12 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425, the watchdog's alertCeo hook, the server-health hook, the OpenCode VACUUM alert and BOS-595's feature_no_ticket card, one option) and decisionsSvc.raise with agentId null (import checklist; the sign-off merge-failed card moved to startLanding)" },
   "src/services/server-health.ts": { counts: { raise: 1 }, why: "deps.raise is app.ts's alerts.raise: alert kinds server_memory / server_freezes, ladder key, no raising agent" },
   "src/mcp.ts": { counts: { raise: 2 }, why: "raise_decision: the one eligible path, when plain and with an approveSummary; submit_plan (BOS-531: blocksTicketId and plan, never eligible)" },
   "src/services/watchdog.ts": { counts: { raise: 1 }, why: "the Scrum Master's raise_decision always blocks its ticket (ticketId, blocker)" },
@@ -138,7 +138,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/runners.ts": { counts: { insert: 1 }, why: "kind budget" },
   "src/services/scheduler.ts": { counts: { insert: 4, question: 1 }, why: "kind budget: budget_limit, project_cap, ticket_cap; unblocked-but-unassigned notice (no raising agent, one option)" },
   "src/services/self-deploy.ts": { counts: { insert: 1 }, why: "kind approval: self_deploy" },
-  "src/services/sweeps.ts": { counts: { insert: 3, question: 2 }, why: "stale_blocker kind; gave-up notice and released-unblocked catch-up notice have no agent and one option (its alerts now use named alert kinds via the ladder: tier ceo, ladder key)" },
+  "src/services/sweeps.ts": { counts: { insert: 4, question: 3 }, why: "stale_blocker kind; gave-up notice (now Reassign/Got it, BOS-612), CEO-plan deadline-passed card (BOS-612) and released-unblocked catch-up notice have no raising agent (its alerts now use named alert kinds via the ladder: tier ceo, ladder key)" },
 };
 const PATTERNS: Record<string, RegExp> = { insert: /insert\(decisions\w*\)/g, question: /kind: "question"/g, raise: /\.raise\(/g, todo: /raiseOwnerTodo\(/g };
 

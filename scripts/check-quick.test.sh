@@ -3,12 +3,14 @@
 set -euo pipefail
 # The merge gate runs this with BOSSMAN_MERGE_CHECK set; the cases below set it themselves where they need it.
 unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED
+# Test this branch's slot wait, not the runner's shared check-slot.sh (BOS-614).
+unset BOSSMAN_CHECK_SLOT BOSSMAN_CHECK_SLOT_HELD CHECK_ALL_PRE_DONE
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; holder=""; trap '[ -z "$holder" ] || kill "$holder" 2>/dev/null; rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
-cp "$here/check-quick.sh" "$here/check-all.sh" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$repo/scripts/"
 cat >"$repo/scripts/check-shell.sh" <<'S'
 #!/usr/bin/env bash
 echo "check-shell" >>"$LOG"
@@ -18,6 +20,7 @@ chmod +x "$repo/scripts/check-shell.sh"
 cat >"$t/bin/pnpm" <<'S'
 #!/usr/bin/env bash
 echo "pnpm $*" >>"$LOG"
+echo "threads=${BOSSMAN_CHECK_THREADS:-} go=${GOMAXPROCS:-} rayon=${RAYON_NUM_THREADS:-} tokio=${TOKIO_WORKER_THREADS:-} for $*" >>"$LOG"
 if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "boom"; exit 1; fi
 S
 cat >"$t/bin/node" <<'S'
@@ -64,6 +67,13 @@ logged "pnpm --filter @boss-man/web build" "web"
 notlogged "@boss-man/server" "web"
 notlogged "check-shell" "web"
 grep -q "^PASS  typecheck @boss-man/web" "$t/out" || fail "PASS line"
+# One CPU budget (BOS-674) reaches every step, inside the slot and out: the stub node prints nothing, so the fallback 2 applies;
+# BOSSMAN_CHECK_THREADS sets it.
+logged "threads=2 go=2 rayon=2 tokio=2 for --filter @boss-man/web typecheck" "default budget in the slot"
+logged "threads=2 go=2 rayon=2 tokio=2 for --filter @boss-man/web build" "default budget for the build"
+run 0 "set budget" env BOSSMAN_CHECK_THREADS=3
+logged "threads=3 go=3 rayon=3 tokio=3 for --filter @boss-man/web exec vitest related" "set budget in the slot"
+logged "threads=3 go=3 rayon=3 tokio=3 for --filter @boss-man/web build" "set budget for the build"
 
 commit apps/server/drizzle/0099_x.sql apps/server/src/b.ts
 run 0 "server and migration change" env
@@ -239,4 +249,17 @@ g checkout -q main; echo main >"$repo/README"; g add -A; g commit -q -m m; g upd
 g checkout -q feature; echo feature >"$repo/README"; g add -A; g commit -q -m f
 run 1 "merge conflict" env
 grep -q "^FAIL  merge with origin/main" "$t/out" || fail "conflict not reported: $(cat "$t/out")"
+
+# A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the whole output of the run is kept there, marked with its exit,
+# and the previous run is kept as .previous.
+g checkout -q -B scratch origin/main; commit apps/web/src/q.ts
+scratch="$t/scratch.own"; mkdir -p "$scratch"
+run 0 "scratch: a passing run" env BOSSMAN_SCRATCH="$scratch"
+[ -s "$scratch/check-quick.log" ] || fail "scratch: no log in the scratch: $(cat "$t/out")"
+grep -q "PASS  typecheck @boss-man/web" "$scratch/check-quick.log" || fail "scratch: the log misses the run's output: $(cat "$scratch/check-quick.log")"
+grep -q "check-quick: finished .* (exit 0)" "$scratch/check-quick.log" || fail "scratch: the log is not marked finished"
+run 1 "scratch: a failing run" env BOSSMAN_SCRATCH="$scratch" FAIL_ON=typecheck
+grep -q "(exit 1)" "$scratch/check-quick.log" || fail "scratch: a failure's log is not marked with its exit: $(cat "$scratch/check-quick.log")"
+grep -q "PASS  typecheck @boss-man/web" "$scratch/check-quick.log.previous" || fail "scratch: the previous run's log is not kept: $(ls "$scratch")"
+
 echo "check-quick.test.sh: ok"
