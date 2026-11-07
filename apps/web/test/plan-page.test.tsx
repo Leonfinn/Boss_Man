@@ -15,8 +15,8 @@ const company = { id: "c1", name: "App Co", mission: "x", paused: false, agents:
 const longTitle = "Skills: plan and build the CEO's add-a-skill flow (own drafts and review) without blocking the queue";
 const plan: PlanData = {
   nodes: [
-    { id: "t1", kind: "ticket", title: longTitle, state: "in_progress", open: true, link: "#/ticket/t1", assignee: "Web Developer", project: "Development", layer: 0, blocked: false, causes: [], holdingUp: 1 },
-    { id: "t2", kind: "ticket", title: "Infra: register the Cloudflare tunnel", state: "blocked", open: true, link: "#/ticket/t2", assignee: null, project: "Development", layer: 1, blocked: true, causes: ["t1"], holdingUp: 0 },
+    { id: "t1", kind: "ticket", ref: "BOS-457", title: longTitle, state: "in_progress", open: true, link: "#/ticket/t1", assignee: "Web Developer", project: "Development", layer: 0, blocked: false, causes: [], holdingUp: 1 },
+    { id: "t2", kind: "ticket", ref: "BOS-458", title: "Infra: register the Cloudflare tunnel", state: "blocked", open: true, link: "#/ticket/t2", assignee: null, project: "Development", layer: 1, blocked: true, causes: ["t1"], holdingUp: 0 },
   ],
   edges: [{ id: "e1", from: "t1", to: "t2" }],
   columns: [["t1"], ["t2"]],
@@ -44,6 +44,16 @@ describe("Plan page (BOS-203)", () => {
     expect(screen.getByText("1 blocked task across 2 items.")).toBeTruthy();
     expect(await screen.findByText(/^Last updated .+ \(just now\)$/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeTruthy();
+  });
+
+  it("shows each ticket's reference on its card and first in the Waiting on line (BOS-508)", async () => {
+    stubPlan();
+    render(<Plan companies={[company]} companyId="c1" go={() => {}} />);
+    const graph = within(await screen.findByRole("region", { name: "Dependency graph" }));
+    await graph.findByRole("link", { name: longTitle });
+    expect(graph.getByText("BOS-457")).toBeTruthy();
+    expect(graph.getByText("BOS-458")).toBeTruthy();
+    expect(graph.getByText(`Waiting on BOS-457 ${longTitle}`)).toBeTruthy();
   });
 
   it("fetches the plan again when Refresh is pressed", async () => {
