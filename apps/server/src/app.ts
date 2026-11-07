@@ -129,6 +129,8 @@ export type AppOptions = {
   workspaceRoot?: string;
   /** Stale-blocker and stalled-run thresholds (R21, R32). */
   sweepLimits?: Partial<SweepLimits>;
+  /** Replaces the runner lookup of a ticket's branch head in the missed-work sweep (tests). */
+  branchHead?: (ticketId: string) => Promise<string | null>;
   /** Review-loop and circular-failure limits (R49, R50). */
   loopLimits?: Partial<LoopLimits>;
   /** The built web UI (apps/web/dist). Without it the server is API-only, e.g. under `vite dev`. */
@@ -663,6 +665,8 @@ export async function buildApp(opts: AppOptions) {
     alert: (input) => alerts.raise(input),
     // The owner's messages on tickets that nobody has answered (BOS-425).
     ownerReplies: (t) => ownerReplies.sweep(t),
+    // Whether a run committed (BOS-612): the branch head from the runner that holds the worktree. Read only when a "looks stuck" card is being written.
+    branchHead: opts.branchHead ?? ((ticketId) => review.diff(ticketId).then((d) => d.head)),
   });
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.

@@ -87,7 +87,9 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     usedBytes: z.number().nonnegative(),
     tickets: z.array(z.object({ ticketId: Uuid, projectId: Uuid, bytes: z.number().nonnegative() })),
     repos: z.array(z.object({ projectId: z.string(), bytes: z.number().nonnegative() })),
-    /** Ticket folders git no longer knew about, removed in this pass. */
+    /** Each ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592); absent from an older runner. */
+    scratch: z.array(z.object({ ticketId: Uuid, bytes: z.number().nonnegative() })).optional(),
+    /** Ticket folders git no longer knew about (or scratch folders past their keep), removed in this pass. */
     removed: z.array(z.string()),
   }),
   // The OpenCode prune's one-off VACUUM ran past its cap and was killed, letting held OpenCode runs go (BOS-622).
@@ -291,6 +293,12 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
+/**
+ * A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): one folder per ticket on the workspaces disk, so a proof
+ * or a check log outlives the runner and the temp sweep. Kept a week, or a few hours once the ticket's work is gone.
+ */
+export const SCRATCH_KEEP_MS = 7 * 24 * 60 * 60_000;
+export const RELEASED_SCRATCH_KEEP_MS = 6 * 60 * 60_000;
 /**
  * How long the runner lets a ticket's check run (R47), counted from when it actually starts. A check that is waiting
  * in scripts/check-all.sh's queue is given up to VERIFY_QUEUE_MAX_MS to reach the front first; the server waits for

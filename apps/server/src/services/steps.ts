@@ -59,7 +59,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R13" | "R14" | "R15" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R13" | "R14" | "R15" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -91,8 +91,47 @@ function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: A
     }
   }
 }
-/** What a raised card keeps from the lint: warnings, and a CEO override with its reason and what it let through. */
-export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[] } };
+/**
+ * How a card with host commands was proven (R11, DR-024 C): rehearsed by a script in CI at a commit, or not
+ * rehearsed, naming the part that is the first time on a real machine. The card shows it as a banner.
+ */
+export type Proof = { rehearsed: true; script: string; commit: string } | { rehearsed: false; part: string };
+
+/** Reads an agent's `proof` field: "rehearsed <script> @ <commit>" or "not rehearsed: <what and why>". A string is why it can't. */
+export function parseProof(text: string): Proof | string {
+  const t = text.replace(/\s+/g, " ").trim();
+  const r = /^rehearsed (\S+) ?@ ?([0-9a-f]{7,40})$/i.exec(t);
+  if (r) return { rehearsed: true, script: r[1]!, commit: r[2]!.toLowerCase() };
+  const n = /^not rehearsed: ?(.+)$/i.exec(t);
+  if (n && n[1]!.trim().length >= 10) return { rehearsed: false, part: n[1]!.trim() };
+  return `proof must be "rehearsed <script> @ <commit>" (the CI rehearsal script under scripts/rehearse/ and the commit it passed on) or "not rehearsed: <what hasn't been tried and why>", at least 10 characters after the colon`;
+}
+
+/** What a raised card keeps from the lint: warnings, a CEO override with its reason and what it let through, and the proof (R11). */
+export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[] }; proof?: Proof };
+
+/**
+ * R10 (DR-024 D): commands that stop and wait for typed input. The owner reads every prompt as something to
+ * fill in, and a secret typed into a terminal is the wrong channel: it goes in an editor step naming the exact
+ * line, or through Boss Man's Secrets screen. Matched where a command starts (line start, after ; & | ( or `),
+ * also behind sudo and VAR=value prefixes.
+ */
+const CMD = String.raw`(?:^|[;&|(\`])\s*(?:sudo\s+(?:-\S+\s+)*)?(?:[A-Za-z_]\w*=\S*\s+)*`;
+const INTERACTIVE: Array<[RegExp, string]> = [
+  [new RegExp(CMD + String.raw`read\b(?!-)`, "m"), "reads typed input (read)"],
+  [/\bsudo\s+(?:-\w*\s+)*-\w*S/, "reads a password from typed input (sudo -S)"],
+  [new RegExp(CMD + String.raw`passwd\b(?!-)`, "m"), "asks for a password (passwd)"],
+  [new RegExp(CMD + String.raw`ssh-keygen\b(?![^;&|\n]*\s-(?:N|[a-zA-Z]*[lFR]))`, "m"), "asks for a file name and passphrase (ssh-keygen without -N)"],
+  [new RegExp(CMD + String.raw`docker\s+login\b(?![^;&|\n]*--password-stdin)`, "m"), "asks for a user name and password (docker login)"],
+];
+
+/**
+ * R11 (DR-024 D): a host command, so the card must say how it was proven. A fixed list: docker and compose,
+ * systemctl, tailscale, chown/chmod, and anything that names the .env file.
+ */
+const HOST_COMMAND = new RegExp(CMD + String.raw`(?:docker(?:-compose)?|systemctl|tailscale|chown|chmod)\b|(?:^|[\s/"'=>])\.env\b`, "m");
+/** A look-only command (DR-024 kind 1): what a "not rehearsed" card ends with, so its answer closes the part that was untried. */
+const LOOK_ONLY = new RegExp(CMD + String.raw`(?:docker(?:-compose)?\s+(?:compose\s+(?:-f\s+\S+\s+)*)?(?:ps|inspect|logs|images|version)|tailscale\s+(?:status|ip|version)|systemctl\s+(?:status|is-active|is-enabled)|curl|cat|ls|grep|df|du|ping|getent)\b`, "m");
 
 /** Variables the owner's shell always has; using them unset is not a mistake. */
 const SHELL_ENV = new Set(["HOME", "PATH", "PWD", "OLDPWD", "USER", "SHELL", "HOSTNAME", "UID", "LANG", "TERM"]);
@@ -294,8 +333,11 @@ export function fillHostTokens(steps: readonly string[], values: Readonly<Record
  *
  * `facts` is either the host facts array (R6 alone, the older call shape) or a `LintFacts` object carrying
  * `hosts`, `addons` and `setsUp`. Each rule runs only when its facts are there.
+ *
+ * R10 (DR-024): a command that waits for typed input (INTERACTIVE). R11 (DR-024): steps with a host command
+ * (HOST_COMMAND) need `proof`; a "not rehearsed" proof also needs the last step to be a look-only check.
  */
-export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[]): { refuse: LintFinding[]; warn: LintFinding[] } {
+export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[], proof?: Proof): { refuse: LintFinding[]; warn: LintFinding[] } {
   const given: LintFacts = Array.isArray(facts) ? { hosts: facts } : facts ?? {};
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
@@ -305,6 +347,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
   /** What earlier blocks on this card made readable for the login (BOS-427), per host and folder. */
   // not state: scratch for one call over one card; nothing is kept between calls.
   const staged = new Map<string, Set<string>>();
+  let hostStep = 0;
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
     const step = i + 1;
@@ -354,11 +397,24 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
     warn.push(...host.warn);
     for (const c of code) refuse.push(...gitUmaskFindings(step, c));
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
+    for (const c of code) {
+      const hit = INTERACTIVE.find(([re]) => re.test(c));
+      if (hit) refuse.push({ step, rule: "R10", problem: `has a command that ${hit[1]}, which the owner would have to answer by typing: ${c.slice(0, 120)}. Give the value in the command, or for a secret an editor step naming the exact line (TS_AUTHKEY= in .env) or Boss Man's Secrets screen` });
+    }
+    if (!hostStep && code.some((c) => HOST_COMMAND.test(c))) hostStep = step;
     if (LINK.test(prose)) warn.push({ step, rule: "warn", problem: "links to a wiki page or ticket; fine as background, but the step itself must be complete" });
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
     const hedge = code.length ? HEDGES.exec(prose) : null;
     if (hedge) warn.push({ step, rule: "warn", problem: `hedges ("${hedge[0]}") next to a command` });
   });
+  if (hostStep && !proof) {
+    refuse.push({ step: hostStep, rule: "R11", problem: `has a host command, so the card needs proof: "rehearsed <script> @ <commit>" once a CI rehearsal passed, or "not rehearsed: <what and why>" with a look-only check as the last step` });
+  } else if (proof && !proof.rehearsed) {
+    const last = steps.length ? pieces(steps[steps.length - 1]!) : null;
+    if (!last || ![...last.blocks, ...last.inline].some((c) => LOOK_ONLY.test(c))) {
+      refuse.push({ step: steps.length, rule: "R11", problem: "is the last step of a card that is the first time on a real machine, so it must be a check that only looks (docker compose ps, docker logs, tailscale status, curl…) and say what to paste back" });
+    }
+  }
   return { refuse, warn };
 }
 
@@ -784,9 +840,12 @@ export function gitUmaskFindings(step: number, command: string): LintFinding[] {
   return out;
 }
 
-/** Rules a CEO override can't let through: a command the owner can't paste as it is, or a value Boss Man doesn't have. */
+/**
+ * Rules a CEO override can't let through: a command the owner can't paste as it is, a value Boss Man doesn't
+ * have, or a command that waits for typed input (R10; DR-024 D says an override can't bypass it).
+ */
 // R14 too (DR-028): its fix is always the same subshell, so there is never a reason to let a bare git step through.
-export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R14"]);
+export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R10", "R14"]);
 
 /** One line per finding, for the agent's refusal or the CEO's list. */
 export const lintLines = (fs: LintFinding[]) => fs.map((f) => `- Step ${f.step}: ${f.problem}.`).join("\n");
