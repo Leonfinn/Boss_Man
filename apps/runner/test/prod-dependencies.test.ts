@@ -23,9 +23,10 @@ describe("runner production dependencies", () => {
     for (const f of sources(join(root, "src"))) {
       const text = readFileSync(f, "utf8");
       for (const m of text.matchAll(/^\s*(?:import|export)\s(?!type\s)[^;]*?from\s+"([^"./][^"]*)"/gm)) {
-        const parts = m[1].split("/");
-        const name = m[1].startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
-        if (name.startsWith("node:")) continue;
+        const spec = m[1] ?? "";
+        const parts = spec.split("/");
+        const name = spec.startsWith("@") ? parts.slice(0, 2).join("/") : (parts[0] ?? "");
+        if (!name || name.startsWith("node:")) continue;
         if (!(name in (pkg.dependencies ?? {})) && name in (pkg.devDependencies ?? {})) missing.add(name);
       }
     }
