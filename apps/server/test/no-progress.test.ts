@@ -7,6 +7,7 @@ import { eq, sql } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, failureSignatures, runs, wakes } from "../src/db/schema.js";
+import { HELD_AGENT, HELD_ALL_COMPANIES, HELD_CHAT, HELD_COMPANY } from "../src/services/fair-share.js";
 import { likelyCause, NO_PROGRESS_QUIET_MS } from "../src/services/no-progress.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -38,7 +39,7 @@ async function setup() {
   };
   const home = await company("Boss Man Co");
   /** A wake that has waited `ago` ms, held for `why`. */
-  const waiting = (c: { id: string; a: string }, ago: number, why: string | null = "at a concurrency limit") =>
+  const waiting = (c: { id: string; a: string }, ago: number, why: string | null = HELD_ALL_COMPANIES) =>
     db.insert(wakes).values({ companyId: c.id, agentId: c.a, reason: "engagement", status: "queued", statusReason: why, createdAt: new Date(clock().getTime() - ago) });
   const ran = (c: { id: string; a: string }, endedAgo: number, outcome: string | null) =>
     db.insert(runs).values({ companyId: c.id, agentId: c.a, startedAt: new Date(clock().getTime() - endedAgo - 5 * MIN), lastEventAt: new Date(clock().getTime() - endedAgo), endedAt: new Date(clock().getTime() - endedAgo), outcome });
@@ -205,11 +206,21 @@ describe("likelyCause (BOS-593)", () => {
     expect(likelyCause({ ...base, badEnds: ["lost: runner restarted", "lost: runner offline"] }).platform).toBe("runner");
     expect(likelyCause({ ...base, badEnds: ["error: Could not resolve host: git.local"] }).platform).toBe("network guard");
     expect(likelyCause({ ...base, liveRuns: 2, liveInCheckLine: 2 }).platform).toBe("check line");
+    // The scheduler's own words (BOS-582): nothing of its own running, held at the all-companies limit.
+    expect(likelyCause({ ...base, holds: [HELD_ALL_COMPANIES] }).platform).toBe("run limit");
+    // Wakes held before BOS-582 carry the bare wording; with nothing running it is the same cause.
     expect(likelyCause({ ...base, holds: ["at a concurrency limit"] }).platform).toBe("run limit");
-    // Its own runs fill its own limit: the company's, not the platform's.
-    const own = likelyCause({ ...base, liveRuns: 3, liveInCheckLine: 1, holds: ["at a concurrency limit"] });
-    expect(own.platform).toBe(false);
-    expect(own.text).toMatch(/its own run limit is full/);
+    // Its own runs fill its own limit: the company's, not the platform's, whichever limit holds it.
+    for (const why of [HELD_COMPANY, HELD_AGENT, HELD_ALL_COMPANIES, "at a concurrency limit"]) {
+      const own = likelyCause({ ...base, liveRuns: 3, liveInCheckLine: 1, holds: [why] });
+      expect(own.platform, why).toBe(false);
+      expect(own.text, why).toMatch(/its own run limit is full/);
+    }
+    // Its company or agent limit is its own even when the run count reads 0.
+    expect(likelyCause({ ...base, holds: [HELD_COMPANY] }).platform).toBe(false);
+    expect(likelyCause({ ...base, holds: [HELD_AGENT] }).platform).toBe(false);
+    // The chat hold is a different reason, not a run limit.
+    expect(likelyCause({ ...base, holds: [HELD_CHAT] }).text).toBe(`its wakes are held: "${HELD_CHAT}"`);
     expect(likelyCause({ ...base, holds: ["budget limit reached"] }).text).toMatch(/budget or cost cap/);
     expect(likelyCause({ ...base, badEnds: ["error: tests failed", "error: tests failed", "error: other"] }).text).toMatch(/keep failing \(3 in the last hour\): "error: tests failed"/);
     expect(likelyCause({ ...base, badEnds: ["error: Claude Max: weekly limit reached"] }).text).toMatch(/Claude Max: the weekly limit/);
