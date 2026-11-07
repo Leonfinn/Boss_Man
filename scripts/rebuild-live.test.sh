@@ -39,8 +39,10 @@ logged() { grep -qF -- "$1" "$FAKE_LOG"; }
 # The proxy's colour: backed up, built at the commit, migrated, recreated, signalled, and confirmed leading.
 run || fail "a good rebuild failed"
 logged "compose build server-green" || fail "didn't build the live colour"
-logged "compose run --rm migrate" || fail "didn't migrate"
+logged "compose run --rm --no-deps migrate" || fail "didn't migrate without --no-deps"
 logged "compose up -d --no-deps --force-recreate server-green" || fail "didn't recreate the live colour"
+# Every logged compose up/run must carry --no-deps, so a rebuild can never recreate the database.
+! grep -E "compose (up|run) " "$FAKE_LOG" | grep -v -- "--no-deps" | grep -q . || fail "a compose up/run without --no-deps"
 logged "compose kill -s SIGUSR2 server-green" || fail "didn't tell it to take charge"
 grep -q "server-green leads at" "$T/out" || fail "didn't confirm the leader"
 [[ $(find "$T/backups" -name 'rebuild-*.sql.gz' | wc -l) == 1 ]] || fail "no backup kept"
