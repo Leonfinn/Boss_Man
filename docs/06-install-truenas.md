@@ -62,7 +62,7 @@ How the NAS reads the repo (a deploy key if it is private, https if it is public
 git clone <repo-https-url> src
 ```
 
-Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up.
+Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up. Moving this install to another host later: see [docs/21](21-move-to-new-host.md).
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
@@ -400,7 +400,7 @@ docker compose up -d
 ```
    Blue/green: first bring the schema up to what the running code expects (a restored older backup may be behind), using the live colour (`blue` below; find it with `grep reverse_proxy $D/proxy/active.caddy`, where `$D` is the deployer folder from step 9), then start only that colour:
 ```sh
-BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
 ```
 ```sh
 docker compose up -d --no-deps server-blue
@@ -689,7 +689,7 @@ grep -E '^(COMPOSE_FILE|BOSSMAN_HOST_PORT|BOSSMAN_PORTAL_HOST_PORT|BOSSMAN_PORTA
 
 ```sh
 BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue
-BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
 ```
 
 **6. The cutover (the one planned stop).** The old single server and its ports go; the proxy and blue take over. The runners reconnect by themselves (their address, `ws://server:3100`, now points at the proxy):
@@ -746,7 +746,7 @@ docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Con
 ```
 2. Build blue at the checkout's commit, then migrate:
 ```sh
-BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue && BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue && BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
 ```
 3. Restart blue on the new image (this is the 20 to 30 second gap):
 ```sh

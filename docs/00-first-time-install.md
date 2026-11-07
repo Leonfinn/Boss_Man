@@ -527,6 +527,7 @@ docker system df
 
 ## Next steps
 
+- [docs/21-move-to-new-host.md](21-move-to-new-host.md): moving Boss Man to another Docker host (host-neutral, with TrueNAS and Proxmox notes).
 - [docs/06-install-truenas.md](06-install-truenas.md): a worked example on TrueNAS SCALE, with backups, the host deployer, blue/green, phone notifications and the feedback portal.
 - [docs/09-self-deploy.md](09-self-deploy.md): how "Deploy latest", the drain and blue/green updates work.
 - [docs/12-runner-add-ons.md](12-runner-add-ons.md): optional tools in the runner image, such as a browser for agents.

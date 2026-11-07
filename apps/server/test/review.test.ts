@@ -215,7 +215,8 @@ describe("approval lands in the background (B)", () => {
       c.held.forEach((release) => release());
       await answering;
     }
-    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toBeNull());
+    // The merge runs in the background, so its outcome is kept for the page to show (BOS-559).
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "finished", outcome: "merged" }));
   });
 
   it("says each outcome in plain words", () => {
@@ -563,25 +564,21 @@ describe("landing an approved ticket (R46, R47)", () => {
     const mergeCards = (c: Awaited<ReturnType<typeof setup>>) =>
       c.db.select().from(decisions).where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'check_stuck'`));
 
-    it("Approve and merge on the ticket answers the open sign-off and merges in one press (BOS-471)", async () => {
+    it("Approve and merge on the ticket answers the open sign-off and starts the merge in one press (BOS-471, BOS-559)", async () => {
       const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
       await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
       const signoff = await signoffCard(c);
       const res = c.req("POST", `/api/tickets/${c.ticket.id}/approve-merge`);
-      try {
-        // The sign-off is settled first, so its hold on the ticket is gone while the merge runs...
-        await vi.waitFor(async () => expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered"));
-        expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, signoff.id))).toHaveLength(0);
-        // ...and the merge is running under the owner's name.
-        await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "running", startedBy: "the owner" }));
-      } finally {
-        c.held.splice(0).forEach((release) => release());
-      }
-      const body = (await res).json() as { outcome: string; signoffAnswered: boolean; landing: unknown };
-      expect(body).toMatchObject({ outcome: "landing", signoffAnswered: true });
-      // The answer's own landing ran the merge and is gone by the time the route replies; the route must not
-      // start a second one, so there is no landing to hand back (BOS-471, review round 1).
-      expect(body.landing).toBeNull();
+      const body = (await res).json() as { outcome: string; signoffAnswered: boolean; landing: { state: string; startedBy: string } | null };
+      // The press returns at once, before the held check finishes (BOS-559): the sign-off is settled and the
+      // merge runs in the background under the owner's name, handed back for the page to poll.
+      expect(body).toMatchObject({ outcome: "landing", signoffAnswered: true, landing: { state: "running", startedBy: "the owner" } });
+      // The sign-off is settled, so its hold on the ticket is gone while the merge runs...
+      expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered");
+      expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, signoff.id))).toHaveLength(0);
+      // ...and exactly one landing is running (the press must not start a second one).
+      expect(c.held).toHaveLength(1);
+      c.held.splice(0).forEach((release) => release());
       await vi.waitFor(async () => expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("done"));
       expect(await mergeCards(c)).toHaveLength(0);
     });
@@ -604,6 +601,44 @@ describe("landing an approved ticket (R46, R47)", () => {
       expect((await c.req("POST", `/api/tickets/${c.ticket.id}/approve-merge`)).statusCode).toBe(200);
       expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered");
       expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!).toMatchObject({ systemState: "done", outcome: "completed" });
+    });
+
+    it("answers the sign-off card at once, before the runner's check finishes (BOS-559)", async () => {
+      // The check is held open by the fake runner: the answer must come back anyway, not wait for it.
+      const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      const signoff = await signoffCard(c);
+      const answered = await Promise.race([
+        c.req("POST", `/api/decisions/${signoff.id}/answer`, { answer: "Approve and merge" }).then((r) => r.statusCode),
+        new Promise<"held">((resolve) => setTimeout(() => resolve("held"), 2_000)),
+      ]);
+      // The card is closed and the merge is running in the background, still held by the fake runner.
+      expect(answered).toBe(200);
+      expect((await c.db.select().from(decisions).where(eq(decisions.id, signoff.id)))[0]!.status).toBe("answered");
+      expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "running", startedBy: "the owner" });
+      expect(c.held).toHaveLength(1);
+      // Finish the merge so the run leaves no timer behind.
+      c.held.splice(0).forEach((release) => release());
+      await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "finished", outcome: "merged" }));
+    });
+
+    it("still reaches the ticket and the owner when the background landing fails (BOS-559)", async () => {
+      // The runner never answers the carried-work check: the merge can't run, which is a failure to report.
+      setInfraRetryBase(1);
+      const c = (ctx = await setup({ answers: { carried: { carried: [] }, carriedFailures: 4 } }));
+      const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Permission gate", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+      await c.db.update(tickets).set({ branch: `bossman/${other.id}` }).where(eq(tickets.id, other.id));
+      const signoff = await signoffCard(c);
+      const res = await c.req("POST", `/api/decisions/${signoff.id}/answer`, { answer: "Approve and merge" });
+      expect(res.statusCode).toBe(200);
+      // The failure reaches the ticket (it stays in review with the reason on it) and the owner gets one card.
+      await vi.waitFor(async () => {
+        const cards = (await c.db.select().from(decisions)).filter((d) => d.status === "open" && d.dedupeKey === `merge-stuck:${c.ticket.id}`);
+        expect(cards).toHaveLength(1);
+      });
+      const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+      expect(t).toMatchObject({ systemState: "review", mergeCommit: null });
+      expect(t.pullRequestNote).toContain("Not merged");
     });
   });
 
