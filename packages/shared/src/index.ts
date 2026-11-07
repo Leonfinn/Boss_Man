@@ -29,6 +29,7 @@ export * from "./runs.js";
 export * from "./retro.js";
 export * from "./sizing.js";
 export * from "./permission-judge.js";
+export * from "./devices.js";
 export * from "./second-opinion.js";
 export * from "./owner-controls.js";
 export * from "./owner-message.js";
