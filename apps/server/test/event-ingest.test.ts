@@ -159,17 +159,18 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     expect(await c.db.select().from(costEvents)).toHaveLength(1);
   });
 
-  it("keeps and acks an event whose apply throws a plain Error on every attempt, so the stream moves on (BOS-606)", async () => {
+  it("keeps and acks an event whose apply throws a TypeError, a clear code bug, on the first try (BOS-606)", async () => {
     const c = (ctx = await setup());
     const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
     const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
-    // A code bug or malformed payload: no SQLSTATE, and it fails the same way on every resend.
+    // A code bug: a TypeError fails the same way on every resend, so it is not retried at all.
     const always = vi.spyOn(c.funding, "recordCost").mockImplementation(async () => {
       throw new TypeError("cannot read properties of undefined");
     });
 
     // It is stored and acked (true) on the first try, not retried for ever.
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(always).toHaveBeenCalledTimes(1);
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
     expect(await c.db.select().from(costEvents)).toHaveLength(0);
     const [failed] = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")));
@@ -182,5 +183,74 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     expect(await c.runners.ingest(c.runnerRow, ended)).toBe(true);
     const [run] = await c.db.select().from(runs).where(eq(runs.id, c.runId));
     expect(run!.endedAt).not.toBeNull();
+  });
+
+  it("retries a plain Error with no code a few times, then keeps, marks and acks it (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    // A plain Error with no code and no connection wording: it could be a payload bug, so it is not
+    // trusted to be permanent straight away. It is retried up to the cap, then stored, marked and acked.
+    const always = vi.spyOn(c.funding, "recordCost").mockImplementation(async () => {
+      throw new Error("something went wrong applying this");
+    });
+
+    // The tries before the cap roll back and reject, so the runner resends; nothing is stored yet.
+    for (let i = 1; i <= 2; i++) {
+      await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("something went wrong");
+      expect(always).toHaveBeenCalledTimes(i);
+      expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(0);
+    }
+
+    // The third try is at the cap: it is stored and acked rather than retried for ever.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(always).toHaveBeenCalledTimes(3);
+    expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
+    expect(await c.db.select().from(costEvents)).toHaveLength(0);
+    const [failed] = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")));
+    expect(failed?.summary).toMatch(/Runner event 2 \(run\.cost\)/);
+  });
+
+  it("still retries an ECONNRESET connection error on the resend, however often it repeats (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    const realRecordCost = c.funding.recordCost.bind(c.funding);
+    // A Node network error carries a code that is not a SQLSTATE; it is a database blip, so always retried.
+    let calls = 0;
+    vi.spyOn(c.funding, "recordCost").mockImplementation(async (...args) => {
+      if (++calls <= 4) throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+      return realRecordCost(...args);
+    });
+    // Even past the ordinary retry cap, a connection error is never treated as permanent.
+    for (let i = 1; i <= 4; i++) {
+      await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("ECONNRESET");
+      expect(calls).toBe(i);
+      expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(0);
+    }
+    // The database is back: the resend applies the event.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(costEvents)).toHaveLength(1);
+    expect(await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")))).toHaveLength(0);
+  });
+
+  it("still retries a codeless 'Connection terminated unexpectedly' on the resend (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    const realRecordCost = c.funding.recordCost.bind(c.funding);
+    // pg's own dropped-connection error has no code at all; it is a blip, so it is retried, not dropped.
+    let calls = 0;
+    vi.spyOn(c.funding, "recordCost").mockImplementation(async (...args) => {
+      if (++calls <= 4) throw new Error("Connection terminated unexpectedly");
+      return realRecordCost(...args);
+    });
+    for (let i = 1; i <= 4; i++) {
+      await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("Connection terminated unexpectedly");
+      expect(calls).toBe(i);
+      expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(0);
+    }
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(costEvents)).toHaveLength(1);
   });
 });
