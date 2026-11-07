@@ -673,6 +673,13 @@
       "when": 1793941639220,
       "tag": "0106_decision_company_status",
       "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1793987256267,
+      "tag": "0110_check_results_company_at",
+      "breakpoints": true
     }
   ]
 }
