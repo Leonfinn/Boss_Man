@@ -5,6 +5,7 @@ import { Menu as MenuIcon } from "lucide-react";
 import { api, type Company } from "../api";
 import { Markdown, headingId } from "../components/Markdown";
 import { useMediaQuery, usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 
@@ -195,7 +196,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
     }
   };
 
-  if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} go={go} /> : <p className="error" role="alert">{page.error.message}</p>;
+  if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} go={go} /> : away(page.error) ? null : <p className="error" role="alert">{page.error.message}</p>;
   if (!p) return null;
   if (editing) return <Editor initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
   return (
@@ -388,7 +389,7 @@ function SemanticSettings({ companyId }: { companyId: string }) {
 
 function BriefView({ companyId }: { companyId: string }) {
   const brief = usePoll((signal) => api<{ markdown: string }>(`/api/companies/${companyId}/brief`, { signal }), 30_000, companyId);
-  if (brief.error) return <p className="error" role="alert">{brief.error.message}</p>;
+  if (brief.error && !away(brief.error)) return <p className="error" role="alert">{brief.error.message}</p>;
   if (!brief.data) return null;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>

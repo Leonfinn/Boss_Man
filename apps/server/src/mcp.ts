@@ -549,7 +549,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, proof, doAfter, doBefore, resetsOnRestart }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       const [me] = lintOverride !== undefined && scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
-      const ask = checkAsk({ triedFirst, ownerMustDo, steps, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof });
+      const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof });
       if (ask.error) return fail(ask.error);
       steps = ask.steps ?? steps; // {{host.…}} filled in
       if (blocksTicketId) {
@@ -1184,7 +1184,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           let r;
           if (input.outcome === "reissue") {
             if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
-            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof });
+            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof });
             if (ask.error) return fail(ask.error);
             const reissueSteps = ask.steps ?? input.steps;
             r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, lint: ask.lint });
@@ -2244,11 +2244,17 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
 
 }
 
-/** A short note for the agent, when the ticket's new migrations take a number another branch already has (BOS-219). */
+/**
+ * A short note for the agent, when one of the ticket's new migration numbers is already on the
+ * default branch (BOS-219). Only a clash with the default branch is worth saying at review time:
+ * a clash with another open branch is not, because that branch hasn't merged and the agent can't
+ * know whether it ever will (DR-037). Telling agents to rename against open branches caused about
+ * 35 renumber commits and gaps on main, so that advice is gone.
+ */
 async function migrationWarning(review: Services["review"], ticketId: string, companyId: string): Promise<string> {
   const m = await review.migrations(ticketId, companyId).catch(() => null);
   if (!m?.needed) return "";
-  return `\n\nHeads up (BOS-219): a migration number is already taken: ${m.why.join("; ")}. Rename it to ${String(m.next).padStart(4, "0")} (and any others it moved) before this merges, set its journal entry's "when" later than the newest one already on the default branch, run the checks, and move the ticket back to review. The merge will send it back if it still clashes.${m.others.length ? ` Other numbers taken: ${m.others.join("; ")}.` : ""}`;
+  return `\n\nHeads up (BOS-219): a migration number is already taken on the default branch: ${m.why.join("; ")}. Rename it to ${String(m.next).padStart(4, "0")} (and any others it moved) before this merges, set its journal entry's "when" later than the newest one already on the default branch, run the checks, and move the ticket back to review. The merge will send it back if it still clashes.${m.others.length ? ` Other numbers taken: ${m.others.join("; ")}.` : ""}`;
 }
 
 /** True when something open holds the ticket: an unanswered decision, an unfinished blocker ticket or an engagement. */

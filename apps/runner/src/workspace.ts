@@ -558,7 +558,7 @@ export class Workspaces {
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
-        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, spec.jobId) });
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) });
       } finally {
         await this.withRepoLock(spec.projectId, async () => {
           await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
@@ -577,29 +577,30 @@ export class Workspaces {
   private readonly activeJobs = new Set<string>();
 
   /**
-   * The fence and own HOME/TMPDIR for one job, like an agent session's: the job's folder, its own home and temp folder, the pnpm
-   * store, and the shared repo with only objects/refs/logs writable. The runner's token, data folder and other tickets' worktrees
-   * are outside it. On a runner that can't fence, the job runs as before (the same fallback sessions have).
+   * The environment, and fence where the runner can fence, for one job, like an agent session's: the job's folder, its own home
+   * and temp folder, the pnpm store, and the shared repo with only objects/refs/logs writable. The runner's token, data folder and
+   * other tickets' worktrees are outside the fence. On a runner that can't fence, the job still gets its own HOME/TMPDIR and the
+   * pnpm store on the workspaces volume (BOS-655), so its install doesn't fill the root disk under the runner's HOME; only the
+   * file fence is missing (the same fallback sessions have).
    */
-  private jobFenceFor(repo: string, dir: string, jobId: string): { env: Record<string, string>; wrap: (bin: string, args: string[]) => { bin: string; args: string[] } } | undefined {
-    if (!this.jobFence || this.jobFence.level === "unavailable") return undefined;
-    const home = path.join(this.root, "check-jobs-home", jobId);
+  private jobFenceFor(repo: string, dir: string, home: string): { env: Record<string, string>; wrap?: (bin: string, args: string[]) => { bin: string; args: string[] } } {
     const tmp = path.join(home, "tmp");
     mkdirSync(tmp, { recursive: true });
     const env: Record<string, string> = { HOME: home, TMPDIR: tmp, XDG_CACHE_HOME: path.join(home, ".cache"), XDG_CONFIG_HOME: path.join(home, ".config"), BOSSMAN_CHECK_STORE: "off", GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null", GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "gc.auto", GIT_CONFIG_VALUE_2: "0" };
     const readWrite: string[] = [];
-    if (this.jobFence.pnpmStore) {
+    if (this.jobFence?.pnpmStore) {
       mkdirSync(this.jobFence.pnpmStore, { recursive: true });
       env.npm_config_store_dir = this.jobFence.pnpmStore;
       readWrite.push(this.jobFence.pnpmStore);
     }
+    if (!this.jobFence || this.jobFence.level === "unavailable") return { env };
     const readOnly = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
     const rules = fenceProfile({ cwd: dir, home, tmp, repo: repoGrant(repo, dir), readOnly, readWrite });
     return { env, wrap: (bin, args) => fencedCommand(rules, bin, args) };
   }
 
   /** One check command in a folder: its own process group, output kept to the last 8 KB. */
-  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void; fence?: { env: Record<string, string>; wrap: (bin: string, args: string[]) => { bin: string; args: string[] } } }): Promise<VerifyResult> {
+  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void; fence?: { env: Record<string, string>; wrap?: (bin: string, args: string[]) => { bin: string; args: string[] } } }): Promise<VerifyResult> {
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
       // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
@@ -620,7 +621,7 @@ export class Workspaces {
       // The check starts with default HUP/INT/TERM handling: a server started with those ignored would pass that on, and a shell can't undo it
       // (so check-all's own signal trap and its tests never fire). env --default-signal needs GNU coreutils; without it the command runs as before.
       const sigScript = `if env --default-signal=HUP,INT,TERM true 2>/dev/null; then exec env --default-signal=HUP,INT,TERM ${inner}; fi; exec ${inner}`;
-      const launch = job?.fence ? job.fence.wrap("sh", ["-c", sigScript, command]) : { bin: "sh", args: ["-c", sigScript, command] };
+      const launch = job?.fence?.wrap ? job.fence.wrap("sh", ["-c", sigScript, command]) : { bin: "sh", args: ["-c", sigScript, command] };
       const child = spawn(launch.bin, launch.args, {
         cwd: dir,
         detached: true,

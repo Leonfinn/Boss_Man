@@ -573,7 +573,7 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * `proof` says how host commands were proven (R11, DR-024); a malformed one is refused before the lint runs,
  * and a good one is kept on the card for its banner.
  */
-export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; proof?: string }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; proof?: string }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -597,7 +597,7 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
     }
     steps = filled.steps;
   }
-  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}) }, proof);
+  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}) }, proof);
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
   const soft = refuse.filter((f) => !NOT_OVERRIDABLE.has(f.rule));
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
@@ -1741,6 +1741,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     async onRefusedCall(runner: { companyId: string }, runId: string, title: string | null) {
       const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
       permLog.refusedCall({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
+    },
+
+    /** A fenced run's tool call failed with a kernel refusal (BOS-325): logged with the run, agent and ticket. Wording only, never a decision. */
+    async onFenceDenied(runner: { companyId: string }, runId: string, title: string | null) {
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
+      permLog.fenceDenied({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
     },
 
     setMaintenanceHook(hook: MaintenanceHook) {

@@ -2,6 +2,7 @@
 // 14 days at a glance, and what happened recently.
 import { api, type Company, type RunRow } from "../api";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
 import { RunLabelLink } from "./Runs";
 
@@ -110,7 +111,7 @@ function SuccessChart({ days }: { days: Day[] }) {
 export function Dashboard({ company }: { company: Company | undefined }) {
   const data = usePoll((signal) => (company ? api<DashboardData>(`/api/companies/${company.id}/dashboard`, { signal }) : Promise.resolve(null)), 10_000, company?.id ?? "none");
   if (!company) return <p>Create a company on the Kanban first.</p>;
-  if (data.error) return <p className="error" role="alert">{data.error.message}</p>;
+  if (data.error && !away(data.error)) return <p className="error" role="alert">{data.error.message}</p>;
   const d = data.data;
   if (!d) return null;
   const s = d.stats;
