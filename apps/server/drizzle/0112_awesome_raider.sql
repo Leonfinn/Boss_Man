@@ -1,0 +1,3 @@
+ALTER TABLE "companies" ALTER COLUMN "watchdog" SET DEFAULT '{"enabled":false,"recordOnly":false,"unassignedMinutes":15,"inProgressHours":2,"reviewHours":2,"blockedHours":8,"blockedUntilGraceHours":2,"ownerDecisionHours":8,"reviewBounces":2,"maxSnoozeHours":48,"maxSmRunsPerHour":4,"maxNudgesPerHour":12,"alertMinutes":30,"maxCeoAlertsPerHour":6,"progressContract":true,"silentSteerMinutes":30,"silentFlagMinutes":60,"unprovenHours":2,"idleAgentMinutes":15,"spareCapacityMinutes":20}'::jsonb;--> statement-breakpoint
+ALTER TABLE "companies" ADD COLUMN "watchdog_spare_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "companies" ADD COLUMN "watchdog_spare_alerted_at" timestamp with time zone;

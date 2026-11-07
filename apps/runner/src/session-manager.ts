@@ -35,6 +35,8 @@ export type SessionManagerOptions = {
   mcpPreflightMs?: number;
   /** Test tuning for that preflight. */
   mcpPreflightTuning?: { attemptTimeoutMs?: number; delayMs?: number };
+  /** Test tuning for the preflight an mcpRequired run does when mcpPreflightMs is unset (BOS-664): shorter budget, attempt timeout and delay than the production 30 s / 10 s / 2 s. */
+  mcpRequiredPreflight?: { budgetMs?: number; attemptTimeoutMs?: number; delayMs?: number };
   /**
    * Confirms the Boss Man tools are reachable before an mcpRequired run starts (BOS-552). The default
    * asks the live server for its tool list; tests override it to drive the success and failure paths.
@@ -502,6 +504,10 @@ export class SessionManager {
     // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
     if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask"));
     if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir));
+    // Every harness the runner starts (Claude, Codex, OpenCode) gets this marker; scripts/check-all.sh and
+    // scripts/vitest-guard.mjs refuse a hand-run full check or whole-suite run when they see it. CLAUDECODE only
+    // covers Claude Code. Set last so a granted secret can't override it.
+    env.BOSSMAN_AGENT_SESSION = "1";
     return env;
   }
 
@@ -875,7 +881,7 @@ export class SessionManager {
         } else {
           const reach = this.opts.mcpPreflightMs
             ? await waitForBossMan(this.opts.mcpPreflightMs, this.opts.mcpPreflightTuning)
-            : await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: MCP_PREFLIGHT_TIMEOUT_MS * MCP_PREFLIGHT_ATTEMPTS, attemptTimeoutMs: MCP_PREFLIGHT_TIMEOUT_MS, delayMs: MCP_PREFLIGHT_DELAY_MS });
+            : await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: MCP_PREFLIGHT_TIMEOUT_MS * MCP_PREFLIGHT_ATTEMPTS, attemptTimeoutMs: MCP_PREFLIGHT_TIMEOUT_MS, delayMs: MCP_PREFLIGHT_DELAY_MS, ...this.opts.mcpRequiredPreflight });
           if (!this.runs.has(cmd.runId)) return;
           result = reach.ok ? await checkBossManTools(this.opts.mcpUrl, cmd.mcpToken) : { ok: false, reason: reach.lastError ?? "no answer" };
         }
