@@ -870,3 +870,88 @@ describe("rules judge: Jane's round-5 BOS-378 findings (BOS-638)", () => {
     allows(["find . -exec grep -l x {} +", "find . -exec ./scripts/x.sh {} +"]);
   });
 });
+
+// BOS-638 round 2 (Jane's security review of fce97414, plus Rex's round-1 list): the original four commands were closed,
+// but close spellings of three of them still got an automatic Allow at fce97414. Each command below was Allow at
+// fce97414 (and at 189a7ba7) and must now be Deny. Same strict allow-list as rounds 14-15: the program word and any
+// folder flag are judged wherever they appear among the flags.
+describe("rules judge: close variants of Jane's round-5 findings (BOS-638, round 2)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+
+  // The folder flag written attached (`-C/tmp/p`) or as its usual abbreviation (`--dir/tmp/p`): pnpm and npm accept both,
+  // so the folder check must match the flag's own ending, not only `=` or the end of the word (Rex round 1, finding 1).
+  describe("1v. folder flags written attached, after another flag", () => {
+    deny([
+      "pnpm -C/tmp/p run evil",
+      "pnpm --silent -C/tmp/p run evil",
+      "npm --silent -C/tmp/p run evil",
+      "pnpm --dir/tmp/p run evil",
+      "pnpm --prefix/tmp/p run evil",
+      "npm --cwd/tmp/p run evil",
+      "npm --filter/tmp/p run evil",
+      "pnpm -C/tmp/p --silent run evil",
+      "PORT=1 pnpm -C/tmp/p run evil",
+    ]);
+    // An attached folder flag naming a sub-folder of the checkout is still Allow.
+    allows(["pnpm -C./scripts run evil", "pnpm --dir=./scripts run evil"]);
+  });
+
+  // Part A: `--node-options`/`--node-arg` are passed to every node process a script starts, so they can load a file at
+  // start. The value may be itself an option with an attached path (`--require=/tmp/x.js`), which the old check missed
+  // because it only looked at the text after the first `=`.
+  describe("2v. node options that load a /tmp file before a script runs", () => {
+    deny([
+      "npm run build --node-options=--require=/tmp/x.js",
+      "npm run build --node-options=--import=/tmp/x.mjs",
+      "npm --node-options=--import=/tmp/x.mjs run build",
+      "pnpm run build --node-options=--require=/tmp/x.js",
+      "pnpm --silent run build --node-options=--require=/tmp/x.js",
+      "npx --node-options=--require=/tmp/x.js vitest run",
+      "npm run build --node-arg=--require=/tmp/x.js",
+      "npm run build --node-arg /tmp/x.js",
+      "npm run build --node-options /tmp/x.js",
+      "npm run build --node-options --require=/tmp/x.js",
+    ]);
+    // A node option naming an in-checkout file is still Allow.
+    allows(["npm run build --node-options=--require=./scripts/setup.js"]);
+  });
+
+  // Part B: the shell turns `~` into the agent's home folder and expands `$X`/`${X}` to a path the judge can't read, so
+  // both leave the checkout. This covers a positional argument to a package-manager tool and the `-exec` program.
+  describe("3v. paths that start with ~ or a variable", () => {
+    deny([
+      "npx vitest run ~/x.test.ts",
+      "pnpm vitest run ~/x.test.ts",
+      "npx vitest run $HOME/x.test.ts",
+      "find . -exec ~/x.sh {} ;",
+      "find . -exec ~/x.sh {} \\;",
+      "find . -exec $X {} ;",
+      "find . -exec $HOME/x.sh {} ;",
+      "find . -exec ${X} {} ;",
+    ]);
+  });
+
+  // Part C: `-execdir`/`-okdir` run their program from the folder of each file found, so a relative `./x.sh` runs in
+  // find's start folder. When a start path leaves the checkout, that program runs outside it.
+  describe("4v. find -execdir with a relative program and an outside start folder", () => {
+    deny([
+      "find /tmp -name x.sh -execdir ./x.sh {} ;",
+      "find /tmp/p -execdir ./x.sh {} +",
+      "find /tmp/p -okdir ./x.sh {} ;",
+      "find /tmp/p -execdir x.sh {} ;",
+      "find /tmp/p -execdir ../x.sh {} ;",
+    ]);
+    // find rooted in the checkout running a relative script there is still Allow.
+    allows(["find . -execdir ./scripts/x.sh {} ;"]);
+  });
+
+  // Part D: `--call=<program>` (npx, npm exec) runs the program with any piped text as its code/stdin, so a code word
+  // there is an executor the judge would have to read.
+  describe("5v. --call / -c piped code", () => {
+    deny(["npx --call=node", "npm exec --call=node", "npm exec -c node", "npx -c 'node -e 1'"]);
+  });
+});

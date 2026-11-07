@@ -667,32 +667,79 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
     // script there is Deny). `run <script>` runs a package.json script: a plain script name, never a path outside.
     const PM = /^(?:pnpm|npm|yarn|bun)$/;
     const PM_EXEC = /^(?:exec|dlx|x|create)$/;
-    // A folder flag names the folder the package manager runs in: `-C`, `--dir`, `--prefix`, `--cwd`, `--filter`.
-    const FOLDER_FLAG = /^(?:-C|--dir|--prefix|--cwd|--filter)(?:=|$)/;
+    // A folder flag names the folder the package manager runs in: `-C`, `--dir`, `--prefix`, `--cwd`, `--filter`. The value
+    // may be attached with `=`, or written straight after the flag (`-C/tmp/p`, and the long flags' usual abbreviation
+    // `--dir/tmp/p`, which pnpm and npm both accept), so match the flag's own ending rather than requiring `=` or the end
+    // of the word (BOS-638, Rex round 1: the attached form slipped through).
+    const FOLDER_FLAG = /^(?:-C(?=$|[^A-Za-z])|--dir(?=$|=|[^A-Za-z=])|--prefix(?=$|=|[^A-Za-z=])|--cwd(?=$|=|[^A-Za-z=])|--filter(?=$|=|[^A-Za-z=]))/;
+    // The folder a folder-flag word names: after `=`, or the rest of the word when it is attached (`-C/tmp/p`), else the
+    // next argument.
+    const folderOf = (w: string, next: string | undefined): string | undefined => {
+      const eq = w.indexOf("=");
+      if (eq >= 0) return w.slice(eq + 1);
+      const m = /^(?:-C|--dir|--prefix|--cwd|--filter)/.exec(w);
+      const tail = m ? w.slice(m[0].length) : "";
+      return tail !== "" ? tail : next;
+    };
+    const attached = (w: string): boolean => {
+      const eq = w.indexOf("=");
+      if (eq >= 0) return true;
+      const m = /^(?:-C|--dir|--prefix|--cwd|--filter)/.exec(w);
+      return !!m && w.length > m[0].length;
+    };
     const PM_TOOL = head === "npx" || head === "pnpx" || head === "bunx";
     if (PM.test(head) || PM_TOOL) {
       if (prefixed) return true;
       // A package-manager setting that names a file can pick the shell that runs a script or the rc file it reads:
       // `npm run build --script-shell=/tmp/x.sh`, `npm --userconfig=/tmp/rc run build` (BOS-638, Jane round 5, finding 2).
-      // The value can come before or after the verb, so scan every argument; the file must be a plain in-checkout path.
-      const CONFIG_FILE = /^--(?:script-shell|userconfig|globalconfig|config)(?:=|$)/;
+      // `--node-options`/`--node-arg` are passed to every node process a script starts, so they can load a file at start
+      // (`npm run build --node-options=--require=/tmp/x.js`) (BOS-638, Jane round 1, part A).
+      // The value can come before or after the verb, so scan every argument; a file it names must be a plain in-checkout
+      // script. The value may itself be an option with an attached path (`--require=/tmp/x.js`), so look past that prefix.
+      const CONFIG_FILE = /^--(?:script-shell|userconfig|globalconfig|config|node-options|node-arg)(?:=|$)/;
+      const valueLeaves = (v: string): boolean => {
+        // `--flag=/tmp/x` / `--flag /tmp/x` inside the value: judge the path, not the whole option word.
+        const inner = /^--?[\w-]+=(.*)$/.exec(v);
+        if (inner) return valueLeaves(inner[1]!);
+        // A quoted value (`--node-options="--require=/tmp/x.js"`) keeps its quotes through shellWords; strip them.
+        const bare = v.replace(/^['"]|['"]$/g, "");
+        if (bare !== v) return valueLeaves(bare);
+        return !plainPath(v) || !scriptOk(v);
+      };
       for (let k = 0; k < args.length; k++) {
         const w = args[k]!;
         if (!CONFIG_FILE.test(w)) continue;
         const v = w.includes("=") ? w.slice(w.indexOf("=") + 1) : args[++k];
-        if (v === undefined || !plainPath(v) || !scriptOk(v)) return true;
+        if (v === undefined || valueLeaves(v)) return true;
       }
       // A tool run through a package manager (`pnpm vitest ...`, `npx <tool> ...`) reads files named in its arguments as
       // code or config (`--config /tmp/x.config.ts`, a positional `/tmp/x.test.ts`). The judge can't tell which argument a
       // tool loads, so any argument that leaves the checkout (an absolute path or a `..` climb) gets no Allow
       // (BOS-638, Jane round 5, finding 3: the general rule she asked for, not one per tool).
+      // A path leaves the checkout when it is absolute, climbs with `..`, or starts with `~`/`$`/backtick (the shell turns
+      // `~` into the home folder and expands a variable to a path the judge can't read) (BOS-638, Rex/Jane round 1).
       const leaves = (w: string): boolean => {
+        if (/^(?:~|[\s]*\$|[`])(?:$|[\/{\w])/.test(w)) return true;
+        // A value that is itself an option with an attached path (`--require=/tmp/x.js`, from `--node-options=...`): judge
+        // the path it names, not the whole word (BOS-638, Jane round 1, part A).
+        const inner = /^--?[\w-]+=(.*)$/.exec(w);
+        if (inner) return leaves(inner[1]!);
         const p = plainPath(w);
         return p !== null && (p.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(p));
       };
       for (let k = 0; k < args.length; k++) {
         const w = args[k]!;
+        if (FOLDER_FLAG.test(w)) {
+          const d = folderOf(w, args[k + 1]);
+          if (d === undefined || !cdOwn(d)) return true;
+          if (!attached(w)) k++;
+          continue;
+        }
         if (w.startsWith("-")) {
+          // `--call=<program>` (npx, npm exec) runs the program with any piped text as its code/stdin: a code word there is
+          // an executor the judge would have to read (`npx --call=node`) (BOS-638, Jane round 1, part D).
+          const call = /^--call=(.*)$/.exec(w) ?? (/^-c$/.test(w) ? [w, args[k + 1] ?? ""] : null);
+          if (call && call[1] !== undefined && codeWord(call[1]!)) return true;
           if (w.includes("=") && leaves(w.slice(w.indexOf("=") + 1))) return true;
           continue;
         }
@@ -825,11 +872,24 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
     if (codeWord(chead)) return true;
     // A `-exec`/`-execdir`/`-ok` program is a command the judge must read: an interpreter/launcher there is Deny, and so is
     // a program given as a path that leaves the checkout (`find . -exec /tmp/x.sh {} ;`) (BOS-638, Jane round 5, finding 4).
-    const leavesOut = (w: string): boolean => { const p = plainPath(w); return p !== null && (p.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(p)); };
+    // A path leaves the checkout when it is absolute, climbs with `..`, or starts with `~`/`$`/backtick (the shell expands
+    // those to a folder the judge can't read) (BOS-638, Jane round 1, part B: `find . -exec ~/x.sh {} ;`).
+    const leavesOut = (w: string): boolean => {
+      if (/^(?:~|[\s]*\$|[`])(?:$|[\/{\w])/.test(w)) return true;
+      const p = plainPath(w);
+      return p !== null && (p.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(p));
+    };
     for (let k = 0; k < cargs.length; k++) {
-      if (!/^-(?:exec|execdir|ok|okdir)$/.test(cargs[k]!)) continue;
+      const verb = cargs[k]!;
+      if (!/^-(?:exec|execdir|ok|okdir)$/.test(verb)) continue;
       const prog = cargs[k + 1] ?? "";
       if (codeWord(prog) || leavesOut(prog)) return true;
+      // `-execdir`/`-okdir` run their program from the folder of each file found, so a relative program runs in find's
+      // start folder, not the shell's. When a start path before the verb leaves the checkout, that program runs outside it
+      // (`find /tmp -execdir ./x.sh {} ;`) (BOS-638, Jane round 1, part C). Flags like `-L` take no path here.
+      if (/^-(?:execdir|okdir)$/.test(verb) && !prog.startsWith("/") && !/^(?:~|\$|`)/.test(prog)) {
+        if (cargs.slice(0, k).some((w) => !w.startsWith("-") && leavesOut(w))) return true;
+      }
     }
     if ((chead === "xargs" || chead === "env") && cargs.some((w) => !w.startsWith("-") && codeWord(w))) return true;
   }
