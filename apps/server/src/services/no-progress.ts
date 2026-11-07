@@ -60,7 +60,6 @@ export type NoProgressCause = { text: string; platform: false | "runner" | "netw
 
 /** The most common item, for naming the error several runs hit. */
 function commonest(xs: string[]): string | null {
-  // shortcut: one string per distinct outcome in a sweep; tens at most, fresh every pass, so no cap needed.
   const n = new Map<string, number>();
   for (const x of xs) n.set(x, (n.get(x) ?? 0) + 1);
   return [...n.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
