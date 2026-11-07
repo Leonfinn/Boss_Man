@@ -619,6 +619,7 @@ reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
 c="$(push apps/server/hc-db)"; bgreq "$c"
 # the fake restarts the database as soon as the new colour is started
 mv "$T/bin/docker" "$T/bin/docker.real"
+# shellcheck disable=SC2016 # the wrapper script is written literally; $W and $* expand when it runs
 printf '#!/usr/bin/env bash\ncase "$*" in *"up -d --no-deps --force-recreate server-"*) echo 2026-11-07T09:00:00Z >"$W/start.db" ;; esac\nexec "%s" "$@"\n' "$T/bin/docker.real" >"$T/bin/docker"; chmod +x "$T/bin/docker"
 bg
 mv "$T/bin/docker.real" "$T/bin/docker"

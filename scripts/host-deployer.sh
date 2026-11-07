@@ -412,7 +412,7 @@ switch_back() {
   if ((ok)); then flip_proxy "$BG_LIVE" || ok=0; fi
   if ((ok)); then wait_ready proxy leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
   if ((ok)); then
-    compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 && plan_stopped "$BG_IDLE" || true
+    if compose stop "server-$BG_IDLE" >>"$LOG" 2>&1; then plan_stopped "$BG_IDLE"; fi
     g reset --quiet --hard "$BG_PREV" || true
   else
     # The old colour did not take over: put the new one back in charge and keep it running (the checkout stays on what runs).
@@ -448,6 +448,7 @@ verify_live() { # commit seconds: on failure VERIFY_WHY says which check failed 
 # hardcoded beyond the service names the rest of this script already uses.
 # ---------------------------------------------------------------------------------------------------
 HC_NAMES=(live other leader db restarts)
+# shellcheck disable=SC2034 # set and read through printf -v / indirect expansion
 HC_live="" HC_other="" HC_leader="" HC_db="" HC_restarts="" HD_live="" HD_other="" HD_leader="" HD_db="" HD_restarts=""
 HEALTH_FAILS="" HEALTH_DETAIL=""
 hc_set() { printf -v "HC_$1" '%s' "$2"; printf -v "HD_$1" '%s' "$3"; } # item pass|fail detail
@@ -508,7 +509,7 @@ hc_record() { # phase commit
 # Runs the checklist. plan = what the other colour should be doing: standby (during the trial) or stopped (after it).
 # Returns 1 if any item fails; VERIFY_WHY then says which and what was seen (the live colour's own message first).
 stack_check() { # commit seconds phase plan
-  local commit=$1 secs=$2 phase=$3 plan=$4 live other st line s why="" bad="" n leaders=0 roles="" id started restarts oom running code bid bst bn p bp note=""
+  local commit=$1 secs=$2 phase=$3 plan=$4 live other st line s why="" bad="" n leaders=0 rolelist="" id started restarts oom running code bid bst bn p bp note=""
   if [[ ! -s $STATE/baseline ]] && ! ((DRY)); then take_baseline; note=" (no baseline from before the deploy; taken now)"; fi
   # 1. The live colour, through the proxy.
   if verify_live "$commit" "$secs"; then
@@ -538,9 +539,9 @@ stack_check() { # commit seconds phase plan
   # 3. Exactly one leader across both colours.
   for s in blue green; do
     st="$(cstate "server-$s")"
-    if [[ $(running_of "$st") == true ]]; then n="$(colour_role "$s")"; roles+="$s=${n:-unknown} "; [[ $n != leader ]] || leaders=$((leaders + 1)); else roles+="$s=not running "; fi
+    if [[ $(running_of "$st") == true ]]; then n="$(colour_role "$s")"; rolelist+="$s=${n:-unknown} "; [[ $n != leader ]] || leaders=$((leaders + 1)); else rolelist+="$s=not running "; fi
   done
-  if ((leaders == 1)); then hc_set leader pass "one leader (${roles% })"; else hc_set leader fail "$leaders leaders where exactly one is needed (${roles% })"; fi
+  if ((leaders == 1)); then hc_set leader pass "one leader (${rolelist% })"; else hc_set leader fail "$leaders leaders where exactly one is needed (${rolelist% })"; fi
   # 4. The database was neither recreated nor restarted. A planned database step drops state/planned-db to re-baseline once.
   if [[ -f $STATE/planned-db && ! -L $STATE/planned-db ]] && ! ((DRY)); then baseline_set db || true; baseline_set_pg || true; rm -f "$STATE/planned-db"; note=" (a planned database step: baseline renewed)"; fi
   st="$(cstate db)"; line="$(baseline_line db)"; bp="$(awk '$1 == "pg" { print $2; exit }' "$STATE/baseline" 2>/dev/null || true)"
@@ -581,7 +582,7 @@ health_degraded() { # commit prev
 }
 
 pre_fail() { # message: undo what happened before the hand-over; the live colour was never touched
-  compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 && plan_stopped "$BG_IDLE" || true
+  if compose stop "server-$BG_IDLE" >>"$LOG" 2>&1; then plan_stopped "$BG_IDLE"; fi
   g reset --quiet --hard "$BG_PREV" || true
   bg_fail failed "$1 The live colour ($BG_LIVE) was not touched. Backup: $BG_BACKUP"
 }
