@@ -6,7 +6,9 @@
 //   BOSSMAN_RUNNER_PIDS    process and thread limit per runner (default 4096)
 //   BOSSMAN_RUNNER_CPU_SHARES  CPU weight per runner against 1024 for the server and database (default 512)
 //   BOSSMAN_CHECK_SLOTS         full checks a runner may run at once (default 1; each extra one needs about 3 GB of runner memory)
+//   PNPM_STORE_DIR         shared pnpm store for every agent install, a folder under the workspaces volume (default: its .pnpm-store)
 //   BOSSMAN_RUNNER_CPUS    optional hard CPU cap per runner, e.g. 4 (default none)
+//   BOSSMAN_RESERVED_THREADS  threads kept back for the server, database and proxy: off (default), auto (2 on hosts with 6+ threads), or a number
 //   BOSSMAN_NETGUARD       auto (default), enforce or off: the network guard that keeps runners off private networks
 //   BOSSMAN_NETGUARD_ALLOW extra host:port entries (space separated) every runner may reach on the private networks
 //   BOSSMAN_LAUNCHER_KEY_FILE  the key the server sends; made on first start if missing
@@ -14,9 +16,10 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, siblingsFromSysfs } from "./cpu-layout.js";
 import { dockerClient } from "./docker.js";
 import { launcher, launcherServer } from "./launcher.js";
-import { parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, type LauncherConfig } from "./spec.js";
+import { parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, parsePnpmStoreDir, type LauncherConfig } from "./spec.js";
 
 const env = process.env;
 const dataRoot = env.BOSSMAN_DATA;
@@ -24,7 +27,11 @@ if (!dataRoot || !path.isAbsolute(dataRoot)) {
   console.error("Set BOSSMAN_DATA to an absolute host folder, mounted at the same path in this container.");
   process.exit(1);
 }
+const cpuPlan = planReserve(parseReservedThreads(env.BOSSMAN_RESERVED_THREADS), allowedThreads(), siblingsFromSysfs);
+console.log(JSON.stringify({ at: new Date().toISOString(), msg: "cpu reserve", on: cpuPlan.on, reason: cpuPlan.reason }));
 const cfg: LauncherConfig = {
+  cpuPlan,
+  ...(cpuPlan.on ? { cpuset: formatCpuList(cpuPlan.runnerThreads) } : {}),
   dataRoot,
   network: env.BOSSMAN_RUNNER_NETWORK ?? "boss-man_default",
   serverUrl: env.BOSSMAN_RUNNER_URL ?? "ws://server:3100/api/runner/connect",
@@ -32,6 +39,7 @@ const cfg: LauncherConfig = {
   pidsLimit: parsePids(env.BOSSMAN_RUNNER_PIDS),
   cpuShares: parseCpuShares(env.BOSSMAN_RUNNER_CPU_SHARES),
   checkSlots: parseCheckSlots(env.BOSSMAN_CHECK_SLOTS),
+  pnpmStoreDir: parsePnpmStoreDir(env.PNPM_STORE_DIR),
   cpus: parseCpus(env.BOSSMAN_RUNNER_CPUS),
   guardMode: parseGuardMode(env.BOSSMAN_NETGUARD),
   guardAllow: parseAllow(env.BOSSMAN_NETGUARD_ALLOW),

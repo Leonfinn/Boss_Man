@@ -22,12 +22,19 @@ export type ClearWhen =
    * A revoked key or an empty credit balance leaves the quota windows untouched, so "room again" is true
    * at once (BOS-469, security review): only a clean run proves the credential is fixed.
    */
-  | { kind: "accountRanOk"; fundingSourceId: string };
+  | { kind: "accountRanOk"; fundingSourceId: string }
+  /** Server-health cards (BOS-640): the rule has stayed under its level for 30 minutes. */
+  | { kind: "serverCalm"; rule: "memory" | "freezes" };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
 /** What a raise says about itself, when it doesn't bring its own condition or cause key. */
 export type AlertCause = {
+  /**
+   * The company the alert is about. The ladder sets it from the raise (BOS-498); a key built here that is
+   * unique across companies must carry it.
+   */
+  companyId?: string;
   /**
    * The funding source the alert is about, for account outages (one card per account, DR-017 B).
    * `auth` is set for a credential/credit failure, which closes only on a clean run (not on "room again").
@@ -105,7 +112,9 @@ export const ALERT_KINDS = {
   // owner, one card per account, naming the agents instead of one card per run.
   account_limit: {
     topRung: "owner",
-    groupBy: (c) => (c.account ? `account:${c.account.fundingSourceId}:account_limit` : null),
+    // The key names the company too (BOS-498): the dedupe key is unique across companies, so without it one
+    // company's open card on a shared funding source would swallow another company's raise.
+    groupBy: (c) => (c.companyId && c.account ? `account:${c.companyId}:${c.account.fundingSourceId}:account_limit` : null),
     title: (c, n) =>
       `${c.account?.name ?? "An account"}: ${n} run${n === 1 ? "" : "s"} failed on ${c.account?.window ?? "a usage limit or auth error"}${c.agents?.length ? ` (${c.agents.length} agent${c.agents.length === 1 ? "" : "s"})` : ""}`,
     // A usage limit lifts when the account has room again; an auth or credit failure does not, because
@@ -149,6 +158,26 @@ export const ALERT_KINDS = {
   quota_held: {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
+  },
+  // watchdog.ts spareCapacity (BOS-659): the company is under-used while work waits, and picking the
+  // next ticket is a judgement call. Stops at the CEO; one card per company folds the stretches together.
+  spare_capacity: {
+    topRung: "ceo",
+    groupBy: (c) => (c.companyId ? `spare-capacity:${c.companyId}` : null),
+    title: (_c, n) => `Spare capacity: ${n} checks found the company under-used while work waits`,
+  },
+  // server-health.ts (BOS-640): the server's rss passed 60% of the memory it may use, or rose more than
+  // 1 GiB an hour for two hours. The CEO can ask for the update or the restart; it never reaches the owner
+  // by itself. Closes once memory has been under the level for 30 minutes (serverCalm).
+  server_memory: {
+    topRung: "ceo",
+    clearWhen: () => [{ kind: "serverCalm", rule: "memory" }],
+  },
+  // server-health.ts (BOS-640): more than 10 freezes over a second in 10 minutes. Only the owner can
+  // approve the update or restart the server, so it starts with them. Closes after 30 calm minutes.
+  server_freezes: {
+    topRung: "owner",
+    clearWhen: () => [{ kind: "serverCalm", rule: "freezes" }],
   },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {

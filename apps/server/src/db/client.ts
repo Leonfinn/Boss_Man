@@ -32,11 +32,27 @@ export async function openPostgres(url: string, opts: { migrate?: boolean } = {}
 // Lost on restart, harmless because it's rebuilt from the migrations on the next call.
 let migratedTemplate: Promise<Blob> | undefined;
 
+// BOS-657: opening a copy costs ~0.7 CPU-s, emptying its tables ~0.08. close() empties a template copy and parks it here for the next openPglite().
+// Opt out with `{ fresh: true }`, or for a whole run with BOSSMAN_PGLITE_REUSE=0.
+type PgliteClient = InstanceType<(typeof import("@electric-sql/pglite"))["PGlite"]>;
+const idlePool: { client: PgliteClient; tables: string }[] = [];
+
+async function listTables(client: PgliteClient): Promise<string> {
+  const r = await client.query<{ tablename: string }>("select tablename from pg_tables where schemaname = 'public' order by tablename");
+  return r.rows.map((x) => x.tablename).join(",");
+}
+
+/** Tests: really close every parked copy (a test file's last step). */
+export async function closePglitePool(): Promise<void> {
+  const parked = idlePool.splice(0);
+  await Promise.all(parked.map((e) => e.client.close().catch(() => undefined)));
+}
+
 /**
  * Tests and quick local runs: an in-process Postgres (PGlite), migrated with the same SQL.
  * `logQuery` (tests only) sees every statement, so a test can prove a pass made none.
  */
-export async function openPglite(dataDir?: string, opts: { logQuery?: (sql: string) => void } = {}): Promise<{ db: Db; close: () => Promise<void> }> {
+export async function openPglite(dataDir?: string, opts: { logQuery?: (sql: string) => void; fresh?: boolean } = {}): Promise<{ db: Db; close: () => Promise<void> }> {
   const { PGlite } = await import("@electric-sql/pglite");
   const { drizzle } = await import("drizzle-orm/pglite");
   const { migrate } = await import("drizzle-orm/pglite/migrator");
@@ -53,10 +69,35 @@ export async function openPglite(dataDir?: string, opts: { logQuery?: (sql: stri
       await first.close();
       return dump;
     })();
-    const client = new PGlite({ extensions: { vector }, loadDataDir: await migratedTemplate });
-    // A copy's first query loads PGlite's array types; a close during that never returns, so do it now.
-    await client.query("select 1");
-    return { db: drizzle(client, { schema, logger }) as unknown as Db, close: () => client.close() };
+    const reuse = !opts.fresh && process.env.BOSSMAN_PGLITE_REUSE !== "0";
+    let entry = reuse ? idlePool.pop() : undefined;
+    if (!entry) {
+      const client = new PGlite({ extensions: { vector }, loadDataDir: await migratedTemplate });
+      // A copy's first query loads PGlite's array types; a close during that never returns, so do it now.
+      await client.query("select 1");
+      entry = { client, tables: await listTables(client) };
+    }
+    const { client, tables } = entry;
+    let closed = false;
+    const close = async () => {
+      if (closed) return;
+      closed = true;
+      if (reuse) {
+        try {
+          // Back to the migrated, empty state: no rows, sequences from 1. If a test added or dropped a table, the copy is not the template any more.
+          const now = await listTables(client);
+          if (now === tables) {
+            if (now) await client.exec(`truncate table ${now.split(",").map((t) => `"${t}"`).join(", ")} restart identity cascade`);
+            idlePool.push({ client, tables });
+            return;
+          }
+        } catch {
+          // Fall through and close it for real.
+        }
+      }
+      await client.close();
+    };
+    return { db: drizzle(client, { schema, logger }) as unknown as Db, close };
   }
   const client = new PGlite({ dataDir, extensions: { vector } });
   const db = drizzle(client, { schema, logger });

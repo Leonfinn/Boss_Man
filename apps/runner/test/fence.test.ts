@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { gitAuthEnv } from "../src/workspace.js";
-import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, probeLandlock, repoGrant, runnerFence, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
+import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, pnpmStoreDir, probeLandlock, pruneStore, pruneStores, repoGrant, runnerFence, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
 
 const { abi } = probeLandlock();
 const live = levelFor(abi).level !== "unavailable";
@@ -73,11 +73,34 @@ describe("the runner's fence setting", () => {
     expect(runnerFence("full", "/data", "/ws")).toEqual({ level: "full", agentsRoot: "/data/agents", pnpmStore: "/ws/.pnpm-store" });
   });
 
+  // BOS-568: the store can be moved with PNPM_STORE_DIR, e.g. to a folder on a bigger volume; never a relative path.
+  it("moves the shared pnpm store wherever PNPM_STORE_DIR says", () => {
+    expect(pnpmStoreDir("/ws", undefined)).toBe("/ws/.pnpm-store");
+    expect(pnpmStoreDir("/ws", "  ")).toBe("/ws/.pnpm-store");
+    expect(pnpmStoreDir("/ws", "/ws/big//pnpm/")).toBe("/ws/big/pnpm");
+    expect(() => pnpmStoreDir("/ws", "pnpm-store")).toThrow(/absolute/);
+    expect(() => pnpmStoreDir("/ws", "/big/../etc")).toThrow(/absolute/);
+  });
+
+  // BOS-633: the workspaces root itself (and /) would grant agents the whole volume, and the gate's store
+  // (/home/node/workspaces-gate) would land on the root disk: the very failure BOS-568 fixed.
+  it("refuses a shared store at the workspaces root, above it, or /", () => {
+    expect(() => pnpmStoreDir("/home/node/workspaces", "/home/node/workspaces")).toThrow(/root/);
+    expect(() => pnpmStoreDir("/home/node/workspaces", "/home/node/workspaces/")).toThrow(/root/);
+    expect(() => pnpmStoreDir("/ws", "/")).toThrow();
+    expect(() => pnpmStoreDir("/ws", "/wsx")).toThrow(/under/);
+    expect(() => pnpmStoreDir("/ws", "/home/node/workspaces-other")).toThrow(/under/);
+    expect(() => pnpmStoreDir("/ws", "/tmp/pnpm-store")).toThrow(/under/);
+  });
+
   // main.ts starts the daemon, so no test runs it. Without this setting every run asked to be
   // fenced ran unfenced while hello still offered the fence (found building BOS-323).
   it("is passed to the runner's SessionManager from its self-test", () => {
     const main = readFileSync(path.join(import.meta.dirname, "..", "src", "main.ts"), "utf8");
-    expect(main).toMatch(/new SessionManager\(\{[\s\S]*?\n  fence: runnerFence\(sandbox\.level, dataDir, workspacesRoot\),[\s\S]*?\n\}\);/);
+    expect(main).toMatch(/new SessionManager\(\{[\s\S]*?\n  fence: \{ \.\.\.runnerFence\(sandbox\.level, dataDir, workspacesRoot\), pnpmStore: storeDir \},[\s\S]*?\n\}\);/);
+    // The store comes from PNPM_STORE_DIR through the same check, and both stores are pruned on a schedule (BOS-633).
+    expect(main).toMatch(/const storeDir = pnpmStoreDir\(workspacesRoot, env\.PNPM_STORE_DIR\)/);
+    expect(main).toMatch(/pruneStores\(storeDir, log\)/);
   });
 });
 
@@ -275,3 +298,67 @@ describe("applyCheckSlots (BOSSMAN_CHECK_SLOTS)", () => {
     expect(existsSync(proofOf(d))).toBe(true);
   });
 });
+
+// BOS-633: both pnpm stores are pruned on a schedule. The test runs a stand-in pnpm (a small script written to a
+// temp folder) so it never downloads a package or touches the network, and proves the prune runs twice safely,
+// does nothing without a store, and keeps going for the gate store when the shared one fails.
+describe("pruneStores (BOS-633)", () => {
+  const fakePnpm = (dir: string) => {
+    const bin = path.join(dir, "pnpm");
+    writeFileSync(bin, '#!/bin/sh\n[ "$1" = "store" ] && [ "$2" = "prune" ] || exit 2\nfor a in "$@"; do dir="$a"; done\n[ -d "$dir" ] || { echo "no store at $dir" >&2; exit 1; }\necho "$dir" >> "$PRUNE_LOG"\necho "Pruned 0 packages"\n');
+    execFileSync("chmod", ["+x", bin]);
+    return bin;
+  };
+  it("prunes the shared and gate stores, twice in a row, and leaves them in place", async () => {
+    const d = mkdtempSync(path.join(tmpdir(), "prune-"));
+    const log = path.join(d, "prune.log");
+    const bin = fakePnpm(d);
+    const shared = path.join(d, "store");
+    mkdirSync(shared);
+    mkdirSync(`${shared}-gate`);
+    process.env.PRUNE_LOG = log;
+    try {
+      expect(await pruneStores(shared, () => {}, bin)).toEqual({ shared: { pruned: true }, gate: { pruned: true } });
+      expect(await pruneStores(shared, () => {}, bin)).toEqual({ shared: { pruned: true }, gate: { pruned: true } });
+      const lines = readFileSync(log, "utf8").trim().split("\n");
+      expect(lines).toEqual([shared, `${shared}-gate`, shared, `${shared}-gate`]);
+      expect(existsSync(shared) && existsSync(`${shared}-gate`)).toBe(true);
+    } finally {
+      delete process.env.PRUNE_LOG;
+    }
+  });
+  it("skips a store that does not exist yet, without running pnpm for it", async () => {
+    const d = mkdtempSync(path.join(tmpdir(), "prune-"));
+    const log = path.join(d, "prune.log");
+    const bin = fakePnpm(d);
+    process.env.PRUNE_LOG = log;
+    try {
+      expect(await pruneStore(path.join(d, "absent"), () => {}, bin)).toEqual({ pruned: false, why: "no store yet" });
+      expect(existsSync(log)).toBe(false);
+    } finally {
+      delete process.env.PRUNE_LOG;
+    }
+  });
+  it("prunes the gate store even when the shared store's prune fails", async () => {
+    const d = mkdtempSync(path.join(tmpdir(), "prune-"));
+    const log = path.join(d, "prune.log");
+    const bin = path.join(d, "pnpm");
+    writeFileSync(bin, `#!/bin/sh\nfor a in "$@"; do dir="$a"; done\ncase "$dir" in */failing) echo "boom" >&2; exit 1 ;; esac\necho "$dir" >> "$PRUNE_LOG"\n`);
+    execFileSync("chmod", ["+x", bin]);
+    const shared = path.join(d, "failing");
+    mkdirSync(shared);
+    mkdirSync(`${shared}-gate`);
+    process.env.PRUNE_LOG = log;
+    const said: string[] = [];
+    try {
+      const r = await pruneStores(shared, (m) => said.push(m), bin);
+      expect(r.shared.pruned).toBe(false);
+      expect(r.gate.pruned).toBe(true);
+      expect(readFileSync(log, "utf8")).toContain(`${shared}-gate`);
+      expect(said.join("\n")).toMatch(/failed/);
+    } finally {
+      delete process.env.PRUNE_LOG;
+    }
+  });
+});
+
