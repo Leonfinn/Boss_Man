@@ -37,11 +37,11 @@ describe("check queue", () => {
     const first = await s.q.claimNext(null);
     expect(first.map((j) => j.id)).toEqual([urgent.id]);
     expect(await s.q.claimNext(null)).toEqual([]); // the one slot is taken
-    await s.q.complete(urgent.id, { commit: urgent.commit, exitCode: 0, logTail: "ok" });
+    await s.q.complete(urgent.id, { commit: urgent.commit, exitCode: 0, logTail: "ok", runnerId: null });
     expect((await s.q.claimNext(null))[0]!.id).toBe(m1.id);
-    await s.q.complete(m1.id, { commit: m1.commit, exitCode: 0, logTail: "" });
+    await s.q.complete(m1.id, { commit: m1.commit, exitCode: 0, logTail: "", runnerId: null });
     expect((await s.q.claimNext(null))[0]!.id).toBe(m2.id);
-    await s.q.complete(m2.id, { commit: m2.commit, exitCode: 1, logTail: "boom" });
+    await s.q.complete(m2.id, { commit: m2.commit, exitCode: 1, logTail: "boom", runnerId: null });
     expect((await s.q.claimNext(null))[0]!.id).toBe(pre.id);
     await s.close();
   });
@@ -60,11 +60,11 @@ describe("check queue", () => {
     const s = await setup();
     const quick = (await s.req({ tree: "c1", kind: "pre_review", scope: "full", command: "scripts/check-quick.sh" })).job;
     await s.q.claimNext(null);
-    await s.q.complete(quick.id, { commit: quick.commit, exitCode: 0, logTail: "" });
+    await s.q.complete(quick.id, { commit: quick.commit, exitCode: 0, logTail: "", runnerId: null });
     const first = await s.req({ tree: "c1", command: "pnpm verify" });
     expect(first.reused).toBeNull();
     await s.q.claimNext(null);
-    await s.q.complete(first.job.id, { commit: first.job.commit, exitCode: 0, logTail: "" });
+    await s.q.complete(first.job.id, { commit: first.job.commit, exitCode: 0, logTail: "", runnerId: null });
     expect((await s.req({ tree: "c1", command: "pnpm verify" })).reused).toBe("passed");
     expect((await s.req({ tree: "c1", command: "pnpm deep" })).reused).toBeNull();
     await s.close();
@@ -73,13 +73,13 @@ describe("check queue", () => {
     const s = await setup();
     const a = (await s.req({ tree: "t1", kind: "pre_review", scope: "full" })).job;
     await s.q.claimNext(null);
-    await s.q.complete(a.id, { commit: a.commit, exitCode: 0, logTail: "" });
+    await s.q.complete(a.id, { commit: a.commit, exitCode: 0, logTail: "", runnerId: null });
     const merge = await s.req({ tree: "t1" });
     expect(merge.reused).toBe("passed");
     expect(merge.job.id).toBe(a.id);
     const q2 = (await s.req({ tree: "t2", kind: "pre_review", scope: "quick" })).job;
     await s.q.claimNext(null);
-    await s.q.complete(q2.id, { commit: q2.commit, exitCode: 0, logTail: "" });
+    await s.q.complete(q2.id, { commit: q2.commit, exitCode: 0, logTail: "", runnerId: null });
     expect((await s.req({ tree: "t2", scope: "full" })).reused).toBeNull();
     expect((await s.req({ tree: "t2", kind: "pre_review", scope: "quick" })).reused).toBe("passed");
     await s.close();
@@ -130,9 +130,9 @@ describe("check queue", () => {
     const pre = (await s.req({ tree: "p", kind: "pre_review", scope: "quick" })).job;
     const fix = (await s.req({ tree: "f", fixesMain: true })).job;
     expect((await s.q.claimNext(null))[0]!.id).toBe(fix.id);
-    await s.q.complete(fix.id, { commit: fix.commit, exitCode: 0, logTail: "" });
+    await s.q.complete(fix.id, { commit: fix.commit, exitCode: 0, logTail: "", runnerId: null });
     expect((await s.q.claimNext(null))[0]!.id).toBe(pre.id);
-    await s.q.complete(pre.id, { commit: pre.commit, exitCode: 0, logTail: "" });
+    await s.q.complete(pre.id, { commit: pre.commit, exitCode: 0, logTail: "", runnerId: null });
     expect(await s.q.claimNext(null)).toEqual([]);
     const held = await s.q.status(s.companyId);
     expect(held.held.map((j) => j.id)).toEqual([other.id]);
@@ -146,9 +146,12 @@ describe("check queue", () => {
     const s = await setup();
     await s.req({ tree: "a" });
     const running = (await s.q.claimNext(null))[0]!;
-    expect(await s.q.complete(running.id, { commit: "someone-elses", exitCode: 0, logTail: "" })).toBeNull();
-    expect((await s.q.complete(running.id, { commit: running.commit, exitCode: 0, logTail: "" }))?.state).toBe("passed");
-    expect(await s.q.complete(running.id, { commit: running.commit, exitCode: 1, logTail: "" })).toBeNull();
+    expect(await s.q.complete(running.id, { commit: running.commit, exitCode: 0, logTail: "", runnerId: "another-runner" })).toBeNull();
+    await s.q.progress(running.id, "another-runner", "forged");
+    expect((await s.q.claimNext(null)).length).toBe(0); // still running, not finished by the other runner
+    expect(await s.q.complete(running.id, { commit: "someone-elses", exitCode: 0, logTail: "", runnerId: null })).toBeNull();
+    expect((await s.q.complete(running.id, { commit: running.commit, exitCode: 0, logTail: "", runnerId: null }))?.state).toBe("passed");
+    expect(await s.q.complete(running.id, { commit: running.commit, exitCode: 1, logTail: "", runnerId: null })).toBeNull();
     await s.close();
   });
 
