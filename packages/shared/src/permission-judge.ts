@@ -667,24 +667,57 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
     // script there is Deny). `run <script>` runs a package.json script: a plain script name, never a path outside.
     const PM = /^(?:pnpm|npm|yarn|bun)$/;
     const PM_EXEC = /^(?:exec|dlx|x|create)$/;
+    // A folder flag names the folder the package manager runs in: `-C`, `--dir`, `--prefix`, `--cwd`, `--filter`.
+    const FOLDER_FLAG = /^(?:-C|--dir|--prefix|--cwd|--filter)(?:=|$)/;
     const PM_TOOL = head === "npx" || head === "pnpx" || head === "bunx";
     if (PM.test(head) || PM_TOOL) {
       if (prefixed) return true;
+      // A package-manager setting that names a file can pick the shell that runs a script or the rc file it reads:
+      // `npm run build --script-shell=/tmp/x.sh`, `npm --userconfig=/tmp/rc run build` (BOS-638, Jane round 5, finding 2).
+      // The value can come before or after the verb, so scan every argument; the file must be a plain in-checkout path.
+      const CONFIG_FILE = /^--(?:script-shell|userconfig|globalconfig|config)(?:=|$)/;
+      for (let k = 0; k < args.length; k++) {
+        const w = args[k]!;
+        if (!CONFIG_FILE.test(w)) continue;
+        const v = w.includes("=") ? w.slice(w.indexOf("=") + 1) : args[++k];
+        if (v === undefined || !plainPath(v) || !scriptOk(v)) return true;
+      }
+      // A tool run through a package manager (`pnpm vitest ...`, `npx <tool> ...`) reads files named in its arguments as
+      // code or config (`--config /tmp/x.config.ts`, a positional `/tmp/x.test.ts`). The judge can't tell which argument a
+      // tool loads, so any argument that leaves the checkout (an absolute path or a `..` climb) gets no Allow
+      // (BOS-638, Jane round 5, finding 3: the general rule she asked for, not one per tool).
+      const leaves = (w: string): boolean => {
+        const p = plainPath(w);
+        return p !== null && (p.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(p));
+      };
+      for (let k = 0; k < args.length; k++) {
+        const w = args[k]!;
+        if (w.startsWith("-")) {
+          if (w.includes("=") && leaves(w.slice(w.indexOf("=") + 1))) return true;
+          continue;
+        }
+        if (leaves(w)) return true;
+      }
       let verb = args[0];
       let rest = args.slice(1);
       if (verb && verb.startsWith("-")) {
         // A folder flag before the verb (`pnpm -C /tmp/p run x`, `npm --prefix /tmp/p run x`): the folder must stay in the
-        // checkout. Other pre-verb flags are fine; they don't change what runs.
-        if (/^(?:-C|--dir|--prefix|--cwd|--filter)(?:=|$)/.test(verb)) {
-          const d = verb.includes("=") ? verb.slice(verb.indexOf("=") + 1) : rest.shift();
-          if (d === undefined || !cdOwn(d)) return true;
-          verb = rest[0];
-          rest = rest.slice(1);
-        } else {
-          while (rest.length > 0 && rest[0]!.startsWith("-") && !/^(?:-C|--dir|--prefix|--cwd|--filter)(?:=|$)/.test(rest[0]!)) rest = rest.slice(1);
-          verb = rest[0];
-          rest = rest.slice(1);
+        // checkout. Other pre-verb flags are fine; they don't change what runs. A folder flag may come *after* another flag
+        // (`pnpm --silent -C /tmp/p run x`, `npm --silent --prefix /tmp/p run x`), so every pre-verb flag is scanned, not just
+        // the first (BOS-638, Jane round 5: only the first was checked, so a later folder flag slipped through).
+        let idx = 0;
+        let pre = [verb, ...rest];
+        while (idx < pre.length && pre[idx]!.startsWith("-")) {
+          if (FOLDER_FLAG.test(pre[idx]!)) {
+            const d = pre[idx]!.includes("=") ? pre[idx]!.slice(pre[idx]!.indexOf("=") + 1) : pre[idx + 1];
+            if (d === undefined || !cdOwn(d)) return true;
+            idx += pre[idx]!.includes("=") ? 1 : 2;
+          } else {
+            idx += 1;
+          }
         }
+        verb = pre[idx];
+        rest = pre.slice(idx + 1);
       }
       if (verb === undefined || verb.startsWith("-")) continue; // `pnpm --version`, `npx --help`: nothing runs code
       if (PM_EXEC.test(verb) || PM_TOOL) {
@@ -790,7 +823,14 @@ function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
     // launcher that starts another program (`-exec`, `-execdir`, `-ok`, xargs, env, …). A plain program whose arguments
     // merely mention `node` (`grep -r node src/`) is left to the other checks.
     if (codeWord(chead)) return true;
-    for (let k = 0; k < cargs.length; k++) if (/^-(?:exec|execdir|ok|okdir)$/.test(cargs[k]!) && codeWord(cargs[k + 1] ?? "")) return true;
+    // A `-exec`/`-execdir`/`-ok` program is a command the judge must read: an interpreter/launcher there is Deny, and so is
+    // a program given as a path that leaves the checkout (`find . -exec /tmp/x.sh {} ;`) (BOS-638, Jane round 5, finding 4).
+    const leavesOut = (w: string): boolean => { const p = plainPath(w); return p !== null && (p.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(p)); };
+    for (let k = 0; k < cargs.length; k++) {
+      if (!/^-(?:exec|execdir|ok|okdir)$/.test(cargs[k]!)) continue;
+      const prog = cargs[k + 1] ?? "";
+      if (codeWord(prog) || leavesOut(prog)) return true;
+    }
     if ((chead === "xargs" || chead === "env") && cargs.some((w) => !w.startsWith("-") && codeWord(w))) return true;
   }
   return false;
