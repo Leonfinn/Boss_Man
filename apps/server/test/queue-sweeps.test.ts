@@ -112,6 +112,103 @@ describe("ranked decision queue (R20)", () => {
     expect(q[0]!.score).toBeLessThan(q[1]!.score);
   });
 
+  describe("do-this-next ordering and the waiting group (BOS-551)", () => {
+    type Ordered = Row & { step?: number | null; waiting?: string | null; doAfter?: string[]; doBefore?: string[] };
+    const ordered = async () => (await ctx.queue()) as unknown as Ordered[];
+
+    it("numbers hands-on cards and puts them in do-this-next order, respecting do after / do before", async () => {
+      ctx = await setup();
+      const q = (await ctx.queue()) as unknown as Ordered[];
+      expect(q).toEqual([]);
+      // Three cards that all need the owner's hands, raised newest-first: update, measure, setup.
+      const setupCard = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Turn on ntfy", options: ["Done", "Skip"], recommended: "Done", steps: ["Open Settings → Add-ons → ntfy."] });
+      ctx.advance(HOUR);
+      const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      ctx.advance(HOUR);
+      // The update must happen after the measurement (a restart resets the reading), expressed as doAfter on the update.
+      const update = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Update to ad845180", options: ["Done", "Skip"], recommended: "Done", steps: ["Apply the update."], doAfter: [{ decisionId: measure.id, label: "Read the memory figure" }] });
+      ctx.advance(HOUR);
+      // The setup must happen before the measurement.
+      await ctx.db.update(decisions).set({ context: sql`${decisions.context} || '{"doBefore":[{"decisionId":"${sql.raw(measure.id)}","label":"Read the memory figure"}]}'::jsonb` }).where(eq(decisions.id, setupCard.id));
+
+      const rows = (await ordered()).filter((r) => !r.waiting);
+      expect(new Set(rows.map((r) => r.id))).toEqual(new Set([setupCard.id, measure.id, update.id]));
+      // Measurement and update: the measure (step before update) plus an independent setup.
+      const step = (id: string) => rows.find((r) => r.id === id)!.step!;
+      expect(step(measure.id)).toBeLessThan(step(update.id));
+      expect(step(setupCard.id)).toBeLessThan(step(measure.id));
+      expect(rows).toEqual([...rows].sort((a, b) => a.step! - b.step!));
+      // Labels show on the card that has the link.
+      expect(rows.find((r) => r.id === update.id)!.doAfter).toEqual(["Read the memory figure"]);
+    });
+
+    it("keeps today's newest-first order for cards with no ordering info, and never numbers cards that need no hands-on work", async () => {
+      ctx = await setup();
+      const older = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+      ctx.advance(HOUR);
+      const newer = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Which domain?", options: ["A", "B"], recommended: "A" });
+      const rows = (await ordered()).filter((r) => !r.waiting);
+      expect(rows.map((r) => r.id)).toEqual([newer.id, older.id]);
+      expect(rows.every((r) => r.step == null)).toBe(true);
+    });
+
+    it("puts a card the owner already acted on into the waiting group at the bottom, with a reason", async () => {
+      ctx = await setup();
+      const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+
+      const rows = await ordered();
+      // The waiting card is last, is marked, and the hands-on card is numbered.
+      expect(rows[rows.length - 1]!.id).toBe(stale.id);
+      expect(rows[rows.length - 1]!.waiting).toMatch(/checking whether this is still needed/i);
+      expect(rows[0]!.id).toBe(hands.id);
+      expect(rows[0]!.step).toBe(1);
+    });
+
+    it("puts a card whose ticket is back with an agent into the waiting group, with the reason", async () => {
+      ctx = await setup();
+      const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      // A merge card whose check failed: the ticket went back to the agent (in progress).
+      const ticket = await ctx.ticket({ title: "Ship the invoicing page", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: ticket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
+
+      const rows = await ordered();
+      const w = rows.find((r) => r.id === sentBack!.id)!;
+      expect(w.waiting).toMatch(/merge check failed/i);
+      expect(w.waiting).toMatch(/Engineer/);
+      // It is last, and the hands-on card keeps its step.
+      expect(rows[rows.length - 1]!.id).toBe(sentBack!.id);
+      expect(rows.find((r) => r.id === hands.id)!.step).toBe(1);
+    });
+
+    it("orders a card that carries a do-after link even when it needs no hands-on work, but never numbers it", async () => {
+      ctx = await setup();
+      const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      ctx.advance(HOUR);
+      // An approval that needs no steps, but must come after the measurement.
+      const approve = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve", doAfter: [{ decisionId: measure.id, label: "Read the memory figure" }] });
+      const rows = (await ordered()).filter((r) => !r.waiting);
+      // The measurement (hands-on) is numbered and comes before the linked approval.
+      expect(rows.find((r) => r.id === measure.id)!.step).toBe(1);
+      expect(rows.find((r) => r.id === approve.id)!.step).toBeUndefined();
+      expect(rows.findIndex((r) => r.id === measure.id)).toBeLessThan(rows.findIndex((r) => r.id === approve.id));
+      expect(rows.find((r) => r.id === approve.id)!.doAfter).toEqual(["Read the memory figure"]);
+    });
+
+    it("breaks a cycle rather than looping, still ordering every card once", async () => {
+      ctx = await setup();
+      const a = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "A", options: ["Done", "Skip"], recommended: "Done", steps: ["Step A."] });
+      const b = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "B", options: ["Done", "Skip"], recommended: "Done", steps: ["Step B."] });
+      // A after B, and B after A: a cycle.
+      await ctx.db.update(decisions).set({ context: sql`${decisions.context} || '{"doAfter":[{"decisionId":"${sql.raw(b.id)}","label":"B"}]}'::jsonb` }).where(eq(decisions.id, a.id));
+      await ctx.db.update(decisions).set({ context: sql`${decisions.context} || '{"doAfter":[{"decisionId":"${sql.raw(a.id)}","label":"A"}]}'::jsonb` }).where(eq(decisions.id, b.id));
+      const rows = (await ordered()).filter((r) => !r.waiting);
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((r) => r.step))).toEqual(new Set([1, 2]));
+    });
+  });
+
   it("links the tickets a card is about and the references in its text, in its own company only", async () => {
     ctx = await setup();
     const restore = await ctx.ticket({ title: "Restore proof" });
