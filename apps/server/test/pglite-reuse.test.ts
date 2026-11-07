@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 
-const rows = async (db: Awaited<ReturnType<typeof openPglite>>["db"], q: string) => (await db.execute(sql.raw(q))).rows as Record<string, unknown>[];
+const rows = async (db: Awaited<ReturnType<typeof openPglite>>["db"], q: string) => ((await db.execute(sql.raw(q))) as unknown as { rows: unknown }).rows as Record<string, unknown>[];
 
 describe("openPglite reuse", () => {
   it("empties rows and restarts sequences between tests", async () => {
