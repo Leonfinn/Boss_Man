@@ -25,6 +25,7 @@
 # Run it from the repository root, where docker-compose.yml is.
 set -euo pipefail
 
+# BOS-562: not affected by unreadable checkout files: the runner image copies with COPY --chown=node and the netguard image runs as root.
 IMAGE=boss-man-runner
 # Compose runners follow COMPOSE_PROFILES (from .env); with none set, the "runners" profile as
 # before. Runners the launcher made (R55) are recreated by the launcher itself.

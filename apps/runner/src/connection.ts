@@ -21,6 +21,8 @@ export type ConnectionOptions = {
   pendingPermissions?: () => Array<{ runId: string; requestId: string }>;
   /** Why this process started, told to the server in every hello so it can record the restart's reason (BOS-594). */
   restart?: { previousExit?: "stopped" | "crashed" | null; hostBootAt?: string | null };
+  /** Ids of the runs the runner has now; the server closes any other open run (BOS-583). */
+  liveRuns?: () => string[];
 };
 
 export class RunnerConnection {
@@ -83,7 +85,8 @@ export class RunnerConnection {
     ws.on("open", () => {
       this.attempt = 0;
       const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(pending.length ? { pending } : {}) });
+      const liveRuns = this.opts.liveRuns?.();
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");

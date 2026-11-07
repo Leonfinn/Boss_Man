@@ -109,6 +109,30 @@ export function missingVerdicts(criteria: readonly Criterion[], note: string | n
 /** The after-merge criteria with no verdict yet: what keeps a merged ticket open. */
 export const unreportedAfterMerge = (criteria: readonly Criterion[], note: string | null | undefined): string[] => missingVerdicts(criteria, note, "after");
 
+/** The after-merge criteria reported fail: a live check that failed, which gets a follow-up ticket (DR-009 #5, BOS-575). */
+export const failedAfterMerge = (criteria: readonly Criterion[], note: string | null | undefined): string[] =>
+  readVerdicts(criteria, note)
+    .filter((r, i) => isAfterMerge(criteria[i]!) && r.verdict === "fail")
+    .map((r) => r.criterion);
+
+/**
+ * At merge (BOS-575): nothing can have failed on the live work yet, so a criterion still at fail when the
+ * branch lands hasn't been shown, it has been put off ("3 fail: measured after merge, owner accepted").
+ * It is carried over: marked after merge, and its stale fail dropped from the note (a fail always wins
+ * in readVerdicts, so it would otherwise outvote the later pass). The passes are kept by number. Null when
+ * no criterion is at fail, so the note is left exactly as it was.
+ */
+export function carryFailedOver(criteria: readonly Criterion[], note: string | null | undefined): { criteria: Criterion[]; carried: string[]; note: string } | null {
+  const verdicts = readVerdicts(criteria, note);
+  if (!verdicts.some((r) => r.verdict === "fail")) return null;
+  const next = criteria.map((c, i): Criterion => (verdicts[i]!.verdict === "fail" ? { text: criterionText(c), after: "merge" } : c));
+  const passed = verdicts.flatMap((r, i) => (r.verdict === "pass" ? [`${i + 1} pass`] : []));
+  const put = verdicts.flatMap((r, i) => (r.verdict === "fail" ? [i + 1] : []));
+  // No pass or fail word in the second sentence, so it can't be read as a verdict for any criterion.
+  const rest = `Carried over at merge, to show now the work is live: criterion ${put.join(" and ")}`;
+  return { criteria: next, carried: verdicts.filter((r) => r.verdict === "fail").map((r) => r.criterion), note: passed.length ? `${passed.join("; ")}. ${rest}` : rest };
+}
+
 /** Words that mean a check can only be settled once the work is live, not in a review. */
 const LIVE = /\b(after (the )?merg(?:e|ing)|once (it'?s |it is )?(merged|live|deployed|in production)|post-?merge|standby window|live deploy|on a real host|on the (real|production) host|on your (own )?(host|machine|server)|on the (owner'?s )?(host|machine|server))\b/i;
 
