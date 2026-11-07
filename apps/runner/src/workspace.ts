@@ -11,6 +11,7 @@
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
@@ -21,6 +22,45 @@ import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
 
 const run = promisify(execFile);
 const VERIFY_KILL_GRACE_MS = 2000;
+/** A review copy's install (BOS-693): seconds from a warm store; a cold one on a slow link can take a few minutes. */
+export const REVIEW_INSTALL_TIMEOUT_MS = 5 * 60_000;
+
+/** Runs a command in its own process group, killed whole at the timeout; output kept to the last 4 KB. Never rejects on exit. */
+function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; timedOut: boolean; output: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    let timedOut = false;
+    const onData = (d: Buffer) => {
+      output = (output + String(d)).slice(-4096);
+    };
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", onData);
+    const kill = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        // group already gone
+      }
+    };
+    let hard: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill("SIGTERM");
+      hard = setTimeout(() => kill("SIGKILL"), VERIFY_KILL_GRACE_MS);
+    }, timeoutMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      clearTimeout(hard);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      clearTimeout(hard);
+      resolve({ code, timedOut, output: output.trim() });
+    });
+  });
+}
 
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
@@ -98,6 +138,16 @@ export function safeGitEnv(extra: Record<string, string> = {}): Record<string, s
   return env;
 }
 
+/**
+ * The git author and committer for a name. An agent's session gets this in its environment (BOS-255):
+ * the worktrees share the repo's own config, where an agent's `git config user.name` lands for every
+ * later run, and environment variables beat any config file.
+ */
+export function gitAuthorEnv(by?: string) {
+  const name = by?.trim().slice(0, 200) || "Boss Man";
+  return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
+}
+
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>();
 
@@ -126,8 +176,7 @@ export class Workspaces {
    * merge) are always Boss Man, since they aren't the agent's work.
    */
   private authorEnv(by?: string) {
-    const name = by?.trim().slice(0, 200) || "Boss Man";
-    return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
+    return gitAuthorEnv(by);
   }
 
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
@@ -306,6 +355,52 @@ export class Workspaces {
       }
       return { path: dir, commit };
     });
+  }
+
+  /** One install at a time per review copy: a ticket's code and security reviewers share the folder. */
+  private readonly reviewInstalls = new Map<string, Promise<unknown>>();
+
+  /**
+   * Installs a review copy's packages (BOS-693), so its reviewer can run the ticket's tests in place instead of building a
+   * /tmp clone. Only for a pnpm project, and only from the shared store (BOS-568): with no shared store it does nothing
+   * rather than start a store of its own. The install follows the branch's lockfile and runs its packages' scripts, which
+   * nobody has reviewed yet, so it runs as a server-queued check job does: fenced where the runner can fence, with a HOME
+   * of its own under check-jobs-home that goes afterwards (and that the start-up sweep takes if the runner dies mid-install).
+   * Never throws: the review starts either way, and what happened is in `detail`.
+   */
+  async installReviewDeps(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, timeoutMs = REVIEW_INSTALL_TIMEOUT_MS): Promise<{ installed: boolean; detail: string }> {
+    const dir = this.reviewDir(spec.ticketId);
+    const prev = this.reviewInstalls.get(spec.ticketId) ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(async (): Promise<{ installed: boolean; detail: string }> => {
+      if (!existsSync(path.join(dir, "pnpm-lock.yaml"))) return { installed: false, detail: "not a pnpm project" };
+      if (!this.jobFence?.pnpmStore) return { installed: false, detail: "this runner has no shared pnpm store" };
+      const pnpm = (this.baseEnv.PATH ?? "").split(":").map((d) => d && path.join(d, "pnpm")).find((p) => p && existsSync(p));
+      if (!pnpm) return { installed: false, detail: "pnpm isn't on this runner's PATH" };
+      const id = randomUUID();
+      const home = path.join(this.root, "check-jobs-home", id);
+      this.activeJobs.add(id);
+      try {
+        const fence = this.jobFenceFor(this.repoDir(spec.projectId), dir, home);
+        // CI: no prompts (and pnpm purges a node_modules made from another store without asking).
+        const args = ["install", "--frozen-lockfile", "--prefer-offline", "--config.confirmModulesPurge=false"];
+        const launch = fence.wrap ? fence.wrap(pnpm, args) : { bin: pnpm, args };
+        const env = { PATH: this.baseEnv.PATH, CI: "1", ...fence.env } as NodeJS.ProcessEnv;
+        const r = await runGroup(launch.bin, launch.args, dir, env, timeoutMs);
+        if (r.code === 0) return { installed: true, detail: "installed" };
+        return { installed: false, detail: `${r.timedOut ? `timed out after ${Math.round(timeoutMs / 1000)} s` : `exit ${r.code}`}: ${r.output.slice(-500)}` };
+      } catch (err) {
+        return { installed: false, detail: String((err as Error)?.message ?? err).slice(0, 500) };
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+        this.activeJobs.delete(id);
+      }
+    });
+    this.reviewInstalls.set(spec.ticketId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.reviewInstalls.get(spec.ticketId) === next) this.reviewInstalls.delete(spec.ticketId);
+    }
   }
 
   /** The worktree as it is now, as a commit no ref points at; its branch, index and files are untouched. */
