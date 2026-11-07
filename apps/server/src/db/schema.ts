@@ -386,6 +386,14 @@ export const tickets = pgTable(
     /** Optional "blocked until" time and reason (BOS-59); the same trigger clears both when the ticket leaves blocked. */
     blockedUntil: timestamp("blocked_until", { withTimezone: true }),
     blockedUntilReason: text("blocked_until_reason"),
+    /** The branch head the missed-work sweep last saw, and when it changed (BOS-612): a new commit is progress, a run start is not. */
+    progressHead: text("progress_head"),
+    progressAt: timestamp("progress_at", { withTimezone: true }),
+    /** The CEO's plan for this ticket and its deadline (BOS-612): the stuck alert stays quiet until the deadline plus a grace, then raises one card. */
+    ceoPlan: text("ceo_plan"),
+    ceoPlanDeadline: timestamp("ceo_plan_deadline", { withTimezone: true }),
+    /** When the "plan deadline passed" card was raised, so it comes once per plan. */
+    ceoPlanAlertedAt: timestamp("ceo_plan_alerted_at", { withTimezone: true }),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },

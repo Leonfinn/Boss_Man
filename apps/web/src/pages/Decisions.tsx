@@ -103,6 +103,20 @@ export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars, refs
   );
 }
 
+/**
+ * The one recommendation a card shows (BOS-328). Boss Man's rule sets `recommendedOption` when the
+ * card is made; when the CEO has since advised Allow or Deny on a permission card, the CEO's call
+ * is the headline and the primary button, and `rule` carries the rule's opposite verdict so the
+ * card can say so instead of showing two recommendations.
+ */
+export function effectiveRecommendation(d: Pick<Decision, "kind" | "options" | "recommendedOption" | "context">): { option: string | null | undefined; rule: string | null } {
+  const advice = d.context?.advice;
+  if (d.kind !== "permission" || advice?.state !== "advised" || !advice.recommendation) return { option: d.recommendedOption, rule: null };
+  const option = d.options.find((o) => (advice.recommendation === "allow" ? /^allow once$/i.test(o) : /^deny$/i.test(o)));
+  if (!option) return { option: d.recommendedOption, rule: null };
+  return { option, rule: d.recommendedOption && d.recommendedOption !== option ? d.recommendedOption : null };
+}
+
 function TicketLink({ t }: { t: { ticketId: string; ref?: string | null; title: string } }) {
   return (
     <a href={`#/tickets/${t.ticketId}`}>
@@ -696,6 +710,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const x = d.context?.explain;
               const rule = d.context?.rule;
               const advice = d.context?.advice;
+              const eff = effectiveRecommendation(d);
               const ranOut = d.context?.handoverRanOut;
               const asking = advice?.state === "asking";
               const ticketId = d.context?.type === "risk_review" ? d.context.ticketId : null;
@@ -1003,16 +1018,21 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <small className="muted">A reviewer you hire does code, security, infra or adversarial reviews once you name them in Settings › Reviews.</small>
                           </fieldset>
                         )}
-                        {d.recommendedOption && (
+                        {eff.option && (
                           <p className="rec">
                             <strong>RECOMMENDED</strong>
-                            {d.recommendedOption}
+                            {eff.option}
                             {d.context?.judge?.mode === "advise" && <span className="muted"> — {d.context.judge.second?.state === "pending" ? "Waiting a few seconds for the second opinion" : d.context.judge.reason}.</span>}
                             {d.context?.judge?.mode === "advise" && d.context.judge.second?.state === "deny" && (
                               <span className="muted" style={{ display: "block" }}>
                                 Second opinion: {d.context.judge.second.reason}
                               </span>
                             )}
+                          </p>
+                        )}
+                        {eff.rule && (
+                          <p className="muted" style={{ fontSize: 13 }}>
+                            Boss Man's automatic check suggested {eff.rule}, but the CEO looked at this request and advises {eff.option}. Their reasons are above.
                           </p>
                         )}
                         {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
@@ -1077,7 +1097,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         ) : ownWords[d.id] === undefined || modelEdits[d.id] ? (
                           <div className="actions">
                             {!modelEdits[d.id] && d.options.map((o) => (
-                              <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
+                              <button type="button" key={o} className={`btn${o === eff.option ? " primary" : ""}`} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
                                 {o}
                               </button>
                             ))}
