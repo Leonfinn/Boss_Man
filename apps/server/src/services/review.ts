@@ -826,6 +826,13 @@ export function reviewService(
       }
     },
 
+    /** Every merge this process has running, with its phase, for the merge queue screen (BOS-587). */
+    runningMerges(): Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" }> {
+      return [...landings.entries()].flatMap(([ticketId, l]) =>
+        l.state === "running" ? [{ ticketId, startedAt: l.startedAt, startedBy: l.startedBy, phase: phases.get(ticketId) ?? ("checking" as const) }] : [],
+      );
+    },
+
     /** True while a merge for this ticket has said it is alive within the merge window (a check or lock wait under way). */
     landingActive(ticketId: string): boolean {
       return Date.now() - (landingBeat.get(ticketId) ?? 0) <= MERGE_MISSED_AFTER_MS;

@@ -117,6 +117,7 @@ req server "$c1" 11111111-1111-1111-1111-111111111111
 host
 [[ $(status result) == deployed && $(status to_commit) == "$c1" && $(status backup) == /b/x.sql.gz ]] || fail "status after deploy: $(cat "$D/outbox/status.json")"
 has "$STUB_LOG" "deploy.sh --yes --no-runner --commit $c1"
+has "$D/outbox/status.json" '"soak_seconds": "0"' # not blue/green: no standby window to wait for (BOS-401)
 [[ ! -e $D/inbox/request.json ]] || fail "request not consumed"
 [[ $(wc -l <"$D/outbox/history.jsonl") == 1 ]] || fail "history"
 [[ ! -s $T/hook.out ]] || fail "webhook posted on success while off"
@@ -171,7 +172,7 @@ for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-r
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
 # CI files and the Penpot and ntfy add-ons don't touch Boss Man's containers.
-for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml; do
+for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml deploy/ntfy-bluegreen.yml; do
   if echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
 done
 
@@ -372,6 +373,7 @@ reset_world blue "$cur"; P="$(git -C "$T/src" rev-parse HEAD)"
 bgreq "$b1"; bg
 [[ $(status result) == deployed && $(status to_commit) == "$b1" ]] || fail "bg status: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "green is live"
+has "$D/outbox/status.json" '"soak_seconds": "900"' # the host's own window rides in the status file (BOS-401)
 order "$DL" "pg_dump" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
 hasnt "$DL" "build blue" # only the idle colour is built
 ls "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz >/dev/null 2>&1 || fail "no backup written"

@@ -52,7 +52,7 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # docs/09-self-deploy.md lists the same files.
 INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
-NOT_INFRA='^deploy/(penpot|ntfy)\.yml$'
+NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
 RUNNER_PATHS='^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
 
@@ -122,7 +122,9 @@ write_status() { # result message [backup]
   ((DRY)) && { log "[dry-run] status: $1: $2"; return 0; }
   local ended=""
   [[ $1 == running ]] || ended="$(now)"
-  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" >"$OUTBOX/status.json.tmp"
+  local soak=0 # the standby window this host really uses (BOS-401): the server holds the runner update for it
+  if bluegreen_enabled; then soak="$SOAK_SECONDS"; fi
+  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" >"$OUTBOX/status.json.tmp"
   chmod 644 "$OUTBOX/status.json.tmp"
   mv "$OUTBOX/status.json.tmp" "$OUTBOX/status.json"
   [[ $1 == running ]] || cat "$OUTBOX/status.json" >>"$OUTBOX/history.jsonl"
