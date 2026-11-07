@@ -35,6 +35,7 @@ import { serverStatusService } from "./services/server-status.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
+import { serverHealthService, type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
@@ -142,6 +143,8 @@ export type AppOptions = {
   portalLimits?: Partial<PortalLimits>;
   /** Clock for scheduling, sweeps and ranking; tests move it forward. */
   now?: () => Date;
+  /** Server-health readings (BOS-640); tests pass made-up rss, memory limit and freezes. */
+  serverHealth?: Partial<Pick<ServerHealthDeps, "rssMb" | "memoryLimit" | "stallsSince">>;
   /** The runner launcher (R55), when BOSSMAN_LAUNCHER=1. */
   launcher?: LauncherOptions;
   /** The folder shared with the host deployer (docs/09-self-deploy.md); self-deploy is off without it. */
@@ -556,11 +559,14 @@ export async function buildApp(opts: AppOptions) {
   // under which its cause is gone, and this closes it, on any tier, with the reason. It runs on the
   // sweep below and on the events that make a condition true: a run ending or speaking, a runner
   // connecting, a deploy finishing.
+  // Built after the ladder below (it raises through it); the closer asks it whether a rule is calm.
+  let health: ServerHealth | null = null;
   const clearing = alertClearing(db, {
     isConnected: (runnerId) => runners.isConnected(runnerId),
     hasRoom: (fundingSourceId) => scheduler.hasRoom(fundingSourceId),
     addons: addonFacts,
     release: (ticketId) => decisionsSvc.release(ticketId),
+    serverCalm: (rule) => health?.calmReason(rule) ?? null,
     now: opts.now,
   });
   // A runner coming back clears "could not start … runner offline" cards at once, on any tier
@@ -673,6 +679,30 @@ export async function buildApp(opts: AppOptions) {
     },
     now: opts.now,
   });
+  // Server-health alerts (BOS-640): memory to the CEO, freezes to the owner. main.ts runs check() on the leader.
+  health = serverHealthService({
+    now: opts.now ? () => opts.now!().getTime() : undefined,
+    stallsSince: (sinceMs) => stalls.since(sinceMs),
+    ...opts.serverHealth,
+    homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
+    openUpdateCard: async () =>
+      (
+        await db
+          .select({ id: decisions.id, question: decisions.question })
+          .from(decisions)
+          .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'self_deploy'`, sql`${decisions.context}->>'target' = 'server'`))
+          .orderBy(desc(decisions.createdAt))
+          .limit(1)
+      )[0] ?? null,
+    isOpen: async (dedupeKey) => (await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open"))).limit(1)).length > 0,
+    raise: async (input) => {
+      const r = await alerts.raise(input);
+      if (r) await notes.syncDecisions();
+      return r;
+    },
+    log: (m) => app.log.warn(m),
+  });
+  const serverHealth = health;
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
   const review = reviewService(db, {
@@ -2717,5 +2747,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
+  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
 }
