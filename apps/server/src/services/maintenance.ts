@@ -77,8 +77,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
   const save = (h: Hold) => db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
 
-  async function activeByCompany() {
-    const rows = await db.select({ companyId: runs.companyId, n: sql<number>`count(*)::int` }).from(runs).where(isNull(runs.endedAt)).groupBy(runs.companyId);
+  /**
+   * Live runs per company. `workOnly` leaves out the owner's chat and the CEO's reply lane (BOS-349):
+   * those never hold a runner swap, and they are what the banner's "N agents" counts.
+   */
+  async function activeByCompany(workOnly = false) {
+    const live = isNull(runs.endedAt);
+    const rows = await db
+      .select({ companyId: runs.companyId, n: sql<number>`count(*)::int` })
+      .from(runs)
+      .where(workOnly ? and(live, sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from 'reply'`) : live)
+      .groupBy(runs.companyId);
     return new Map(rows.map((r) => [r.companyId, r.n]));
   }
 
@@ -151,8 +160,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         }
       }
       if (!h) return last && !last.ok ? { on: false as const, last, healthy } : { on: false as const, last };
-      const active = await activeByCompany();
-      return { on: true as const, reason: h.reason, since: h.since, deadline: h.deadline, runs: [...active.values()].reduce((a, b) => a + b, 0), companies: active.size, last };
+      const active = await activeByCompany(true);
+      const runsTotal = [...active.values()].reduce((a, b) => a + b, 0);
+      // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
+      return { on: true as const, reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, last };
     },
 
     /** Lifts the hold without finishing the swap; runners already swapped stay on the new image. // leader-only */
@@ -200,7 +211,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         return;
       }
       const t = now();
-      let active = await activeByCompany();
+      let active = await activeByCompany(true);
       const total = [...active.values()].reduce((a, b) => a + b, 0);
       if (!h.force && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, total, active.size);
 
@@ -214,7 +225,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
         await deps.settled();
-        active = await activeByCompany();
+        active = await activeByCompany(true);
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         try {
           await deps.recreate(r.slug); // leader-only

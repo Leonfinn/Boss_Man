@@ -211,7 +211,9 @@ function explainSegment(seg: string): Part {
   } else if (program === "sed") {
     // Without -e the first operand is the script, not a file.
     const files = flags.some((f) => f === "-e" || f === "-f") ? operands : operands.slice(1);
-    p = flags.some((f) => /^-\w*i/.test(f)) ? part("changes", "Edits files in place", files) : part("reads", "", files.filter((a) => a.includes("/")));
+    // `sed -i <script> /dev/null` (or no file) edits nothing, unless the script writes/runs (w, W, e) or is read from a file (-f) (BOS-680).
+    const nothing = files.every((f) => f === "/dev/null") && !flags.some((f) => f === "-f" || /^--file/.test(f)) && !/(^|[;\n{}!\d$/,])\s*[wWe](\s|\/|$)|\bs([^\w\s\\]).*\2[gpiImM\d]*[weW]/.test(operands.slice(0, 1).join(" ") + " " + flags.join(" "));
+    p = flags.some((f) => /^-\w*i/.test(f)) && nothing ? part("reads", "") : flags.some((f) => /^-\w*i/.test(f)) ? part("changes", "Edits files in place", files) : part("reads", "", files.filter((a) => a.includes("/")));
   }
   else if (program === "git") {
     const at = rest.findIndex((a, i) => !a.startsWith("-") && !GIT_VALUE_OPTS.has(rest[i - 1] ?? ""));
