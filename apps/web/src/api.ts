@@ -241,6 +241,10 @@ export type Ticket = {
   noReviewer?: boolean;
   /** Who an open agent review waits on and why, e.g. "Sam is busy on BOS-7". */
   reviewWait?: string | null;
+  /** In review and not the owner's to act on: still with its reviewers, or approved by all of them and only merging (BOS-667). */
+  reviewStage?: "awaiting_review" | "merging" | null;
+  /** Where an approved ticket's merge is, in plain words ("Waiting for a check slot."). */
+  mergeNote?: string | null;
   /** An open owner decision this ticket waits on, outside review sign-off. */
   ownerQuestion?: string | null;
   approvedBy?: string | null;
