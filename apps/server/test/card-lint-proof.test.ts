@@ -129,6 +129,20 @@ describe("R10: pagers, typed-into prompts and commands that never return", () =>
     expect(rules(steps, "rehearsed speed @ 0123abcd")).toContain("1:R10");
   });
 
+  it("refuses card 9c9e0c8e's steps 6 and 9 word for word, even with a lintOverride", () => {
+    // Exactly as the CEO raised them on 6 Nov (BOS-406): step 6 opens psql at a prompt, step 9 is typed into it
+    // and its explain output went to less, leaving the owner at "(END)".
+    const step6 =
+      "Open the database console, then paste the line after it. It only names a piece of the queries in the next steps.\n```sh\ndocker exec -it \"$(docker ps -q --filter label=com.docker.compose.service=db)\" psql -U bossman -d bossman\n```\n```sh\n\\set o1 '(select a2.name from agents a2 where a2.id = (select n2.from_agent_id from nudges n2 where n2.wake_id = (select w2.id from wakes w2 where w2.run_id = r.id limit 1) order by n2.created_at desc limit 1))'\n```";
+    const step9 =
+      "Time the Dashboard's query. It can take up to a minute.\n```sh\nexplain (analyze, buffers) select distinct on (r.agent_id) r.agent_id, r.id, t.title, :o1, :o2, :o3 from runs r left join tickets t on t.id = r.ticket_id where r.agent_id in (select id from agents where company_id = :co) order by r.agent_id, r.started_at desc \\g\n```";
+    const found = lintOwnerSteps([step6, step9]).refuse.filter((f) => f.rule === "R10");
+    expect(found.map((f) => f.step)).toContain(1);
+    expect(found.map((f) => f.problem).join("\n")).toMatch(/psql prompt.*-c/);
+    const r = checkAsk({ triedFirst: TRIED, steps: [step6, step9], lintOverride: "The owner knows to press q.", byCeo: true });
+    expect(r.error).toMatch(/can't let through.*pager or never returns/);
+  });
+
   it("can't be overridden, even by the CEO", () => {
     for (const cmd of ["git log -5", "tail -f app.log", "docker exec -it db psql -U bossman"]) {
       const r = checkAsk({ triedFirst: TRIED, steps: [step("Look at it. This prints nothing.", sh(cmd))], lintOverride: "The owner knows to press q.", byCeo: true });
