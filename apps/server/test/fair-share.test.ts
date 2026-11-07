@@ -158,7 +158,7 @@ describe("fair share at the all-companies run limit (BOS-582)", () => {
     await c.db.update(wakes).set({ status: "deferred", statusReason: "subscription 5-hour window nearly used up", notBefore: later }).where(eq(wakes.id, quota.id));
     // One wake that really will take a slot: an idle agent's.
     await c.queued(c.A, "A next", "nudge", 1);
-    // 10, less the one kept for cards, less 3 runs and the one startable wake. Before, every queued or held wake took a slot (2).
+    // 10, less the one kept for cards, less 3 runs and the one startable wake. Before, every queued or held wake took a slot (1).
     expect(await c.scheduler.freeSlots(c.A)).toBe(5);
   });
 });
