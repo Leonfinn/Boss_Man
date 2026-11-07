@@ -73,7 +73,11 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
       "$1" "$2" "$key" "$(git rev-parse HEAD)" "$(date -u +%FT%TZ)" "$dur" "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo true || echo false)" "$steps" >"$STORE/$key.json" || return 0
     # Per-file test times of this run (best effort): the slowest server test files and shell tests, in seconds, for the next speed-up.
     if [ -n "$(ls -A "$times_dir" 2>/dev/null)" ]; then
-      node "$(dirname "$self")/test-times.mjs" "$times_dir" >"$STORE/$key.test-times.tmp" 2>/dev/null && mv "$STORE/$key.test-times.tmp" "$STORE/$key.test-times" || rm -f "$STORE/$key.test-times.tmp"
+      if node "$(dirname "$self")/test-times.mjs" "$times_dir" >"$STORE/$key.test-times.tmp" 2>/dev/null; then
+        mv "$STORE/$key.test-times.tmp" "$STORE/$key.test-times"
+      else
+        rm -f "$STORE/$key.test-times.tmp"
+      fi
     else
       rm -f "$STORE/$key.test-times"
     fi
@@ -85,7 +89,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   for ((n = 1; n <= attempts; n++)); do
     # Test hook: a simulated queue wait, which the fixed budget ignores (check-all.test.sh retry-budget case).
     [ "$n" -gt 1 ] || [ -z "${CHECK_ALL_QUEUE_TEST_SLEEP:-}" ] || sleep "$CHECK_ALL_QUEUE_TEST_SLEEP"
-    rc=0; : >"$began_file"; attempt_start=$SECONDS; rm -rf "$times_dir"/* 2>/dev/null || true
+    rc=0; : >"$began_file"; attempt_start=$SECONDS; rm -rf "${times_dir:?}"/* 2>/dev/null || true
     # The child runs in the background and we wait for it, so a signal reaches the trap at once instead of after the child.
     BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" BOSSMAN_CHECK_TIMES_DIR="$times_dir" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
     child=$!
