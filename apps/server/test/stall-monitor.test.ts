@@ -72,9 +72,11 @@ describe("stall monitor", () => {
       const [sleeping, busy] = m.summary().recent;
       expect(sleeping!.cpuMs).toBeLessThan(300);
       expect(sleeping!.cgroup).toEqual({ memoryFullAvg10: 19.5, cpuSomeAvg10: null, ioFullAvg10: null, sinceLast: expect.objectContaining({ memoryHighEvents: 4, memoryMaxEvents: 0, cpuThrottledMs: 0 }) });
-      // Loose bounds: on a loaded runner the busy loop and the sampler thread both get less than a full core.
-      expect(busy!.cpuMs).toBeGreaterThan(400);
-      expect(busy!.profile!.sampledMs).toBeGreaterThan(300);
+      // Loose bounds: on a loaded runner (GitHub's shared machines measured 303 ms for the 1300 ms loop) the busy loop
+      // and the sampler thread both get well under a full core. What matters is that busy reads clearly above sleeping.
+      expect(busy!.cpuMs).toBeGreaterThan(150);
+      expect(busy!.cpuMs).toBeGreaterThan(sleeping!.cpuMs + 100);
+      expect(busy!.profile!.sampledMs).toBeGreaterThan(100);
       expect(busy!.profile!.top[0]!.fn).toMatch(/^busyStallForTest .*stall-monitor\.test\.ts:\d+$/);
       expect(lines[1]).toMatch(/process CPU \d+ ms.*top: busyStallForTest .*; cgroup avg10 memory full 19.5%.*memory.high 0/);
     } finally {

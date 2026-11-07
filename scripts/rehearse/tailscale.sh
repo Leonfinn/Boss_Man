@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Rehearses the Tailscale sidecar (deploy/tailscale.yml, docs/20-https-tailscale.md) on a throwaway Docker machine (DR-024).
 # Starts the real sidecar from the repo's own compose files, with no auth key, and checks the outcome:
-#   - the container is Up and its RestartCount does not change over REHEARSE_SECONDS (catches a restart loop);
+#   - over REHEARSE_SECONDS it is Up at the end, and every exit was a clean one (code 0) at least ~45 s apart. Without a key
+#     containerboot gives up on the login after ~60 s, exits 0 and is restarted (docs/20-https-tailscale.md, Troubleshooting),
+#     so those restarts are expected here; a crash (non-zero exit) or a fast restart loop fails the run;
 #   - it reports it needs a login (so it is running tailscaled, not crashing);
 #   - its state folder is written, and survives `docker compose restart tailscale`.
 # It cannot rehearse: the login itself, approving the device, the tailnet's HTTPS/DNS settings, and the
@@ -40,20 +42,25 @@ fail() { echo "FAIL: $*" >&2; dc logs --no-color tailscale 2>&1 | tail -30 >&2 |
 cid() { dc ps -q tailscale; }
 restarts() { docker inspect -f '{{.RestartCount}}' "$(cid)"; }
 running() { docker inspect -f '{{.State.Running}}' "$(cid)"; }
+# Up within 15 s: a keyless restart can land just as we look.
+wait_running() { for _ in $(seq 15); do [ "$(running)" = true ] && return 0; sleep 1; done; return 1; }
 
 echo "== start the sidecar alone (no key, so it waits for a login)"
 dc config -q
 dc up -d --no-deps tailscale
 sleep 10
-[ "$(running)" = true ] || fail "sidecar is not running after start"
+wait_running || fail "sidecar is not running after start"
 first="$(restarts)"
-started="$(docker inspect -f '{{.State.StartedAt}}' "$(cid)")"
+since="$(date +%s)"
 
-echo "== watch for ${secs}s: must stay up, no restarts"
+echo "== watch for ${secs}s: must stay up; only the clean ~60 s keyless restarts are allowed"
 sleep "$secs"
-[ "$(running)" = true ] || fail "sidecar stopped during the watch"
-[ "$(restarts)" = "$first" ] || fail "RestartCount went from $first to $(restarts): restart loop"
-[ "$(docker inspect -f '{{.State.StartedAt}}' "$(cid)")" = "$started" ] || fail "container was started again during the watch"
+wait_running || fail "sidecar stopped during the watch"
+codes="$(docker events --since "$since" --until "$(date +%s)" --filter "container=$(cid)" --filter event=die --format '{{.Actor.Attributes.exitCode}}')"
+grep -v '^0$' <<<"$codes" | grep -q . && fail "sidecar crashed during the watch (exit codes: $(tr '\n' ' ' <<<"$codes"))"
+n=$(($(restarts) - first))
+[ "$n" -le $((secs / 45)) ] || fail "RestartCount went from $first to $(restarts) in ${secs}s: faster than the ~60 s keyless restart, a restart loop"
+echo "restarts during the watch: $n, all clean (expected without a key: about one per 60 s)"
 
 echo "== it says it needs a login (running, not crashing)"
 dc logs --no-color tailscale 2>&1 | grep -qiE "NeedsLogin|authkey" || fail "no login prompt in the logs"
@@ -63,7 +70,7 @@ dc exec -T tailscale sh -c 'ls /var/lib/tailscale | grep -q .' || fail "state fo
 before="$(dc exec -T tailscale sh -c 'ls /var/lib/tailscale' | sort | tr '\n' ' ')"
 dc restart tailscale >/dev/null
 sleep 10
-[ "$(running)" = true ] || fail "sidecar did not come back after restart"
+wait_running || fail "sidecar did not come back after restart"
 after="$(dc exec -T tailscale sh -c 'ls /var/lib/tailscale' | sort | tr '\n' ' ')"
 [ "$before" = "$after" ] || fail "state changed across restart: [$before] -> [$after]"
 
@@ -78,7 +85,8 @@ fi
 
 cat <<'SUMMARY'
 RESULT: sidecar rehearsal OK, but kind 3: login not rehearsed
-Rehearsed: starts from the repo's compose files, stays up with no restarts (a restart loop fails this run),
+Rehearsed: starts from the repo's compose files, stays up (a crash or a restart loop fails this run; the clean ~60 s
+keyless restarts are expected and allowed, and only a real key stops them),
 asks for a login, keeps its state across a restart, and the guide's key steps run with a placeholder key.
 kind 3: login not rehearsed. Needs a real Tailscale account: the login with a real key, approving the device,
 HTTPS and DNS in the tailnet, the serve config being applied, and the login surviving a restart.
