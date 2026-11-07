@@ -1,24 +1,34 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
-import { openPglite } from "../src/db/client.js";
+import { signedInOwner } from "./helpers/owner-session.js";
+import { appCache, sharedDatabase } from "./helpers/shared-server.js";
 import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
-afterEach(async () => {
-  await ctx.app.close();
-  await ctx.close();
+
+// One database for the file, emptied before each test, and one app per set of limits (BOS-686). Every test
+// makes its own company, owner, runner and agents; nothing a test made is left for the next one.
+let shared: Awaited<ReturnType<typeof sharedDatabase>>;
+const apps = appCache<Awaited<ReturnType<typeof buildApp>>>();
+beforeAll(async () => {
+  shared = await sharedDatabase();
+});
+afterEach(() => ctx?.release());
+afterAll(async () => {
+  await apps.closeAll();
+  await shared.close();
 });
 
 async function setup(limits: Partial<Limits> = {}) {
-  const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0, ...limits }, workspaceRoot: "/ws" });
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  await shared.reset();
+  const { db } = shared;
+  const built = await apps.get(JSON.stringify(limits), () => buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0, ...limits }, workspaceRoot: "/ws" }));
+  const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Customer app" })).json() as { id: string };
@@ -27,7 +37,7 @@ async function setup(limits: Partial<Limits> = {}) {
   // A fake connected runner that records commands.
   const commands: Extract<RunnerCommand, { type: "run.start" }>[] = [];
   let online = true;
-  built.runners.connect(reg.runnerId, (c) => {
+  const release = built.runners.connect(reg.runnerId, (c) => {
     if (!online) return false;
     if (c.type === "run.start") commands.push(c);
     return true;
@@ -40,7 +50,7 @@ async function setup(limits: Partial<Limits> = {}) {
     await built.scheduler.slow();
     return built.scheduler.tick();
   };
-  return { ...built, db, close, cookie, req, company, ceo, project, commands, endRun, setOnline, tick };
+  return { ...built, db, release, cookie, req, company, ceo, project, commands, endRun, setOnline, tick };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 50));

@@ -7,7 +7,7 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "dr
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, featureHorizon, findCredential, formatDate, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
@@ -15,7 +15,7 @@ import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agentNotes, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, checkJobs, companies, costEvents, decisions, engagements, features as featuresTable, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
@@ -43,7 +43,7 @@ import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
-import { alertLadder } from "./services/alert-ladder.js";
+import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
 import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { DeployError, deploysService } from "./services/deploys.js";
@@ -86,11 +86,13 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
+import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
+import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { NotifySettings, notificationsService } from "./services/notifications.js";
@@ -127,6 +129,8 @@ export type AppOptions = {
   workspaceRoot?: string;
   /** Stale-blocker and stalled-run thresholds (R21, R32). */
   sweepLimits?: Partial<SweepLimits>;
+  /** Replaces the runner lookup of a ticket's branch head in the missed-work sweep (tests). */
+  branchHead?: (ticketId: string) => Promise<string | null>;
   /** Review-loop and circular-failure limits (R49, R50). */
   loopLimits?: Partial<LoopLimits>;
   /** The built web UI (apps/web/dist). Without it the server is API-only, e.g. under `vite dev`. */
@@ -431,6 +435,7 @@ export async function buildApp(opts: AppOptions) {
     },
     errors: errorBuffer,
     stalls: () => stalls.summary(),
+    cpuReserve: () => launch.cpuReserve(),
     permissions: (companyId: string) => permLog.summary(companyId),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
@@ -486,8 +491,8 @@ export async function buildApp(opts: AppOptions) {
       const key = `quota-alert:${fundingSourceId}:${window}:${f.resetsAt?.toISOString() ?? "none"}`;
       const told = await db.insert(settings).values({ key, value: true }).onConflictDoNothing().returning();
       if (!told.length) continue;
-      const hhmm = (d: Date) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: OWNER_TZ });
-      const dayAt = (d: Date) => `${d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: OWNER_TZ })} at ${hhmm(d)}`;
+      const hhmm = (d: Date) => formatDate("en-GB", d, { hour: "2-digit", minute: "2-digit", timeZone: OWNER_TZ });
+      const dayAt = (d: Date) => `${formatDate("en-GB", d, { weekday: "short", day: "numeric", month: "short", timeZone: OWNER_TZ })} at ${hhmm(d)}`;
       await notes.notify({
         companyId: null,
         agentId: null,
@@ -526,6 +531,8 @@ export async function buildApp(opts: AppOptions) {
       void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA relay failed"));
       void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "ticket reply failed"));
     }
+    // A tool call a fenced agent got a kernel refusal for (BOS-325).
+    if (event.type === "run.update" && (event.update as { fenceDenied?: unknown } | null)?.fenceDenied === true) void decisionsSvc.onFenceDenied(runner, event.runId, ((event.update as { title?: unknown }).title as string | null) ?? null).catch((err) => app.log.error({ err, companyId: runner.companyId }, "fence refusal log failed"));
     // A tool call the agent says was refused (BOS-306).
     if (event.type === "run.update" && (event.update as { refused?: unknown } | null)?.refused === true) void decisionsSvc.onRefusedCall(runner, event.runId, ((event.update as { title?: unknown }).title as string | null) ?? null).catch((err) => app.log.error({ err, companyId: runner.companyId }, "refused call log failed"));
     if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error, !!event.interrupted).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chat end failed"));
@@ -535,6 +542,13 @@ export async function buildApp(opts: AppOptions) {
     // What each agent kind offers, for the model picker (R60).
     if (event.type === "runner.models") void models.record(runner.companyId, event.agentKind, event.models).catch((err) => app.log.error({ err, companyId: runner.companyId }, "model list failed"));
     if (event.type === "runner.sandbox") void runners.recordSandbox(runner.id, event.report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err, companyId: runner.companyId }, "sandbox report failed"));
+    if (event.type === "runner.opencode_vacuum_cut") {
+      const { type: _type, ...cut } = event;
+      void opencodeVacuumAlerts({ alert: (input) => alerts.raise(input) })
+        .onCut(runner, cut, (opts.now ?? (() => new Date()))())
+        .then(() => notes.syncDecisions())
+        .catch((err) => app.log.error({ err, companyId: runner.companyId }, "OpenCode VACUUM alert failed"));
+    }
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
       void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err, companyId: runner.companyId }, "disk report handling failed"));
@@ -595,6 +609,29 @@ export async function buildApp(opts: AppOptions) {
   });
   const sweeps = sweepService(db, {
     clearAlerts: () => clearing.check(),
+    // A feature the roadmap commits to but nothing is working on (BOS-595): the sweep raises one CEO
+    // card, which the one closer above withdraws as soon as a ticket is linked to the feature.
+    featuresWithoutTickets: async () => {
+      let raised = 0;
+      for (const companyId of [...new Set((await db.select({ id: featuresTable.companyId }).from(featuresTable)).map((r) => r.id))]) {
+        raised += await feedback.raiseFeatureNoTicket(companyId, async (f) => {
+          const column = featureHorizon(f);
+          const where = column === "now" ? "on the roadmap's Now column" : column === "next" ? "on the roadmap's Next column" : "in progress";
+          await alerts.raise({
+            companyId,
+            kind: "feature_no_ticket",
+            question: `The feature "${f.title}" is ${where}, but no open ticket is doing its work, so nothing will deliver it. Create a ticket for it (with create_ticket and feature set to it), or move it out of Now or Next.`,
+            options: [GOT_IT],
+            recommended: GOT_IT,
+            from: "ceo",
+            why: "creating a ticket for a feature is the CEO's",
+            dedupeKey: `feature-no-ticket:${f.id}`,
+            context: { type: "question", featureId: f.id, clearWhen: [{ kind: "featureHasTicket", featureId: f.id }] },
+          });
+        });
+      }
+      return raised;
+    },
     // The same sweep settles second opinions whose asker was lost to a restart (BOS-338).
     expireAdvice: () => Promise.all([decisionsSvc.expireAdvice(), decisionsSvc.expireSecondOpinions()]),
     limits: opts.sweepLimits,
@@ -615,17 +652,22 @@ export async function buildApp(opts: AppOptions) {
     resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
     releaseUnblocked: (ticketId) => scheduler.releaseIfUnblocked(ticketId),
     landingActive: (ticketId) => review.landingActive(ticketId),
+    branchClash: (ticketId) => review.branchClash(ticketId),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),
     // The owner's messages on tickets that nobody has answered (BOS-425).
     ownerReplies: (t) => ownerReplies.sweep(t),
+    // Whether a run committed (BOS-612): the branch head from the runner that holds the worktree. Read only when a "looks stuck" card is being written.
+    branchHead: opts.branchHead ?? ((ticketId) => review.diff(ticketId).then((d) => d.head)),
   });
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
     onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
     onFeature: (id) => feedback.syncFeature(id),
+    // The board's "Approved, merging" cards say where their merge is (BOS-667). `review` is built below; this runs per request.
+    runningMerges: () => review.runningMerges(),
     now: opts.now,
   });
   // The CEO's proposed skills (BOS-86): review by the Security Reviewer where required, the owner's decision, then install.
@@ -662,9 +704,14 @@ export async function buildApp(opts: AppOptions) {
     // A trip means the Scrum Master is the problem: straight to the owner.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
     alertCeo: (input) => alerts.raise(input),
+    // The idle-capacity rules (BOS-659): how many of the company's run slots are busy, and its limit.
+    capacity: async (companyId) => {
+      const { company } = await scheduler.runLimits(companyId);
+      return { busy: company.running, limit: company.limit };
+    },
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
-    localHour: (t) => Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ }).format(t)),
+    localHour: (t) => Number(formatDate("en-GB", t, { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ })),
     now: opts.now,
     log: (m) => app.log.error(m),
   });
@@ -724,9 +771,26 @@ export async function buildApp(opts: AppOptions) {
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
+  // In server mode (BOS-316, BOS-597) it reports the server-owned check queue's own mode, slots, and
+  // running and waiting counts for the company, so the screen can show "waiting for a check slot".
+  // The counts read only the live states, through check_jobs_state_queued: check_jobs has no company
+  // index, so a company-only filter would read the whole table.
+  const checkQueueSvc = checkQueue(db);
   const mergeQueue = mergeQueueService(db, {
     runningMerges: () => review.runningMerges(),
     limit: () => checkGate(db).limit(),
+    queueStatus: async (companyId) => {
+      const mode = await checkQueueSvc.mode();
+      if (mode !== "server") return { mode, slots: await checkQueueSvc.slots(), running: 0, waiting: 0 };
+      const [live] = (await db
+        .select({
+          running: sql<number>`(count(*) filter (where ${checkJobs.state} = 'running'))::int`.mapWith(Number),
+          waiting: sql<number>`(count(*) filter (where ${checkJobs.state} = 'queued'))::int`.mapWith(Number),
+        })
+        .from(checkJobs)
+        .where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.state, ["queued", "running"])))) as [{ running: number; waiting: number }];
+      return { mode: mode as CheckQueueMode, slots: await checkQueueSvc.slots(), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
+    },
     now: opts.now,
   });
   decisionsSvc.setLoopHooks({
@@ -927,8 +991,14 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
+      // Enforce changes what an agent can do without asking (BOS-325): not selectable until BOS-323 has closed the git gap.
+      if (b.fenceMode === "enforce" && !FENCE_ENFORCE_AVAILABLE) return reply.code(400).send({ error: "fence_enforce_locked", message: "Enforce isn't available yet: it waits for the fix that stops a fenced agent running programs outside the fence (BOS-323)." });
+      if (b.fenceMode && b.fenceMode !== "off") {
+        const [r] = await db.select({ id: runnersTable.id, sandbox: runnersTable.sandbox }).from(runnersTable).where(eq(runnersTable.companyId, id));
+        if (b.fenceMode === "enforce" && r?.sandbox?.level !== "full" && r?.sandbox?.level !== "partial") return reply.code(400).send({ error: "fence_unavailable", message: "This company's runner can't fence agents, so enforce can't be switched on." });
+      }
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
       if (!c) return reply.code(404).send({ error: "not_found" });

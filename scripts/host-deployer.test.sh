@@ -293,10 +293,14 @@ cat >"$T/bin/docker" <<'FAKE'
 if [[ $1 == image ]]; then # image inspect boss-man-server:<colour>
   [[ -z ${FAKE_NO_IMAGE:-} ]]; exit
 fi
-if [[ $1 == inspect ]]; then # inspect -f <template> <id>: the project label, or the start time of the database
-  echo "docker inspect $*" >>"$DL"
-  case "$3" in *compose.project*) echo bmtest ;; *StartedAt*) cat "$W/started.db" 2>/dev/null || true ;; esac
-  exit 0
+if [[ $1 == inspect && $3 == *compose.project* ]]; then echo bmtest; exit 0; fi # the project label (BOS-487)
+if [[ $1 == inspect && $3 == "{{.State.StartedAt}}" ]]; then # the start time of the database (BOS-487)
+  echo "docker inspect $*" >>"$DL"; cat "$W/started.db" 2>/dev/null || true; exit 0
+fi
+if [[ $1 == inspect ]]; then # inspect -f <format> cid<service>: id, start, restarts, oom, running, exit code (BOS-488)
+  s=${4#cid}; f() { cat "$W/$1.$s" 2>/dev/null || echo "$2"; }
+  r=false; [[ -e $W/running.$s ]] && r=true
+  echo "cid$s $(f start 2026-11-07T08:00:00Z) $(f restarts 0) $(f oom false) $r $(f exit 0)"; exit
 fi
 [[ $1 == compose ]] || exit 99
 shift; a="$*"; echo "docker $a" >>"$DL"
@@ -307,6 +311,8 @@ ready() { # colour: the JSON /api/ready would print
 }
 case "$a" in
   "ps -q "*) x=${a#ps -q }; x=${x#server-}; if [[ -e $W/cid.$x ]]; then cat "$W/cid.$x"; elif [[ -e $W/running.$x ]]; then echo cid; fi ;;
+  "ps -aq "*) x=${a#ps -aq }; x=${x#server-}; [[ -e $W/running.$x || -e $W/exists.$x ]] && echo "cid$x" || true ;;
+  "exec -T db psql"*) cat "$W/pgstart" 2>/dev/null || echo "2026-11-07 08:00:00.5+00" ;;
   "--project-name "*" config --hash"*) # one line per svc-<name> file in the unpacked commit, as Compose's --hash prints them
     [[ -z ${FAKE_NO_HASH:-} ]] || { echo "unknown flag: --hash" >&2; exit 1; }
     [[ -z ${FAKE_NO_RENDER:-} ]] || exit 1
@@ -321,7 +327,7 @@ case "$a" in
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
   "kill -s USR1 server-"*) c=${a##*server-}; echo "signal USR1 $c" >>"$DL"; [[ -n ${FAKE_NO_DEMOTE:-} ]] || echo standby >"$W/role.$c" ;;
   "kill -s USR2 server-"*) c=${a##*server-}; echo "signal USR2 $c" >>"$DL"; echo leader >"$W/role.$c" ;;
-  "stop server-"*) c=${a##*server-}; rm -f "$W/running.$c"; echo "stopped $c" >>"$DL" ;;
+  "stop server-"*) c=${a##*server-}; rm -f "$W/running.$c"; touch "$W/exists.$c"; echo "stopped $c" >>"$DL" ;;
   "exec -T server-"*)
     c=${a#exec -T server-}; c=${c%% *}
     case "$a" in
@@ -356,8 +362,8 @@ order() { # log-file pattern...: each pattern must appear after the previous one
 }
 reset_world() {  # live colour = $1, leading at commit $2
   local idle=green; [[ $1 == green ]] && idle=blue
-  rm -rf "$W"; mkdir -p "$W"; touch "$W/running.proxy" "$W/running.$1"; echo leader >"$W/role.$1"; echo "$2" >"$W/commit.$1"
-  rm -rf "$D/proxy" "$D/state/soak" "$D/state/previous" "$D/state/hold"; mkdir -p "$D/proxy"; chmod 755 "$D/proxy"
+  rm -rf "$W"; mkdir -p "$W"; touch "$W/running.proxy" "$W/running.db" "$W/running.$1"; echo leader >"$W/role.$1"; echo "$2" >"$W/commit.$1"
+  rm -rf "$D/proxy" "$D/state/soak" "$D/state/previous" "$D/state/hold" "$D/state/baseline" "$D/state/stopped-by-plan" "$D/state/last-health-alert" "$D/state/planned-db" "$D/outbox/health.json"; mkdir -p "$D/proxy"; chmod 755 "$D/proxy"
   printf '# x\n# Written by host-deployer.sh. Live colour: %s\n(active) {\n\treverse_proxy server-%s:{args[0]} {\n\t}\n}\n' "$1" "$1" >"$D/proxy/active.caddy"
   : >"$DL"; : >"$T/hook.out"; : >"$D/deployer.log"; echo "$idle" >/dev/null
 }
@@ -583,7 +589,7 @@ hasnt "$DL" "stopped"; hasnt "$DL" "signal"; live_is blue
 # Ticking again changes nothing more.
 bg; [[ $(status result) == failed ]] || fail "second tick changed the status"
 
-# 31. BOS-487: which services an update changes, read from each service's rendered settings (fake files svc-<name>), and
+# 32. BOS-487: which services an update changes, read from each service's rendered settings (fake files svc-<name>), and
 # which of db/proxy still run with older settings. Nothing here may start, stop or recreate a container.
 svc_check() { rm -f "$D/state/last-server"; : >"$D/inbox/check"; : >"$DL"; bg; } # a refresh, as the cron tick does it
 avail() { jget "$D/outbox/available.json" "$1"; }
@@ -640,7 +646,7 @@ for f in host-deployer.sh rebuild-live.sh deploy.sh; do
   # the server or the launcher: every `up` and `run` carries --no-deps, and none names db or proxy. A bare
   # `up -d` or `restart` therefore fails here.
   if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm|create|down)\b' "$here/$f" \
-    | grep -vE '^[0-9]+:\s*#|exec -T |rm -f ' \
+    | grep -vE '^[0-9]+:\s*#|exec -T |rm -f |^[0-9]+:\s*finish (partial|failed) ' \
     | grep -vE '(up|run)\b.*--no-deps .*(server|launcher|migrate|\$\{svcs\[@\]\})|(stop|kill)\b.*"?server' ; then
     fail "$f has a compose up/run/restart/stop/kill/rm/create/down that is not limited to the server services"
   fi
@@ -648,6 +654,100 @@ for f in host-deployer.sh rebuild-live.sh deploy.sh; do
     fail "$f starts or recreates db or proxy"
   fi
 done
+# 31. The whole-stack checklist (DR-020 D, BOS-488): five items, recorded in outbox/health.json and in the status file.
+hget() { jget "$D/outbox/health.json" "$1"; }
+swap() { # a good swap to a new commit, blue -> green; then a clean log and webhook file
+  local c
+  reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+  c="$(push "apps/server/hc$RANDOM")"; bgreq "$c"; bg
+  [[ $(status result) == deployed ]] || fail "setup swap: $(cat "$D/outbox/status.json") $(cat "$T/out")"
+  SW="$c"; : >"$DL"; : >"$T/hook.out"
+}
+all_pass() { local i; for i in live other leader db restarts; do [[ $(hget "check_$i") == pass ]] || fail "check_$i: $(cat "$D/outbox/health.json")"; done; }
+failed_only() { # item...: exactly these items fail
+  local i w=" $* "
+  for i in live other leader db restarts; do
+    if [[ $w == *" $i "* ]]; then [[ $(hget "check_$i") == fail ]] || fail "check_$i should fail: $(cat "$D/outbox/health.json")"
+    else [[ $(hget "check_$i") == pass ]] || fail "check_$i should pass: $(cat "$D/outbox/health.json")"; fi
+  done
+}
+# 31a. Healthy swap and healthy tick: every item passes, in health.json and in the status file.
+swap
+[[ $(hget stack) == healthy && $(hget phase) == swap && $(hget commit) == "$SW" ]] || fail "health after swap: $(cat "$D/outbox/health.json")"
+all_pass
+has "$D/outbox/status.json" '"stack": "healthy"'; has "$D/outbox/status.json" '"check_db": "pass"'
+bg; [[ $(hget phase) == soak ]] || fail "a soak tick did not run the checklist"; all_pass
+# 31b. The standby crashed during the trial: degraded, one page, nothing switched, and no repeat page.
+rm -f "$W/running.blue"; echo 137 >"$W/exit.blue"; touch "$W/exists.blue"
+bg
+failed_only other
+[[ $(hget stack) == degraded && $(hget check_other) == fail && $(hget check_live) == pass ]] || fail "crashed standby: $(cat "$D/outbox/health.json")"
+[[ $(status result) == partial ]] || fail "crashed standby should page as partial: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "server-blue should be running as a standby"
+hasnt "$DL" "signal"; live_is green; [[ -e $D/state/soak ]] || fail "the window was ended by a degraded tick"
+bg; bg
+[[ $(grep -c '"result": "partial"' "$T/hook.out") == 1 ]] || fail "expected one page, got: $(cat "$T/hook.out")"
+rm -f "$W/exit.blue" "$W/exists.blue"; touch "$W/running.blue"; echo standby >"$W/role.blue"
+bg; all_pass; [[ ! -e $D/state/last-health-alert ]] || fail "alert marker kept after recovery"
+# 31c. Two leaders: degraded, no switch.
+swap; echo leader >"$W/role.blue"; bg
+failed_only other leader
+has "$D/outbox/health.json" "2 leaders"; live_is green; hasnt "$DL" "signal"
+# 31c2. Two leaders at the deadline: stopping the old colour fixes it, so the end check passes and nothing is paged.
+swap; echo leader >"$W/role.blue"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
+[[ $(hget phase) == end && $(hget stack) == healthy ]] || fail "two leaders at the deadline: $(cat "$D/outbox/health.json")"
+[[ $(status result) != partial ]] || fail "empty page after a healthy end check: $(cat "$D/outbox/status.json")"
+[[ ! -s $T/hook.out ]] || ! grep -q '"result": "partial"' "$T/hook.out" || fail "paged on a healthy end check"
+# 31d. No leader at all: the live check fails first, so it is switched back; the record still says why.
+swap; echo standby >"$W/role.green"; bg
+[[ $(status result) == rolled_back ]] || fail "no leader: $(cat "$D/outbox/status.json")"
+[[ $(hget check_leader) == fail ]] || fail "no-leader record: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "0 leaders"
+# 31e. The database was recreated or its process restarted: degraded (a failure, never a pass).
+swap; echo 2026-11-07T09:00:00Z >"$W/start.db"; bg
+failed_only db; [[ $(status result) == partial ]] || fail "recreated db: $(cat "$D/outbox/status.json")"
+swap; echo "2026-11-07 09:00:00+00" >"$W/pgstart"; bg
+failed_only db; has "$D/outbox/health.json" "server process restarted"
+# 31f. A planned database step re-baselines once; the next tick is healthy again.
+swap; echo 2026-11-07T09:00:00Z >"$W/start.db"; echo "2026-11-07 09:00:00+00" >"$W/pgstart"; touch "$D/state/planned-db"; bg
+all_pass; [[ ! -e $D/state/planned-db ]] || fail "planned-db marker kept"
+# 31g. Restarts and OOM kills of each container count.
+for s in blue green db proxy; do swap; echo 1 >"$W/restarts.$s"; bg; [[ $(hget check_restarts) == fail ]] || fail "restart of $s not seen: $(cat "$D/outbox/health.json")"; done
+swap; echo true >"$W/oom.green"; bg; [[ $(hget check_restarts) == fail ]] || fail "OOM kill not seen"; has "$D/outbox/health.json" "running out of memory"
+# 31h. The end of the window: the old colour is stopped by plan (exit 0, recorded) and that is healthy.
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
+[[ $(hget phase) == end ]] || fail "no end-of-window check"; all_pass
+grep -qx blue "$D/state/stopped-by-plan" || fail "planned stop not recorded"
+# ...but stopped with a non-zero exit code, or running when the plan says stopped, is not.
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; bg
+[[ $(hget phase) == end && $(hget check_other) == fail ]] || fail "exit 137 after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exit code 137"
+# 31j. A failed item other than the live colour does not keep the window open: the old colour is still stopped at the deadline,
+# the stop is recorded, the end check says degraded, and there is one page that names the way to accept the new state.
+swap; echo 1 >"$W/restarts.proxy"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
+[[ ! -e $D/state/soak ]] || fail "a restarts failure kept the window open"
+grep -qx blue "$D/state/stopped-by-plan" || fail "window end did not record the planned stop"
+[[ $(hget phase) == end && $(hget check_restarts) == fail && $(hget check_other) == pass ]] || fail "window end with a restart: $(cat "$D/outbox/health.json")"
+[[ $(status result) == partial ]] || fail "window end with a restart should page: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "--ack-health"
+live_is green
+# ...and --ack-health accepts the current state: baseline renewed, checklist healthy.
+bg --ack-health; all_pass; [[ $(hget phase) == ack ]] || fail "ack did not re-run the checklist: $(cat "$D/outbox/health.json")"
+# 31k. The same for the database, and an unreadable database start time (a hung or unreachable psql) is a failed db item.
+swap; echo 2026-11-07T09:00:00Z >"$W/start.db"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
+[[ ! -e $D/state/soak ]] || fail "a db failure kept the window open"; [[ $(hget check_db) == fail ]] || fail "db at window end"
+swap; : >"$W/pgstart"; bg
+[[ $(hget check_db) == fail ]] || fail "no psql answer should fail the db item: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "could not read the database"
+rm -f "$W/pgstart"
+# 31i. A swap whose database was recreated mid-deploy is not declared good: switched back.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+c="$(push apps/server/hc-db)"; bgreq "$c"
+# the fake restarts the database as soon as the new colour is started
+mv "$T/bin/docker" "$T/bin/docker.real"
+# shellcheck disable=SC2016 # the wrapper script is written literally; $W and $* expand when it runs
+printf '#!/usr/bin/env bash\ncase "$*" in *"up -d --no-deps --force-recreate server-"*) echo 2026-11-07T09:00:00Z >"$W/start.db" ;; esac\nexec "%s" "$@"\n' "$T/bin/docker.real" >"$T/bin/docker"; chmod +x "$T/bin/docker"
+bg
+mv "$T/bin/docker.real" "$T/bin/docker"
+[[ $(status result) == rolled_back ]] || fail "db restarted during the swap: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "whole-stack check found"; live_is blue
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"

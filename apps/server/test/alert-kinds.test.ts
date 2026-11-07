@@ -35,6 +35,7 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/scheduler.ts", kind: "could_not_start", why: "a run that couldn't start" },
   { file: "services/scheduler.ts", kind: "alert", why: "the add-on notice" },
   { file: "services/watchdog.ts", kind: "quota_held", why: "work held by the usage limit" },
+  { file: "services/opencode-vacuum.ts", kind: "opencode_vacuum_cut", why: "the OpenCode prune's VACUUM killed at its cap" },
   { file: "services/server-health.ts", kind: "server_memory", why: "the server's memory running high or climbing" },
   { file: "services/server-health.ts", kind: "server_freezes", why: "the server freezing again and again" },
 ];
@@ -77,7 +78,7 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
       expect(["scrum_master", "ceo", "owner"]).toContain(row.topRung);
     }
     // The alert kinds that must stop at the CEO (DR-017 A).
-    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "runner_boot", "quota_held"] as const) {
+    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "runner_boot", "quota_held", "opencode_vacuum_cut"] as const) {
       expect(kindCeiling(kind, undefined), kind).toBe("ceo");
       expect(kindRow(kind, undefined).topRung, kind).toBe("ceo");
     }

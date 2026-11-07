@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DEFAULT_REVIEW_POLICY, type ReviewPolicy, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, reviewRequests, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, checkResults, decisions, reviewRequests, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { resolveReviewer } from "../src/services/review-policy.js";
 import { MERGE_ACTIVITY_MS, setInfraRetryBase } from "../src/services/review.js";
@@ -43,12 +43,12 @@ async function setup() {
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
   /** Set to make the runner's merge fail, as when it drops off mid-way. */
-  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null; holdVerify: Promise<void> | null; verifyTimeout: boolean } = { merge: false, changed: false, holdMerge: null, holdVerify: null, verifyTimeout: false };
+  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null; holdVerify: Promise<void> | null; verifyTimeout: boolean; verifyFail: boolean } = { merge: false, changed: false, holdMerge: null, holdVerify: null, verifyTimeout: false, verifyFail: false };
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
     if (c.type === "workspace.diff") ok(faults.changed ? { ...DIFF, files: [{ path: "src/a.ts", added: 1, removed: 0 }] } : DIFF);
-    if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok(faults.verifyTimeout ? { ok: false, exitCode: null, timedOut: true, output: "", ms: 1 } : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
+    if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok(faults.verifyTimeout ? { ok: false, exitCode: null, timedOut: true, output: "", ms: 1 } : faults.verifyFail ? { ok: false, exitCode: 1, timedOut: false, output: "FAIL  migration lint", ms: 1 } : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
     if (c.type === "workspace.merge" && faults.merge) queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: false, error: "The runner went away" }));
     else if (c.type === "workspace.merge") void (faults.holdMerge ?? Promise.resolve()).then(() => ok({ status: "merged", commit: "c".repeat(40) }));
     if (c.type === "workspace.carried") ok({ carried: [] });
@@ -275,8 +275,25 @@ describe("a merge check that runs long", () => {
     await approved;
     await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
     const commands = c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command);
-    expect(commands).toEqual(["pnpm test", "pnpm test:e2e"]);
+    // The project check is told the deep check follows, so it can skip what that repeats (BOS-665).
+    expect(commands).toEqual(["export BOSSMAN_FULL_CHECK_NEXT=1; pnpm test", "pnpm test:e2e"]);
     expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(1);
+  });
+
+  it("names the project's own command when the project check before the deep one fails (BOS-665)", async () => {
+    const c = await setup();
+    const t = await c.ticket({ state: "review", risk: "critical" });
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test", deepVerifyCommand: "pnpm test:e2e" });
+    await c.setPolicy((p) => (p.critical.ownerSignoff = false));
+    c.faults.verifyFail = true;
+    await (await c.mcp(c.senior.id)).callTool({ name: "review", arguments: { action: "submit", ticketId: t.id, verdict: "approved" } });
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("in_progress"));
+    // The deep check never starts once the cheap one failed, and the agent is told about `pnpm test`, not the wrapper.
+    expect(c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command)).toEqual(["export BOSSMAN_FULL_CHECK_NEXT=1; pnpm test"]);
+    const notes = (await c.db.select().from(wakes).where(eq(wakes.ticketId, t.id))).map((w) => JSON.stringify(w));
+    expect(notes.some((n) => n.includes("the check `pnpm test` exited with code 1"))).toBe(true);
+    expect(notes.some((n) => n.includes("BOSSMAN_FULL_CHECK_NEXT"))).toBe(false);
+    expect(await c.db.select().from(checkResults).where(eq(checkResults.ticketId, t.id))).toEqual([expect.objectContaining({ kind: "verify", passed: false })]);
   });
 });
 
