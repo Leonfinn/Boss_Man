@@ -13,7 +13,7 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard } from "./signoff.js";
 import { checkGate, checkPriority } from "./check-gate.js";
 import { checkQueue } from "./check-queue.js";
@@ -439,6 +439,7 @@ export function reviewService(
       .set({ mergeCommit: commit, pullRequestNote: null, ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
       .where(eq(tickets.id, t.id));
     if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
+    if (commit) await tellCeoLiveFix(t, commit).catch(() => undefined);
     const left = afterMergeLeft(t);
     // With a live check still to show, the ticket isn't finished: go straight to the assignee without a
     // brief done state in between, so done hooks (worktree release, notifications) never fire for it.
@@ -477,6 +478,24 @@ export function reviewService(
     // The CEO hears when a merge leaves a put-off check on its ticket (BOS-575): that is the moment BOS-542 was lost.
     if (carried.length) await tellCeo(t, "after merge carried", `"${t.title}" merged with ${quoted(carried)} still at fail. Boss Man kept it open with its assignee as after-merge ${carried.length > 1 ? "checks" : "check"} until ${carried.length > 1 ? "they are" : "it is"} reported; no follow-up ticket is needed. Nothing to do unless it stalls.`).catch(() => undefined);
     return { outcome: "merged" as const, delivered, detail: { ...r.detail, commit } };
+  }
+
+  /**
+   * A merged ticket that fixes a live problem (BOS-639) wakes the CEO with the same words the deploy card will
+   * lead with, so the chat says it too. Only a hand-set "fixes live" marker counts, never priority. Nothing is
+   * deployed: the owner still approves the deploy card, which the host deployer raises once it sees the merge.
+   */
+  async function tellCeoLiveFix(t: { id: string; companyId: string; number: number | null; fixesLive: string | null }, commit: string) {
+    const symptom = t.fixesLive?.trim();
+    if (!symptom) return;
+    const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
+    const ref = ticketRef(c?.prefix ?? null, t.number) ?? "this ticket";
+    const heading = fixesLiveHeading([{ symptom, ref }]);
+    await tellCeo(
+      t,
+      "fixes live merged",
+      `${heading}. It merged as ${commit.slice(0, 12)}. The live server still runs the old code until the owner approves the deploy card, which Boss Man raises headed with these words and sorted first in Decisions. Make sure the owner knows; Boss Man never deploys by itself.`,
+    );
   }
 
   /** Wakes the company's CEO about a ticket, with a note; nothing when the company has no CEO. */
@@ -1406,6 +1425,9 @@ export function reviewService(
       const mine = await closeAfterMerge(t, m.commit, causedByRunId);
       for (const c of together) {
         await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, c.ticketId));
+        // A fix riding along on this merge is just as live (BOS-639).
+        const [rider] = await db.select().from(tickets).where(eq(tickets.id, c.ticketId));
+        if (rider) await tellCeoLiveFix(rider, m.commit).catch(() => undefined);
         await deps.work.updateTicket(c.ticketId, { state: "done", outcome: "completed", overLimit: true });
       }
       return { ...mine, delivered: mine.delivered, detail: mine.detail };

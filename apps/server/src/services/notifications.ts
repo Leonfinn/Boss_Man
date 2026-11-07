@@ -172,8 +172,12 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       for (const { d, company } of open) {
         const options = d.options as string[];
         const alertOnly = options.length === 1 && options[0] === "Got it";
-        const level: NotifyLevel = d.tier === "ceo" ? "note" : alertOnly ? "flag" : "ask";
-        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : `${company} needs a decision`, body: d.question, link: evidenceLink(d.context as DecisionContext), decisionId: d.id });
+        // A deploy card carrying the fix for a live problem (BOS-639) is paged, once per fix: a later card for
+        // the same fix (main moved on) is a plain ask. Quiet hours still lower it, in notify, as for any page.
+        const c = d.context as DecisionContext;
+        const urgent = c.type === "self_deploy" && d.tier !== "ceo" ? c.urgent : undefined;
+        const level: NotifyLevel = d.tier === "ceo" ? "note" : urgent && !urgent.repeat ? "page" : alertOnly ? "flag" : "ask";
+        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : urgent ? urgent.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id });
       }
       return open.length;
     },
