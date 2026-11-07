@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
-import { createMemorySampler, type MemorySample } from "../src/services/memory-sampler.js";
+import { createMemorySampler, readRssAndPeak, type MemoryJump, type MemorySample } from "../src/services/memory-sampler.js";
 import { serverStatusService } from "../src/services/server-status.js";
 
 // BOS-410 step 1: log where the server's memory sits, and show the latest in server_status.
@@ -124,5 +124,88 @@ describe("server_status memory", () => {
 
   it("is null when no sampler is wired, so existing callers see no change", async () => {
     expect((await serverPart()).memory).toBeNull();
+  });
+});
+
+// BOS-410 step 2: the 5 Nov jump (2-3 GiB to 15 GiB in one go) needs its moment and context caught.
+describe("memory jump watch", () => {
+  function jumpSampler(opts: { native?: () => Promise<Record<string, number>> } = {}) {
+    let t = Date.parse("2026-11-06T10:00:00Z");
+    let reading: { rss: number; peak: number | null } = { rss: 2000, peak: 2100 };
+    const lines: MemoryJump[] = [];
+    const windows: number[] = [];
+    const sampler = createMemorySampler({
+      log: () => {},
+      now: () => t,
+      memoryUsage: () => ({ rss: reading.rss * MiB, heapTotal: 100 * MiB, heapUsed: 90 * MiB, external: 1 * MiB, arrayBuffers: 1 * MiB }),
+      heapLimit: () => 4096 * MiB,
+      native: opts.native,
+      jump: {
+        read: () => reading,
+        context: (w) => {
+          windows.push(w);
+          return { inFlight: 1 };
+        },
+        log: (l) => lines.push(l),
+      },
+    });
+    const look = async (r: { rss: number; peak: number | null }, ms = 15_000) => {
+      t += ms;
+      reading = r;
+      await sampler.jumpTick();
+    };
+    return { sampler, lines, windows, look };
+  }
+
+  it("logs one line with before, after, the breakdown and the context when rss rises 512 MiB in one look", async () => {
+    const { sampler, lines, windows, look } = jumpSampler({ native: async () => ({ mapBrkHeap: 2500 }) });
+    await sampler.jumpTick(); // baseline
+    await look({ rss: 2300, peak: 2300 }); // +300: not a jump
+    expect(lines).toHaveLength(0);
+    await look({ rss: 2900, peak: 2900 }); // +600 since the last look
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ seconds: 15, rss: { from: 2300, to: 2900 }, peak: { from: 2300, to: 2900 }, context: { inFlight: 1 } });
+    expect(lines[0]!.sample.rss).toBe(2900);
+    expect(lines[0]!.sample.native).toEqual({ mapBrkHeap: 2500 });
+    expect(windows).toEqual([15_000]);
+    // The jump line is not a trend sample.
+    expect(sampler.samples()).toHaveLength(0);
+  });
+
+  it("catches a burst that was already freed through the peak", async () => {
+    const { sampler, lines, look } = jumpSampler();
+    await sampler.jumpTick();
+    await look({ rss: 2000, peak: 9000 });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ rss: { from: 2000, to: 2000 }, peak: { from: 2100, to: 9000 } });
+  });
+
+  it("logs at most one line a minute, and a held-back rise is reported later from the old baseline", async () => {
+    const { sampler, lines, look } = jumpSampler();
+    await sampler.jumpTick();
+    await look({ rss: 3000, peak: 3000 });
+    await look({ rss: 4000, peak: 4000 }); // 15 s later: held back
+    await look({ rss: 4000, peak: 4000 }); // 30 s
+    await look({ rss: 4000, peak: 4000 }); // 45 s
+    expect(lines).toHaveLength(1);
+    await look({ rss: 4000, peak: 4000 }); // 60 s: reported, measured from the first jump's end
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatchObject({ seconds: 60, rss: { from: 3000, to: 4000 } });
+  });
+
+  it("works without a peak (not Linux), and a failing reader never throws", async () => {
+    const { sampler, lines, look } = jumpSampler();
+    await look({ rss: 2000, peak: null });
+    await look({ rss: 2600, peak: null });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.peak).toBeNull();
+    const broken = createMemorySampler({ log: () => {}, jump: { read: () => { throw new Error("no /proc"); }, log: () => {} } });
+    expect(() => broken.jumpTick()).not.toThrow();
+  });
+
+  it("reads this process's rss and peak in MiB", () => {
+    const r = readRssAndPeak();
+    expect(r.rss).toBeGreaterThan(10);
+    if (process.platform === "linux") expect(r.peak).toBeGreaterThanOrEqual(r.rss);
   });
 });

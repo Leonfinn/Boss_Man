@@ -258,6 +258,14 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         // Kept out of the transaction: it may send a verdict over the socket and wake the CEO. Its
         // rows are dedupe-keyed by request id, so re-running it on the resend is harmless.
         return [async () => (await onPermission?.(runner, event)) ?? null];
+      case "runner.log":
+        // A failed tool-connection preflight is worth a line in the server log (BOS-403). Logged
+        // after commit, so a resent (already stored) event doesn't log twice.
+        if (event.message.startsWith("mcp-preflight:")) {
+          const line = `[runner ${runner.id}] ${event.message}`;
+          return [async () => console.warn(line)];
+        }
+        return [];
       default:
         // run.update and runner.log are stored; later phases act on them.
         return [];
