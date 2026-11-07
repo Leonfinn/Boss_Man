@@ -411,6 +411,7 @@ export async function buildApp(opts: AppOptions) {
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
     addons: addonFacts,
+    hostFacts: () => hostFacts.sync(),
     commit: process.env.BOSSMAN_COMMIT || "dev",
     startedAt: new Date(STARTED_AT),
     now: opts.now,

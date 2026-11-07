@@ -165,6 +165,14 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
     return rec.facts[key]?.value ?? null;
   }
 
+  /** Every recorded fact's value, for filling `{{host.…}}` tokens. Undefined when the steps use no host token, so
+   * a card without one never waits on the settings record. */
+  async function valuesFor(steps: readonly string[] | undefined): Promise<Record<string, string> | undefined> {
+    if (!steps?.some((s) => s.includes("{{"))) return undefined;
+    const rec = await sync();
+    return Object.fromEntries(Object.entries(rec.facts).map(([k, f]) => [k, f.value]));
+  }
+
   /** The add-on states the host reported, if the report is fresh enough to trust. */
   async function reportedAddons(): Promise<Record<string, string>> {
     const r = await read();
@@ -173,5 +181,5 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
     return Number.isFinite(age) && age <= HOST_REPORT_FRESH_MS ? r.addons : {};
   }
 
-  return { read, hosts, load, sync, confirm, value, reportedAddons };
+  return { read, hosts, load, sync, confirm, value, valuesFor, reportedAddons };
 }

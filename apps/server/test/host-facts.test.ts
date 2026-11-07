@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { hostFactsService } from "../src/services/host-facts.js";
+import { checkAsk } from "../src/services/decisions.js";
+import { fillHostTokens, hostTokensIn, sh, step as stepText } from "../src/services/steps.js";
 
 // Host facts (BOS-427): what the host recorded about itself, read from outbox/host.json.
 
@@ -134,5 +136,33 @@ describe("host facts settings record (BOS-419)", () => {
     expect(m.tailscale.state).toBe("stopped");
     expect(m.ntfy.state).toBe("stopped");
     expect(m.penpot.state).toBe("running");
+  });
+});
+
+describe("{{host.…}} tokens in card steps", () => {
+  it("fills known facts, names missing ones and refuses values that would break a command block", () => {
+    const vals = { "paths.src": "/srv/bm/src", "bad.nl": "a\nb", "bad.tick": "a`b" };
+    expect(fillHostTokens(["cd {{host.paths.src}} && ls {{ host.paths.src }}"], vals)).toEqual({ steps: ["cd /srv/bm/src && ls /srv/bm/src"], missing: [] });
+    const r = fillHostTokens(["{{host.network.publicAddress}}", "{{host.bad.nl}} {{host.bad.tick}}", "{{other}}"], vals);
+    expect(r.missing.sort()).toEqual(["bad.nl", "bad.tick", "network.publicAddress"]);
+    expect(r.steps[2]).toBe("{{other}}");
+    expect(hostTokensIn(["{{host.a.b}} {{host.a.b}}", "x"])).toEqual(["a.b"]);
+  });
+
+  it("checkAsk fills the token, refuses a missing fact, and still refuses tokens when it has no facts", () => {
+    const tried = "Checked the host from the runner; agents have no access to the owner's machine.";
+    const step = stepText("Open the source folder:", sh("cd {{host.paths.src}}", { host: "nas01", as: "root" }));
+    const ok = checkAsk({ triedFirst: tried, steps: [step], hostValues: { "paths.src": "/srv/bm/src" } });
+    expect(ok.error).toBeNull();
+    expect(ok.steps?.[0]).toContain("cd /srv/bm/src");
+    const miss = checkAsk({ triedFirst: tried, steps: [step], hostValues: {} });
+    expect(miss.error).toContain("{{host.paths.src}}");
+    expect(checkAsk({ triedFirst: tried, steps: [step] }).error).toContain("{{host.paths.src}}");
+  });
+
+  it("valuesFor reads the record only when a step has a token", async () => {
+    const svc = hostFactsService({});
+    expect(await svc.valuesFor(["no token"])).toBeUndefined();
+    expect(await svc.valuesFor(["{{host.x}}"])).toEqual({});
   });
 });

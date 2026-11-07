@@ -10,6 +10,7 @@ import type { Db } from "../db/client.js";
 import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
 import type { AddonFacts } from "./addons.js";
+import type { HostFactsRecord } from "./host-facts.js";
 import type { BlueGreen } from "./bluegreen.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
@@ -39,6 +40,8 @@ export type ServerStatusDeps = {
   syntheticUsage?: (companyId: string) => Promise<unknown>;
   /** Which add-ons are running (addons.ts, DR-023): server-wide, like commit. Absent: null. */
   addons?: () => Promise<AddonFacts>;
+  /** The host's settings record (host-facts.ts, BOS-419): each fact's value, source and any conflict. Absent: null. */
+  hostFacts?: () => Promise<HostFactsRecord>;
   /** Where this process's memory sits, server-wide like commit (memory-sampler.ts, BOS-410). */
   memory?: Pick<MemorySampler, "status">;
   /** The run limits in force and the work runs going, across all companies and in this one (scheduler.runLimits, BOS-582). Absent: null. */
@@ -247,6 +250,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // ntfy, Tailscale and Penpot: state (not_set_up, stopped, needs_login, running, unknown), since and source (DR-023).
         // Only "running" means the add-on is up; never tell the owner otherwise.
         addons: deps.addons ? await deps.addons() : null,
+        hostFacts: deps.hostFacts ? await deps.hostFacts().catch(() => null) : null,
       };
     },
   };
