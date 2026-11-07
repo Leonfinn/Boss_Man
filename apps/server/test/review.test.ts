@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 
 // Hoisted so it is set before review.ts reads it: the landing re-reads its check job row this often.
@@ -7,7 +7,7 @@ vi.hoisted(() => { process.env.BOSSMAN_CHECK_JOB_POLL_MS = "20"; });
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
-import { openPglite } from "../src/db/client.js";
+import { sharedDatabase } from "./helpers/shared-server.js";
 import { activity, checkJobs, projects, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
 import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, INFRA_RETRY_ATTEMPTS, LOCK_RETRY_ATTEMPTS, setInfraRetryBase, setLockRetryBase, landingText } from "../src/services/review.js";
 import { supersedeSignoffs } from "../src/services/decisions.js";
@@ -16,10 +16,20 @@ import { settings } from "../src/db/schema.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
-afterEach(async () => {
-  await ctx?.app.close();
-  await ctx?.close();
+
+// One database and one app for the file, the database emptied before each test (BOS-686). Every test makes
+// its own company, agents, project and ticket and reads only those.
+let shared: Awaited<ReturnType<typeof sharedDatabase>>;
+let app: ReturnType<typeof buildApp> | undefined;
+beforeAll(async () => {
+  shared = await sharedDatabase();
+});
+afterEach(() => {
   ctx = undefined;
+});
+afterAll(async () => {
+  await (await app)?.app.close();
+  await shared.close();
 });
 
 const DIFF: WorkspaceDiff = {
@@ -36,8 +46,9 @@ type Answers = { verify?: unknown; merge?: unknown | ((c: { phase?: string }) =>
 async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean } = {}) {
   const held: Array<() => void> = [];
   const answers: Answers = { merge: { status: "merged", commit: "c".repeat(40) }, migrations: { needed: false, reason: "No other branch uses this ticket's migration numbers." }, ...opts.answers };
-  const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
+  await shared.reset();
+  const { db } = shared;
+  const built = await (app ??= buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" }));
   const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
@@ -70,7 +81,7 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
   const ticket = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
   await db.update(tickets).set({ branch: `bossman/${ticket.id}` }).where(eq(tickets.id, ticket.id));
   await db.delete(wakes);
-  return { ...built, db, close, req, company, ceo, worker, project, ticket, sent, answers, held };
+  return { ...built, db, req, company, ceo, worker, project, ticket, sent, answers, held };
 }
 
 describe("review (R39)", () => {
@@ -419,7 +430,6 @@ describe("server-owned check queue (BOS-316)", () => {
     const d = await setup();
     await d.db.insert(reviewRequests).values({ ticketId: d.ticket.id, kind: "code", reviewerAgentId: d.ceo.id, round: 1, seq: 0, status: "approved" });
     await expect(d.review.submit(d.ticket.id, { verdict: "approved", reviewer: "Other", reviewerAgentId: randomUUID() })).rejects.toThrow(/no open review/);
-    await d.app.close(); await d.close();
   });
 
   it("does not restart the merge while an owner sign-off is still open", async () => {
@@ -526,9 +536,8 @@ describe("server-owned check queue (BOS-316)", () => {
       expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
       expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(2);
       // A failing test is sent back at once: one run only.
+      // (setup empties the database, so the first round's rows are gone; nothing below reads them.)
       const c2 = await setup({ answers: { verify: { ok: false, exitCode: 1, timedOut: false, output: "FAIL limit.test.ts", ms: 10 } } });
-      await ctx.app.close();
-      await ctx.close();
       ctx = c2;
       await c2.req("PATCH", `/api/projects/${c2.project.id}`, { verifyCommand: "pnpm test" });
       expect((await approveAndWait(c2.req, c2.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
