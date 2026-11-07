@@ -42,7 +42,7 @@ import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
 import { REVIEW_REASON } from "./review-kinds.js";
-import { type CardLint, type HostFacts, NOT_OVERRIDABLE, fillHostTokens, lintLines, lintOwnerSteps } from "./steps.js";
+import { type CardLint, type HostFacts, type SelfDeployFacts, NOT_OVERRIDABLE, fillHostTokens, lintLines, lintOwnerSteps } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -514,7 +514,7 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * `addons` are the add-on facts for R9 (DR-023); a route that has them passes them, and `setsUp` names the
  * add-on this card sets up, so its own setup steps aren't refused for it not running yet.
  */
-export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -536,7 +536,7 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
     }
     steps = filled.steps;
   }
-  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}) });
+  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}) });
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
   const soft = refuse.filter((f) => !NOT_OVERRIDABLE.has(f.rule));
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
