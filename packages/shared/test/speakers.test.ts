@@ -35,8 +35,14 @@ describe("speaker names (BOS-265)", () => {
       expect(speakerNameProblem(bad), JSON.stringify(bad)).toMatch(/invisible accent or formatting characters/);
     }
     // A reserved label built from lookalike letters from another alphabet reads as "Owner" too.
-    expect(speakerNameProblem("\u039Fwner")).toMatch(/different alphabets/);
-    expect(speakerNameProblem("\u041Ewner")).toMatch(/different alphabets/);
+    expect(speakerNameProblem("\u039Fwner")).toMatch(/look like Latin/);
+    expect(speakerNameProblem("\u041Ewner")).toMatch(/look like Latin/);
+  });
+
+  it("refuses names spelled wholly in lookalike letters (BOS-281)", () => {
+    for (const bad of ["СЕО", "ОԜΝЕᎡ", "ΒΟЅЅ ΜΑΝ", "ᴏᴡɴᴇʀ", "ʏᴏᴜ"]) {
+      expect(speakerNameProblem(bad), bad).not.toBeNull();
+    }
   });
 
   it("still allows ordinary names, including accented ones outside a Latin word", () => {
