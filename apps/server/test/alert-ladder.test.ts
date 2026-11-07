@@ -207,13 +207,14 @@ describe("the alert ladder (BOS-64)", () => {
     const ceo = await client(ctx.ceo.id);
     const advised = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, outcome: "advice", what: "Copies part of a database file into another file.", needed: "Yes, the ticket needs it to check the export.", recommendation: "allow", why: "It only reads a file in /tmp the agent made itself." } });
     expect(textOf(advised)).toMatch(/Advice saved/);
-    // The CEO then passes the same card on to the owner.
-    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d!.id, triedFirst: "Read the command and the ticket; only the owner can judge this one" } }))).toBe(false);
+    // The CEO then passes the same card on to the owner, with the advice BOS-233 requires on every escalation.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d!.id, triedFirst: "Read the command and the ticket; only the owner can judge this one", adviceNeeded: "It is needed for the export check, to read the session file.", adviceDeny: "The export can't be checked, so the ticket stays blocked." } }))).toBe(false);
     const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, d!.id));
     expect(after!.tier).toBe("owner");
-    // The recommendation, needed and why survive the hand-over, so the owner still sees the Recommend tag.
+    // The recommendation, needed and why survive the hand-over, so the owner still sees the Recommend tag;
+    // the card's "What it's for" and "If you deny it" lines show the escalation's advice.
     expect(after!.context).toMatchObject({
-      advice: { state: "advised", recommendation: "allow", needed: "Yes, the ticket needs it to check the export.", why: "It only reads a file in /tmp the agent made itself.", what: "Copies part of a database file into another file." },
+      advice: { state: "advised", recommendation: "allow", needed: "Yes, the ticket needs it to check the export.", why: "It only reads a file in /tmp the agent made itself.", what: "It is needed for the export check, to read the session file.", denyStops: "The export can't be checked, so the ticket stays blocked." },
     });
   });
 
@@ -627,5 +628,27 @@ describe("permission cards carry the CEO's advice (BOS-233)", () => {
     const r = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d.id, outcome: "advice", what: "It reads the exported session file.", needed: "Yes, the ticket needs it to check the export.", recommendation: "allow", why: "It only reads a file in /tmp the agent made itself." } });
     expect(isError(r)).toBe(false);
     expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.context).toMatchObject({ advice: { state: "advised", recommendation: "allow" }, handoverRanOut: { at: expect.any(String) } });
+  });
+
+  // BOS-636 (Freddy's BOS-233 review): escalating a card the CEO has already advised on keeps that
+  // earlier recommendation and why, and the fields given at escalation win where they overlap.
+  it("escalating a card the CEO already advised on keeps the recommendation and why", async () => {
+    const d = await permissionAtCeo();
+    const ceo = await client(ctx.ceo.id);
+    const advised = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d.id, outcome: "advice", what: "It copies part of a database file.", needed: "Yes, the ticket needs it to check the export.", recommendation: "allow", why: "It only reads a file in /tmp the agent made itself." } });
+    expect(isError(advised)).toBe(false);
+    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d.id, triedFirst: "Checked the command and the ticket, which needs the data", adviceNeeded: "It is needed for BOS-1, to read the exported session file.", adviceDeny: "The session export cannot be checked, so BOS-1 stays blocked." } });
+    expect(isError(ok)).toBe(false);
+    const row = (await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!;
+    expect(row.tier).toBe("owner");
+    expect(row.context).toMatchObject({
+      advice: {
+        state: "advised",
+        recommendation: "allow",
+        why: "It only reads a file in /tmp the agent made itself.",
+        what: expect.stringContaining("BOS-1"),
+        denyStops: expect.stringContaining("blocked"),
+      },
+    });
   });
 });
