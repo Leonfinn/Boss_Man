@@ -9,7 +9,7 @@ import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
-import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult } from "@boss-man/shared";
+import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
 import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
@@ -83,8 +83,11 @@ import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
+import { checkDispatcher } from "./services/check-dispatcher.js";
+import { checkRequestService } from "./services/check-request.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
-import { createMemorySampler } from "./services/memory-sampler.js";
+import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
+import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
@@ -271,7 +274,10 @@ export async function buildApp(opts: AppOptions) {
     const blocked = path.startsWith("/api/runner/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
     if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
   });
-  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader() });
+  // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
+  let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
+  const checks = checkDispatcher(db, { send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
+  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
   // The live commit each company's server runs (BOS-284): a deploy, a switch-back, a rollback or a
   // restart after a hand-apply wakes the Release Manager. Its deps are filled in further down.
   const releaseLog = releaseLogService(db, {
@@ -376,6 +382,8 @@ export async function buildApp(opts: AppOptions) {
   const memory = createMemorySampler({
     everyMs: Number(process.env.BOSSMAN_MEMORY_LOG_MS ?? 0) || undefined,
     log: (sample) => app.log.info({ memory: sample }, "memory"),
+    // What the off-heap part is made of (BOS-410 step 2: 15 GiB native with a 100 MiB heap on 5 Nov).
+    native: () => readNativeDetail(),
     extra: () => {
       let sockets = 0;
       let socketBuffered = 0;
@@ -384,6 +392,12 @@ export async function buildApp(opts: AppOptions) {
         socketBuffered += c.bufferedAmount;
       }
       return { sockets, socketBufferedKiB: Math.round(socketBuffered / 1024), runnerEventsWaiting: runnerIngestWaiting() };
+    },
+    // Catch the moment of a burst (5 Nov: 2-3 GiB to 15 GiB in one go) and what was running then.
+    jump: {
+      read: readRssAndPeak,
+      context: (windowMs) => stalls.activity(windowMs),
+      log: (line) => app.log.warn({ memoryJump: line }, "memory jump"),
     },
   });
   const serverStatus = serverStatusService(db, {
@@ -580,6 +594,7 @@ export async function buildApp(opts: AppOptions) {
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
     resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
+    releaseUnblocked: (ticketId) => scheduler.releaseIfUnblocked(ticketId),
     landingActive: (ticketId) => review.landingActive(ticketId),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
@@ -664,6 +679,7 @@ export async function buildApp(opts: AppOptions) {
     isLeader: () => leader.isLeader(),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
+  checkWake = (agentId, w) => scheduler.notify(agentId, w);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
   const mergeQueue = mergeQueueService(db, {
     runningMerges: () => review.runningMerges(),
@@ -674,19 +690,24 @@ export async function buildApp(opts: AppOptions) {
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
     // A stalled-review card's actions (BOS-404, BOS-426): take it, hand it to another reviewer, send it back, or leave it.
     reviewStall: (ctx, answer, byAgentId) => review.reviewStall(ctx, answer, byAgentId),
-    // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
-    // Decisions show "Checking and merging" while it runs (including lock retries), rather than inviting
-    // another approval. A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
+    // Answering "Approve and merge" on the sign-off card starts a tracked landing without holding the
+    // answer open: the check can take 10+ minutes, so the card closes at once and the ticket page and
+    // Decisions show "Checking and merging" while it runs (including lock retries) (BOS-559). The merge
+    // result arrives in the feed as it does today: a failed landing is recorded on the ticket and raised
+    // as a card by land()/startLanding(), so the owner is still told and can approve it again.
     land: (ticketId, reviewer, merge) =>
       (merge?.markDone
         ? // Nothing to merge (no repo, or a no-code ticket): the owner's own sign-off finishes it in the same press (BOS-471).
           work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true, stateNote: "The owner approved and signed it off; there was nothing to merge." })
-        : review.landVisible(ticketId, reviewer)
+        : review.startLanding(ticketId, reviewer)
       ).catch(async (err) => {
-        // Another sign-off card for the same ticket being settled is a wait, not a failed merge (BOS-471).
+        // Waiting on the sign-off, or another merge already running, is a wait, not a failed merge: no card.
         if (isSignoffPending(err)) return;
-        const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
+        if (err instanceof ReviewError && /already being checked and merged/i.test(err.message)) return;
+        // A landing that couldn't start has already left a trail and a card (startLanding), so raise nothing
+        // more, so a single failed press never leaves two cards saying the same thing; log it in case an
+        // unexpected error got this far without one.
+        app.log.warn(`the sign-off answer started no merge for ${ticketId}: ${(err as Error).message}`);
       }),
     // An answer that arrives after the ticket moved on is told to the owner, not thrown back at them.
     landAgain: (ticketId, skipChecks) =>
@@ -698,6 +719,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
       await work.updateTicket(ticketId, { state: "done", outcome: "cancelled", overLimit: true });
     },
+    moveAfterMerge: (ticketId, criteria) => review.moveAfterMerge(ticketId, criteria),
     raiseCap: async (ticketId) => {
       const [t] = await db.select({ cap: tickets.costCapMicros, projectCap: projects.ticketCostCapMicros }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, ticketId));
       const cap = t?.cap ?? t?.projectCap;
@@ -706,7 +728,8 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, addons: addonFacts }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
+  const checkRequests = checkRequestService(db, { command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, addons: addonFacts, checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -2620,8 +2643,8 @@ export async function buildApp(opts: AppOptions) {
     /**
      * "Approve and merge" on the ticket page (BOS-471): when the owner's sign-off card is open, this answers
      * it exactly as Decisions does (same answer path, so the sign-off is settled and any stale merge-retry
-     * card is cleared) and then starts the tracked merge. Without a card it is the plain approval. On a
-     * ticket with no repo it marks it done, as before.
+     * card is cleared) and then starts the tracked merge in the background, so the press returns at once
+     * (BOS-559). Without a card it is the plain approval. On a ticket with no repo it marks it done, as before.
      */
     owner.post("/api/tickets/:id/approve-merge", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -2648,10 +2671,12 @@ export async function buildApp(opts: AppOptions) {
           throw err;
         }
         try {
-          // The answer's own hook (setLoopHooks.land above) already ran and finished the merge before it
-          // returned, so start nothing more here: a second start would merge twice (BOS-471, review round 1).
-          // A press that found the sign-off already settled (r === null) started no landing, so start one now.
-          const landing = signoffAnswered ? null : await review.startLanding(id, "the owner");
+          // The answer's own hook (setLoopHooks.land above) now starts the merge in the background and
+          // returns at once, so the card closes before the check finishes (BOS-559). It started a landing
+          // only when it settled the sign-off, so hand that running landing back for the page to poll;
+          // start nothing more, or it would merge twice (BOS-471). A press that found the sign-off already
+          // settled (r === null) started no landing, so start one now.
+          const landing = signoffAnswered ? await review.landing(id) : await review.startLanding(id, "the owner");
           return { outcome: "landing" as const, signoffAnswered, landing };
         } catch (err) {
           // A sign-off still open here is the owner's next answer, not a failed merge: say so, and raise no card.
@@ -2711,5 +2736,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
+  return { app, launcher: launch, memory, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
 }

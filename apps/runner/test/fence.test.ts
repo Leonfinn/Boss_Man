@@ -86,8 +86,8 @@ describe("the runner's fence setting", () => {
   it("is passed to the runner's SessionManager from its self-test", () => {
     const main = readFileSync(path.join(import.meta.dirname, "..", "src", "main.ts"), "utf8");
     expect(main).toMatch(/new SessionManager\(\{[\s\S]*?\n  fence: \{ \.\.\.runnerFence\(sandbox\.level, dataDir, workspacesRoot, env\.PNPM_STORE_DIR\), pnpmStore: storeDir \},[\s\S]*?\n\}\);/);
-    // The merge gate installs from a store of its own, outside the agents' shared one (BOS-568 review), not from HOME.
-    expect(main).toMatch(/new Workspaces\(workspacesRoot, process\.env, coordDir, gateStore\)/);
+    // Agents' own checks install from the shared store; server-queued jobs fence with their own gate store (BOS-568, BOS-316).
+    expect(main).toMatch(/new Workspaces\(workspacesRoot, process\.env, coordDir, storeDir, \{ level: sandbox\.level, pnpmStore: gateStore \}\);/);
     expect(main).toMatch(/assertSeparateStore\(storeDir, gateStore\)/);
   });
 });

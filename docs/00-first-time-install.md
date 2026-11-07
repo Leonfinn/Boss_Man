@@ -388,6 +388,7 @@ On 3 Nov 2026 a headless browser with no memory limit used up the whole host's m
 | `BOSSMAN_CHECK_SLOTS` | how many full checks (the merge gate's and agents' `check-quick`) a runner may run at once; the rest wait in line. Each extra one peaks at about 3 GB, so raise `BOSSMAN_RUNNER_MEMORY` with it (for 2 slots, `8g` or more) and keep the host's free memory above that. Takes effect when the runner container is recreated (it is read at runner start) | `1` |
 | `PNPM_STORE_DIR` | where every agent install keeps its pnpm packages, as seen inside the runner (an absolute path). The default shares one store on the workspaces volume; set it only to move the store to another volume. Left unset, nothing changes. Takes effect when the runner container is recreated | `/home/node/workspaces/.pnpm-store` |
 | `BOSSMAN_SERVER_MEMORY` / `BOSSMAN_SERVER_MEMORY_RESERVED` | the server (single, or each blue/green colour): limit / amount kept for it. No cap by default (`0`), because the server currently uses 10-13 GiB; set a value only once measured | `0` / `512m` |
+| `BOSSMAN_SERVER_HEAP_MB` | the server's JavaScript heap, in MiB (`--max-old-space-size`). Measured use is about 100 MiB; the memory log's `heapUsed` shows yours. If you set `BOSSMAN_SERVER_MEMORY`, keep this well below it | `1536` |
 | `BOSSMAN_DB_MEMORY` / `BOSSMAN_DB_MEMORY_RESERVED` | Postgres: limit / amount kept for it | `0` (no cap) / `256m` |
 | `BOSSMAN_TOOLSERVER_MEMORY`, `BOSSMAN_TOOLSERVER_PIDS`, `BOSSMAN_TOOLSERVER_SHM` | tool servers that run a browser (crawl4ai, scrapling), see below | `2g`, `512`, `512m` |
 
@@ -528,6 +529,7 @@ docker system df
 
 ## Next steps
 
+- [docs/21-move-to-new-host.md](21-move-to-new-host.md): moving Boss Man to another Docker host (host-neutral, with TrueNAS and Proxmox notes).
 - [docs/06-install-truenas.md](06-install-truenas.md): a worked example on TrueNAS SCALE, with backups, the host deployer, blue/green, phone notifications and the feedback portal.
 - [docs/09-self-deploy.md](09-self-deploy.md): how "Deploy latest", the drain and blue/green updates work.
 - [docs/12-runner-add-ons.md](12-runner-add-ons.md): optional tools in the runner image, such as a browser for agents.

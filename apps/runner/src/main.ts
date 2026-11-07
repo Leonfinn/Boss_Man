@@ -5,6 +5,7 @@ import path from "node:path";
 import { checkClaude } from "./claude-check.js";
 import { applyCheckSlots, pnpmStoreDir, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
+import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
@@ -31,6 +32,7 @@ const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
 // the merge check share, so checks still take turns (BOS-321).
 const coordDir = path.join(workspacesRoot, ".bossman-coord");
 mkdirSync(coordDir, { recursive: true });
+const sandbox = sandboxSelfTest();
 const checkSlots = applyCheckSlots(coordDir, env.BOSSMAN_CHECK_SLOTS);
 if (checkSlots > 1) console.log(`[runner] full checks: ${checkSlots} at a time (BOSSMAN_CHECK_SLOTS)`);
 if (checkSlots > 1) {
@@ -55,15 +57,18 @@ assertSeparateStore(storeDir, gateStore);
 mkdirSync(gateStore, { recursive: true });
 // The runner's own installs use the shared store too, so the runner's ~1.3 GB isn't in a second store on the root disk.
 Object.assign(env, storeEnv(storeDir));
-const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, gateStore);
+// Server-queued check jobs run a commit nobody has reviewed, so they fence with their own gate store, kept apart
+// from the shared one agents can write (BOS-316, BOS-568).
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, storeDir, { level: sandbox.level, pnpmStore: gateStore });
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
-const sandbox = sandboxSelfTest();
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
 
 let connection: RunnerConnection;
+const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log);
 const sessions = new SessionManager({
   mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
+  mcpPreflightMs: Number(env.BOSSMAN_MCP_PREFLIGHT_MS ?? 20_000),
   emit: (event) => connection.emit(event),
   resolveEnv: async (runId) => {
     const res = await fetch(`${httpBase}/api/runner/env?runId=${encodeURIComponent(runId)}`, { headers: { authorization: `Bearer ${token}` } });
@@ -75,6 +80,7 @@ const sessions = new SessionManager({
   reply: (requestId, result) => connection.reply(requestId, result),
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,
+  checkJobs,
   fence: { ...runnerFence(sandbox.level, dataDir, workspacesRoot, env.PNPM_STORE_DIR), pnpmStore: storeDir },
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
@@ -94,6 +100,8 @@ connection = new RunnerConnection({
   log,
   onCommand: (command) => sessions.handle(command),
   pendingPermissions: () => sessions.pendingPermissions(),
+  runningChecks: () => checkJobs.running(),
+  onWelcome: () => checkJobs.resend(),
   liveRuns: () => sessions.liveRunIds(),
 });
 
