@@ -2,9 +2,9 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
+import { agents, checkJobs, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
@@ -16,6 +16,7 @@ import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipp
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard } from "./signoff.js";
 import { checkGate, checkPriority } from "./check-gate.js";
+import { checkQueue } from "./check-queue.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import type { notificationsService } from "./notifications.js";
@@ -95,6 +96,10 @@ export const INFRA_CAUSE_TEXT: Record<InfraCause, (ms: number) => string> = {
 
 /** How long the server waits for the runner to merge or push an approved branch. */
 export const MERGE_WAIT_MS = 10 * 60_000;
+/** Set for the project check when the deeper check runs straight after it on the same tree (BOS-665); scripts/check-quick.sh reads it. */
+export const FULL_CHECK_NEXT = "BOSSMAN_FULL_CHECK_NEXT";
+/** How often a landing re-reads its check job row (BOS-316). Tests shorten it with BOSSMAN_CHECK_JOB_POLL_MS. */
+const CHECK_JOB_POLL_MS = Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) > 0 ? Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) : 3000;
 const CHECK_MERGED_KEY = "check_merged_result";
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
@@ -170,7 +175,7 @@ type NotifyHook = (agentId: string, input: { reason: string; note: string; ticke
 /** "4 Nov 07:35 UTC", for a sign-off named on a card or event. */
 const when = (iso: string) => {
   const d = new Date(iso);
-  return `${d.getUTCDate()} ${d.toLocaleString("en-GB", { month: "short", timeZone: "UTC" })} ${iso.slice(11, 16)} UTC`;
+  return `${d.getUTCDate()} ${formatDate("en-GB", d, { month: "short", timeZone: "UTC" })} ${iso.slice(11, 16)} UTC`;
 };
 
 /** The owner decides what to do with a check that couldn't finish; the ticket stays in review and the loop detector never hears of it. */
@@ -218,6 +223,7 @@ export function reviewService(
   const landings = new Map<string, LandingStatus>();
   // At most N merge checks at once, quick or full (BOS-446); the rest wait in order, urgent and arch fixes first.
   const gate = checkGate(db);
+  const queue = checkQueue(db);
   // When each ticket's merge last said it was alive (BOS-362). The merge sweep reads this, not the ticket's
   // activity, which chat and chases also bump: talk must not hold a merge retry back, and a running merge must.
   // shortcut: in memory like `landings`; a restart ends every merge, so forgetting it is correct.
@@ -698,7 +704,7 @@ export function reviewService(
       await skipPending(db, rows);
       const failed = rows.filter((r) => r.status === "changes_requested");
       const text = failed.map((r) => r.notes).join("\n\n");
-      const sent = await this.sendBackRound(t, { reviewer: failed.map((r) => (r.kind === "code" ? "the reviewer" : `the ${r.kind} reviewer`)).join(" and "), comments: failed.flatMap((r) => r.comments as ReviewComment[]), text, causedByRunId: o.causedByRunId });
+      const sent = await this.sendBackRound(t, { reviewer: failed.map((r) => (r.kind === "code" ? "the reviewer" : `the ${r.kind} reviewer`)).join(" and "), comments: failed.flatMap((r) => r.comments as ReviewComment[]), text, parts: failed.map((r) => ({ notes: r.notes ?? "", comments: r.comments as ReviewComment[] })), causedByRunId: o.causedByRunId });
       return sent;
     },
 
@@ -725,8 +731,8 @@ export function reviewService(
     },
 
     /** Changes requested: a review that keeps coming back goes to the owner instead of another round (R49). */
-    async sendBackRound(t: typeof tickets.$inferSelect, o: { reviewer: string; comments: ReviewComment[]; text: string; causedByRunId?: string | null }) {
-      const round = await deps.loops.reviewRound({ ticketId: t.id, reviewer: o.reviewer, comments: o.comments, message: o.text });
+    async sendBackRound(t: typeof tickets.$inferSelect, o: { reviewer: string; comments: ReviewComment[]; text: string; parts?: { notes: string; comments: ReviewComment[] }[]; causedByRunId?: string | null }) {
+      const round = await deps.loops.reviewRound({ ticketId: t.id, reviewer: o.reviewer, comments: o.comments, message: o.text, parts: o.parts });
       if (round.escalated) return { verdict: "changes_requested" as const, outcome: "escalated" as const, delivered: `held: the review looks stuck, so the CEO (or the owner, if the CEO can't settle it) decides what happens next (decision ${round.escalated})`, message: o.text, round: round.round };
       const delivered = await this.sendBack(t.id, o.text, o.reviewer, o.causedByRunId);
       return { verdict: "changes_requested" as const, outcome: "sent_back" as const, delivered, message: o.text, round: round.round };
@@ -757,6 +763,39 @@ export function reviewService(
       // Reviews that never ran now have to: the ticket goes back into review for them.
       if (evaluate(after) === "waiting" && t.systemState !== "review") await deps.work.updateTicket(ticketId, { state: "review", overLimit: true });
       return this.settle(t, { verdict: "approved", reviewer: "the CEO", reviewerAgentId: input.byAgentId, background: input.background, causedByRunId: input.causedByRunId, before });
+    },
+
+    /**
+     * The owner's (or CEO's) "move these checks to after the merge" on a stuck-review card (BOS-422): the named criteria become
+     * after-merge ones, the changes-requested reviews that only failed them are overruled, and the ticket goes on through review.
+     * Owner sign-off still applies, as it does after an overrule.
+     */
+    async moveAfterMerge(ticketId: string, criteria: string[]) {
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+      if (!t || t.systemState === "done") return;
+      // Re-check against the reviews as they are now (a stale card, or criteria edited since): every changes-requested review
+      // must fail only criteria in the moved set, with no line comments; otherwise nothing is moved or overruled.
+      const current = readCriteria(t.acceptanceCriteria);
+      const asked = new Set(criteria);
+      const open = (await latestRows(db, ticketId)).filter((r) => r.status === "changes_requested");
+      const ok = open.every((r) => {
+        const m = movableFailures(current, r.comments as ReviewComment[], r.notes ?? "");
+        return m.length > 0 && m.every((c) => asked.has(c));
+      });
+      if (!ok) return this.sendBack(ticketId, open.map((r) => r.notes ?? "").join("\n\n"), "the reviewer");
+      const move = new Set(criteria);
+      const next =readCriteria(t.acceptanceCriteria).map((c) => (!isAfterMerge(c) && move.has(criterionText(c)) ? { text: criterionText(c), after: "merge" as const } : c));
+      await db.update(tickets).set({ acceptanceCriteria: next }).where(eq(tickets.id, ticketId));
+      const rows = await latestRows(db, ticketId);
+      const before = activeRows(rows);
+      const failed = rows.filter((r) => r.status === "changes_requested");
+      for (const r of failed) await decide(db, r.id, { status: "overruled", overruleReason: `Moved to after the merge: ${criteria.map((c) => `"${c}"`).join(", ")}` });
+      await record(db, { companyId: t.companyId, ticketId, kind: "review_overruled", summary: `Stuck review: ${criteria.map((c) => `"${c}"`).join(", ")} moved to after the merge, so the changes requested on them no longer hold the ticket.` });
+      await reviveSkipped(db, rows);
+      const reviewer = failed.find((r) => r.reviewerAgentId)?.reviewerAgentId;
+      // A review the owner gave straight from the ticket page has no review rows: the move is the approval.
+      if (!reviewer) return failed.length ? undefined : this.approve(t, { reviewer: "the owner", background: true });
+      return this.settle(t, { verdict: "approved", reviewer: "the owner", reviewerAgentId: reviewer, before });
     },
 
     /**
@@ -1211,8 +1250,15 @@ export function reviewService(
       // The project's check, plus its deeper one for high and critical work (R47, R48).
       // Deep check at the highest risk among this ticket and every ticket landing with it.
       const needsDeep = [t.risk, ...together.map((c) => c.risk)].some((r) => deepChecks(r));
-      const checks = opts?.skipChecks ? [] : [verifyCommand, needsDeep ? deepVerifyCommand : null].filter((c): c is string => !!c);
-      const kindOf = (command: string) => (command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify");
+      // BOS-665: when a different, deeper check runs next on the same tree, the project check is told so (FULL_CHECK_NEXT)
+      // and may skip what the deeper one repeats (check-quick.sh drops its typecheck and related tests). It rides in the
+      // command string because every way of running a check is `sh -c <command>`, so no runner change is needed; `named`
+      // maps it back to the project's own command for messages and check results.
+      const fullNext = needsDeep && !!deepVerifyCommand && !!verifyCommand && deepVerifyCommand !== verifyCommand;
+      const project = verifyCommand && fullNext ? `export ${FULL_CHECK_NEXT}=1; ${verifyCommand}` : verifyCommand;
+      const named = (command: string) => (command === project && verifyCommand ? verifyCommand : command);
+      const checks = opts?.skipChecks ? [] : [project, needsDeep ? deepVerifyCommand : null].filter((c): c is string => !!c);
+      const kindOf = (command: string) => (named(command) === deepVerifyCommand && named(command) !== verifyCommand ? "deep_verify" : "verify");
       // A failed check: wait for the lock, a stuck check, or the ticket goes back with the output (shared by both ways of checking).
       const checkFailed = async (command: string, v: VerifyResult): Promise<{ outcome: "verify_failed" | "check_stuck" | "lock_wait"; delivered: string | null; detail: unknown }> => {
         // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
@@ -1236,8 +1282,10 @@ export function reviewService(
         return { outcome: "verify_failed", delivered, detail: v };
       };
       // BOS-313 (F6): with the setting on, the checks run on the merge commit that will be pushed, inside the merge itself.
-      const checkMerged = landing !== "pull_request" && checks.length > 0 && (await checkMergedResult());
-      for (const command of checkMerged ? [] : checks) {
+      // BOS-316 (DR-003): in server mode the merged result is checked by a job in the check queue, not inside the merge request.
+      const serverChecks = landing !== "pull_request" && checks.length > 0 && (await queue.mode()) === "server";
+      const checkMerged = !serverChecks && landing !== "pull_request" && checks.length > 0 && (await checkMergedResult());
+      for (const command of checkMerged || serverChecks ? [] : checks) {
         await touch();
         // Through the gate: at most N checks run at once. A runner that doesn't answer counts as an infra failure too.
         const runCheck = (alone: boolean) =>
@@ -1266,7 +1314,7 @@ export function reviewService(
           v = await runCheck(retry === INFRA_RETRY_ATTEMPTS);
         }
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(command), passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
-        if (!v.ok) return checkFailed(command, v);
+        if (!v.ok) return checkFailed(named(command), v);
       }
 
       // Its migrations must not take a number another branch already has (BOS-219): the merge is the
@@ -1288,7 +1336,35 @@ export function reviewService(
       // that finishes after this is still safe: trying again finds the branch already merged.
       await touch();
       phases.set(ticketId, "merging");
-      const m: MergeResult | PushResult = pr
+      type Stuck = { status: "job_stuck"; command: string; reason: string; output: string };
+      // Server mode: build the merge commit, queue a merge job for its tree, wait on the job's row, then push exactly what was checked.
+      const serverMerge = async (): Promise<MergeResult | Stuck> => {
+        const message = `Merge "${t.title}" (${ticketId})`;
+        for (let round = 0; round < 3; round++) {
+          const prep = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS);
+          if (prep.status !== "prepared") return prep;
+                    for (const command of checks) {
+            const { job } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "full", commit: prep.commit, tree: prep.tree, command, priority: checkPriority(t) });
+            let cur = job;
+            while (cur.state === "queued" || cur.state === "running") {
+              await new Promise((resolve) => setTimeout(resolve, CHECK_JOB_POLL_MS));
+              const [row] = await db.select().from(checkJobs).where(eq(checkJobs.id, cur.id));
+              if (!row) return { status: "job_stuck", command, reason: "The check job disappeared from the queue.", output: "" };
+              cur = row;
+            }
+            if (cur.state === "passed") await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: kindOf(command), passed: true, detail: null });
+            if (cur.state === "stuck" || cur.state === "cancelled") return { status: "job_stuck", command, reason: cur.reason ?? `The check job was ${cur.state}.`, output: cur.logTail ?? "" };
+            if (cur.state === "failed") return { status: "check_failed", command, result: { ok: false, exitCode: cur.exitCode, timedOut: /timed out/i.test(cur.reason ?? ""), output: cur.logTail ?? "", ms: cur.startedAt && cur.endedAt ? cur.endedAt.getTime() - cur.startedAt.getTime() : 0 } };
+          }
+          await touch();
+          const fin = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "finish", commit: prep.commit, tree: prep.tree }), MERGE_WAIT_MS);
+          if (fin.status !== "main_moved") return fin;
+        }
+        return { status: "main_moved" };
+      };
+      const m0: MergeResult | PushResult | Stuck = serverChecks
+        ? await whileActive(serverMerge)
+        : pr
         ? await whileActive(() => ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
         : await whileActive(() =>
             (checkMerged ? (w: () => Promise<MergeResult>) => gate.run(checkPriority(t), false, w) : (w: () => Promise<MergeResult>) => w())(() => ask<MergeResult>(
@@ -1297,9 +1373,16 @@ export function reviewService(
               checkMerged ? MERGE_WAIT_MS + 3 * checks.length * VERIFY_ASK_TIMEOUT_MS : MERGE_WAIT_MS,
             )),
           );
+      if (m0.status === "job_stuck") {
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The queued merge check stopped before it finished: ${m0.reason}` });
+        await raiseCheckStuck(db, t, named(m0.command), `stopped: ${m0.reason}`, m0.output);
+        return { outcome: "check_stuck", delivered: null, detail: m0 };
+      }
+      const m: MergeResult | PushResult = m0;
+      if (m.status === "prepared") throw new ReviewError(409, "The runner answered the merge with an unfinished step; try again.");
       if (m.status === "check_failed") {
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(m.command), passed: false, detail: m.result.output.slice(-500) });
-        return checkFailed(m.command, m.result);
+        return checkFailed(named(m.command), m.result);
       }
       // The target kept moving while the merged result was checked; nothing was pushed, so land() tries again.
       if (m.status === "main_moved") return { outcome: "lock_wait", delivered: null, detail: m };
@@ -1339,6 +1422,8 @@ export function reviewService(
         for (const command of checks) await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: checkedSha, kind: kindOf(command), passed: true, detail: null });
       }
       await db.update(tickets).set({ mergeCommit: m.commit, ...(checkedSha ? { checkedCommit: checkedSha } : {}) }).where(eq(tickets.id, ticketId));
+      // BOS-316: what was pushed is exactly the tree a merge job just passed, so main passes its check (P11a).
+      if (serverChecks && m.status === "merged") await queue.setMainState(t.projectId, "green", m.commit);
       // Its own after-merge checks keep this ticket open (DR-024 #5), but not the ones riding along.
       const mine = await closeAfterMerge(t, m.commit, causedByRunId);
       for (const c of together) {

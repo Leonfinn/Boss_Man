@@ -4,6 +4,7 @@ import {
   creditStatus,
   dateIn,
   forecastQuota,
+  formatDate,
   parseClaudeRateLimit,
   parseCodexRateLimits,
   parseSyntheticQuota,
@@ -239,7 +240,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     const paid = await db.select({ name: agents.name, company: companies.name }).from(agents).innerJoin(companies, eq(companies.id, agents.companyId)).where(and(eq(agents.fundingSourceId, source.id), sql`${agents.retiredAt} is null`)).orderBy(agents.name);
     const when = (iso: string | null) =>
       iso
-        ? `${new Date(iso).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone })} at ${new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone })}`
+        ? `${formatDate("en-GB", new Date(iso), { weekday: "short", day: "numeric", month: "short", timeZone })} at ${formatDate("en-GB", new Date(iso), { hour: "2-digit", minute: "2-digit", timeZone })}`
         : "Synthetic doesn't say";
     // The card says "about X% used": the stored count is the percentage rounded to 0.01 points.
     const usedPercent = Math.floor(percent);
@@ -288,6 +289,14 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return rows;
   }
 
+  /** The latest reading per window and when each runs out at the recent rate (R78). */
+  async function quotaForecasts(source: typeof fundingSources.$inferSelect, now: Date) {
+    const fundingSourceId = source.id;
+    const quota = source.kind === "subscription" ? await latestQuota(fundingSourceId) : [];
+    const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
+    return { quota, forecasts: Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)])) };
+  }
+
   return {
     async create(input: typeof fundingSources.$inferInsert) {
       const [row] = await db.insert(fundingSources).values(input).returning();
@@ -324,12 +333,9 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         source.kind === "api_credit" && source.monthlyGrantMicros != null && source.cycleAnchor
           ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, events, now)
           : null;
-      const quota = source.kind === "subscription" ? await latestQuota(id) : [];
+      const { quota, forecasts } = await quotaForecasts(source, now);
       // Every window name the adapter has reported, so the owner can switch each one on or off (BOS-227).
       const windowsSeen = source.kind === "subscription" ? [...new Set((await db.selectDistinct({ window: quotaSamples.window }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id))).map((r) => r.window))].sort() : [];
-      // When each window runs out at the recent rate (R78).
-      const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, id), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
-      const forecasts = Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)]));
       return {
         source,
         credit,
@@ -348,6 +354,17 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     },
 
     /**
+     * Just the source and its window forecasts, for the quota alert on every `run.quota` event.
+     * status() also adds up a week of runs and every cost event, which the alert never reads
+     * (BOS-604/BOS-649 T1: that roll-up on each event was what froze the server).
+     */
+    async forecasts(id: string, now = new Date()) {
+      const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, id));
+      if (!source) return null;
+      return { source, ...(await quotaForecasts(source, now)) };
+    },
+
+    /**
      * Use per day for the last 7 days, oldest first (R78): tokens for runs paid from this source
      * (a subscription's real measure) and the money its cost events add up to. Days are the
      * owner's local days (e.g. BST in a UK summer), since that's how Claude's limits are shown.
@@ -363,17 +380,20 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .where(and(gte(runs.startedAt, since), sql`(${runs.id} in (select ${costEvents.runId} from ${costEvents} where ${costEvents.fundingSourceId} = ${id} and ${costEvents.runId} is not null) or ${agents.fundingSourceId} = ${id})`));
       const money = await db.select({ occurredAt: costEvents.occurredAt, costMicros: costEvents.costMicros }).from(costEvents).where(and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since)));
-      const day = (at: Date) => dateIn(at, timeZone);
-      return dates.map((d) => {
-        const on = runsHere.filter((r) => day(r.startedAt) === d);
-        return {
-          day: d,
-          runs: on.length,
-          inputTokens: on.reduce((n, r) => n + (r.input ?? 0), 0),
-          outputTokens: on.reduce((n, r) => n + (r.output ?? 0), 0),
-          costMicros: money.filter((m) => day(m.occurredAt) === d).reduce((n, m) => n + m.costMicros, 0),
-        };
-      });
+      // One pass per row, not one per row per day (BOS-643: a week of runs froze the server).
+      const byDay = new Map(dates.map((d) => [d, { day: d, runs: 0, inputTokens: 0, outputTokens: 0, costMicros: 0 }]));
+      for (const r of runsHere) {
+        const b = byDay.get(dateIn(r.startedAt, timeZone));
+        if (!b) continue;
+        b.runs++;
+        b.inputTokens += r.input ?? 0;
+        b.outputTokens += r.output ?? 0;
+      }
+      for (const m of money) {
+        const b = byDay.get(dateIn(m.occurredAt, timeZone));
+        if (b) b.costMicros += m.costMicros;
+      }
+      return [...byDay.values()];
     },
 
     /**
