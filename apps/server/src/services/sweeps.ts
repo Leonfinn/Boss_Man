@@ -20,6 +20,7 @@ import { getHold } from "./maintenance.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { derivedSignoff, sweepMissingSignoffs } from "./signoff.js";
 import { progressSweep } from "./progress.js";
+import { noProgressSweep } from "./no-progress.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -1289,6 +1290,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return { woken };
   }
 
+  // A whole company with work waiting and nothing finishing (BOS-593). Its cause test asks whether a live run waits in the check line.
+  const noProgress = noProgressSweep(db, { alert: opts.alert, isConnected: opts.isConnected, inCheckLine: async (runId) => !!(await busyInCommand(runId))?.checkScript });
+
   return {
     limits,
     resumeMergesOnPromotion,
@@ -1327,10 +1331,13 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // The owner's messages that nobody has answered (BOS-425). A hold stops new runs, so both
       // steps wait, like the other sweeps: an ask to the CEO would start a run too.
       const unanswered = held ? { rewoken: 0, standIns: 0 } : opts.ownerReplies ? await opts.ownerReplies(t).catch(() => ({ rewoken: 0, standIns: 0 })) : { rewoken: 0, standIns: 0 };
+      // After the closer, so a company that has just moved again isn't raised. An update hold stops every
+      // company on purpose, so it isn't a stall.
+      const noProgressResult = held ? { raised: 0 } : await noProgress.run(t);
       // A feature the roadmap commits to with nothing working on it (BOS-595): the CEO is asked to give
       // it a ticket. Raised after the closer, so a feature whose ticket was linked in the same pass gets none.
       const featuresWithoutTickets = (await opts.featuresWithoutTickets?.().catch(() => 0)) ?? 0;
-      return { goalChecks, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress };
+      return { noProgress: noProgressResult, goalChecks, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress };
     },
   };
 }
