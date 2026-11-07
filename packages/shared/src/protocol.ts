@@ -118,6 +118,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     prompt: z.string(),
     /** Per-session MCP bearer token for the Boss Man MCP server. */
     mcpToken: z.string(),
+    /**
+     * This run needs the Boss Man tools: a runner that can't reach them fails the run instead of
+     * starting it blind (BOS-552). An older runner strips it and behaves as before.
+     */
+    mcpRequired: z.boolean().optional(),
     /** Recovery (R42): try to reopen this ACP session; start a fresh one if it can't be loaded. */
     resumeSessionId: z.string().optional(),
     /** The prompt to send instead if resumeSessionId can't be reopened, so a fresh session still gets its full context. */
