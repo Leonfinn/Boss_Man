@@ -758,6 +758,10 @@ describe("rules judge: shell options after -c (BOS-695)", () => {
     "bash -c -e 'node /tmp/x.js'",
     // An option form the judge can't place: no Allow.
     "bash -c --posix 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    // Options before `-c` (the other side of the same gap): separate word, joined `-ec`, and joined `+e`.
+    "bash -e -c 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -ec 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash +e -c 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
   ]);
   allows([
     "bash -c 'pnpm test'",
@@ -765,5 +769,8 @@ describe("rules judge: shell options after -c (BOS-695)", () => {
     "bash -c -o pipefail 'pnpm test'",
     "bash -c -e -- 'pnpm test'",
     "sh -c 'ls -la'",
+    // Options before `-c` don't hide an ordinary command either.
+    "bash -e -c 'pnpm test'",
+    "bash -ec 'pnpm test'",
   ]);
 });
