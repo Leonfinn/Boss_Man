@@ -83,10 +83,10 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
     expect(kindCeiling("owner", undefined)).toBe("owner");
   });
 
-  it("an account limit card is per account and clears when the account has room", () => {
+  it("an account limit card is per company and account, and clears when the account has room (BOS-498)", () => {
     const row = ALERT_KINDS.account_limit;
-    const cause = { account: { fundingSourceId: "fs-1", name: "Claude Max", window: "the weekly limit" } };
-    expect(row.groupBy(cause)).toBe("account:fs-1:account_limit");
+    const cause = { companyId: "co-1", account: { fundingSourceId: "fs-1", name: "Claude Max", window: "the weekly limit" } };
+    expect(row.groupBy(cause)).toBe("account:co-1:fs-1:account_limit");
     expect(row.clearWhen(cause)).toEqual([{ kind: "limitReset", fundingSourceId: "fs-1" }]);
   });
 
