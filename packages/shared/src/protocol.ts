@@ -87,8 +87,17 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     usedBytes: z.number().nonnegative(),
     tickets: z.array(z.object({ ticketId: Uuid, projectId: Uuid, bytes: z.number().nonnegative() })),
     repos: z.array(z.object({ projectId: z.string(), bytes: z.number().nonnegative() })),
-    /** Ticket folders git no longer knew about, removed in this pass. */
+    /** Each ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592); absent from an older runner. */
+    scratch: z.array(z.object({ ticketId: Uuid, bytes: z.number().nonnegative() })).optional(),
+    /** Ticket folders git no longer knew about (or scratch folders past their keep), removed in this pass. */
     removed: z.array(z.string()),
+  }),
+  // The OpenCode prune's one-off VACUUM ran past its cap and was killed, letting held OpenCode runs go (BOS-622).
+  z.object({
+    type: z.literal("runner.opencode_vacuum_cut"),
+    heldSeconds: z.number().int().nonnegative().max(86_400),
+    bytes: z.number().nonnegative(),
+    agentHome: z.boolean(),
   }),
   // The runner's start-up self-test of the agent fence (BOS-321).
   z.object({ type: z.literal("runner.sandbox"), report: SandboxReport }),
@@ -165,6 +174,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1), fence: z.boolean().optional() }),
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
+  /** Whether the ticket's branch still merges into the target, without merging it (BOS-426). */
+  z.object({ type: z.literal("workspace.clash"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1) }),
   /** Merges the ticket's branch into a named target (R46). */
   z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
@@ -248,8 +259,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "clash-check": answers workspace.clash (BOS-426). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -283,6 +294,12 @@ export type WorkspaceDiff = {
 /** The outcome of a ticket's check (R47). */
 /** fenced: set only when the check was asked to run fenced, saying whether it was. */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean };
+/**
+ * A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): one folder per ticket on the workspaces disk, so a proof
+ * or a check log outlives the runner and the temp sweep. Kept a week, or a few hours once the ticket's work is gone.
+ */
+export const SCRATCH_KEEP_MS = 7 * 24 * 60 * 60_000;
+export const RELEASED_SCRATCH_KEEP_MS = 6 * 60 * 60_000;
 /**
  * How long the runner lets a ticket's check run (R47), counted from when it actually starts. A check that is waiting
  * in scripts/check-all.sh's queue is given up to VERIFY_QUEUE_MAX_MS to reach the front first; the server waits for
@@ -344,3 +361,14 @@ export type MigrationsResult =
   | { needed: false; reason: string }
   | { needed: true; number: number; next: number; why: string[]; others: string[] }
   | { needed: null; reason: string };
+
+/**
+ * The company's agent fence setting (BOS-325): off (default), watch (agents run fenced and refusals are logged) or
+ * enforce. "enforce" is not selectable yet: it waits for BOS-323's git fix, so the server refuses it.
+ */
+export const FENCE_MODES = ["off", "watch", "enforce"] as const;
+export type FenceMode = (typeof FENCE_MODES)[number];
+/** Flip once BOS-323 is merged and its test shows the git gap closed. */
+export const FENCE_ENFORCE_AVAILABLE = false;
+/** Tool output a fenced agent gets when the kernel refuses it (Landlock gives EACCES or EPERM, nothing else). */
+export const FENCE_DENIED_PATTERN = /Permission denied|Operation not permitted|\bEACCES\b|\bEPERM\b/i;

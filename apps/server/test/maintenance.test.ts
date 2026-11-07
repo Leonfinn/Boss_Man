@@ -130,7 +130,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     // The run that was going is untouched and the banner counts it: 1 run in 1 company.
     expect(await c.maint()).toMatchObject({ on: true, runs: 1, companies: 1 });
 
-    // Even a chat message to the CEO waits (nothing is exempt).
+    // Any other wake still waits: the hold itself starts nothing new.
     await c.wake(b);
     await c.scheduler.tick();
     expect(c.commands).toHaveLength(1);
@@ -148,6 +148,37 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await c.maint()).toMatchObject({ on: false, last: { ok: true, title: "Runners updated" } });
     expect(await c.titles()).toContain("note: Runners updated");
     expect(c.commands.map((x) => x.company).sort()).toEqual(["App Co", "App Co", "Home Lab"]);
+  });
+
+  it("counts only work runs, so the chat page's banner matches what really holds the swap", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/start", {});
+    // A chat run is live beside the one work run.
+    await c.req("POST", `/api/companies/${a.id}/chat`, { text: "What's still running?" });
+    await c.scheduler.tick();
+    const chat = c.commands.find((x) => x.type === "run.start" && x.boardToolsOnly);
+    expect(chat).toBeDefined();
+    // The banner counts the work run only, and says chat stays open.
+    expect(await c.maint()).toMatchObject({ on: true, runs: 1, companies: 1, chatOpen: true });
+  });
+
+  it("a live chat run doesn't stop a busy company's runner swapping", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    // The owner's chat is answering when the update starts to drain.
+    await c.req("POST", `/api/companies/${a.id}/chat`, { text: "Are you there?" });
+    await c.scheduler.tick();
+    expect(c.commands.filter((x) => x.type === "run.start" && x.boardToolsOnly)).toHaveLength(1);
+    await c.req("POST", "/api/maintenance/start", {});
+    // The chat run is live but it isn't work: the banner counts nothing and chat is not "open".
+    expect(await c.maint()).toMatchObject({ on: true, runs: 0, chatOpen: false });
+    // With no work run to wait for, the runner swaps even though the chat run is still live.
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+    expect(await getHold(c.db)).toBeNull();
   });
 
   it("tells each running agent once to wrap up when the hold starts", async () => {
