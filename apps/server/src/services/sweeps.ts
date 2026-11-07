@@ -544,27 +544,6 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         if (waited && t.getTime() - waited.getTime() < limits.missedAfterMs) continue;
         // A branch that no longer merges is a reason a reviewer sits idle (BOS-426): wake the author to merge
         // main, not the reviewer again, and don't count it as a missed review. The review stays open and resumes.
-        // A check that can't answer (null) changes nothing.
-        const clash = ticket.assigneeAgentId ? await opts.branchClash?.(ticket.id) : null;
-        if (clash && ticket.assigneeAgentId) {
-          const [lastAsk] = await db
-            .select({ createdAt: wakes.createdAt })
-            .from(wakes)
-            .where(and(eq(wakes.agentId, ticket.assigneeAgentId), eq(wakes.reason, CLASH_REASON), eq(wakes.ticketId, ticket.id)))
-            .orderBy(desc(wakes.createdAt))
-            .limit(1);
-          if (!lastAsk || t.getTime() - lastAsk.createdAt.getTime() >= limits.missedAfterMs) {
-            await opts.wake({
-              agentId: ticket.assigneeAgentId,
-              ticketId: ticket.id,
-              reason: CLASH_REASON,
-              priority: 3,
-              note: `- ${ticket.id} "${ticket.title}": the ${r.kind} review is waiting, but your branch no longer merges with the default branch${clash.length ? ` (clashes in: ${clash.slice(0, 10).join(", ")})` : ""}. Merge origin's default branch into your branch, resolve the conflicts keeping both sides' intent, run the checks, commit, then move the ticket to review again. The review resumes from there.`,
-            });
-          }
-          done.add(agentId);
-          continue;
-        }
         // Review wakes name the ticket at the start of their note; the first one counts too. Only this
         // round's wakes count (BOS-433): a reviewer who answered rounds 1-2 isn't reported for round 3.
         const recent = await db
@@ -573,6 +552,33 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, REVIEW_REASON), like(wakes.note, reviewAskPattern(ticket.id)), gte(wakes.createdAt, roundStart)))
           .orderBy(desc(wakes.createdAt));
         if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.missedAfterMs) continue;
+        // The runner is only asked when a wake would go out: at most once per missedAfterMs per review, since
+        // each answer costs a fetch under the project's repo lock. A check that can't answer (null) changes nothing.
+        if (ticket.assigneeAgentId && opts.branchClash) {
+          const [lastAsk] = await db
+            .select({ createdAt: wakes.createdAt })
+            .from(wakes)
+            .where(and(eq(wakes.agentId, ticket.assigneeAgentId), eq(wakes.reason, CLASH_REASON), eq(wakes.ticketId, ticket.id)))
+            .orderBy(desc(wakes.createdAt))
+            .limit(1);
+          if (lastAsk && t.getTime() - lastAsk.createdAt.getTime() < limits.missedAfterMs) {
+            // The author was just told to merge main; leave the reviewer alone meanwhile.
+            done.add(agentId);
+            continue;
+          }
+          const clash = await opts.branchClash(ticket.id);
+          if (clash) {
+            await opts.wake({
+              agentId: ticket.assigneeAgentId,
+              ticketId: ticket.id,
+              reason: CLASH_REASON,
+              priority: 3,
+              note: `- ${ticket.id} "${ticket.title}": the ${r.kind} review is waiting, but your branch no longer merges with the default branch${clash.length ? ` (clashes in: ${clash.slice(0, 10).join(", ")})` : ""}. Merge origin's default branch into your branch, resolve the conflicts keeping both sides' intent, run the checks, commit, then move the ticket to review again. The review resumes from there.`,
+            });
+            done.add(agentId);
+            continue;
+          }
+        }
         if (recent.length > MISSED_NUDGES_PER_DAY) {
           // The CEO first: stopping or moving a review is beyond the Scrum Master, and the owner
           // should only see this if the CEO doesn't settle it (BOS-119). Real actions on the review,

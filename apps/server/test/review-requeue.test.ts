@@ -206,6 +206,12 @@ describe("interrupted or lost review runs are not a missed verdict", () => {
     expect((await authorWakes())[0]!.note).toContain("src/a.ts");
     await ctx.sweeps.run();
     expect(await authorWakes()).toHaveLength(1);
+    // The runner is asked once per quiet period, not on every sweep (infra review, BOS-426).
+    for (let i = 0; i < 5; i++) {
+      ctx.advance(2 * MIN);
+      await ctx.sweeps.run();
+    }
+    expect(spy).toHaveBeenCalledTimes(1);
     // Never counted as a missed review: after many hours of clash, no stall card is raised.
     for (let i = 0; i < 5; i++) {
       ctx.advance(61 * MIN);

@@ -879,7 +879,7 @@ export function reviewService(
         if (!repoUrl || !t.branch) return null;
         const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
         if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "clash-check")) return null;
-        const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 60_000);
+        const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 15_000);
         if (typeof r?.clashes !== "boolean") return null;
         return r.clashes ? (r.files ?? []) : [];
       } catch {
