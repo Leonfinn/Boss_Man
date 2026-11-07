@@ -6,6 +6,7 @@ import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerComman
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { redact } from "./error-buffer.js";
 import { costEvents, decisions, engagements, notifications, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
@@ -120,6 +121,24 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       if (typeof e.code === "string" && /^2[23]/.test(e.code)) return true;
     }
     return false;
+  }
+
+  /**
+   * A short, safe description of a failed apply for the activity log (BOS-605): only the SQLSTATE
+   * code and the constraint name, never the SQL or its parameter values, which can carry another
+   * company's data. Walked through drizzle's wrapped cause, like isPermanentApplyError. Kept to
+   * about 200 characters.
+   */
+  function safeApplyError(err: unknown): string {
+    let code: string | undefined;
+    let constraint: string | undefined;
+    for (let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | null, i = 0; e && i < 3; e = e.cause as { code?: unknown; constraint?: unknown; cause?: unknown } | null, i++) {
+      if (code === undefined && typeof e.code === "string") code = e.code;
+      if (constraint === undefined && typeof e.constraint === "string") constraint = e.constraint;
+    }
+    const parts = [code ? `code ${code}` : null, constraint ? `constraint ${constraint}` : null].filter(Boolean);
+    const text = redact(parts.length ? parts.join(", ") : "error of unknown type").replace(/\s+/g, " ").trim();
+    return text.slice(0, 200);
   }
 
   /**
@@ -253,7 +272,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
           return { inserted: true, afterCommit: work };
         } catch (err) {
           if (!isPermanentApplyError(err)) throw err;
-          skipped = (err as Error).message;
+          skipped = safeApplyError(err);
           await record(tx, {
             companyId: runner.companyId,
             kind: "runner_event_failed",
