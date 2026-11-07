@@ -749,10 +749,16 @@ export class Workspaces {
         if (!exists) continue;
         // B is carried when this branch holds a commit on B's own first-parent line (B's work).
         // Commits B has only by merging this ticket in are on this ticket's side, not B's line (BOS-365).
-        if ((await refs(b.branch, true)).some((sha) => mine.has(sha))) {
+        const bLine = await refs(b.branch, true);
+        if (bLine.some((sha) => mine.has(sha))) {
           // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
           // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
           const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
+          // B stacked on this ticket (BOS-629): this ticket's own tip sits on B's first-parent line, so every shared commit
+          // is this ticket's work that B was built on, not B's work that we picked up. When we picked up B's work and B
+          // then took ours, our tip arrives on B's second-parent side, so it is not on B's line and stays reported.
+          const myTip = await this.git(["rev-parse", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
+          if (!contained && bLine.includes(myTip)) continue;
           found.push({ ticketId: b.ticketId, branch: b.branch, contained });
         }
       }
