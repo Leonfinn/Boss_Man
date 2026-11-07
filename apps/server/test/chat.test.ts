@@ -153,9 +153,9 @@ describe("owner chat", () => {
     expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "SSO", description: "For Acme.", milestoneId: c.ms.id } }))).toMatch(/^Created feature [0-9a-f-]{36} "SSO"/);
     expect((await c.feedback.scored(c.company.id)).features[0]).toMatchObject({ title: "SSO", description: "For Acme.", milestoneId: c.ms.id });
     expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "sso" } }))).toMatch(/already exists/);
-    const auth = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Refactor auth", risk: "medium" } }));
+    const auth = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Refactor auth", body: "Move the auth routes behind the shared session helper.", risk: "medium" } }));
     const authId = /#\/tickets\/([0-9a-f-]{36})/.exec(auth)![1]!;
-    const made = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Rate-limit login", risk: "high", milestoneId: c.ms.id, assignee: "engineer", waitsOn: [authId] } }));
+    const made = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Rate-limit login", body: "Cap login attempts per account before the beta.", risk: "high", milestoneId: c.ms.id, assignee: "engineer", waitsOn: [authId] } }));
     expect(made).toMatch(/^Created #\/tickets\/[0-9a-f-]{36} "Rate-limit login" in App \(plan first\)\.$/);
     const rateId = /#\/tickets\/([0-9a-f-]{36})/.exec(made)![1]!;
     const [t] = await c.db.select().from(tickets).where(eq(tickets.id, rateId));

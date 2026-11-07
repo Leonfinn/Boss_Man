@@ -9,6 +9,7 @@ import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
+import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
@@ -44,11 +45,22 @@ if (checkSlots > 1) {
     break;
   }
 }
-// The shared pnpm store (BOS-568), where PNPM_STORE_DIR moves it. Refused when it is the workspaces volume's root or
-// outside it (BOS-633): the fence grants everything beneath a rule, and the gate's store sits beside it.
+// One pnpm store for every install an agent's checks make (BOS-568): on the workspaces volume by default,
+// or at PNPM_STORE_DIR. Without it pnpm starts a fresh store in each agent's $HOME (on the root disk) and
+// the old ones are left behind. Refused when it is the workspaces volume's root or outside it (BOS-633).
 const storeDir = pnpmStoreDir(workspacesRoot, env.PNPM_STORE_DIR);
 mkdirSync(storeDir, { recursive: true });
-const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, { level: sandbox.level, pnpmStore: storeDir });
+// The merge gate runs unfenced, so it installs from a store of its own that the fence never grants (BOS-568 review):
+// a poisoned package in the shared store must not run in the gate, as the runner's own user.
+const gateStore = gateStoreDir(storeDir);
+assertSeparateStore(storeDir, gateStore);
+mkdirSync(gateStore, { recursive: true });
+// The runner's own installs use the shared store too, so the runner's ~1.3 GB isn't in a second store on the root disk.
+Object.assign(env, storeEnv(storeDir));
+// The 4th argument is the unfenced merge gate's store, so it gets its own (gateStore); agents can write the
+// shared store, and a poisoned package there must not run in the gate as the runner's user. Server-queued check
+// jobs are fenced like agents, so they use the shared store (BOS-316, BOS-568).
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, gateStore, { level: sandbox.level, pnpmStore: storeDir });
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);

@@ -29,7 +29,7 @@ function setup(jobFence: { level: FenceLevel; pnpmStore?: string }) {
   const root = mkdtempSync(path.join(tmpdir(), "bm-fj-root-"));
   mkdirSync(path.join(root, "repos"), { recursive: true });
   git(root, "clone", "-q", "--bare", bare, path.join(root, "repos", `${projectId}.git`));
-  return { root, commit, ws: new Workspaces(root, process.env, undefined, jobFence) };
+  return { root, commit, ws: new Workspaces(root, process.env, undefined, undefined, jobFence) };
 }
 
 describe.skipIf(level === "unavailable")("fenced check job", () => {
@@ -50,7 +50,8 @@ describe("unfenced check job (BOS-655)", () => {
   it("still gets its own HOME/TMPDIR and the pnpm store on the workspaces volume, and leaves no HOME behind", async () => {
     const { root, commit } = setup({ level: "unavailable" });
     const store = path.join(root, ".pnpm-store");
-    const unfenced = new Workspaces(root, process.env, undefined, { level: "unavailable", pnpmStore: store });
+    const gate = `${store}-gate`;
+    const unfenced = new Workspaces(root, process.env, undefined, gate, { level: "unavailable", pnpmStore: store });
     const jobId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const home = path.join(root, "check-jobs-home", jobId);
     const r = await unfenced.runCommitCheck({ projectId, jobId, commit }, 'echo "home=$HOME"; echo "tmp=$TMPDIR"; echo "store=$npm_config_store_dir"; touch "$TMPDIR/x"', 60_000);
@@ -58,7 +59,48 @@ describe("unfenced check job (BOS-655)", () => {
     expect(r.output).toContain(`home=${home}`);
     expect(r.output).toContain(`tmp=${path.join(home, "tmp")}`);
     expect(r.output).toContain(`store=${store}`);
+    expect(r.output).not.toContain(gate);
     expect(existsSync(home)).toBe(false);
     expect(existsSync(path.join(root, "check-jobs", jobId))).toBe(false);
+  });
+});
+
+// BOS-568 review: a job must never install from the merge gate's store (the gate runs unfenced as the runner).
+// A fenced job, and one on a runner that can't fence, both use the agents' shared store instead.
+describe("a job's pnpm store (BOS-568 review)", () => {
+  function setup() {
+    const bare = mkdtempSync(path.join(tmpdir(), "bm-fjs-origin-"));
+    git(bare, "init", "-q", "--bare", "-b", "main");
+    const seed = mkdtempSync(path.join(tmpdir(), "bm-fjs-seed-"));
+    git(seed, "clone", "-q", bare, ".");
+    writeFileSync(path.join(seed, "a.txt"), "a\n");
+    git(seed, "add", ".");
+    git(seed, "commit", "-qm", "init");
+    git(seed, "push", "-q", "origin", "HEAD:main");
+    const commit = git(seed, "rev-parse", "HEAD");
+    const root = mkdtempSync(path.join(tmpdir(), "bm-fjs-root-"));
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    mkdirSync(path.join(root, "repos"), { recursive: true });
+    git(root, "clone", "-q", "--bare", bare, path.join(root, "repos", `${projectId}.git`));
+    const shared = path.join(root, ".pnpm-store");
+    const gate = `${shared}-gate`;
+    return { root, projectId, commit, shared, gate };
+  }
+
+  it("a fenced job uses the shared store, never the gate's", async () => {
+    const { root, projectId, commit, shared, gate } = setup();
+    const ws = new Workspaces(root, process.env, undefined, gate, { level, pnpmStore: shared });
+    const r = await ws.runCommitCheck({ projectId, jobId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", commit }, `echo "store=$npm_config_store_dir"`, 60_000);
+    expect(r.output).toContain(`store=${shared}`);
+    expect(r.output).not.toContain(gate);
+  });
+
+  it("a job on a runner that can't fence still uses the shared store, not a fresh one in HOME", async () => {
+    const { root, projectId, commit, shared, gate } = setup();
+    // "unavailable": jobFenceFor gives the job its env (HOME, TMPDIR, store) but no fence wrapper (BOS-655).
+    const ws = new Workspaces(root, process.env, undefined, gate, { level: "unavailable", pnpmStore: shared });
+    const r = await ws.runCommitCheck({ projectId, jobId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", commit }, `echo "store=$npm_config_store_dir"`, 60_000);
+    expect(r.output).toContain(`store=${shared}`);
+    expect(r.output).not.toContain(gate);
   });
 });
