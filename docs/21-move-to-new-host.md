@@ -71,7 +71,7 @@ Run all commands in the checkout (`$BOSSMAN_HOME/src`) unless a step says otherw
 docker ps --format '{{.Names}}\t{{.Ports}}'
 ```
 
-Boss Man needs these host ports free (defaults; `.env` can change them): 3101 for the app, plus Penpot's and ntfy's ports if you use them. If one is taken, pick another in `.env` (`BOSSMAN_BIND`) rather than stopping the other container. Docker's default network range can also clash with your LAN; `docker network ls` shows what exists.
+Boss Man needs these host ports free (defaults; `.env` can change them): 3100 for the app and 3101 for the feedback portal, plus Penpot's and ntfy's ports if you use them. If one is taken, pick another in `.env` (`BOSSMAN_HOST_PORT`, `BOSSMAN_PORTAL_HOST_PORT`) rather than stopping the other container. Docker's default network range can also clash with your LAN; `docker network ls` shows what exists.
 
 Then check which of the tools below are already installed, and install only the missing ones. Otherwise, install Docker with the Compose plugin and git, flock and curl using the host's own instructions. **Unconfirmed per host**; find out the supported way from Docker's install page for your distribution, then check:
 
@@ -129,9 +129,9 @@ mkdir -p "$BOSSMAN_HOME/data/postgres" "$BOSSMAN_HOME/data/companies" "$BOSSMAN_
 sudo chown -R 1000:1000 "$BOSSMAN_HOME/data/companies" "$BOSSMAN_HOME/src/secrets" && sudo chmod 700 "$BOSSMAN_HOME/src/secrets"
 ```
 
-Write `.env` by copying the old host's and changing only: `BOSSMAN_DATA`, `BOSSMAN_BIND`, `BOSSMAN_PORTAL_URL`, `BOSSMAN_DOCKER_GID`, `PENPOT_*` if used. Keep `POSTGRES_PASSWORD` the same as the old host's. Do not start the stack yet.
+Write `.env` by copying the old host's and changing only: `BOSSMAN_DATA`, `BOSSMAN_BIND`, `BOSSMAN_PORTAL_BIND`, `BOSSMAN_PORTAL_URL`, `BOSSMAN_DOCKER_GID`, `PENPOT_*` if used (and `BOSSMAN_HOST_PORT` / `BOSSMAN_PORTAL_HOST_PORT` only if a default port is taken). `BOSSMAN_BIND` and `BOSSMAN_PORTAL_BIND` default to `127.0.0.1`, which only answers on the host itself: set them to `0.0.0.0` or the new host's LAN address, or `<host-ip>` checks and phone access fail from other machines. Keep `POSTGRES_PASSWORD` the same as the old host's. Do not start the stack yet.
 
-Don't build images yet. With blue/green in `COMPOSE_FILE` the plain `server` service is parked and nothing runs it, so building it only wastes time and disk. The images are built in stage 4, after the checkout is moved to the final commit:
+Don't build images yet. With blue/green in `COMPOSE_FILE` the plain `server` service is parked and nothing runs it, so building it only wastes time and disk. The images are built in stage 4, after the checkout is moved to the final commit. This is the command for then (run it in stage 4, not now):
 
 ```sh
 docker compose build server-blue server-green launcher netguard
@@ -178,21 +178,27 @@ docker compose stop
 
 ### Stage 4: restore and check (on the NEW host)
 
-Follow `runbooks/database-restore-and-bluegreen-rollback` section 2, steps 4 to 6, using the final backup (there is no running writer to stop on a fresh host). Then start the stack and compare:
+Follow `runbooks/database-restore-and-bluegreen-rollback` section 2, steps 4 to 6, using the final backup (there is no running writer to stop on a fresh host). Move the checkout to the final commit and build the images (the build command from stage 1), then start the stack and compare:
+
+```sh
+docker compose build server-blue server-green launcher netguard
+```
 
 ```sh
 docker compose up -d
 ```
 
+The app answers on port 3100 (the feedback portal is 3101, and has no `/api/ready`):
+
 ```sh
-curl -s http://<host-ip>:3101/api/ready
+curl -s http://<host-ip>:3100/api/ready
 ```
 
 It must show `"role":"leader"`. Ticket and migration counts must equal the numbers you wrote down in stage 3.
 
 ### Stage 5: switch over
 
-**The old host's Tailscale must already be stopped (stage 3, step 4) before the new one starts**: two machines with the same Tailscale identity fight for the name and break the address. Confirm with `docker compose ps` on the old host that Tailscale is not running. With Tailscale state copied, `docker compose up -d tailscale server` brings the same machine name up (`docs/20-https-tailscale.md`, "Backing up and moving to a new host"). Update the addresses you use. Then the checks listed in step 5 of section 3 run from Boss Man.
+**The old host's Tailscale must already be stopped (stage 3, step 4) before the new one starts**: two machines with the same Tailscale identity fight for the name and break the address. Confirm with `docker compose ps` on the old host that Tailscale is not running. With Tailscale state copied, `docker compose up -d tailscale` brings the same machine name up (`docs/20-https-tailscale.md`, "Backing up and moving to a new host"). Do not name the plain `server` service: under blue/green it is parked behind a profile, and naming it would start a second server on the same database. Update the addresses you use. Then the checks listed in item 5 of the order in section 3 run from Boss Man.
 
 ### Stage 6: retire the old host
 
