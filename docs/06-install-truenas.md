@@ -736,6 +736,8 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
 
 **Rebuild the live colour in place.** This is for an image change the deployer refuses, or for a colour built from an older image. For ordinary app changes use Settings → Server and runner → Updates → **Deploy latest** instead: it swaps colours with no downtime. The UI is down for about 20 to 30 seconds.
 
+**Before you run anything here that updates the checkout (`git merge`, `git checkout`, `git pull`), type `umask 022` in your root shell.** A root shell with `umask 077` writes every file git changes as mode 600. The server runs as user `node` in its container and the image copies file permissions as they are on disk, so it crashes at start with `EACCES: permission denied, open '/app/...'`, and a rollback with the same umask fails the same way (6 Nov outage, BOS-562). `scripts/rebuild-live.sh`, `scripts/deploy.sh` and the host deployer now check this before the backup and build: if any git-tracked file is unreadable by others, or its folder can't be read and searched, they stop, change nothing, list up to 10 paths and print the fix (`git ls-files -z | xargs -0 chmod go+r`, then `chmod go+rx` on the folders). Only tracked files are touched: `.env`, `secrets/` and the data folder stay private. If the new colour never answers, the STOPPED message ends with the last 20 lines of its container log.
+
 `scripts/rebuild-live.sh` does all of the steps below in one go: it backs up, builds the colour the proxy points at, migrates, recreates it, sends SIGUSR2, and waits until `/api/ready` shows it leading at the new commit. It stops at the first failure and says which step. The steps by hand, for reference (the examples say blue):
 
 1. Back up the database:

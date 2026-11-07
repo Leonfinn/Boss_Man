@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # A 2-5 minute check of what this branch changed, for authors and reviewers. Only the merge gate runs the full
-# scripts/check-all.sh. Prints one PASS/FAIL line per step (output of a failed step follows it) and exits non-zero on any failure.
+# scripts/check-all.sh. Prints one PASS/FAIL line per step (output of a failed step follows it) and exits 1 on any failure,
+# or 75 when nothing failed but the heavy phase never got a check slot (check-all exit 75; the merge gate retries).
 # BASE (default origin/main) is the branch to compare with. Tests stub the commands through PATH.
 # Typecheck and vitest are heavy (1-1.5 GB, up to an hour), so they run only while holding the merge gate's one-slot check lock
 # (scripts/check-all.sh does the waiting and prints "waiting for a free check slot (place N ...)"); the gate keeps priority.
@@ -36,7 +37,7 @@ main() {
 changed="$(git diff --name-only "$base"...HEAD)" || { echo "FAIL  diff against $base"; return 1; }
 if [ -z "$changed" ]; then echo "PASS  nothing changed against $base"; return 0; fi
 
-failed=0
+failed=0 skipped=0
 step() { # step <label> <command...>
   local label=$1 out rc=0; shift
   out="$("$@" 2>&1)" || rc=$?
@@ -99,22 +100,29 @@ if [ "$need_slot" -eq 1 ]; then
   # The slot wait streams through, so the agent sees "waiting for a free check slot (place N of M ...)".
   rc=0
   BOSSMAN_CHECK_CHILD=1 CHECK_ALL_SLOT_COMMAND="CHECK_QUICK_PHASE=heavy '$PWD/scripts/check-quick.sh'" "$PWD/scripts/check-all.sh" || rc=$?
-  [ "$rc" -eq 0 ] || failed=1
+  # The heavy phase prints its own PASS/FAIL lines; two outcomes print none, so name them here. Exit 75 means nothing ran
+  # (check-all gave up waiting for a slot): check-quick exits 75 too unless another step failed, so the merge gate
+  # retries instead of sending an approved ticket back. check-all's own "gave up waiting" line streams through above.
+  if [ "$rc" -eq 75 ]; then echo "SKIP  heavy phase (typecheck, related tests): gave up waiting for a check slot (nothing ran)"; skipped=1
+  elif [ "$rc" -gt 128 ]; then echo "FAIL  heavy phase (typecheck, related tests): killed by signal $(kill -l "$((rc - 128))" 2>/dev/null || echo "$((rc - 128))") (exit $rc)"; failed=1
+  elif [ "$rc" -ne 0 ]; then failed=1; fi
 fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
 if has '^apps/web/|^packages/shared/'; then step "build web" pnpm --filter @boss-man/web build; fi
 
-if [ "$failed" -eq 0 ]; then echo "check-quick: all steps passed (the merge gate still runs the full check)"; else echo "check-quick: FAILED"; fi
-return "$failed"
+if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; finish 1; fi
+if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; finish 75; fi
+echo "check-quick: all steps passed (the merge gate still runs the full check)"
+finish 0
 }
 
 # One tee for the whole outer run (which is what the kept log holds), or a plain run when there is nowhere to keep it.
+# The exit code comes back through finish either way, so the skipped (75) and failed outcomes keep their codes.
 if [ -n "$SCRATCH_LOG" ] && command -v tee >/dev/null; then
   SCRATCH_NAME="$(mktemp)"
   echo "check-quick: the full output of this run is kept in $SCRATCH_LOG"
   main 2>&1 | tee "$SCRATCH_NAME"
-  rc=${PIPESTATUS[0]}
-  finish "$rc"
+  finish "${PIPESTATUS[0]}"
 else
   main
   exit $?

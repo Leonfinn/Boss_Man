@@ -159,7 +159,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
       >
         {items.length === 0 ? (
           <p className="muted" style={{ padding: 16 }}>
-            {run ? "Nothing recorded yet." : "Loading…"}
+            {!run ? "Loading…" : run.endedAt ? "No events are kept for this run: runner events older than the retention period (60 days unless the owner changed it) are deleted." : "Nothing recorded yet."}
           </p>
         ) : (
           <div style={{ height: rows.getTotalSize(), position: "relative" }}>
