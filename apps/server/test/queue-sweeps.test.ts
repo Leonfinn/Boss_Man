@@ -780,6 +780,53 @@ describe("the server ends runs it can't reach", () => {
     expect((await ctx.alerts()).filter((d) => !/could not start/.test(d.question))).toEqual([]);
   });
 
+  it("closes a run its runner restarted under, after the replay window, so it stops holding its agent (BOS-579)", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    const [before] = await ctx.db.select().from(runners).where(eq(runners.companyId, ctx.company.id));
+    await ctx.db.update(runners).set({ bootId: "boot-1" }).where(eq(runners.id, before!.id));
+    const [runner] = await ctx.db.select().from(runners).where(eq(runners.id, before!.id));
+    // A reconnect of the same process changes nothing: its runs are still going.
+    // (The restart time is the server's real clock, so this test moves the sweep's clock only after the restart.)
+    await ctx.runners.bootSeen(runner!, "boot-1");
+    expect(ctx.runners.restartedAt(runner!.id)).toBeNull();
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+
+    // The runner restarts, and never reports this run (its record of live runs was lost, say).
+    await ctx.runners.bootSeen(runner!, "boot-2");
+    const held = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "engagement", note: "Engagement: the server is back." });
+    await ctx.scheduler.tick();
+    expect((await ctx.db.select().from(wakes).where(eq(wakes.id, held.id)))[0]!.statusReason).toBe("at a concurrency limit");
+    // Inside the replay window the runner's own "interrupted" reports get their chance first.
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+    expect((await row(runId)).endedAt).toBeNull();
+
+    const starts = ctx.commands.filter((c) => c.type === "run.start").length;
+    ctx.advance(2 * 60_000);
+    expect((await ctx.sweep()).lostRuns).toBe(1);
+    expect(await row(runId)).toMatchObject({ outcome: "lost: runner restarted", endedAt: expect.any(Date) });
+    // The agent's one run slot is free again: the cut-off work is picked up (BOS-574), then the held wake goes next.
+    await ctx.scheduler.tick();
+    const next = ctx.commands.filter((c) => c.type === "run.start") as Extract<RunnerCommand, { type: "run.start" }>[];
+    expect(next).toHaveLength(starts + 1);
+    expect(next.at(-1)!.agentId).toBe(ctx.ceo.id);
+    const [resume] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "resume"));
+    expect(resume).toMatchObject({ status: "launched", resumeRunId: runId });
+  });
+
+  it("leaves a run that started after the runner restarted alone (BOS-579)", async () => {
+    ctx = await setup();
+    const [before] = await ctx.db.select().from(runners).where(eq(runners.companyId, ctx.company.id));
+    await ctx.db.update(runners).set({ bootId: "boot-1" }).where(eq(runners.id, before!.id));
+    const [runner] = await ctx.db.select().from(runners).where(eq(runners.id, before!.id));
+    await ctx.runners.bootSeen(runner!, "boot-2");
+    ctx.advance(1_000);
+    const { runId } = await launched();
+    ctx.advance(3 * HOUR);
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+    expect((await row(runId)).endedAt).toBeNull();
+  });
+
   it("never reaps a run on a connected runner that has sent events", async () => {
     ctx = await setup();
     const { runId } = await launched();
