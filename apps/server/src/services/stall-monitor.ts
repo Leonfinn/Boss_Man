@@ -6,8 +6,16 @@
 // How a stall is seen: a probe timer every `probeMs`; if it fires much later than due, the loop was blocked for
 // the difference. GC entries arrive through a PerformanceObserver; they are delivered after the stall ends, so a
 // stall is finished (GC summed, logged) a moment after it is seen.
+//
+// What blocked it (BOS-602): each stall also carries the process CPU time and major page faults during it (from
+// getrusage, read on every probe), a CPU profile of the main thread for the stall window (stall-profile.ts, live
+// server only) and the container's cgroup pressure and throttling counters. CPU close to the stall's length plus a
+// profile names our own synchronous code; CPU near zero means the process was made to wait (kernel memory
+// throttling, swap-in, CPU quota), which the cgroup figures then name.
+import { readFile } from "node:fs/promises";
 import { monitorEventLoopDelay, performance, PerformanceObserver, type PerformanceEntry } from "node:perf_hooks";
 import { getHeapStatistics } from "node:v8";
+import { startLoopProfiler, type LoopProfiler, type StallProfile } from "./stall-profile.js";
 
 const MB = 1024 * 1024;
 const mb = (n: number) => Math.round(n / MB);
@@ -25,6 +33,20 @@ export type Stall = {
   /** The oldest requests still open when the stall ended: method, route pattern and age. */
   oldest: { route: string; ageMs: number }[];
   runnerSockets: number;
+  /** Process CPU (all threads, user + system) and major page faults (swap or file reads) during the stall. */
+  cpuMs: number;
+  majorFaults: number;
+  /** What the main thread ran during the stall; null when profiling is off. */
+  profile: StallProfile | null;
+  /** The container's pressure (10 s averages, %) and the throttling events since the previous stall; null off Linux cgroup v2. */
+  cgroup: CgroupAtStall | null;
+};
+
+export type CgroupAtStall = {
+  memoryFullAvg10: number | null;
+  cpuSomeAvg10: number | null;
+  ioFullAvg10: number | null;
+  sinceLast: { seconds: number; memoryHighEvents: number; memoryMaxEvents: number; cpuThrottledMs: number };
 };
 
 export type StallSummary = {
@@ -56,9 +78,40 @@ export type StallMonitorOptions = {
   keep?: number;
   runnerSockets?: () => number;
   log?: (line: string) => void;
+  /** CPU profile sampling interval in µs; 0 turns it off. Default 10 ms on the live server (NODE_ENV=production), off elsewhere; BOSSMAN_STALL_PROFILE=0 turns it off. */
+  profileIntervalUs?: number;
+  /** cgroup v2 folder to read pressure and throttling from (tests point it elsewhere). */
+  cgroupDir?: string;
 };
 
 const GC_KINDS: Record<number, string> = { 1: "minor", 2: "major", 4: "incremental", 8: "weakcb" };
+
+// Ended profiles are dropped this often when no stall cut one, so the samples kept stay small.
+const PROFILE_ROTATE_MS = 120_000;
+
+const defaultProfileUs = () => (process.env.NODE_ENV === "production" && process.env.BOSSMAN_STALL_PROFILE !== "0" ? 10_000 : 0);
+
+type CgroupCounters = { at: number; memoryHigh: number; memoryMax: number; throttledUs: number; memoryFullAvg10: number | null; cpuSomeAvg10: number | null; ioFullAvg10: number | null };
+
+async function readCgroup(dir: string): Promise<CgroupCounters | null> {
+  const read = (f: string) => readFile(`${dir}/${f}`, "utf8").catch(() => "");
+  const [events, cpuStat, mem, cpu, io] = await Promise.all(["memory.events", "cpu.stat", "memory.pressure", "cpu.pressure", "io.pressure"].map(read));
+  if (!events && !cpuStat && !mem && !cpu && !io) return null;
+  const field = (text: string, key: string) => Number(new RegExp(`^${key} (\\d+)$`, "m").exec(text ?? "")?.[1] ?? 0);
+  const avg10 = (text: string | undefined, line: "some" | "full") => {
+    const m = new RegExp(`^${line} avg10=([\\d.]+)`, "m").exec(text ?? "");
+    return m ? Number(m[1]) : null;
+  };
+  return {
+    at: Date.now(),
+    memoryHigh: field(events!, "high"),
+    memoryMax: field(events!, "max"),
+    throttledUs: field(cpuStat!, "throttled_usec"),
+    memoryFullAvg10: avg10(mem, "full"),
+    cpuSomeAvg10: avg10(cpu, "some"),
+    ioFullAvg10: avg10(io, "full"),
+  };
+}
 
 export function memorySnapshot(): MemorySnapshot {
   const m = process.memoryUsage();
@@ -83,8 +136,28 @@ export function createStallMonitor(opts: StallMonitorOptions = {}): StallMonitor
   let probe: NodeJS.Timeout | null = null;
   let observer: PerformanceObserver | null = null;
   const histogram = monitorEventLoopDelay({ resolution: 20 });
+  const profileUs = opts.profileIntervalUs ?? defaultProfileUs();
+  const cgroupDir = opts.cgroupDir ?? "/sys/fs/cgroup";
+  let profiler: LoopProfiler | null = null;
+  let lastCgroup: CgroupCounters | null = null;
 
-  const finish = (startPerf: number, endPerf: number, ms: number) => {
+  const finish = async (startPerf: number, endPerf: number, ms: number, used: { cpuMs: number; majorFaults: number; profile: StallProfile | null }) => {
+    const cg = await readCgroup(cgroupDir).catch(() => null);
+    const prev = lastCgroup;
+    if (cg) lastCgroup = cg;
+    const cgroup: CgroupAtStall | null = cg
+      ? {
+          memoryFullAvg10: cg.memoryFullAvg10,
+          cpuSomeAvg10: cg.cpuSomeAvg10,
+          ioFullAvg10: cg.ioFullAvg10,
+          sinceLast: {
+            seconds: prev ? Math.round((cg.at - prev.at) / 1000) : 0,
+            memoryHighEvents: prev ? cg.memoryHigh - prev.memoryHigh : 0,
+            memoryMaxEvents: prev ? cg.memoryMax - prev.memoryMax : 0,
+            cpuThrottledMs: prev ? Math.round((cg.throttledUs - prev.throttledUs) / 1000) : 0,
+          },
+        }
+      : null;
     const inStall = gcs.filter((g) => g.end > startPerf && g.start < endPerf);
     let gcMs = 0;
     let longestGc: Stall["longestGc"] = null;
@@ -107,6 +180,10 @@ export function createStallMonitor(opts: StallMonitorOptions = {}): StallMonitor
       inFlight: open.size,
       oldest,
       runnerSockets: opts.runnerSockets?.() ?? 0,
+      cpuMs: used.cpuMs,
+      majorFaults: used.majorFaults,
+      profile: used.profile,
+      cgroup,
     };
     count++;
     worstMs = Math.max(worstMs, stall.ms);
@@ -119,7 +196,15 @@ export function createStallMonitor(opts: StallMonitorOptions = {}): StallMonitor
         `; rss ${m.rssMb} MB, heap ${m.heapUsedMb}/${m.heapTotalMb} MB (limit ${m.heapLimitMb}), external ${m.externalMb} MB, arrayBuffers ${m.arrayBuffersMb} MB` +
         `; ${stall.inFlight} request(s) in flight` +
         (oldest.length ? ` (oldest: ${oldest.map((o) => `${o.route} ${o.ageMs} ms`).join(", ")})` : "") +
-        `; ${stall.runnerSockets} runner socket(s)`,
+        `; ${stall.runnerSockets} runner socket(s)` +
+        `; process CPU ${stall.cpuMs} ms, ${stall.majorFaults} major fault(s)` +
+        (stall.profile
+          ? `; sampled ${stall.profile.sampledMs} ms, top: ${stall.profile.top.map((t) => `${t.fn} ${t.ms} ms${t.via ? ` via ${t.via}` : ""}`).join(" | ") || "none"}`
+          : "") +
+        (cgroup
+          ? `; cgroup avg10 memory full ${cgroup.memoryFullAvg10 ?? "?"}%, cpu some ${cgroup.cpuSomeAvg10 ?? "?"}%, io full ${cgroup.ioFullAvg10 ?? "?"}%` +
+            `; since last ${cgroup.sinceLast.seconds} s: memory.high ${cgroup.sinceLast.memoryHighEvents}, memory.max ${cgroup.sinceLast.memoryMaxEvents}, cpu throttled ${cgroup.sinceLast.cpuThrottledMs} ms`
+          : ""),
     );
   };
 
@@ -140,20 +225,41 @@ export function createStallMonitor(opts: StallMonitorOptions = {}): StallMonitor
         gcs = gcs.filter((g) => g.end > cutoff);
       });
       observer.observe({ entryTypes: ["gc"] });
+      if (profileUs > 0) profiler = startLoopProfiler(profileUs);
+      void readCgroup(cgroupDir).then((cg) => (lastCgroup ??= cg), () => undefined);
       let last = performance.now();
+      let lastUsage = process.resourceUsage();
+      let lastRotate = last;
       probe = setInterval(() => {
         const now = performance.now();
+        const usage = process.resourceUsage();
         const ms = now - last - probeMs;
         const startPerf = last;
+        const before = lastUsage;
         last = now;
-        // The GC entries of a stall are delivered just after it; finish it once they are in.
-        if (ms >= thresholdMs) setTimeout(() => finish(startPerf + probeMs, now, ms), 50).unref();
+        lastUsage = usage;
+        if (ms >= thresholdMs) {
+          // Cut the profile now, in the same callback that saw the stall, so no rotation can drop its samples.
+          const used = {
+            cpuMs: Math.round((usage.userCPUTime - before.userCPUTime + usage.systemCPUTime - before.systemCPUTime) / 1000),
+            majorFaults: usage.majorPageFault - before.majorPageFault,
+            profile: profiler?.cut(startPerf, now) ?? null,
+          };
+          lastRotate = now;
+          // The GC entries of a stall are delivered just after it; finish it once they are in.
+          setTimeout(() => void finish(startPerf + probeMs, now, ms, used).catch(() => undefined), 50).unref();
+        } else if (profiler && now - lastRotate >= PROFILE_ROTATE_MS) {
+          profiler.rotate();
+          lastRotate = now;
+        }
       }, probeMs);
       probe.unref();
     },
     stop() {
       if (probe) clearInterval(probe);
       probe = null;
+      profiler?.stop();
+      profiler = null;
       observer?.disconnect();
       observer = null;
       histogram.disable();
