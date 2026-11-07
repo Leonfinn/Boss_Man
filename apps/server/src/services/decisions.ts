@@ -704,7 +704,7 @@ function sameAsk(a: { toolTitle?: string | null; toolInput?: string }, b: { titl
   return (a.toolTitle ?? null) === (b.title ?? null) && a.toolInput === b.fingerprint;
 }
 
-type WakeHook = (input: { agentId: string; reason: string; ticketId?: string | null; note?: string | null; priority?: number }) => Promise<unknown>;
+type WakeHook = (input: { agentId: string; reason: string; ticketId?: string | null; note?: string | null; priority?: number; replyLane?: boolean }) => Promise<unknown>;
 
 type EngagementHook = (engagementId: string, approved: boolean) => Promise<unknown>;
 type DeployHook = (deployId: string, approved: boolean) => Promise<unknown>;
