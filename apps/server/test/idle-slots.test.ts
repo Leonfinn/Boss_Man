@@ -240,7 +240,7 @@ describe("free run slots go to idle in-progress work (BOS-574)", () => {
     await c.working("Idle work", idle.id, 25 * MIN);
 
     await c.scheduler.tickOnce();
-    expect((await c.db.select().from(wakes).where(eq(wakes.id, held!.id)))[0]).toMatchObject({ status: "queued", statusReason: "at a concurrency limit" });
+    expect((await c.db.select().from(wakes).where(eq(wakes.id, held!.id)))[0]).toMatchObject({ status: "queued", statusReason: "at a concurrency limit: this company" });
     expect(await c.scheduler.freeSlots(c.company.id)).toBe(0);
     expect(await c.sweeps.run()).toMatchObject({ idleSlots: { woken: 0 } });
 
