@@ -54,7 +54,14 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
-  const c = withoutOwnMemory(command, ownProject).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  // A quoted flag is the same flag (`rm "-rf" /`, `rm -"r"f /`): drop the quotes from a word that starts with a dash.
+  const unquoteFlags = (s: string): string => s.replace(/(^|[\s;&|(])((?:["']*-["']*)[\w"'=.,:@/+-]*)(?=$|[\s;&|)])/g, (all, pre: string, w: string) =>
+    (w.split('"').length % 2 === 1 && w.split("'").length % 2 === 1 && /["']/.test(w) ? pre + w.replace(/["']/g, "") : all));
+  const c = unquoteFlags(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  // Opaque: a command substitution in the string given to `bash -c` / `sh -c` makes the inner command unknown.
+  if (/\b(?:ba|z|da|k)?sh\s+(?:-\S+\s+)*-\w*c\s+(?:--\s+)?(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)/.test(c)) {
+    for (const m of c.matchAll(/\b(?:ba|z|da|k)?sh\s+(?:-\S+\s+)*-\w*c\s+(?:--\s+)?("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g)) if (/\$\(|\x60/.test(m[1]!)) return result("opaque");
+  }
   const ids = [...c.matchAll(WORKSPACE)].map((m) => m[1]!);
   const own = ownFolder ?? LEADING_CD.exec(c)?.[1] ?? [...ids].sort((a, b) => ids.filter((x) => x === b).length - ids.filter((x) => x === a).length)[0];
 

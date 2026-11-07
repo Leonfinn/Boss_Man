@@ -38,6 +38,15 @@ describe("an agent session's environment", () => {
     }
   });
 
+  it("commits as the agent running, whatever user.name the shared repo config holds (BOS-255)", () => {
+    const m = new SessionManager({ mcpUrl: "http://127.0.0.1:1/mcp", baseEnv: { PATH: "/usr/bin", GIT_AUTHOR_NAME: "Senior Developer" }, resolveEnv: async () => ({}), emit: () => {} });
+    const env = (m as unknown as { launchEnv: (c: unknown, s: Record<string, string>) => NodeJS.ProcessEnv }).launchEnv({ ...start, agentName: "George - DeepSeek Developer" }, { GIT_AUTHOR_NAME: "Other", GIT_COMMITTER_NAME: "Other" });
+    expect(env.GIT_AUTHOR_NAME).toBe("George - DeepSeek Developer");
+    expect(env.GIT_COMMITTER_NAME).toBe("George - DeepSeek Developer");
+    expect(env.GIT_AUTHOR_EMAIL).toBe("bossman@localhost");
+    expect(env.GIT_COMMITTER_EMAIL).toBe("bossman@localhost");
+  });
+
   it("does not take the runner's own token from the environment it was started with", () => {
     const env = launchEnv({}, { PATH: "/usr/bin", BOSSMAN_RUNNER_TOKEN: "runner-secret", BOSSMAN_RUNNER_TOKEN_FILE: "/run/secrets/runner_token" });
     expect(JSON.stringify(env)).not.toContain("runner-secret");

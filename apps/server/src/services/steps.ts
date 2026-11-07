@@ -59,7 +59,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R13" | "R14" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R13" | "R14" | "R15" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -72,8 +72,9 @@ const ADDON_WORDS: Record<Addon, { label: string; re: RegExp }> = {
 };
 const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up", stopped: "stopped", needs_login: "waiting for a login", running: "running", unknown: "unknown" };
 /** What the lint can be given: add-on facts for R9 (and the add-on this card sets up, whose steps are exempt),
- * and the host facts for R6 (BOS-427). Either may be absent, and then that rule only checks what it can without them. */
-export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; options?: readonly string[] };
+ * the host facts for R6 (BOS-427), the card's options, and the machine's own update card for R15 (DR-036). Each
+ * may be absent, and then that rule only checks what it can without them. */
+export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; options?: readonly string[]; selfDeploy?: SelfDeployFacts };
 
 /** R9: a step that relies on an add-on that isn't running is refused; one Boss Man can't see is warned about. */
 function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: Addon | undefined, refuse: LintFinding[], warn: LintFinding[]) {
@@ -91,8 +92,47 @@ function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: A
     }
   }
 }
-/** What a raised card keeps from the lint: warnings, and a CEO override with its reason and what it let through. */
-export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[] } };
+/**
+ * How a card with host commands was proven (R11, DR-024 C): rehearsed by a script in CI at a commit, or not
+ * rehearsed, naming the part that is the first time on a real machine. The card shows it as a banner.
+ */
+export type Proof = { rehearsed: true; script: string; commit: string } | { rehearsed: false; part: string };
+
+/** Reads an agent's `proof` field: "rehearsed <script> @ <commit>" or "not rehearsed: <what and why>". A string is why it can't. */
+export function parseProof(text: string): Proof | string {
+  const t = text.replace(/\s+/g, " ").trim();
+  const r = /^rehearsed (\S+) ?@ ?([0-9a-f]{7,40})$/i.exec(t);
+  if (r) return { rehearsed: true, script: r[1]!, commit: r[2]!.toLowerCase() };
+  const n = /^not rehearsed: ?(.+)$/i.exec(t);
+  if (n && n[1]!.trim().length >= 10) return { rehearsed: false, part: n[1]!.trim() };
+  return `proof must be "rehearsed <script> @ <commit>" (the CI rehearsal script under scripts/rehearse/ and the commit it passed on) or "not rehearsed: <what hasn't been tried and why>", at least 10 characters after the colon`;
+}
+
+/** What a raised card keeps from the lint: warnings, a CEO override with its reason and what it let through, and the proof (R11). */
+export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[] }; proof?: Proof };
+
+/**
+ * R10 (DR-024 D): commands that stop and wait for typed input. The owner reads every prompt as something to
+ * fill in, and a secret typed into a terminal is the wrong channel: it goes in an editor step naming the exact
+ * line, or through Boss Man's Secrets screen. Matched where a command starts (line start, after ; & | ( or `),
+ * also behind sudo and VAR=value prefixes.
+ */
+const CMD = String.raw`(?:^|[;&|(\`])\s*(?:sudo\s+(?:-\S+\s+)*)?(?:[A-Za-z_]\w*=\S*\s+)*`;
+const INTERACTIVE: Array<[RegExp, string]> = [
+  [new RegExp(CMD + String.raw`read\b(?!-)`, "m"), "reads typed input (read)"],
+  [/\bsudo\s+(?:-\w*\s+)*-\w*S/, "reads a password from typed input (sudo -S)"],
+  [new RegExp(CMD + String.raw`passwd\b(?!-)`, "m"), "asks for a password (passwd)"],
+  [new RegExp(CMD + String.raw`ssh-keygen\b(?![^;&|\n]*\s-(?:N|[a-zA-Z]*[lFR]))`, "m"), "asks for a file name and passphrase (ssh-keygen without -N)"],
+  [new RegExp(CMD + String.raw`docker\s+login\b(?![^;&|\n]*--password-stdin)`, "m"), "asks for a user name and password (docker login)"],
+];
+
+/**
+ * R11 (DR-024 D): a host command, so the card must say how it was proven. A fixed list: docker and compose,
+ * systemctl, tailscale, chown/chmod, and anything that names the .env file.
+ */
+const HOST_COMMAND = new RegExp(CMD + String.raw`(?:docker(?:-compose)?|systemctl|tailscale|chown|chmod)\b|(?:^|[\s/"'=>])\.env\b`, "m");
+/** A look-only command (DR-024 kind 1): what a "not rehearsed" card ends with, so its answer closes the part that was untried. */
+const LOOK_ONLY = new RegExp(CMD + String.raw`(?:docker(?:-compose)?\s+(?:compose\s+(?:-f\s+\S+\s+)*)?(?:ps|inspect|logs|images|version)|tailscale\s+(?:status|ip|version)|systemctl\s+(?:status|is-active|is-enabled)|curl|cat|ls|grep|df|du|ping|getent)\b`, "m");
 
 /** Variables the owner's shell always has; using them unset is not a mistake. */
 const SHELL_ENV = new Set(["HOME", "PATH", "PWD", "OLDPWD", "USER", "SHELL", "HOSTNAME", "UID", "LANG", "TERM"]);
@@ -108,6 +148,16 @@ const DOC_POINTERS: Array<[RegExp, string]> = [
   [/\bwith (?:the |your |some )?changes\b/i, "asks the owner to adapt instructions (\"with changes\")"],
   [/\b(?:same as|as) (?:before|last time|usual)\b/i, "relies on what the owner did before"],
   [/\b(?:previous|earlier|other|last|old) card\b/i, "sends the owner to another card"],
+];
+/**
+ * R15 (BOS-594): a command that recreates or restarts the runners at once cuts off every run in progress, with no
+ * drain and no wake afterwards (6 Nov 16:00: a setting change applied with recreate-all). Setting changes go through
+ * `scripts/update-runner.sh --settings`, new images through Build and update runners; both drain first.
+ */
+const RUNNER_RECREATE: Array<[RegExp, string]> = [
+  [/\brecreate-all\b/, "recreates every runner at once"],
+  [/\bupdate-runner\.sh\b[^\n|;&]*\s--now\b/, "recreates every runner at once (--now)"],
+  [/\bdocker\s+(?:restart|stop|rm(?:\s+-f)?)\s+[^\n|;&]*\bboss-man-runner-/, "restarts or removes a runner container directly"],
 ];
 const HEDGES = /\b(?:probably|should be|if it'?s still|i think|maybe|hopefully|might need)\b/i;
 const LINK = /\[\[|#\/(?:wiki|tickets)\/|\b[A-Z]{2,6}-\d+\b/;
@@ -282,10 +332,17 @@ export function fillHostTokens(steps: readonly string[], values: Readonly<Record
  * subshell (`gitUmaskFindings`), and a `umask` outside a subshell is refused, since it stays set in the owner's terminal.
  * A CEO override can't let it through.
  *
+ * R15 (DR-036), only when `selfDeploy` is given and the host deployer is installed: an agent card may not bring
+ * the machine that runs Boss Man to a commit (`updateCardFindings`). That job belongs to Boss Man's own "Main has
+ * moved" card, which is pinned, kept current and cleared by itself; the refusal points the agent to it.
+ *
  * `facts` is either the host facts array (R6 alone, the older call shape) or a `LintFacts` object carrying
- * `hosts`, `addons` and `setsUp`. Each rule runs only when its facts are there.
+ * `hosts`, `addons`, `setsUp` and `selfDeploy`. Each rule runs only when its facts are there.
+ *
+ * R10 (DR-024): a command that waits for typed input (INTERACTIVE). R11 (DR-024): steps with a host command
+ * (HOST_COMMAND) need `proof`; a "not rehearsed" proof also needs the last step to be a look-only check.
  */
-export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[]): { refuse: LintFinding[]; warn: LintFinding[] } {
+export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[], proof?: Proof): { refuse: LintFinding[]; warn: LintFinding[] } {
   const given: LintFacts = Array.isArray(facts) ? { hosts: facts } : facts ?? {};
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
@@ -295,6 +352,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
   /** What earlier blocks on this card made readable for the login (BOS-427), per host and folder. */
   // not state: scratch for one call over one card; nothing is kept between calls.
   const staged = new Map<string, Set<string>>();
+  let hostStep = 0;
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
     const step = i + 1;
@@ -321,6 +379,12 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
       if (p) refuse.push({ step, rule: "R3", problem: `has a command that ${p}: ${b.slice(0, 120)}` });
     }
     for (const c of inline) if (PLACEHOLDER.test(c)) refuse.push({ step, rule: "R3", problem: `has a placeholder the owner would have to edit: ${c.slice(0, 120)}` });
+    for (const c of code)
+      for (const [re, what] of RUNNER_RECREATE)
+        if (re.test(c)) {
+          refuse.push({ step, rule: "R15", problem: `${what}, which cuts off every agent run in progress with no drain and no wake afterwards. For a runner setting change use \`scripts/update-runner.sh --settings\` (it waits for runs to finish, then wakes the agents); for a new runner image use Settings → Server and runner → Updates → Build and update runners. In a real emergency only the CEO can raise it, with lintOverride saying why` });
+          break;
+        }
     // A `{{host.…}}` token is filled in by `fillHostTokens` before this lint runs (checkAsk), so one left here had no
     // recorded fact behind it, or the caller has no host facts; any other token never has a value.
     for (const m of text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) refuse.push({ step, rule: "R4", problem: `has {{${m[1]}}}, which Boss Man has no value for. Write the value itself` });
@@ -337,12 +401,26 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
     refuse.push(...host.refuse);
     warn.push(...host.warn);
     for (const c of code) refuse.push(...gitUmaskFindings(step, c));
+    if (given.selfDeploy) updateCardFindings(step, code, given.selfDeploy, refuse);
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
+    for (const c of code) {
+      const hit = INTERACTIVE.find(([re]) => re.test(c));
+      if (hit) refuse.push({ step, rule: "R10", problem: `has a command that ${hit[1]}, which the owner would have to answer by typing: ${c.slice(0, 120)}. Give the value in the command, or for a secret an editor step naming the exact line (TS_AUTHKEY= in .env) or Boss Man's Secrets screen` });
+    }
+    if (!hostStep && code.some((c) => HOST_COMMAND.test(c))) hostStep = step;
     if (LINK.test(prose)) warn.push({ step, rule: "warn", problem: "links to a wiki page or ticket; fine as background, but the step itself must be complete" });
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
     const hedge = code.length ? HEDGES.exec(prose) : null;
     if (hedge) warn.push({ step, rule: "warn", problem: `hedges ("${hedge[0]}") next to a command` });
   });
+  if (hostStep && !proof) {
+    refuse.push({ step: hostStep, rule: "R11", problem: `has a host command, so the card needs proof: "rehearsed <script> @ <commit>" once a CI rehearsal passed, or "not rehearsed: <what and why>" with a look-only check as the last step` });
+  } else if (proof && !proof.rehearsed) {
+    const last = steps.length ? pieces(steps[steps.length - 1]!) : null;
+    if (!last || ![...last.blocks, ...last.inline].some((c) => LOOK_ONLY.test(c))) {
+      refuse.push({ step: steps.length, rule: "R11", problem: "is the last step of a card that is the first time on a real machine, so it must be a check that only looks (docker compose ps, docker logs, tailscale status, curl…) and say what to paste back" });
+    }
+  }
   return { refuse, warn };
 }
 
@@ -768,9 +846,125 @@ export function gitUmaskFindings(step: number, command: string): LintFinding[] {
   return out;
 }
 
-/** Rules a CEO override can't let through: a command the owner can't paste as it is, or a value Boss Man doesn't have. */
+// ---------------------------------------------------------------------------------------------------
+// R15 (DR-036, the 7 Nov duplicate update cards). The machine's own update, pinning it to a commit,
+// rebuilding it and rolling it back are Boss Man's job: its "Main has moved" card is pinned, kept current
+// and cleared by itself. An agent card that also does it has no commit behind it, so nothing supersedes
+// it, and the owner is asked twice. So that card is refused here, pointed at Boss Man's own.
+// ---------------------------------------------------------------------------------------------------
+
+/** What the machine's own update card is, as far as this rule needs it: whether the host deployer is
+ * installed at all (an install without one only ever gets an agent's card), the install folder the host
+ * reported (so a git there is recognised, never guessed), and the open card's commit for the refusal to name. */
+export type SelfDeployFacts = {
+  /** The deployer folder is set, so Boss Man raises its own update card. */
+  enabled: boolean;
+  /** The install folder the host reported (`paths.src`, where the checkout lives). */
+  installDir?: string;
+  /** The commit that card offers, for the refusal to name; absent when none is open. */
+  openCommit?: string;
+};
+
+/** The scripts that bring the machine up to a commit or roll it back: they run from the install folder. */
+const UPDATE_SCRIPTS = /(?:^|\/)(?:rebuild-live|deploy|update-runner|host-deployer)\.sh$/;
+/** git's own options that take the next word as their value (`git -C <dir> checkout`). */
+const GIT_SELF_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+
+/** The program's name as it was written, folder dropped (`/mnt/bm/src/scripts/deploy.sh` → `deploy.sh`). */
+const progName = (words: string[], p: Prog) => words.find((w) => (w.split("/").pop() ?? "") === p.name) ?? p.name;
+
+/**
+ * How a program names an update script: its own name, or the first argument that is one (`sh scripts/deploy.sh`).
+ * The argument has to be a word, not an option (`--rollback` isn't a script), and the folder in front is kept
+ * so `…/rebuild-live.sh` is recognised wherever the install lives.
+ */
+const updateScriptOf = (p: Prog): string | null => {
+  if (UPDATE_SCRIPTS.test(`/${p.name}`)) return p.name;
+  return p.args.find((a) => !a.startsWith("-") && UPDATE_SCRIPTS.test(`/${a}`)) ?? null;
+};
+
+/**
+ * Where a `git` in this word list would write the checkout: the `-C` path if it names one, else the `cd` the
+ * command runs after. Both are made absolute against `/` only when they are paths; a bare word is `null`, so the
+ * rule falls back to the install folder the host reported.
+ */
+function gitAt(words: string[], p: Prog): string | null {
+  const rest = words.slice(words.indexOf(progName(words, p)) + 1);
+  let j = 0;
+  while (j < rest.length && rest[j]!.startsWith("-")) {
+    if (rest[j] === "-C" && rest[j + 1]) return normPath(rest[j + 1]!);
+    j += GIT_SELF_OPTS.has(rest[j]!) ? 2 : 1;
+  }
+  return null;
+}
+
+/** The folder a command's own `cd`/`pushd` goes to before a git runs there, or null when it doesn't go anywhere. */
+function commandCd(command: string): string | null {
+  for (const words of simpleCommands(unparen(command))) {
+    const p = readCommand(words).prog;
+    if (p?.name === "cd" || p?.name === "pushd") {
+      const target = p.args.at(-1);
+      if (target) return normPath(target);
+    }
+  }
+  return null;
+}
+
+/** A subshell's parentheses as command separators, so `(cd X && git …)` is read as `cd X` and `git …` (R15 reads through them). */
+const unparen = (command: string) => command.replace(/[()]/g, " ; ");
+
+/**
+ * R15 (DR-036): refuse an agent card whose steps bring this machine's Boss Man to a commit or rebuild it, when
+ * the host deployer is installed. Two things count: a step that runs an update script (rebuild-live.sh,
+ * deploy.sh, update-runner.sh, host-deployer.sh — directly, or as `sh scripts/deploy.sh`), and a git write
+ * (checkout, switch, merge, pull, reset, restore, rebase, …) run on the install folder. The refusals point the
+ * agent at Boss Man's own card instead.
+ *
+ * Where a git runs: a `-C` path, else the step's own `cd`, else the install folder the host reported. Without
+ * an install folder a bare `git checkout` can't be told from one in an agent's own checkout, so only the update
+ * scripts are refused — the rule never guesses a folder. A `sh -c` string is not read, as with R14: it guards
+ * against an agent copying an update card by accident, not against someone hiding one.
+ */
+export function updateCardFindings(step: number, commands: string[], facts: SelfDeployFacts, out: LintFinding[]): void {
+  if (!facts.enabled) return;
+  let reported = false;
+  for (const command of commands) {
+    const cd = commandCd(command);
+    for (const words of simpleCommands(unparen(command))) {
+      const p = readCommand(words).prog;
+      if (!p) continue;
+      const script = updateScriptOf(p);
+      if (script) {
+        if (!reported) out.push({ step, rule: "R15", problem: `runs the machine's own update script (${script}), which brings the machine that runs Boss Man to a commit or rebuilds it. ${updateCardHint(facts)}` });
+        reported = true;
+        continue;
+      }
+      if (p.name !== "git") continue;
+      const rest = words.slice(words.indexOf(progName(words, p)) + 1);
+      let j = 0;
+      while (j < rest.length && rest[j]!.startsWith("-")) j += GIT_SELF_OPTS.has(rest[j]!) ? 2 : 1;
+      const sub = rest[j];
+      if (!sub || !GIT_WRITES.has(sub)) continue;
+      if (["stash", "worktree", "submodule"].includes(sub) && GIT_READ_ONLY.has(rest[j + 1] ?? "")) continue;
+      const at = gitAt(words, p) ?? cd ?? facts.installDir ?? null;
+      if (!at) continue; // no folder to go by: can't tell an agent's checkout from the install, so leave it
+      if (!facts.installDir || normPath(at) !== facts.installDir) continue; // a git in another folder is the agent's own work
+      if (!reported) out.push({ step, rule: "R15", problem: `runs git ${sub} in the install folder (${at}), which would bring the machine that runs Boss Man to a commit. ${updateCardHint(facts)}` });
+      reported = true;
+    }
+  }
+}
+
+/** Where an agent's update work goes instead: Boss Man's own card, named when one is open. */
+function updateCardHint(facts: SelfDeployFacts): string {
+  const open = facts.openCommit ? `the open "Main has moved to ${facts.openCommit.slice(0, 8)}" card` : `Boss Man's own "Main has moved" card (one is raised when main moves past what runs)`;
+  return `Updating the machine that runs Boss Man is Boss Man's own job: approve ${open}, which is pinned to the commit and clears itself once applied. Fix the steps to leave the update out, and raise this card again${facts.openCommit ? "" : " if it has another purpose"}. If the update card's steps are missing something, have the change make it into the server's step builder (self-deploy.ts) rather than around it.`;
+}
+
 // R14 too (DR-028): its fix is always the same subshell, so there is never a reason to let a bare git step through.
-export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R14"]);
+// R15 too (DR-036): the fix is to leave the update to Boss Man's own card, never to hand-write it.
+// R10 too (DR-024 D): an override can't bypass a command that waits for typed input.
+export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R10", "R14", "R15"]);
 
 /** One line per finding, for the agent's refusal or the CEO's list. */
 export const lintLines = (fs: LintFinding[]) => fs.map((f) => `- Step ${f.step}: ${f.problem}.`).join("\n");
