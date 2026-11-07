@@ -41,7 +41,11 @@ Words used here: `$BOSSMAN_HOME` is the folder that holds Boss Man on a host. In
 | `192.168.68.67` | A comment in `docker-compose.yml` (now `<host-ip>`), the wiki restore runbook and `.env` values `BOSSMAN_BIND` and `BOSSMAN_PORTAL_URL` | `.env` values **must be changed** to the new host's address. Other hits are test data and examples (`packages/shared/test`, `git-host.ts` comment) and need no change |
 | `BOSSMAN_DOCKER_GID` | `.env` | Differs per host. Find it on the new host with `stat -c %g /var/run/docker.sock` |
 | `PENPOT_BIND`, `PENPOT_PUBLIC_URI` | `.env`, `deploy/penpot.yml` | Host addresses; must be changed if Penpot moves |
-| Edge network `172.30.0.0/29` and `172.30.0.2` | `deploy/tailscale.yml` (BOS-242) | The only fixed subnet in the repo. Overridable with `BOSSMAN_EDGE_SUBNET` / `BOSSMAN_EDGE_IP`. Check it is free on the new host (step 3 in `docs/20-https-tailscale.md`). No other compose file sets a fixed subnet or address |
+| Edge network `172.30.0.0/29`, Tailscale `172.30.0.2`, server or proxy `172.30.0.3` | `deploy/tailscale.yml` (BOS-242), `deploy/tailscale-bluegreen.yml` | Fixed. Overridable with `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP`, `BOSSMAN_EDGE_SERVER_IP` and `BOSSMAN_EDGE_PROXY_IP`. Check the range is free on the new host (step 3 in `docs/20-https-tailscale.md`) |
+| `front` network `172.30.0.16/28` (range `172.30.0.24/29`, proxy `172.30.0.18`) | `deploy/truenas-bluegreen.yml` (BOS-278) | Fixed, and used by every blue/green stack, so the most likely to give "Pool overlaps" on a new LAN or VPN. Overridable with `BOSSMAN_FRONT_SUBNET`, `BOSSMAN_FRONT_RANGE` and `BOSSMAN_FRONT_PROXY_IP`; keep the three consistent |
+| ntfy on the edge network, `172.30.0.6` | `deploy/ntfy.yml` | Fixed. Overridable with `NTFY_EDGE_IP`; it must sit inside the edge subnet |
+
+If you change a subnet, change every address that lives in it. `grep -rn "subnet:\|ipv4_address" deploy/` lists them all.
 | Docker's default address pools | The host, not the repo | Can clash with a LAN or VPN range. **Unconfirmed**; find out with `docker network ls -q \| xargs docker network inspect --format "{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}"` and `ip -4 route` |
 | TrueNAS-only install guide | `docs/06-install-truenas.md` | This guide is the host-neutral move guide; `docs/00-first-time-install.md` is the host-neutral first install |
 
@@ -58,7 +62,7 @@ Downtime is only steps 3 to 5, about 30 to 60 minutes, mainly the final data cop
 5. **Switch over.** Start Tailscale with the moved state, update the address you use (bookmarks, phone app, ntfy subscription, `BOSSMAN_PORTAL_URL`, any webhook that points at the old address). Boss Man then checks: server status, live commit, runner health, a test run, login over `ts.net`, an ntfy test push.
 6. **Retire the old host** only after you sign off, after a trial period you choose.
 
-**Rollback until step 6:** on the new host, stop Tailscale first and then everything else (`docker compose stop`). Then on the old host run `docker compose start`, which brings back the same services including its Tailscale (the new host's must be stopped first, or the two fight for the name), and turn the old host's deployer scheduled job back on (and the new host's off). The old host's data is exactly as it was at step 3. Anything written on the new host after the switch is lost unless you take a backup there first and load it back on the old host; the switch-over stage says so when it asks you.
+**Rollback until step 6:** on the new host, stop Tailscale first and then everything else (`docker compose stop`). Then on the old host mirror stage 4: run `docker compose start db`; under blue/green run `docker compose start proxy server-<live colour> launcher netguard` (plus any other service you ran, but **not** the other colour and not a plain `docker compose start`, which would start the standby colour and let an older image take the leader lock), send the leader signal if the live colour is green (same command as stage 4), and check `/api/ready`; under a single server a plain `docker compose start` is fine. Start ntfy again with its own flags (`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy start`). Last, `docker compose start tailscale` (the new host's must be stopped first, or the two fight for the name). Then turn the old host's deployer scheduled job back on (and the new host's off). The old host's data is exactly as it was at step 3. Anything written on the new host after the switch is lost unless you take a backup there first and load it back on the old host; the switch-over stage says so when it asks you.
 
 ## 4. The commands
 
@@ -167,28 +171,34 @@ Backups and the files copied in stage 3 are usually readable by root only, while
 docker compose stop tailscale
 ```
 
-List what is still running, then stop each remaining service except `db` by name (under blue/green: `server-blue server-green`, the proxy, `launcher`, `netguard`):
+List what is still running, then stop each remaining service except `db` by name (under blue/green: `server-blue server-green`, `proxy`, `launcher`, `netguard`):
 
 ```sh
 docker compose ps --services --filter status=running
 ```
 
-3. Take the backup now that nothing writes. It is written to a `.partial` file and renamed only if `pg_dump` succeeded; `umask 077` keeps it root-only. Write down its table counts:
+ntfy runs as its own Compose project, so that list does not show it. Stop it too, so nothing writes to `$NTFY_DATA` while it is copied (skip if you do not run ntfy):
 
 ```sh
-( set -o pipefail; umask 077; docker compose exec -T db pg_dump -U bossman bossman | gzip > ../bossman-final.sql.gz.partial && mv ../bossman-final.sql.gz.partial ../bossman-final-$(date +%F-%H%M).sql.gz )
+docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy stop
+```
+
+3. Take the backup now that nothing writes. Run this line in bash (`pipefail` is not accepted by every plain `sh`). Note the file name it prints; the later checks use that exact name, not a pattern, so an earlier try cannot hide a bad new file. It is written to a `.partial` file and renamed only if `pg_dump` succeeded; `umask 077` keeps it root-only. Write down its table counts:
+
+```sh
+bash -c 'set -o pipefail; umask 077; f=../bossman-final-$(date +%F-%H%M).sql.gz; docker compose exec -T db pg_dump -U bossman bossman | gzip > "$f.partial" && mv "$f.partial" "$f" && echo "$f"'
 ```
 
 Check the file is not tiny and decompresses cleanly (`gzip -t`) before going on:
 
 ```sh
-ls -l ../bossman-final-*.sql.gz && gzip -t ../bossman-final-*.sql.gz && echo gzip-ok
+ls -l ../<the file name printed above> && gzip -t ../<the file name printed above> && echo gzip-ok
 ```
 
 4. Copy the backup, `secrets/`, `.env`, `$BOSSMAN_DATA` (without `postgres/`, which is rebuilt from the dump, but **including** `tailscale/` and `ntfy/`) and the whole deployer folder `$D` (`inbox`, `outbox`, `state`, `proxy/active.caddy` naming the live colour, `host-deployer.sh`, `host.conf`) to the new host. Use the tool you trust (`rsync -a` keeps owners and times; **Unconfirmed**: check it is installed with `command -v rsync`). Note which colour is live (`grep reverse_proxy $D/proxy/active.caddy`). Compare checksums of `master.key` and the backup on both sides:
 
 ```sh
-sha256sum secrets/master.key ../bossman-final-*.sql.gz
+sha256sum secrets/master.key ../<the file name printed above>
 ```
 
 5. Only when the checksums match, stop the database too. Do not delete anything:
@@ -227,7 +237,7 @@ If the live colour is green, green starts as a standby and needs the leader sign
 docker compose kill -s SIGUSR2 server-green
 ```
 
-Then start the proxy and the other services except Tailscale (name them: for example `docker compose up -d --no-deps <proxy> launcher netguard`; the service names are in your compose files). **Do not start Tailscale yet**: it starts in stage 5, after these checks.
+Then start the proxy and the other services except Tailscale (name them: for example `docker compose up -d --no-deps proxy launcher netguard`; the service names are in your compose files). **Do not start Tailscale yet**: it starts in stage 5, after these checks.
 
 The app answers on port 3100 (the feedback portal is 3101, and has no `/api/ready`):
 
@@ -239,7 +249,7 @@ It must show `"role":"leader"`. Ticket and migration counts must equal the numbe
 
 ### Stage 5: switch over
 
-**The old host's Tailscale must already be stopped (stage 3, step 4) before the new one starts**: two machines with the same Tailscale identity fight for the name and break the address. Confirm with `docker compose ps` on the old host that Tailscale is not running. With Tailscale state copied, `docker compose up -d tailscale` brings the same machine name up (`docs/20-https-tailscale.md`, "Backing up and moving to a new host"). Do not name the plain `server` service: under blue/green it is parked behind a profile, and naming it would start a second server on the same database. Update the addresses you use. Turn on the deployer's scheduled job on the new host (the scheduler you chose in stage 1; **Unconfirmed per host**). Then the checks listed in item 5 of the order in section 3 run from Boss Man.
+**The old host's Tailscale must already be stopped (stage 3, step 2) before the new one starts**: two machines with the same Tailscale identity fight for the name and break the address. Confirm with `docker compose ps` on the old host that Tailscale is not running. With Tailscale state copied, `docker compose up -d tailscale` brings the same machine name up (`docs/20-https-tailscale.md`, "Backing up and moving to a new host"). Do not name the plain `server` service: under blue/green it is parked behind a profile, and naming it would start a second server on the same database. If you run ntfy, start it on the new host with its own flags (`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d`); it was stopped on the old host in stage 3. Update the addresses you use. Turn on the deployer's scheduled job on the new host (the scheduler you chose in stage 1; **Unconfirmed per host**). Then the checks listed in item 5 of the order in section 3 run from Boss Man.
 
 ### Stage 6: retire the old host
 
