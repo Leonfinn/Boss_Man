@@ -477,6 +477,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
 
   return {
     enabled: !!dir,
+    /** What the host deployer last reported: its last request's result, and what is live and on main (BOS-420's wait reads both). */
+    status,
+    available,
 
     /**
      * The owner's hand-apply to-dos the host has caught up with (BOS-122): once the live commit is no

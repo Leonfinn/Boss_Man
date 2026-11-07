@@ -138,6 +138,15 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
     return { ready: why.length === 0, runs, checks, freeMb, needMb, why, ...(memoryUnknown ? { memoryUnknown } : {}), at: t.toISOString() };
   }
 
+  /** A hand-applied update: the owner's to-do shows how quiet the machine is, so they know when to apply it. */
+  async function markTodo(w: DeployWait, q: Quiet) {
+    if (w.origin !== "hand") return;
+    const [todo] = await db.select({ id: decisions.id, context: decisions.context }).from(decisions).where(and(eq(decisions.dedupeKey, `owner-todo:self-deploy:${w.commit}`), eq(decisions.status, "open")));
+    if (!todo) return;
+    const { memoryUnknown: _m, ...quiet } = q;
+    await db.update(decisions).set({ context: { ...(todo.context as object), quiet } }).where(eq(decisions.id, todo.id));
+  }
+
   async function homeCompany() {
     const [c] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
     return c?.id ?? null;
@@ -149,16 +158,21 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
     if (!companyId) return;
     const busy = q.why.length ? q.why.join("; ") : "it isn't quiet yet";
     const mem = q.memoryUnknown ? " Memory isn't reported by this machine's host deployer, so only runs and checks are counted." : "";
+    const hand = w.origin === "hand";
     const where = hostHolding
       ? `The update to ${short(w.commit)} was handed to the machine, but the machine is holding it because memory is short: ${busy}.`
       : `The update to ${short(w.commit)} has waited ${w.minutes} minutes for the machine to be quiet: ${busy}.`;
-    const options = [KEEP_WAITING_MORE(w.minutes), UPDATE_NOW_ANYWAY, CANCEL_UPDATE];
+    // A hand-applied update is never sent by Boss Man, so there is nothing to "update now": the owner can apply it anyway from the to-do.
+    const options = hand ? [KEEP_WAITING_MORE(w.minutes), CANCEL_UPDATE] : [KEEP_WAITING_MORE(w.minutes), UPDATE_NOW_ANYWAY, CANCEL_UPDATE];
+    const choice = hand
+      ? `Keep waiting, or stop waiting (this lifts the hold; you can still apply the update by hand, at the risk of running short of memory as on 3 Nov)?`
+      : `Keep waiting, update now anyway (it may run short of memory and be switched back, as on 3 Nov), or cancel the update?`;
     await db
       .insert(decisions)
       .values({
         companyId,
         kind: "approval",
-        question: `${where}${mem} Keep waiting, update now anyway (it may run short of memory and be switched back, as on 3 Nov), or cancel the update? Until you answer, new merge checks wait and at most ${quietRuns} runs go at once.`,
+        question: `${where}${mem} ${choice} Until you answer, new merge checks wait and at most ${quietRuns} runs go at once.`,
         options,
         recommendedOption: options[0]!,
         dedupeKey: `deploy-wait:${w.approvedAt}:${w.deadline}`,
@@ -210,6 +224,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
         }
       }
       await save({ ...w, quiet: q });
+      await markTodo(w, q);
       if (w.origin === "approve")
         await deps.notify({
           companyId: null,
@@ -251,10 +266,14 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
           return get();
         }
         const q = await measure();
+        const wasReady = !!w.quiet?.ready;
         w = { ...w, quiet: q };
         if (q.ready && w.origin === "approve") return sendNow(w, false);
+        if (q.ready && !wasReady && w.origin === "hand")
+          await deps.notify({ companyId: null, level: "note", title: "Ready: the machine is quiet", body: `You can apply the update to ${short(w.commit)} by hand now. The steps are on the to-do in Decisions.`, link: "#/settings" });
         if (!q.ready && t >= new Date(w.deadline)) await ask(w, q, false);
         await save(w);
+        await markTodo(w, q);
         return w;
       }
 
@@ -328,6 +347,10 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
       }
       // Sent and not in the inbox any more: the host has it, so it goes ahead and the hold stays until it ends.
       if (w.phase === "sent" && !(await deps.takeBack(w.decisionId))) return { cancelled: false, tooLate: true };
+      if (w.origin === "hand") {
+        await end("hand wait stopped by the owner", { level: "note", title: "Stopped making room for the update", body: `Merge checks and runs are back to normal. The to-do to apply the update to ${short(w.commit)} by hand is still on your queue.` });
+        return { cancelled: true };
+      }
       await end("cancelled by the owner", { level: "note", title: `Update to ${short(w.commit)} cancelled`, body: "Nothing was sent to the machine. Merge checks and runs are back to normal. The update is offered again in Settings → Server and runner → Updates." });
       return { cancelled: true };
     },

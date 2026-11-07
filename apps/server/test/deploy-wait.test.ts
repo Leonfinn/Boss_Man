@@ -373,4 +373,19 @@ describe("deploy wait (BOS-420)", () => {
     w.trialUntil = new Date(t0 + 17 * MIN).toISOString();
     expect((await svc.step())?.phase).toBe("window");
   });
+
+  it("a hand wait's 30-minute card offers no 'update now' (Boss Man never sends it), and stopping it leaves the to-do", async () => {
+    const { w, deps } = world();
+    w.checks = 1;
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A, origin: "hand" });
+    offset = 31 * MIN;
+    await svc.step();
+    const [card] = await cards();
+    expect(card!.options).toEqual([KEEP_WAITING_MORE(30), CANCEL_UPDATE]);
+    await svc.answered(CANCEL_UPDATE);
+    expect(await svc.get()).toBeNull();
+    expect(w.sent).toEqual([]);
+    expect(w.notes.at(-1)?.title).toBe("Stopped making room for the update");
+  });
 });

@@ -24,7 +24,7 @@ import { modelProbeService } from "./services/model-probe.js";
 import { assetPathOf, PRECOMPRESSED_SUFFIX_LIST, parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
-import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
+import { checkJobs, secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
@@ -37,6 +37,7 @@ import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
+import { deployWaitService } from "./services/deploy-wait.js";
 import { hostFactsService } from "./services/host-facts.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -685,6 +686,35 @@ export async function buildApp(opts: AppOptions) {
     limit: () => checkGate(db).limit(),
     now: opts.now,
   });
+  // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
+  // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.
+  const deployWait = deployWaitService(db, {
+    headroom: () => selfDeploy.headroom(),
+    checksRunning: async () => {
+      const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(eq(checkJobs.state, "running"))) as [{ n: number }];
+      return review.gateState().running + n;
+    },
+    openRuns: async () => {
+      const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`))) as [{ n: number }];
+      return n;
+    },
+    send: (ctx, id, o) => selfDeploy.send(ctx, id, o),
+    takeBack: (id) => selfDeploy.takeBack(id),
+    status: () => selfDeploy.status(),
+    available: () => selfDeploy.available(),
+    trialUntil: () => selfDeploy.trialUntil(),
+    runnerCardOpen: () => selfDeploy.runnerCardOpen(),
+    drainOn: async () => !!(await getHold(db)),
+    notify: (n) => notes.notify(n),
+    released: async () => {
+      await review.gatePump();
+      await checks.sweep();
+      await scheduler.tick();
+    },
+    now: opts.now,
+    log: (m) => app.log.warn(m),
+  });
+  decisionsSvc.setDeployWaitHook(deployWait);
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
     // A stalled-review card's actions (BOS-404, BOS-426): take it, hand it to another reviewer, send it back, or leave it.
@@ -2495,6 +2525,13 @@ export async function buildApp(opts: AppOptions) {
       return "error" in r ? reply.code(409).send({ error: "nothing_to_deploy", message: r.error }) : r;
     });
 
+    // A server update waiting for a quiet machine (BOS-420): what it waits for, and the owner's cancel.
+    owner.get("/api/self-deploy/wait", async () => deployWait.status());
+    owner.post("/api/self-deploy/wait/cancel", async (_req, reply) => {
+      const r = await deployWait.cancel(); // leader-only
+      return r.tooLate ? reply.code(409).send({ error: "too_late", message: "The machine has already started this update, so it can't be cancelled. The hold lifts when it ends." }) : r;
+    });
+
     owner.post("/api/self-deploy/update-runners", async (_req, reply) => {
       const r = await selfDeploy.updateRunners();
       return "error" in r ? reply.code(409).send({ error: "cannot_update_runners", message: r.error }) : r;
@@ -2734,5 +2771,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
+  return { app, launcher: launch, memory, checks, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
 }

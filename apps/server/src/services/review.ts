@@ -821,6 +821,11 @@ export function reviewService(
       }
     },
 
+    /** The in-memory merge gate's checks: running and waiting (BOS-420 counts them before a server update). */
+    gateState: () => gate.state(),
+    /** Looks at the gate's queue again now: a server update's soft hold lifted (BOS-420). */
+    gatePump: () => gate.pump(),
+
     /** Every merge this process has running, with its phase, for the merge queue screen (BOS-587). */
     runningMerges(): Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" }> {
       return [...landings.entries()].flatMap(([ticketId, l]) =>

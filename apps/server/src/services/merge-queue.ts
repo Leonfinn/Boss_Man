@@ -8,6 +8,7 @@ import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
+import { softHold } from "./deploy-wait-hold.js";
 
 /** How many recently finished items the screen shows. */
 export const RECENT_LIMIT = 10;
@@ -283,6 +284,8 @@ export function mergeQueueService(
       const cards = await ownerCards(ids);
       const runningIds = new Set(running.map((r) => r.ticketId));
       const queue = deps.queueStatus ? await deps.queueStatus(companyId).catch(() => null) : null;
+      // A server update waiting for a quiet machine parks new checks (BOS-420): say so rather than "waiting for a slot".
+      const held = (await softHold(db, t).catch(() => ({ on: false as const }))).on;
 
       const waiting: WaitingRow[] = [];
       for (const r of inReview) {
@@ -313,6 +316,10 @@ export function mergeQueueService(
         }
         if (failedCheck) {
           waiting.push({ ...base, state: "check_failed_retrying", label: `check failed: retrying (${failingStep(check!.detail) ?? "no output recorded"})`, stuck: true, next: "Boss Man sends it back to the agent with the failure.", actor: "agent", decisionId: null });
+          continue;
+        }
+        if (held) {
+          waiting.push({ ...base, state: "waiting_for_slot", label: "waiting for the server update", stuck: false, next: "New checks start once the server update is done (it waits for a quiet machine, then its standby window).", actor: "system", decisionId: null });
           continue;
         }
         if (queue?.mode === "server" && queue.waiting > 0) {
