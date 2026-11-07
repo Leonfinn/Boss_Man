@@ -64,8 +64,11 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     local dur=0
     [ -s "$began_file" ] && dur=$(( $(date +%s) - $(cat "$began_file") ))
     cp "$log" "$STORE/$key.log" 2>/dev/null || return 0
-    printf '{"status":"%s","exit":%s,"tree":"%s","commit":"%s","finished":"%s","duration_seconds":%s,"merge_check":%s}\n' \
-      "$1" "$2" "$key" "$(git rev-parse HEAD)" "$(date -u +%FT%TZ)" "$dur" "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo true || echo false)" >"$STORE/$key.json" || return 0
+    # Per-step times ("check-all: step <name> took <s>s"), as {"name":seconds,...} in order, so the result shows where the time went.
+    local steps
+    steps=$(sed -n 's/^check-all: step \([A-Za-z0-9:._-]*\) took \([0-9]*\)s.*/"\1":\2/p' "$log" | paste -sd, -)
+    printf '{"status":"%s","exit":%s,"tree":"%s","commit":"%s","finished":"%s","duration_seconds":%s,"merge_check":%s,"steps":{%s}}\n' \
+      "$1" "$2" "$key" "$(git rev-parse HEAD)" "$(date -u +%FT%TZ)" "$dur" "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo true || echo false)" "$steps" >"$STORE/$key.json" || return 0
     # keep the newest 50 results
     local old
     while read -r old; do rm -f "$old" "${old%.json}.log"; done < <(find "$STORE" -maxdepth 1 -name '*.json' -printf '%T@ %p\n' | sort -rn | tail -n +51 | cut -d' ' -f2-)
@@ -330,8 +333,20 @@ step in-memory-state node scripts/check-in-memory-state.mjs
 # at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),
 # and a capped heap for tsc only. Callers can override any of these.
 export BOSSMAN_TEST_MAX_WORKERS="${BOSSMAN_TEST_MAX_WORKERS:-2}"
-NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}" step typecheck pnpm -r --workspace-concurrency=1 typecheck
-step test pnpm -r --workspace-concurrency=1 test
+# Typecheck and tests run one package at a time (the same order and limits as `pnpm -r --workspace-concurrency=1`), each as its own
+# timed step, so the time shows which package is slow (BOS-415). Packages come from pnpm in dependency order.
+pkg_dirs=(); while IFS= read -r d; do pkg_dirs+=("$d"); done < <(pnpm -r --workspace-concurrency=1 exec pwd 2>/dev/null | grep '^/' || true)
+[ "${#pkg_dirs[@]}" -gt 0 ] || { echo "check-all: could not list the workspace packages" >&2; exit 1; }
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}"
+for d in "${pkg_dirs[@]}"; do
+  grep -q '"typecheck"' "$d/package.json" || continue
+  step "typecheck:${d##*/}" pnpm --dir "$d" run typecheck
+done
+unset NODE_OPTIONS  # the heap cap is for tsc only
+for d in "${pkg_dirs[@]}"; do
+  grep -q '"test"' "$d/package.json" || continue
+  step "test:${d##*/}" pnpm --dir "$d" run test
+done
 step build pnpm build
 step shellcheck scripts/check-shell.sh
 step shell-tests scripts/test-shell.sh
