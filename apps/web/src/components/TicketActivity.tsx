@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 
 import { systemAuthor, ticketRef } from "@boss-man/shared";
 import { api, type Agent } from "../api";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
+import { useDraft } from "../drafts";
 import { linked } from "../pages/Chat";
 import { ImagePreviews, useImageAttach, withAttachments } from "./ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "./OwnerMessageBox";
@@ -141,7 +142,8 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   const [busy, setBusy] = useState(false);
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
-  const [text, setText] = useState("");
+  // The ticket's reply box, kept while the server is away or the page reloads (BOS-637).
+  const [text, setText, clearText] = useDraft(`ticket/${ticketId}/reply`);
   const img = useImageAttach(companyId, ticketId);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   // "" is whoever is working the ticket; another agent (e.g. the CEO) can be asked about it instead.
@@ -167,7 +169,8 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
     if (!outgoing.trim()) return;
     try {
       await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: outgoing.trim(), interrupt, ...(other ? { agentId: other.id } : {}) } });
-      setText("");
+      // Sent: the draft goes. A failed send keeps it, so Send can be pressed again (BOS-637).
+      clearText();
       img.clear();
       setNote(null);
       convo.reload();
@@ -182,7 +185,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
       const markdown = await img.uploadText(long, "message.txt");
       const outgoing = withAttachments("I've sent the text as a file (below); please read it before answering.", [markdown]);
       await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: outgoing, ...(other ? { agentId: other.id } : {}) } });
-      setText("");
+      clearText();
       img.clear();
       setNote({ ok: true, text: "Sent as a .txt file on the ticket." });
       convo.reload();

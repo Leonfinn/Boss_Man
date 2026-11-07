@@ -90,7 +90,7 @@ describe("the lint and the card read fences the same way (BOS-550)", () => {
   });
 });
 
-describe("R13: no runner recreate that skips the drain (BOS-594)", () => {
+describe("R15: no runner recreate that skips the drain (BOS-594)", () => {
   const block = (cmd: string) => `Do it.\n\n\`\`\`sh host="boss-man" as="root"\n${cmd}\n\`\`\``;
   it("refuses the 6 Nov 16:00 card's recreate-all step, --now and a direct container restart", () => {
     const steps = [
@@ -98,13 +98,13 @@ describe("R13: no runner recreate that skips the drain (BOS-594)", () => {
       block("scripts/update-runner.sh --settings --now"),
       block("docker restart boss-man-runner-app-co"),
     ];
-    const r = lintOwnerSteps(steps).refuse.filter((f) => f.rule === "R13");
+    const r = lintOwnerSteps(steps).refuse.filter((f) => f.rule === "R15");
     expect(r.map((f) => f.step)).toEqual([1, 2, 3]);
     expect(r[0]!.problem).toContain("scripts/update-runner.sh --settings");
   });
 
   it("lets the draining paths through", () => {
     const steps = [block("scripts/update-runner.sh --settings"), block("scripts/update-runner.sh"), block("docker compose up -d --no-deps launcher")];
-    expect(lintOwnerSteps(steps).refuse.filter((f) => f.rule === "R13")).toEqual([]);
+    expect(lintOwnerSteps(steps).refuse.filter((f) => f.rule === "R15")).toEqual([]);
   });
 });

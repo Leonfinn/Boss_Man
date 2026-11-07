@@ -6,6 +6,7 @@ import { unzipSync } from "fflate";
 import { api, ApiError, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
 import { Section, useAction } from "./Settings";
@@ -212,7 +213,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
   const [open, setOpen] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ name: string; description: string; body: string } | null>(null);
   const s = skill.data;
-  if (skill.error) return <p className="error" role="alert">{skill.error.message}</p>;
+  if (skill.error && !away(skill.error)) return <p className="error" role="alert">{skill.error.message}</p>;
   if (!s) return null;
   const chosen = holders ?? s.agents.map((a) => a.id);
   const run = async (f: () => Promise<string>) => {

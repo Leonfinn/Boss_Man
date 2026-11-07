@@ -9,6 +9,7 @@
 
 import { HOST_NAME, OWNER_CONTROLS, parseStep, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
+import { norm, screenFindings, type Pressed } from "./owner-screens.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
 export { parseStep, strayFence, type StepPiece, type Where };
@@ -58,7 +59,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R9" | "R13" | "R14" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R13" | "R14" | "R15" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -109,7 +110,7 @@ const DOC_POINTERS: Array<[RegExp, string]> = [
   [/\b(?:previous|earlier|other|last|old) card\b/i, "sends the owner to another card"],
 ];
 /**
- * R13 (BOS-594): a command that recreates or restarts the runners at once cuts off every run in progress, with no
+ * R15 (BOS-594): a command that recreates or restarts the runners at once cuts off every run in progress, with no
  * drain and no wake afterwards (6 Nov 16:00: a setting change applied with recreate-all). Setting changes go through
  * `scripts/update-runner.sh --settings`, new images through Build and update runners; both drain first.
  */
@@ -148,8 +149,6 @@ function usesIn(code: string): string[] {
   return out;
 }
 
-/** A label as compared: lower case, words only ("Saved ✓" is "saved", "Done: mark processed" is "done mark processed"). */
-const norm = (s: string) => s.toLowerCase().replace(/’/g, "'").replace(/[^\p{L}\p{N}']+/gu, " ").trim();
 /** Keys on the keyboard: "press Enter" is not a button. */
 const KEYS = new Set(["enter", "return", "esc", "escape", "tab", "space", "spacebar", "ctrl", "control", "cmd", "command", "shift", "alt", "option", "delete", "backspace", "f5", "y", "n", "q"]);
 /** Words that end a button's name in a sentence: "press Approve on the card", "click Save again". */
@@ -177,31 +176,43 @@ const SCREENS = (Object.keys(OWNER_CONTROLS) as OwnerScreen[]).filter((k) => k !
  * Whether `name` is a control: a key, an exact label or card option, the start of a "…" label, or, when it wasn't
  * quoted (so the sentence may run on), a label followed by a word that ends it ("Approve on the card").
  */
-function isControl(name: string, quoted: boolean, options: Set<string>): boolean {
+/**
+ * Which control `name` is: the listed label it names (normalised), "" for a key or one of the card's own options
+ * (real, but not on any screen's list), or null when it isn't a control. A "…" label matches anything after its
+ * start; when the name wasn't quoted (so the sentence may run on), a label followed by a word that ends it
+ * ("Approve on the card") counts too.
+ */
+function controlLabel(name: string, quoted: boolean, options: Set<string>): string | null {
   const n = norm(name);
-  if (!n || KEYS.has(n.split(" ")[0]!) || CONTROLS.exact.has(n) || options.has(n)) return true;
-  for (const p of CONTROLS.prefix) if (n === p || n.startsWith(`${p} `)) return true;
-  if (quoted) return false;
-  for (const l of [...CONTROLS.exact, ...options]) if (n.startsWith(`${l} `) && AFTER_LABEL.test(n.slice(l.length + 1))) return true;
-  return false;
+  if (!n || KEYS.has(n.split(" ")[0]!) || options.has(n)) return "";
+  if (CONTROLS.exact.has(n)) return n;
+  for (const p of CONTROLS.prefix) if (n === p || n.startsWith(`${p} `)) return p;
+  if (quoted) return null;
+  for (const l of [...CONTROLS.exact, ...options]) if (n.startsWith(`${l} `) && AFTER_LABEL.test(n.slice(l.length + 1))) return options.has(l) ? "" : l;
+  return null;
 }
 
 /**
- * The controls a step tells the owner to press that the app doesn't have (R7). A name counts when it follows
- * press/click/tap/hit and is quoted, bold or starts with a capital ("press Overrule and merge"), or when it is
- * "the X button". Lower-case words after the verb ("click the link", "press it") aren't taken as names: refusing
- * those would stop good cards, and a made-up button is written the way the screen would show it.
+ * The controls a step tells the owner to press: `missing` are names the app doesn't have (R7), `pressed` the listed
+ * buttons it names, with where (for R8). A name counts when it follows press/click/tap/hit and is quoted, bold or
+ * starts with a capital ("press Overrule and merge"), or when it is "the X button". Lower-case words after the verb
+ * ("click the link", "press it") aren't taken as names: refusing those would stop good cards, and a made-up button
+ * is written the way the screen would show it.
  */
-function missingControls(prose: string, options: Set<string>): string[] {
-  const out: string[] = [];
-  const named = (raw: string, quoted: boolean) => {
+function controlsIn(prose: string, options: Set<string>): { missing: string[]; pressed: Pressed[] } {
+  const missing: string[] = [];
+  const pressed: Pressed[] = [];
+  const named = (raw: string, quoted: boolean, at: number) => {
     const n = raw.replace(/\s+/g, " ").trim();
-    if (n && !isControl(n, quoted, options) && !out.includes(n)) out.push(n);
+    if (!n) return;
+    const label = controlLabel(n, quoted, options);
+    if (label === null) { if (!missing.includes(n)) missing.push(n); }
+    else if (label) pressed.push({ label, at });
   };
   for (const m of prose.matchAll(/\b(?:press|click|tap|hit)\s+(?:on\s+)?(?:the\s+)?/gi)) {
     const rest = prose.slice(m.index + m[0].length);
     const q = /^(?:"([^"\n]+)"|“([^”\n]+)”|\*\*([^*\n]+)\*\*|`([^`\n]+)`|'([^'\n]+)'(?!\w))/.exec(rest);
-    if (q) named(q[1] ?? q[2] ?? q[3] ?? q[4] ?? q[5]!, true);
+    if (q) named(q[1] ?? q[2] ?? q[3] ?? q[4] ?? q[5]!, true, m.index);
     else if (/^\p{Lu}/u.test(rest)) {
       // Widest reading first: an option can hold a comma ("Yes, move it") or a bracket that is part of the label
       // ("Update runners (finish runs first)"). Only if none of those is a control, cut at a comma or bracket
@@ -209,12 +220,14 @@ function missingControls(prose: string, options: Set<string>): string[] {
       const cut = (re: RegExp) => rest.split(re)[0]!;
       const end = String.raw`\s+(?:button|link|tab)\b`;
       const readings = [`[.;:!?\\n→>]|${end}`, `[.,;:!?\\n→>]|${end}`, `[.,;:!?()\\n→>]|${end}`].map((re) => cut(new RegExp(re)));
-      if (!readings.some((r) => isControl(r, false, options))) named(readings[2]!, false);
+      const label = readings.map((r) => controlLabel(r, false, options)).find((l) => l !== null);
+      if (label === undefined) named(readings[2]!, false, m.index);
+      else if (label) pressed.push({ label, at: m.index });
     }
   }
-  for (const m of prose.matchAll(/(?:"([^"\n]+)"|“([^”\n]+)”|\*\*([^*\n]+)\*\*)\s+button\b/g)) named(m[1] ?? m[2] ?? m[3]!, true);
-  for (const m of prose.matchAll(/\bthe\s+(\p{Lu}[^.,;:!?()\n"“”*]*?)\s+button\b/gu)) named(m[1]!, false);
-  return out;
+  for (const m of prose.matchAll(/(?:"([^"\n]+)"|“([^”\n]+)”|\*\*([^*\n]+)\*\*)\s+button\b/g)) named(m[1] ?? m[2] ?? m[3]!, true, m.index);
+  for (const m of prose.matchAll(/\bthe\s+(\p{Lu}[^.,;:!?()\n"“”*]*?)\s+button\b/gu)) named(m[1]!, false, m.index);
+  return { missing, pressed };
 }
 
 /** The first screen a step names, for the list in a refusal; a ticket reference or the word "ticket" is Ticket. */
@@ -260,6 +273,10 @@ export function fillHostTokens(steps: readonly string[], values: Readonly<Record
  *
  * R7 (BOS-421, DR-009 L6): a step that tells the owner to press a button the app doesn't have
  * (`OWNER_CONTROLS`) is refused; `options` (the card's own buttons, which the owner can press too) count as real.
+ *
+ * R8 and R13 (BOS-442, owner-screens.ts): a path ("Settings → Secrets") must follow the app's menus and tabs, and a
+ * button or field it names must be on the screen the path reaches (`OWNER_FIELDS` lists the fields); a step that
+ * tells the owner to fill in a field must give the value or say that any value works. Both can be overridden.
  *
  * R6 (BOS-427) is the host and account check: every command block says where it runs and as whom, and a block
  * run by the owner's login may not read a recorded folder that login can't read unless an earlier block on the
@@ -317,17 +334,21 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
     for (const c of code)
       for (const [re, what] of RUNNER_RECREATE)
         if (re.test(c)) {
-          refuse.push({ step, rule: "R13", problem: `${what}, which cuts off every agent run in progress with no drain and no wake afterwards. For a runner setting change use \`scripts/update-runner.sh --settings\` (it waits for runs to finish, then wakes the agents); for a new runner image use Settings → Server and runner → Updates → Build and update runners. In a real emergency only the CEO can raise it, with lintOverride saying why` });
+          refuse.push({ step, rule: "R15", problem: `${what}, which cuts off every agent run in progress with no drain and no wake afterwards. For a runner setting change use \`scripts/update-runner.sh --settings\` (it waits for runs to finish, then wakes the agents); for a new runner image use Settings → Server and runner → Updates → Build and update runners. In a real emergency only the CEO can raise it, with lintOverride saying why` });
           break;
         }
     // A `{{host.…}}` token is filled in by `fillHostTokens` before this lint runs (checkAsk), so one left here had no
     // recorded fact behind it, or the caller has no host facts; any other token never has a value.
     for (const m of text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) refuse.push({ step, rule: "R4", problem: `has {{${m[1]}}}, which Boss Man has no value for. Write the value itself` });
-    for (const name of missingControls(prose, own)) {
-      const screen = screenIn(prose);
+    const { missing, pressed } = controlsIn(prose, own);
+    const screens = screenFindings(prose, pressed);
+    for (const name of missing) {
+      const screen = screens.screen ?? screenIn(prose);
       const there = screen ? ` The buttons on ${screen} are: ${OWNER_CONTROLS[screen].join(", ")}.` : "";
       refuse.push({ step, rule: "R7", problem: `tells the owner to press "${name}", which isn't a button in the app.${there} Name a button exactly as the screen shows it, or one of this card's options` });
     }
+    for (const problem of screens.r8) refuse.push({ step, rule: "R8", problem });
+    for (const problem of screens.r13) refuse.push({ step, rule: "R13", problem });
     const host = lintHost(blockPieces, step, given.hosts, staged, step === 1);
     refuse.push(...host.refuse);
     warn.push(...host.warn);
