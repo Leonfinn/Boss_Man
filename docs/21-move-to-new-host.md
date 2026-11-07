@@ -13,18 +13,16 @@ Words used here: `$BOSSMAN_HOME` is the folder that holds Boss Man on a host. In
 | Piece | How it moves | Check on the new host |
 |---|---|---|
 | Database | `pg_dump` backup on the old host (a `bossman-*.sql.gz` file), loaded on the new host. Rehearsed first with `scripts/restore-test.sh` | Table counts and migration count equal the old host; `/api/ready` says `"role":"leader"` |
-| `secrets/master.key`, `.env`, runner token files | Copied by hand (never through git, tickets or chat). Without `master.key` every stored credential is unreadable | Server starts; a test run works |
+| `secrets/master.key`, secrets from `.env`, runner token files | Copied by hand (never through git, tickets or chat). Without `master.key` every stored credential is unreadable. The old `.env` is copied under another name and only its secrets are carried over (stage 3, step 4) | Server starts; a test run works |
 | Company data (`$BOSSMAN_DATA/companies`: workspaces, repo copies, Claude config) | Copy the folder, keep owner uid 1000 | A test run sees its workspace. Repo clones can be fetched again; **unpushed work inside a workspace cannot**, so agents are stopped before the copy |
 | Legacy `app-co` data (only if you still use it) | Part of the same data folder | Same |
 | Runner images | Built again on the new host, never copied | Runner health in Boss Man |
 | Host deployer and its scheduled job | Recreated per `docs/09-self-deploy.md` | `status.json` is refreshed; a dry run works |
 | Blue/green and Caddy | Recreate `$D/proxy/active.caddy` with the same live colour | The commit shown through the proxy equals the old host's |
-| Tailscale state (BOS-242, `$BOSSMAN_DATA/tailscale`) | Copy the folder so the machine keeps its name; see `docs/20-https-tailscale.md` | Login over the `ts.net` address; certificate valid |
-| ntfy data and tokens (BOS-241, `$BOSSMAN_DATA/ntfy` by default) | Part of `$BOSSMAN_DATA` | The test push reaches the phone |
+| Tailscale state (`$BOSSMAN_DATA/tailscale`, `deploy/tailscale.yml`; skip if you do not run Tailscale) | Copy the folder so the machine keeps its name; see `docs/20-https-tailscale.md` | Login over the `ts.net` address; certificate valid |
+| ntfy data and tokens (`$NTFY_DATA`, default `$BOSSMAN_DATA/ntfy`, `deploy/ntfy.yml`; skip if you do not run ntfy) | Part of `$BOSSMAN_DATA` | The test push reaches the phone |
 | Penpot (only if you use it) | `scripts/backup-penpot.sh`, restore its database and assets | Open Penpot, see the project list |
 | GitHub deploy access | The new host gets its **own new** deploy key; remove the old one at the end | `git ls-remote` works from the new host |
-
-**Update (3 Nov 2026):** BOS-241 (ntfy) and BOS-242 (Tailscale) have both merged. The folders are confirmed on main: `$BOSSMAN_DATA/tailscale` (`deploy/tailscale.yml`) and `$NTFY_DATA`, default `$BOSSMAN_DATA/ntfy` (`deploy/ntfy.yml`). If you do not run Tailscale or ntfy, skip those rows.
 
 **Two more checks for the new host:** (1) the live commit can be behind main, so check out the commit shown by Boss Man's server status, not just the main tip; (2) runners now filter network access per container (`docs/20-netguard.md`, which relies on Landlock), so confirm the new host's kernel supports what that page needs before you rely on it. On a Proxmox VM this is the guest kernel; how to check is on that page, and I have not verified it on your hardware.
 
@@ -62,7 +60,7 @@ Downtime is only steps 3 to 5, about 30 to 60 minutes, mainly the final data cop
 5. **Switch over.** Start Tailscale with the moved state, update the address you use (bookmarks, phone app, ntfy subscription, `BOSSMAN_PORTAL_URL`, any webhook that points at the old address). Boss Man then checks: server status, live commit, runner health, a test run, login over `ts.net`, an ntfy test push.
 6. **Retire the old host** only after you sign off, after a trial period you choose.
 
-**Rollback until step 6:** on the new host, stop Tailscale first and then everything else (`docker compose stop`). Then on the old host mirror stage 4: run `docker compose start db`; under blue/green run `docker compose start proxy server-<live colour> launcher netguard` (plus any other service you ran, but **not** the other colour and not a plain `docker compose start`, which would start the standby colour and let an older image take the leader lock), send the leader signal if the live colour is green (same command as stage 4), and check `/api/ready`; under a single server a plain `docker compose start` is fine. Start ntfy again with its own flags (`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy start`; under blue/green add `-f deploy/ntfy-bluegreen.yml` after the first `-f`, so the servers can reach it). Also stop ntfy on the new host first, the same way (`... stop`), so only one host runs it. Last, `docker compose start tailscale` (the new host's must be stopped first, or the two fight for the name). Then turn the old host's deployer scheduled job back on (and the new host's off). The old host's data is exactly as it was at step 3. Anything written on the new host after the switch is lost unless you take a backup there first and load it back on the old host; the switch-over stage says so when it asks you.
+**Rollback until step 6:** first, on the new host, stop everything, before you start anything on the old host. In this order: Tailscale (`docker compose stop tailscale`), ntfy with its own flags (the same command as below, ending `stop`; skip if you do not run it), then everything else (`docker compose stop`). Only when all of that is stopped, on the old host mirror stage 4: run `docker compose start db`; under blue/green run `docker compose start proxy server-<live colour> launcher netguard` (plus any other service you ran, but **not** the other colour and not a plain `docker compose start`, which would start the standby colour and let an older image take the leader lock), send the leader signal if the live colour is green (same command as stage 4), and check `/api/ready`; under a single server a plain `docker compose start` is fine. Start ntfy again with its own flags (`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy start`; under blue/green add `-f deploy/ntfy-bluegreen.yml` after the first `-f`, so the servers can reach it). Last, `docker compose start tailscale` (the new host's was stopped above, or the two fight for the name). If the new host has already used the Tailscale state (it may have rotated the keys), the old host's copy can be rejected and need a fresh login: follow `docs/20-https-tailscale.md` to sign in again, and remove any duplicate machine in the Tailscale admin console. Then turn the old host's deployer scheduled job back on (and the new host's off). The old host's data is exactly as it was at step 3. Anything written on the new host after the switch is lost unless you take a backup there first and load it back on the old host; the switch-over stage says so when it asks you.
 
 ## 4. The commands
 
@@ -177,6 +175,12 @@ List what is still running, then stop each remaining service except `db` by name
 docker compose ps --services --filter status=running
 ```
 
+That list misses runner containers, which the launcher starts outside Compose. They should be gone already: the CEO's "all runs ended, merges frozen" message means none is left. Confirm with this; it must print nothing (a name still listed is a run in progress, so stop and ask the CEO before going on):
+
+```sh
+docker ps --filter name=boss-man-runner- --format '{{.Names}}'
+```
+
 ntfy runs as its own Compose project, so that list does not show it. Stop it too, so nothing writes to `$NTFY_DATA` while it is copied (skip if you do not run ntfy):
 
 ```sh
@@ -195,7 +199,7 @@ Check the file is not tiny and decompresses cleanly (`gzip -t`) before going on:
 ls -l ../<the file name printed above> && gzip -t ../<the file name printed above> && echo gzip-ok
 ```
 
-4. Copy the backup, `secrets/`, `.env`, `$BOSSMAN_DATA` (without `postgres/`, which is rebuilt from the dump, but **including** `tailscale/` and `ntfy/`) and the whole deployer folder `$D` (`inbox`, `outbox`, `state`, `proxy/active.caddy` naming the live colour, `host-deployer.sh`, `host.conf`) to the new host. Use the tool you trust (`rsync -a` keeps owners and times; **Unconfirmed**: check it is installed with `command -v rsync`). Note which colour is live (`grep reverse_proxy $D/proxy/active.caddy`). Compare checksums of `master.key` and the backup on both sides:
+4. Copy the backup, `secrets/`, the old `.env` **under another name** (for example `.env.old-host`), `$BOSSMAN_DATA` (without `postgres/`, which is rebuilt from the dump, but **including** `tailscale/` and `ntfy/`) and the whole deployer folder `$D` (`inbox`, `outbox`, `state`, `proxy/active.caddy` naming the live colour, `host-deployer.sh`, `host.conf`) to the new host. **Never copy the old `.env` over the new host's `.env`** from stage 1: it would bring back the old host's data and deployer paths, bind addresses, portal URL and Docker group id, and the stack would fail during downtime. On the new host, compare the two files and carry over only the secrets that differ (for example `POSTGRES_PASSWORD`, which must match the old host's); or skip the copy if stage 1 already set every secret. Use the tool you trust (`rsync -a` keeps owners and times; **Unconfirmed**: check it is installed with `command -v rsync`). Note which colour is live (`grep reverse_proxy $D/proxy/active.caddy`). Compare checksums of `master.key` and the backup on both sides:
 
 ```sh
 sha256sum secrets/master.key ../<the file name printed above>
@@ -217,15 +221,19 @@ BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue server-gre
 
 Put the deployer folder `$D` in place from the copy made in stage 3 (same layout as `docs/06` steps 9a and 9d: `inbox` owned by uid 1000, `proxy/active.caddy` naming the live colour, `host.conf` root-only 600) and set `BOSSMAN_DEPLOYER` in `.env` to its path on this host. Without `active.caddy` the proxy has nothing to route to.
 
-Follow `runbooks/database-restore-and-bluegreen-rollback` section 2 for the load, using the final backup (there is no running writer to stop on a fresh host). Then start **only the live colour**; do not run a bare `docker compose up -d` (under blue/green it starts both colours, and a standby green with a leading blue breaks routing; `docs/06` step 9d.5). Start the database, migrate with the live colour's tag, then start that colour (replace `blue` with the live colour):
+First start the database, because the load needs it running:
 
 ```sh
 docker compose up -d db
 ```
 
+Then follow `runbooks/database-restore-and-bluegreen-rollback` section 2 for the load step only, using the final backup (there is no running writer to stop on a fresh host). Then start **only the live colour**; do not run a bare `docker compose up -d` (under blue/green it starts both colours, and a standby green with a leading blue breaks routing; `docs/06` step 9d.5). Migrate with the live colour's tag, then start that colour (replace `blue` with the live colour):
+
 ```sh
 BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
 ```
+
+**If migrate fails:** stop there. Do not start the server, and do not retry in a loop. Keep the old host as it is (it still has the exact data from stage 3). Read the error. If it is a clear fix on the new host (wrong tag, database not ready), fix it and run migrate once more. If you cannot tell, or the restored database looks wrong, roll back as described in section 3 and ask the CEO before trying again.
 
 ```sh
 docker compose up -d --no-deps server-blue
