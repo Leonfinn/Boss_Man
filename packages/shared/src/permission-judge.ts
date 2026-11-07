@@ -961,9 +961,32 @@ function usesScratchUnsafely(c: string): boolean {
     for (const m of c.matchAll(heredoc)) if (playOutside(m[1]!) && (loadsCode(m[1]!) || mentionsWritten(m[1]!))) return true;
     // Code piped to an interpreter that has no script argument (`echo "import c" | python3 -`, `cat c.py | node`) is read from stdin:
     // the text before the pipe is checked like a heredoc body, and a pipe from `cat` of a written or scratch file is code too.
-    const piped = new RegExp(`\\|\\s*(?:(?:env|exec|nohup|time)\\s+)*(?:${interpWords})(?:\\s+-[A-Za-z]*)*\\s*(?=$|[;&|\\n)])`, "g");
-    for (const m of c.matchAll(piped)) {
-      const before = c.slice(0, m.index!);
+    // A here-string is code on stdin too: the rest of the line is checked like a heredoc body.
+    const hereStr = new RegExp(`\\b(?:${interpWords})\\b[^\\n;|&]*<<<[ \\t]*([^\\n]*)`, "g");
+    for (const m of c.matchAll(hereStr)) if (playOutside(m[1]!) && (loadsCode(m[1]!) || mentionsWritten(m[1]!))) return true;
+    // The segment after each pipe is parsed: redirects dropped, runners looked through, then an interpreter with no script
+    // operand (no word with a dot or slash) and no -c/-e code reads its program from stdin; a lone `-` is stdin too.
+    const pipeSeg = /(?<!\|)\|(?!\|)((?:(?!&&)[^;\n|)])*)/g;
+    const piped: { index: number }[] = [];
+    for (const m of c.matchAll(pipeSeg)) {
+      const words = m[1]!
+        .replace(/\d*>&\d+|&>>?\s*\S+|\d*>>?\s*\S+|\d*<\s*\S+/g, " ")
+        .split(/\s+/)
+        .filter((w) => w !== "" && w !== "&");
+      while (words.length && /^(?:env|exec|nohup|time)$/.test(words[0]!)) words.shift();
+      let ai = 0;
+      if (words.length && /^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(words[0]!)) {
+        ai = words.findIndex((w) => interpreters.test(w.replace(/^.*\//, "")));
+        if (ai < 0) continue;
+      }
+      if (!interpreters.test((words[ai] ?? "").replace(/^.*\//, ""))) continue;
+      const rest = words.slice(ai + 1);
+      if (rest.some((a) => /^-[A-Za-z]*[cermEpM]/.test(a) || /^--(?:eval|print|require|import|exec)\b/.test(a))) continue;
+      if (rest.some((a) => a !== "-" && /[./]/.test(a))) continue;
+      piped.push({ index: m.index! });
+    }
+    for (const m of piped) {
+      const before = c.slice(0, m.index);
       if (loadsCode(before) || mentionsWritten(before)) return true;
       const last = before.split(/[;&|\n]/).pop() ?? "";
       if (/^\s*cat\b/.test(last) && last.split(/\s+/).some((w) => w !== "cat" && !w.startsWith("-") && w !== "" && (isWritten(w) || isScratch(w)))) return true;
@@ -1022,11 +1045,10 @@ function usesScratchUnsafely(c: string): boolean {
     // An interpreter behind a runner (`pnpm exec node -e`, `pnpm tsx -e`, `npx tsx -e`, `uv run python -c`, `poetry run python -c`).
     let ish = sh;
     let iargs = args;
-    if (/^(?:pnpm|npx|bunx|yarn|npm|uv|poetry|pipx)$/.test(sh)) {
-      let j = 0;
-      while (j < iargs.length && (iargs[j]!.startsWith("-") || /^(?:exec|run|dlx|x|--)$/.test(iargs[j]!))) j++;
-      const w = iargs[j] ?? "";
-      if (interpreters.test(w.replace(/^.*\//, ""))) { ish = w.replace(/^.*\//, ""); iargs = iargs.slice(j + 1); }
+    if (/^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(sh)) {
+      // The first interpreter word anywhere in the arguments (`pnpm --filter x exec node`, `uv run --with y python`).
+      const j = iargs.findIndex((a) => interpreters.test(a.replace(/^.*\//, "")));
+      if (j >= 0) { ish = iargs[j]!.replace(/^.*\//, ""); iargs = iargs.slice(j + 1); }
     }
     const codeAt = iargs.findIndex((a) => /^-[A-Za-z]*[cermEpM]/.test(a) || /^--(?:eval|print|require|import|exec)\b/.test(a));
     if (codeAt >= 0 && interpreters.test(ish) && playOutside(iargs.slice(codeAt + 1).join(" "))) {

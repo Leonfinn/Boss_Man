@@ -749,6 +749,16 @@ describe("BOS-631: a file the command wrote (or a /tmp path) must not be loaded 
     "echo x > c.py; echo \"import c\" | python3 -",
     "echo x > c.py; cat c.py | python3",
     "echo x > c.js; echo \"require('./c.js')\" | node",
+    // round 10: runner options with a value, stdin with redirects or value flags, here-strings
+    "echo x > c.js; pnpm --filter shared exec node -e \"require('./c.js')\"",
+    "echo x > c.js; pnpm -C apps/server exec tsx -e \"require('./c.js')\"",
+    "echo x > c.py; uv run --with requests python -c \"import c\"",
+    "echo x > c.py; uvx python -c \"import c\"",
+    "echo x > c.py; echo \"import c\" | python3 2>&1",
+    "echo x > c.py; echo \"import c\" | python3 -X utf8",
+    "echo x > c.py; echo \"import c\" | uv run python",
+    "echo x > c.py; python3 <<< \"import c\"",
+    "echo x > c.js; node <<< \"require('./c.js')\"",
   ]);
   allows([
     "ls /tmp; python3 -c \"import json\"",
