@@ -1,7 +1,9 @@
-// Before a turn starts, check that Boss Man's MCP endpoint answers an `initialize`.
+// Before a turn starts, check that Boss Man's MCP endpoint answers.
 // The server can stall for several seconds; Claude Code gives its own MCP handshake only about
 // 5 s, then starts the turn without Boss Man's tools (BOS-428). Waiting here, with retries, lets
 // the stall pass first.
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 export type PreflightResult = { ok: boolean; attempts: number; waitedMs: number; lastError: string | null };
 
@@ -36,5 +38,27 @@ export async function mcpPreflight(
     }
     if (Date.now() - started + delay >= budget) return { ok: false, attempts, waitedMs: Date.now() - started, lastError };
     await new Promise((r) => setTimeout(r, delay));
+  }
+}
+
+/**
+ * Asks the Boss Man MCP server for its tool list, the same way an agent would (BOS-552). OpenCode
+ * silently drops an MCP server it can't reach at session/new, so a run with mcpRequired must check
+ * first: a server that answers with tools is healthy, anything else stops the run instead of letting
+ * it work blind. Returns the tool names on success, or a short reason on failure.
+ */
+export async function checkBossManTools(url: string, token: string): Promise<{ ok: boolean; tools?: string[]; reason?: string }> {
+  const client = new Client({ name: "bossman-preflight", version: "0.0.1" }, { capabilities: {} });
+  try {
+    const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } });
+    await client.connect(transport);
+    const listed = await client.listTools();
+    const tools = (listed.tools ?? []).map((t) => t.name);
+    if (!tools.length) return { ok: false, reason: "it answered but listed no tools" };
+    return { ok: true, tools };
+  } catch (err) {
+    return { ok: false, reason: String((err as Error)?.message ?? err).slice(0, 200) };
+  } finally {
+    await client.close().catch(() => {});
   }
 }

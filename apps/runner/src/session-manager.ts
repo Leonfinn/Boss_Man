@@ -3,7 +3,6 @@
 // models are pinned at launch, Codex starts in workspace-write so approvals reach Boss Man,
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
-import { mcpPreflight } from "./mcp-preflight.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,11 +13,17 @@ import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods,
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
+import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
+
+/** How long one preflight attempt may take before it counts as failed, and how many attempts a run makes. */
+const MCP_PREFLIGHT_TIMEOUT_MS = 10_000;
+const MCP_PREFLIGHT_ATTEMPTS = 3;
+const MCP_PREFLIGHT_DELAY_MS = 2_000;
 
 export type SessionManagerOptions = {
   emit: (event: RunnerEvent) => void;
@@ -30,6 +35,11 @@ export type SessionManagerOptions = {
   mcpPreflightMs?: number;
   /** Test tuning for that preflight. */
   mcpPreflightTuning?: { attemptTimeoutMs?: number; delayMs?: number };
+  /**
+   * Confirms the Boss Man tools are reachable before an mcpRequired run starts (BOS-552). The default
+   * asks the live server for its tool list; tests override it to drive the success and failure paths.
+   */
+  checkBossManTools?: (url: string, token: string) => Promise<{ ok: boolean; tools?: string[]; reason?: string }>;
   /** Environment every agent inherits (PATH, HOME, proxy settings); secrets are added per run. */
   baseEnv?: NodeJS.ProcessEnv;
   /** How long a permission request waits for a verdict before it is refused. */
@@ -793,21 +803,53 @@ export class SessionManager {
       }
 
       const mcpServers: McpServer[] = [{ type: "http", name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
-      // Wait out a server stall before the agent's own (about 5 s) MCP handshake can give up on us (BOS-403).
-      if (this.opts.mcpPreflightMs) {
-        let pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: this.opts.mcpPreflightMs, ...this.opts.mcpPreflightTuning });
-        if (!pre.ok) {
-          emit({ type: "runner.log", level: "warn", message: `mcp-preflight: Boss Man tools unreachable for run ${cmd.runId} after ${pre.attempts} tries over ${Math.round(pre.waitedMs / 1000)}s (${pre.lastError}); retrying once.` });
-          emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools didn't load, retrying." } });
-          pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: this.opts.mcpPreflightMs, ...this.opts.mcpPreflightTuning });
-          if (!pre.ok) {
-            emit({ type: "runner.log", level: "error", message: `mcp-preflight: Boss Man tools still unreachable for run ${cmd.runId} (${pre.lastError}); starting the turn without waiting longer.` });
-            emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools could not be reached after a retry; this turn may run without them." } });
-          }
+      // Wait out a server stall before the agent's own (about 5 s) MCP handshake can give up on us (BOS-403):
+      // one round of retries, then tell the owner and the server log and try one more round.
+      const waitForBossMan = async (budgetMs: number, tuning: { attemptTimeoutMs?: number; delayMs?: number } | undefined) => {
+        let pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs, ...tuning });
+        if (pre.ok || !this.runs.has(cmd.runId)) return pre;
+        emit({ type: "runner.log", level: "warn", message: `mcp-preflight: Boss Man tools unreachable for run ${cmd.runId} after ${pre.attempts} tries over ${Math.round(pre.waitedMs / 1000)}s (${pre.lastError}); retrying once.` });
+        emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools didn't load, retrying." } });
+        pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs, ...tuning });
+        if (!pre.ok) emit({ type: "runner.log", level: "error", message: `mcp-preflight: Boss Man tools still unreachable for run ${cmd.runId} (${pre.lastError}).` });
+        return pre;
+      };
+      if (this.opts.mcpPreflightMs && !cmd.mcpRequired) {
+        // An older server that doesn't send mcpRequired: wait, then start the turn anyway, saying so.
+        const pre = await waitForBossMan(this.opts.mcpPreflightMs, this.opts.mcpPreflightTuning);
+        if (!this.runs.has(cmd.runId)) return;
+        if (!pre.ok) emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools could not be reached after a retry; this turn may run without them." } });
+      }
+      const supported = (init.agentCapabilities as { mcpCapabilities?: Record<string, boolean | undefined> } | undefined)?.mcpCapabilities;
+      // Boss Man tools are required (BOS-552): OpenCode accepts a session/new even when its MCP server
+      // is unreachable and then runs with no tools, so check the tools are really there first. Checking
+      // before session/new means a run that can't reach them never reaches run.started: it ends with a
+      // clear error, which the ticket feed shows as "Run ended: error: ...".
+      if (cmd.mcpRequired) {
+        if (!supported?.http) {
+          finish(null, `This run was stopped because ${cmd.agentKind} doesn't support HTTP MCP servers, so it would start without the Boss Man tools.`);
+          return;
+        }
+        // Wait out a brief stall first (BOS-403: retries, then tell the owner and retry once more),
+        // then require the tools to actually list. A test-provided check drives both steps itself,
+        // so it isn't run against the real URL.
+        const injected = this.opts.checkBossManTools;
+        let result: { ok: boolean; reason?: string };
+        if (injected) {
+          result = await injected(this.opts.mcpUrl, cmd.mcpToken);
+        } else {
+          const reach = this.opts.mcpPreflightMs
+            ? await waitForBossMan(this.opts.mcpPreflightMs, this.opts.mcpPreflightTuning)
+            : await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: MCP_PREFLIGHT_TIMEOUT_MS * MCP_PREFLIGHT_ATTEMPTS, attemptTimeoutMs: MCP_PREFLIGHT_TIMEOUT_MS, delayMs: MCP_PREFLIGHT_DELAY_MS });
+          if (!this.runs.has(cmd.runId)) return;
+          result = reach.ok ? await checkBossManTools(this.opts.mcpUrl, cmd.mcpToken) : { ok: false, reason: reach.lastError ?? "no answer" };
+        }
+        if (!result.ok) {
+          finish(null, `This run was stopped because it couldn't reach the Boss Man tools (${result.reason ?? "no answer"}), so it would have worked blind. It runs again when the server is reachable.`);
+          return;
         }
       }
       // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
-      const supported = (init.agentCapabilities as { mcpCapabilities?: Record<string, boolean | undefined> } | undefined)?.mcpCapabilities;
       for (const m of cmd.mcpServers ?? []) {
         const token = m.secretEnv ? secrets[m.secretEnv] : undefined;
         if (m.secretEnv && !token) continue;
