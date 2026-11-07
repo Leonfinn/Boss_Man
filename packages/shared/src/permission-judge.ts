@@ -537,7 +537,7 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
     if (p.startsWith("/")) return !inOwn(p);
     return !relOk;
   };
-  const writeOp = />|\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\bdd\b|\bcurl\b|\bwget\b|\btouch\b|\bsed\b|\bpatch\b|\bgit\s+(?:apply|checkout|restore|am)\b|\bunzip\b|\btar\b/;
+  const writeOp = />|\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\bdd\b|\bcurl\b|\bwget\b|\btouch\b|\bsed\b|\bpatch\b|\bgit\b[^;&|\n]*?\s(?:apply|checkout|restore|am)\b|\bunzip\b|\btar\b/;
   // A relative path lands wherever the last `cd` went.
   let relOk = true;
   for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) {
@@ -693,7 +693,13 @@ function extractsFiles(name: string, args: string[], scratchInPlay: boolean): bo
   if (name === "cp") return args.some((a) => /^-[A-Za-z]*[rRa]|^--(?:recursive|archive)$/.test(a));
   if (name === "git") {
     // git verbs that write files they never name (a patch, a stash, a ref's tree).
-    const rest = args.filter((a) => !a.startsWith("-"));
+    // Global options before the verb (`--git-dir .git`, `-C dir`, `-c k=v`, `--work-tree dir`) must not hide it.
+    const rest: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!;
+      if (rest.length === 0 && /^(?:-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--attr-source)$/.test(a)) i++;
+      else if (!a.startsWith("-")) rest.push(a);
+    }
     const verb = rest[0];
     if (verb === "apply" || verb === "am") return true;
     // Restoring paths from a ref or stash is the agent's own committed work, unless the command also touches scratch or
@@ -790,6 +796,34 @@ function toolingRunsScratch(name: string, args: string[], isScratch: (w: string)
 }
 
 /**
+ * Environment variables an agent may set in front of a command, or export. Allow-list (BOS-630): a variable the judge does not
+ * know to be harmless can make a listed tool run a program or load code (TAR_OPTIONS=--to-command=..., GREP_OPTIONS, ZIPOPT,
+ * WGETRC, RIPGREP_CONFIG_PATH, BASH_ENV, ENV, PERL5OPT, NODE_OPTIONS, NODE_PATH, PYTHONSTARTUP, PYTHONPATH, LD_PRELOAD, PATH,
+ * GIT_*, PAGER ...). None of those is listed; a name not listed here is never Allow, whatever its value.
+ */
+const SAFE_ENVIRONMENT = /^(?:CI|NODE_ENV|FORCE_COLOR|NO_COLOR|CLICOLOR|CLICOLOR_FORCE|TZ|TERM|COLUMNS|LINES|LANG|LANGUAGE|LC_[A-Z]+|DEBUG|CHECK_ALL_FORCE|CHECK_ALL_LOCK_WAIT|BOSSMAN_TEST_MAX_WORKERS|CHECK_QUICK_FORCE_RELATED|BOSSMAN_VITEST_NO_SLOT|BOSSMAN_CHECK_STORE)$/;
+
+/**
+ * True when a command puts a variable that is not on SAFE_ENVIRONMENT into a program's environment: as a prefix (`X=1 cmd`,
+ * `env X=1 cmd`; `assigns` holds those), after a launcher that is not peeled (`sudo X=1 cmd`), by `export` / `declare -x` /
+ * `typeset -x`, or by switching on allexport (`set -a`) or `env -S`. A plain `X=1` on its own is a shell variable, not environment.
+ */
+function setsUnknownEnvironment(assigns: string[], sh: string, args: string[]): boolean {
+  const unknown = (word: string): boolean => {
+    const m = /^(\w+)\+?=?/.exec(word);
+    return !m || !SAFE_ENVIRONMENT.test(m[1]!);
+  };
+  if (assigns.some(unknown)) return true;
+  if (/^(?:sudo|doas|xargs|stdbuf|ionice|chroot|su|unshare|nsenter|strace|ltrace|watch|parallel)$/.test(sh) && args.some((a) => /^\w+=/.test(a) && unknown(a))) return true;
+  if (/^(?:export|declare|typeset)$/.test(sh)) {
+    const exports = sh === "export" || args.some((a) => /^-[A-Za-z]*x/.test(a));
+    if (exports && args.some((a) => !a.startsWith("-") && unknown(a))) return true;
+  }
+  if (sh === "set" && args.some((a, i) => /^-[A-Za-z]*[ak]/.test(a) || ((a === "allexport" || a === "keyword") && args[i - 1] === "-o") || /^-o?(?:allexport|keyword)$/.test(a))) return true;
+  return false;
+}
+
+/**
  * Deny-by-default for scratch paths. In a command that names a /tmp path or a path the command itself writes (redirect, tee,
  * cp, mv, curl -o ...), the only commands allowed to mention that path are readers and file tools (cat, grep, ls, cp, rm,
  * tee ...). Any other command word (an interpreter however it is spelled or wrapped, `./w.js`, flock, strace, npx, `FOO=/tmp/x
@@ -873,6 +907,8 @@ function usesScratchUnsafely(c: string): boolean {
     const assigns = [...p.assigns];
     // Peel plain wrappers that only start the real command: `setsid nohup`, `env A=b`, `timeout 120`, `nice -n 5`, `time`.
     for (let guard = 0; guard < 8 && /^(?:setsid|nohup|nice|time|command|exec|env|timeout|flock)$/.test(head); guard++) {
+      // `env -S 'A=b cmd'` splits a string into assignments and a command: not readable here.
+      if (head === "env" && args.some((a) => /^-[A-Za-z]*S|^--split-string/.test(a))) return true;
       let i = 0;
       if (head === "flock") {
         // flock [-nx..] <lock file> <command...>: the lock file is not the command's code (no -c form is peeled).
@@ -884,14 +920,15 @@ function usesScratchUnsafely(c: string): boolean {
       }
       while (i < args.length && (args[i]!.startsWith("-") || /^\w+=/.test(args[i]!) || (head === "timeout" && /^\d[\w.]*$/.test(args[i]!)) || (head === "nice" && /^-?\d+$/.test(args[i]!)))) {
         if (/^\w+=/.test(args[i]!)) assigns.push(args[i]!);
-        else if (/^(?:-n|-u|-C|-S|-s|-k)$/.test(args[i]!) && head !== "env") i++;
+        else if (head === "env" ? /^(?:-u|-C|-P|--unset|--chdir)$/.test(args[i]!) : /^(?:-n|-u|-C|-S|-s|-k)$/.test(args[i]!)) i++;
         i++;
       }
       if (head === "timeout" && /^\d[\w.]*$/.test(args[i] ?? "")) i++;
       head = args[i] ?? "";
       args = args.slice(i + 1);
     }
-    if (head === "") continue;
+    if (head === "") continue; // a plain `X=1` is a shell variable, not environment
+    if (setsUnknownEnvironment(assigns, head.replace(/^.*\//, ""), args)) return true;
     // A command word that is a variable or backtick may expand to a file the command wrote (`X=c; $X`): unread code.
     // Any `$` or backtick anywhere in the word counts (`./$X`, `./"$X"`, `$(echo ./c)`), not just at its start.
     // Globs and brace lists (`./c*`, `./[c]`, `./{c,d}`) are not plain literals either; `[` and `[[` are the test builtin.
@@ -917,8 +954,10 @@ function usesScratchUnsafely(c: string): boolean {
     if (written.size > 0 && codeAt >= 0 && /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh)$/.test(sh) && (mentionsWritten(args.slice(codeAt + 1).join(" ")) || (/^-[A-Za-z]*m$/.test(args[codeAt]!) && named(args[codeAt + 1] ?? "")))) return true;
     const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
-      if (written.size > 0 && named(args[dashC + 1] ?? "")) return true; // the inner command may run what the outer one wrote
-      if (usesScratchUnsafely(args[dashC + 1] ?? "")) return true;
+      // `bash -c -- 'cmd'`: the command string is the first word after -c that is not `--`.
+      const inner = args.slice(dashC + 1).find((a) => a !== "--") ?? "";
+      if (written.size > 0 && named(inner)) return true; // the inner command may run what the outer one wrote
+      if (usesScratchUnsafely(inner)) return true;
       continue;
     }
     const all = [...assigns.map((a) => a.slice(a.indexOf("=") + 1)), head, ...args];
