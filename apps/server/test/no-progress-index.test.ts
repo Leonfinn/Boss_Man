@@ -1,5 +1,5 @@
 // The no-progress sweep's trigger B read (BOS-593) must use the (company_id, created_at) index added
-// in 0113 (BOS-611): it runs every minute, so a scan that grows with the table would never get cheaper.
+// in 0117 (BOS-611): it runs every minute, so a scan that grows with the table would never get cheaper.
 import { afterEach, describe, expect, it } from "vitest";
 import { and, gt, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
