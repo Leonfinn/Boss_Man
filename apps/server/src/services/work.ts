@@ -4,7 +4,8 @@ import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, 
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
-import { REVIEW_REASON, reviewWaits } from "./review-kinds.js";
+import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.js";
+import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, WorkError } from "./ticket-links.js";
 import { derivedSignoff } from "./signoff.js";
@@ -98,6 +99,8 @@ export type WorkHooks = {
   onDone?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
   /** A task of this feature started, finished, reopened, moved or was added: its status may need to follow. */
   onFeature?: (featureId: string) => Promise<unknown>;
+  /** The merges this process is running, with their phase (the review service's markers), so an approved card can say where it is. */
+  runningMerges?: () => Array<{ ticketId: string; phase?: MergePhase }>;
   now?: () => Date;
 };
 
@@ -269,6 +272,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Runs with no ticket at all: the strip lists them, so the board never under-reports.
       const withoutCard = everyLive.filter((r) => about(r).size === 0);
       const waits = await reviewWaits(db, inReview);
+      // Approved by every reviewer, so only the merge is left (BOS-667): the board shows these apart from
+      // tickets still waiting on a reviewer, so a long merge line doesn't read as a reviewer shortage.
+      const passed = await passedReviewTickets(db, inReview);
+      const merging = new Map((hooks.runningMerges?.() ?? []).map((m) => [m.ticketId, m.phase ?? "checking"] as const));
+      const mergeNote = (t: typeof tickets.$inferSelect) => {
+        const phase = merging.get(t.id);
+        if (phase) return phase === "queued" ? "Waiting for a check slot." : `Now ${PHASE_LABEL[phase]}.`;
+        if (t.pullRequestUrl) return t.pullRequestNote ? `Pull request waiting on the git host: ${t.pullRequestNote.slice(0, 120)}` : "Pull request open; merges when the git host's checks pass.";
+        return "Waiting to be checked and merged.";
+      };
       // A held wake whose reason is the subscription quota (BOS-227), so the card can show it and offer Run now.
       // A ticket's wake can be merged into another of its assignee's wakes, so the assignee's held
       // wakes count too (BOS-253), not just ones naming the ticket.
@@ -286,9 +299,14 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
         // A sign-off still open on a ticket no longer in review (moved, blocked) must not vanish from the owner's lane.
         const askedId = t.systemState === "done" ? null : (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && (questions.has(d.blockerDecisionId) || (t.systemState !== "review" && signoffs.has(d.blockerDecisionId))))?.blockerDecisionId ?? null);
+        const waitingOnOwner = !!waitingDecisionId || signoffWaiting.has(t.id) || unreviewed.has(t.id) || !!askedId;
+        // Only for a ticket in review that isn't the owner's to act on: those are in Your review.
+        const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
         return {
         ...t,
-        waitingOnOwner: !!waitingDecisionId || signoffWaiting.has(t.id) || unreviewed.has(t.id) || !!askedId,
+        waitingOnOwner,
+        reviewStage,
+        mergeNote: reviewStage === "merging" ? mergeNote(t) : null,
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
         noReviewer: unreviewed.has(t.id),
         reviewWait: waits.get(t.id) ?? null,

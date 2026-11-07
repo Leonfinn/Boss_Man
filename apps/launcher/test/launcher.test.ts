@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DockerError } from "../src/docker.js";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, serverAddress, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
@@ -123,6 +123,22 @@ describe("the runner launcher (R55)", () => {
     expect(containerSpec(config(), "app-co").HostConfig).not.toHaveProperty("NanoCpus");
     expect(containerSpec({ ...config(), checkSlots: 2 }, "app-co").Env).toContain("BOSSMAN_CHECK_SLOTS=2");
     expect(containerSpec({ ...config(), checkSlots: 1 }, "app-co").Env.join()).not.toContain("BOSSMAN_CHECK_SLOTS");
+    // BOS-568: the shared pnpm store is only set when the operator asks for another place, and it must stay
+    // under the workspaces volume (the runner's only writable one), or it would land on the root disk.
+    expect(containerSpec({ ...config(), pnpmStoreDir: "/home/node/workspaces/big/pnpm" }, "app-co").Env).toContain("PNPM_STORE_DIR=/home/node/workspaces/big/pnpm");
+    expect(containerSpec(config(), "app-co").Env.join()).not.toContain("PNPM_STORE_DIR");
+    expect([parsePnpmStoreDir(undefined), parsePnpmStoreDir("  "), parsePnpmStoreDir("/home/node/workspaces/big/pnpm/")]).toEqual([undefined, undefined, "/home/node/workspaces/big/pnpm"]);
+    expect(() => parsePnpmStoreDir("pnpm-store")).toThrow();
+    expect(() => parsePnpmStoreDir("relative/pnpm")).toThrow();
+    expect(() => parsePnpmStoreDir("/big/../etc")).toThrow();
+    expect(() => parsePnpmStoreDir("/big/pnpm")).toThrow(/under/);
+    expect(() => parsePnpmStoreDir("/home/node/workspaces-other")).toThrow(/under/);
+    expect(() => parsePnpmStoreDir("/tmp/pnpm-store")).toThrow(/under/);
+    // BOS-633: the volume's own root is refused too: the fence would grant the whole volume, and the gate store
+    // (/home/node/workspaces-gate) would sit on the root disk.
+    expect(() => parsePnpmStoreDir("/home/node/workspaces")).toThrow(/root/);
+    expect(() => parsePnpmStoreDir("/home/node/workspaces/")).toThrow(/root/);
+    expect(() => parsePnpmStoreDir("/")).toThrow();
     expect([parseCheckSlots(undefined), parseCheckSlots(""), parseCheckSlots("2")]).toEqual([1, 1, 2]);
     expect(() => parseCheckSlots("0")).toThrow();
     expect(() => parseCheckSlots("lots")).toThrow();

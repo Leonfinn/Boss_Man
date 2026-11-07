@@ -59,7 +59,7 @@ describe("server_status stack fields", () => {
   let close: (() => Promise<void>) | undefined;
   afterEach(async () => { await close?.(); close = undefined; });
 
-  async function status(deps: { colours?: () => Promise<BlueGreen>; status?: unknown }) {
+  async function status(deps: { colours?: () => Promise<BlueGreen>; status?: unknown; cpuReserve?: () => Promise<unknown> }) {
     const opened = await openPglite();
     close = opened.close;
     const svc = serverStatusService(opened.db, {
@@ -67,6 +67,7 @@ describe("server_status stack fields", () => {
       errors: { recent: () => [], count: () => 0, untagged: () => 0 } as never,
       deploy: async () => ({ enabled: true, pending: false, status: deps.status ?? null, available: null }),
       colours: deps.colours,
+      cpuReserve: deps.cpuReserve,
       commit: "dev", startedAt: new Date(0), now: () => NOW,
     });
     return svc.status(randomUUID());
@@ -91,5 +92,15 @@ describe("server_status stack fields", () => {
   it("reads a probe that throws as could-not-check, never as a single server", async () => {
     const s = await status({ colours: async () => Promise.reject(new Error("boom")) });
     expect(s).toMatchObject({ stack: "degraded", colours: null });
+  });
+
+  // BOS-586: the launcher's GET /cpu reading is passed through; no launcher (or none answering) reads as null.
+  it("shows the reserved CPU threads from the launcher, or null without one", async () => {
+    const on = { on: true, reserved: [10, 11], runners: "0-9", threads: 12, why: "auto: 12 threads" };
+    expect((await status({ cpuReserve: async () => on })).cpuReserve).toEqual(on);
+    await close?.();
+    expect((await status({ cpuReserve: async () => null })).cpuReserve).toBeNull();
+    await close?.();
+    expect((await status({})).cpuReserve).toBeNull();
   });
 });

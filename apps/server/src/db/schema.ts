@@ -78,6 +78,10 @@ export const companies = pgTable("companies", {
   watchdogTrippedReason: text("watchdog_tripped_reason"),
   /** Written by the sweep only, so it never overwrites the owner's settings. */
   watchdogLastSweepAt: timestamp("watchdog_last_sweep_at", { withTimezone: true }),
+  /** Spare-capacity rules (BOS-659): when the sweep first found the company under-used while work waits; null once it is busy again. */
+  watchdogSpareAt: timestamp("watchdog_spare_at", { withTimezone: true }),
+  /** ...and when it last told the CEO about it, so it says so once per quiet stretch. */
+  watchdogSpareAlertedAt: timestamp("watchdog_spare_alerted_at", { withTimezone: true }),
   /** Tickets are referred to as PREFIX-number (e.g. HOL-12); one sequence per company, handed out by a database trigger. */
   ticketPrefix: text("ticket_prefix"),
   nextTicketNumber: integer("next_ticket_number").notNull().default(1),
@@ -216,6 +220,11 @@ export const projects = pgTable("projects", {
   verifyCommand: text("verify_command"),
   /** An extra, slower check run before merging high and critical risk tickets (R48). */
   deepVerifyCommand: text("deep_verify_command"),
+  /** Whether the default branch passes its check: green, red or unknown. Set by the merge gate (BOS-316). While red, only fixes for main are checked. */
+  mainState: text("main_state").notNull().default("unknown"),
+  mainStateSince: timestamp("main_state_since", { withTimezone: true }),
+  /** The commit on the default branch that the gate last found red (or green). */
+  mainStateCommit: text("main_state_commit"),
   /** Default spend ceiling per ticket across all its runs (R53). */
   ticketCostCapMicros: micros("ticket_cost_cap_micros"),
   /** Starred projects show under Projects in the sidebar. */
@@ -879,6 +888,48 @@ export const checkResults = pgTable(
     detail: text("detail"),
   },
   (t) => [index("check_results_ticket_at").on(t.ticketId, t.at), index("check_results_company_at").on(t.companyId, t.at)],
+);
+
+/**
+ * The server-owned check queue (DR-003, BOS-316). One row per requested check; the runner runs it in a process it owns,
+ * outside any agent session. kind: merge (the gate's one full check) or pre_review (an author's or reviewer's quick or full check).
+ * state: queued, running, passed, failed, stuck (with a reason), cancelled (with a reason). A job never leaves the queue without a reason.
+ */
+export const checkJobs = pgTable(
+  "check_jobs",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    /** quick or full: how wide the check is. A passed full check satisfies a quick request on the same tree. */
+    scope: text("scope").notNull().default("full"),
+    commit: text("commit").notNull(),
+    tree: text("tree").notNull(),
+    state: text("state").notNull().default("queued"),
+    /** 0 urgent, 1 normal (see check-gate.ts checkPriority); lower goes first within a kind. */
+    priority: integer("priority").notNull().default(1),
+    /** True for a ticket that fixes a red main: it goes before every other job while main is red. */
+    fixesMain: boolean("fixes_main").notNull().default(false),
+    /** The agent to wake with the result. */
+    requestedBy: uuid("requested_by").references(() => agents.id, { onDelete: "set null" }),
+    runnerId: uuid("runner_id").references(() => runners.id, { onDelete: "set null" }),
+    command: text("command"),
+    exitCode: integer("exit_code"),
+    /** Why the job is stuck or cancelled, or how it ended. Set whenever the state is stuck or cancelled. */
+    reason: text("reason"),
+    logTail: text("log_tail"),
+    queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    lastOutputAt: timestamp("last_output_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("check_jobs_state_queued").on(t.state, t.queuedAt),
+    index("check_jobs_ticket").on(t.ticketId, t.queuedAt),
+    index("check_jobs_project_tree").on(t.projectId, t.tree),
+  ],
 );
 
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
