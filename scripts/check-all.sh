@@ -28,7 +28,9 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-3000}"  # Boss Man kills the merge check 60 min after its slot is taken (VERIFY_TIMEOUT_MS); stay well inside it
   pause="${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
   log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
-  trap 'rm -f "$log" "$began_file"' EXIT
+  # The child leaves per-file test times here (vitest JSON reports, shell test times); record() folds them into $STORE/<tree>.test-times (BOS-654).
+  times_dir="$(mktemp -d)"
+  trap 'rm -f "$log" "$began_file"; rm -rf "$times_dir"' EXIT
 
   # Only a clean checkout has a tree hash that says what was checked.
   key=""
@@ -69,17 +71,23 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     steps=$(sed -n 's/^check-all: step \([A-Za-z0-9:._-]*\) took \([0-9]*\)s.*/"\1":\2/p' "$log" | paste -sd, -)
     printf '{"status":"%s","exit":%s,"tree":"%s","commit":"%s","finished":"%s","duration_seconds":%s,"merge_check":%s,"steps":{%s}}\n' \
       "$1" "$2" "$key" "$(git rev-parse HEAD)" "$(date -u +%FT%TZ)" "$dur" "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo true || echo false)" "$steps" >"$STORE/$key.json" || return 0
+    # Per-file test times of this run (best effort): the slowest server test files and shell tests, in seconds, for the next speed-up.
+    if [ -n "$(ls -A "$times_dir" 2>/dev/null)" ]; then
+      node "$(dirname "$self")/test-times.mjs" "$times_dir" >"$STORE/$key.test-times.tmp" 2>/dev/null && mv "$STORE/$key.test-times.tmp" "$STORE/$key.test-times" || rm -f "$STORE/$key.test-times.tmp"
+    else
+      rm -f "$STORE/$key.test-times"
+    fi
     # keep the newest 50 results
     local old
-    while read -r old; do rm -f "$old" "${old%.json}.log"; done < <(find "$STORE" -maxdepth 1 -name '*.json' -printf '%T@ %p\n' | sort -rn | tail -n +51 | cut -d' ' -f2-)
+    while read -r old; do rm -f "$old" "${old%.json}.log" "${old%.json}.test-times"; done < <(find "$STORE" -maxdepth 1 -name '*.json' -printf '%T@ %p\n' | sort -rn | tail -n +51 | cut -d' ' -f2-)
   }
   [ -z "$key" ] || echo "check-all: the result and log of this run will be kept in $STORE/$key.{json,log}"
   for ((n = 1; n <= attempts; n++)); do
     # Test hook: a simulated queue wait, which the fixed budget ignores (check-all.test.sh retry-budget case).
     [ "$n" -gt 1 ] || [ -z "${CHECK_ALL_QUEUE_TEST_SLEEP:-}" ] || sleep "$CHECK_ALL_QUEUE_TEST_SLEEP"
-    rc=0; : >"$began_file"; attempt_start=$SECONDS
+    rc=0; : >"$began_file"; attempt_start=$SECONDS; rm -rf "$times_dir"/* 2>/dev/null || true
     # The child runs in the background and we wait for it, so a signal reaches the trap at once instead of after the child.
-    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
+    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" BOSSMAN_CHECK_TIMES_DIR="$times_dir" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
     child=$!
     wait "$child" || rc=$?
     wait 2>/dev/null || true  # let tee finish writing the log
@@ -382,9 +390,10 @@ done
 unset NODE_OPTIONS  # the heap cap is for tsc only
 for d in "${pkg_dirs[@]}"; do
   grep -q '"test"' "$d/package.json" || continue
-  step "test:${d##*/}" pnpm --dir "$d" run test
+  # BOSSMAN_TEST_TIMES_FILE makes vitest also write a JSON report, which the parent folds into the result store (BOS-654).
+  step "test:${d##*/}" env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_TEST_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/vitest-${d##*/}.json"} pnpm --dir "$d" run test
 done
 step build pnpm build
 step shellcheck scripts/check-shell.sh
-step shell-tests scripts/test-shell.sh
+step shell-tests env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_SHELL_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/shell.tsv"} scripts/test-shell.sh
 echo "check-all: everything passed"
