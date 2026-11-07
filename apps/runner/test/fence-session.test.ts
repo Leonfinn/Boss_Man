@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
 import { claudeProjectSlug, levelFor, probeLandlock, runnerFence, type FenceLevel } from "../src/fence.js";
 import { SessionManager } from "../src/session-manager.js";
+import { gateStoreDir } from "../src/store.js";
 import { Workspaces } from "../src/workspace.js";
 import { startStubAnthropic, type StubLogEntry } from "./stub-model.js";
 
@@ -16,7 +17,7 @@ const level = levelFor(probeLandlock().abi).level;
 const live = level !== "unavailable";
 const FAKE_REACH = path.join(import.meta.dirname, "fake-reach.mjs");
 
-type Reach = { wroteInside: boolean; wroteTmp: boolean; wroteOutside: boolean; readSecret: boolean; readSharedClaude: boolean; wroteQueue: boolean; wroteStore: boolean; wroteProof: boolean; env: Record<string, string | null> };
+type Reach = { wroteInside: boolean; wroteTmp: boolean; wroteOutside: boolean; readSecret: boolean; readSharedClaude: boolean; wroteQueue: boolean; wroteStore: boolean; wroteProof: boolean; wroteSharedStore: boolean; wroteGateStore: boolean; env: Record<string, string | null> };
 
 /** One run of the reach-probing adapter; `fence` is what the run asks for, `runnerLevel` what the runner can do. */
 async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel }) {
@@ -33,6 +34,12 @@ async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel }) {
   mkdirSync(cwd, { recursive: true });
   const agentsRoot = path.join(root, "runner-data", "agents");
   const coordDir = path.join(root, "workspaces", ".bossman-coord");
+  // The agents' store and the merge gate's own store (BOS-568 review): the same layout main.ts uses.
+  const sharedStore = path.join(root, "workspaces", ".pnpm-store");
+  const gateStore = gateStoreDir(sharedStore);
+  mkdirSync(sharedStore, { recursive: true });
+  mkdirSync(gateStore, { recursive: true });
+  writeFileSync(path.join(gateStore, "gate-only"), "must stay");
 
   const events: RunnerEvent[] = [];
   let done!: () => void;
@@ -40,7 +47,7 @@ async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel }) {
   const manager = new SessionManager({
     mcpUrl: "http://127.0.0.1:1/mcp",
     baseEnv: { PATH: process.env.PATH, HOME: sharedHome, CLAUDE_CONFIG_DIR: sharedClaude },
-    resolveEnv: async () => ({ REACH_OUTSIDE: outside, REACH_SECRET: secret, REACH_SHARED_CLAUDE: path.join(sharedClaude, "other-agent-transcript.jsonl") }),
+    resolveEnv: async () => ({ REACH_OUTSIDE: outside, REACH_SECRET: secret, REACH_SHARED_CLAUDE: path.join(sharedClaude, "other-agent-transcript.jsonl"), REACH_GATE_STORE: path.join(gateStore, "planted") }),
     adapterBins: { claude: FAKE_REACH },
     coordDir,
     ...(opts.runnerLevel ? { fence: runnerFence(opts.runnerLevel, path.join(root, "runner-data"), path.join(root, "workspaces")) } : {}),
@@ -54,7 +61,7 @@ async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel }) {
   manager.handle({ type: "run.start", runId, agentId, agentKind: "claude", model: null, fundingSourceId: null, cwd, prompt: "probe", mcpToken: "t", ...(opts.fence === undefined ? {} : { fence: opts.fence }) });
   await ended;
   const reach = JSON.parse(readFileSync(path.join(cwd, "reach.json"), "utf8")) as Reach;
-  return { reach, events, outside, sharedHome, home: path.join(agentsRoot, agentId), runId, coordDir };
+  return { reach, events, outside, sharedHome, home: path.join(agentsRoot, agentId), runId, coordDir, sharedStore, gateStore };
 }
 
 describe.skipIf(!live)("a fenced run", () => {
@@ -62,6 +69,8 @@ describe.skipIf(!live)("a fenced run", () => {
     const r = await reachRun({ fence: true, runnerLevel: level });
     expect(r.reach).toMatchObject({ wroteInside: true, wroteTmp: true, wroteOutside: false, readSecret: false, readSharedClaude: false });
     expect(readFileSync(r.outside, "utf8")).toBe("original");
+    // The merge gate's store is outside the fence's grant (BOS-568 review): an agent can't plant a package there.
+    expect(r.reach).toMatchObject({ wroteGateStore: false });
     expect(r.events.find((e) => e.type === "run.started")).toMatchObject({ fenced: true });
     expect(r.events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "end_turn", error: null });
   });
@@ -78,7 +87,13 @@ describe.skipIf(!live)("a fenced run", () => {
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "gc.auto",
     });
-    expect(r.reach.env.npm_config_store_dir).toMatch(/\.pnpm-store$/);
+    expect(r.reach.env.npm_config_store_dir).toBe(r.sharedStore);
+    // The shared store (BOS-568) is the one writable place outside HOME, so installs don't make a new store per run.
+    expect(r.reach).toMatchObject({ wroteSharedStore: true });
+    // ...but the merge gate installs from its own store, which the fence never grants.
+    expect(r.sharedStore).not.toBe(r.gateStore);
+    expect(existsSync(path.join(r.gateStore, "planted"))).toBe(false);
+    expect(readFileSync(path.join(r.gateStore, "gate-only"), "utf8")).toBe("must stay");
     expect(existsSync(path.join(r.home, "tmp", r.runId))).toBe(false);
   });
 

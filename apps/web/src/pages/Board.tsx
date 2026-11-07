@@ -465,12 +465,19 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // A saved feature that is not in this company's list (other company, deleted) counts as any.
   const featureFilter = filters.feature === "any" || filters.feature === "none" || featureList.some((f) => f.id === filters.feature) ? filters.feature : "any";
   const visibleFeatures = featureList.filter((f) => shownStates.includes(f.status));
-  // The review column is two lanes: agent review, and every ticket, from any column, whose next step is the owner's.
-  const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Agent review" : c.name);
+  // The review column is three lanes (BOS-667): still with its reviewers, approved by all of them and
+  // only merging, and every ticket, from any column, whose next step is the owner's. Approved work used
+  // to sit with the work awaiting review, so a long merge line read as a reviewer shortage.
+  const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Awaiting review" : c.name);
   const waiting = (board.data?.columns ?? []).flatMap((c) => c.tickets.filter((t) => t.waitingOnOwner));
-  const lanes = (board.data?.columns ?? []).flatMap((col) => {
-    const lane = { col, tickets: col.tickets.filter((t) => !t.waitingOnOwner), mine: false };
-    return col.systemState === "review" ? [lane, { col, tickets: waiting, mine: true }] : [lane];
+  const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean }> => {
+    const open = col.tickets.filter((t) => !t.waitingOnOwner);
+    if (col.systemState !== "review") return [{ col, tickets: open, mine: false }];
+    return [
+      { col, tickets: open.filter((t) => t.reviewStage !== "merging"), mine: false },
+      { col, tickets: open.filter((t) => t.reviewStage === "merging"), mine: false, merging: true },
+      { col, tickets: waiting, mine: true },
+    ];
   });
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
@@ -716,7 +723,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
-          {lanes.map(({ col, tickets, mine }) => {
+          {lanes.map(({ col, tickets, mine, merging }) => {
             const full = col.wipLimit != null && col.tickets.length >= col.wipLimit;
             const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
             // Every word must appear in the ticket's reference, title, feature or description.
@@ -730,13 +737,23 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             const rows = done ? [...shown].sort((x, y) => (y.lastActivityAt ?? "").localeCompare(x.lastActivityAt ?? "")) : shown;
             const visible = done && !allDone && !words.length ? rows.slice(0, DONE_SHOWN) : rows;
             return (
-              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : `lane-${col.id}`}>
+              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : merging ? "merging" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : `lane-${col.id}`}>
                 {mine ? (
                   <header className="lane-head">
                     <div className="lane-title">
                       <h2 id="lane-your-review">Your review</h2>
                       <span className="count-badge">{shown.length}</span>
                     </div>
+                  </header>
+                ) : merging ? (
+                  <header className="lane-head">
+                    <div className="lane-title">
+                      <h2 id="lane-merging">Approved, merging</h2>
+                      <span className="mono">{shown.length}</span>
+                    </div>
+                    <span className="lane-hint">
+                      Every reviewer approved. Boss Man checks and merges these itself. <a href={`#/merge-queue/${current?.companyId ?? ""}`}>See the merge queue</a>
+                    </span>
                   </header>
                 ) : renaming === col.id ? (
                   <RenameColumn col={col} onCancel={() => setRenaming(null)} onSave={async (name) => { await rename(col.id, name); setRenaming(null); }} />
@@ -758,7 +775,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </header>
                 )}
-                {shown.length === 0 && <p className="lane-empty">{EMPTY_HINT[col.systemState] ?? "No tasks here."}</p>}
+                {shown.length === 0 && <p className="lane-empty">{merging ? "Nothing approved is waiting to merge." : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>}
                 {done ? (
                   <>
                     <ul className="done-list">
@@ -838,6 +855,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         </span>
                       )}
                       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
+                      {merging && t.mergeNote && <span className="note">{t.mergeNote}</span>}
                       {!!t.working?.length && (
                         <span className="working" role="status">
                           <span className="pulse-dot" aria-hidden="true" />

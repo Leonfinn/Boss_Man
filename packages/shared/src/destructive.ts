@@ -470,6 +470,13 @@ const SQL_DESTROYS = /\b(drop|truncate|delete|program|system|load_extension)\b|\
 const SED_EXEC = /(^|[;\n{}!\d$/,])\s*e(\s|;|}|$)|\bs([^\w\s\\]).*\3[gpiImMw\d]*e[gpiImM\d]*(\s|;|}|$)/m;
 
 /**
+ * A sed script that can write a file: the `w` / `W` command or the `w` flag of `s` (`s/a/b/w FILE` creates FILE even
+ * when the input is /dev/null). Matched on the text and on purpose wide (BOS-680): a stray `w` only means the
+ * do-nothing `sed -i … /dev/null` is judged as an edit, as before.
+ */
+const SED_WRITES = /(^|[;\n{}!\d$/,])\s*[wW](\s|\/|$)|\bs([^\w\s\\]).*\3[gpiImMe\d]*[wW]/m;
+
+/**
  * In-place edits (sed -i, perl -i), decided on purpose (BOS-393). Agents edit files in their own
  * checkout all the time, so an edit there or under /tmp runs without asking. Anything else goes to the
  * owner: an absolute path outside /tmp, ~, a variable, `..`, anything in .git (.git/config can set a hook,
@@ -909,6 +916,7 @@ export function commandRisks(command: string | string[]): Risk[] {
           let inPlace = false;
           let scriptGiven = false;
           let follow = false;
+          let fileScript = false;
           let dashes = false;
           for (let i = 0; i < args.length; i++) {
             const a = args[i]!;
@@ -929,6 +937,7 @@ export function commandRisks(command: string | string[]): Risk[] {
                 if (v) scripts.push(v);
               } else if (longOf(t, ["file"])) {
                 scriptGiven = true;
+                fileScript = true;
                 const v = value();
                 if (v && (PROC_SUB.test(v.text) || STREAM_PATH.test(v.text))) return destroys("runs a sed script made when it runs");
               } else if (longOf(t, ["line-length"]) && eq < 0) i++;
@@ -942,6 +951,7 @@ export function commandRisks(command: string | string[]): Risk[] {
                 if (c === "e" || c === "f" || c === "l") {
                   const v = j + 1 < t.length ? { ...a, text: t.slice(j + 1) } : args[++i];
                   if (c !== "l") scriptGiven = true;
+                  if (c === "f") fileScript = true;
                   if (c === "e" && v) scripts.push(v);
                   if (c === "f" && v && (PROC_SUB.test(v.text) || STREAM_PATH.test(v.text))) return destroys("runs a sed script made when it runs");
                   break;
@@ -951,7 +961,10 @@ export function commandRisks(command: string | string[]): Risk[] {
           }
           if (!scriptGiven && operands.length) scripts.push(operands.shift()!);
           if (scripts.some((s) => SED_EXEC.test(s.text))) return destroys("runs a shell command from a sed script (sed e)");
-          if (inPlace) editsInPlace(follow ? [] : operands, "edits files outside the working copy and /tmp (sed -i)");
+          // `sed -i '<script>' /dev/null` (or no file) changes nothing unless the script writes (w/W) or runs (e, checked
+          // above) or comes from a file (-f), so the rest of the command is judged on its own (BOS-680).
+          const nothingToEdit = !wrapped && !bulk && !fileScript && !scripts.some((s) => SED_WRITES.test(s.text)) && operands.every((o) => o.text === "/dev/null" && !o.dynamic);
+          if (inPlace && !nothingToEdit) editsInPlace(follow ? [] : operands, "edits files outside the working copy and /tmp (sed -i)");
           if (inPlace && follow) destroys("edits files through symlinks (sed -i --follow-symlinks)");
           return;
         }
