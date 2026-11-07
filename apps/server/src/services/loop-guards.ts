@@ -3,11 +3,12 @@
 // failed checks) are reduced to signatures; the same one three times in two hours means the
 // agent is going round in circles and needs a different approach.
 import { and, count, eq, gt } from "drizzle-orm";
-import { failureSignature, findingFingerprint, type ReviewComment } from "@boss-man/shared";
+import { failureSignature, findingFingerprint, movableFailures, readCriteria, type ReviewComment } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { decisions, failureSignatures, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { AlertInput } from "./alert-ladder.js";
+import { MOVE_AFTER_MERGE } from "./decisions.js";
 
 export type LoopLimits = { repeatedFinding: number; maxRounds: number; circularFailures: number; circularWindowMs: number };
 export const DEFAULT_LOOP_LIMITS: LoopLimits = { repeatedFinding: 3, maxRounds: 3, circularFailures: 3, circularWindowMs: 2 * 3_600_000 };
@@ -40,7 +41,7 @@ export function loopGuards(
      * Records a "changes requested" round. If it would be the round that loops, it holds the
      * message back, blocks the ticket on an owner decision and returns that decision's id.
      */
-    async reviewRound(input: { ticketId: string; reviewer: string; comments: ReviewComment[]; message: string }): Promise<{ round: number; escalated: string | null }> {
+    async reviewRound(input: { ticketId: string; reviewer: string; comments: ReviewComment[]; message: string; /** Each failing review on its own, when several failed together. */ parts?: { notes: string; comments: ReviewComment[] }[] }): Promise<{ round: number; escalated: string | null }> {
       const fingerprints = input.comments.map((c) => findingFingerprint(c));
       await db.insert(ticketReviews).values({ ticketId: input.ticketId, reviewer: input.reviewer, verdict: "changes_requested", comments: input.comments, fingerprints, createdAt: now() });
       const rounds = await db.select({ fingerprints: ticketReviews.fingerprints }).from(ticketReviews).where(and(eq(ticketReviews.ticketId, input.ticketId), eq(ticketReviews.verdict, "changes_requested")));
@@ -55,11 +56,17 @@ export function loopGuards(
         repeatedIdx !== -1
           ? `the same comment has now come back ${seen.get(fingerprints[repeatedIdx]!)} times: "${input.comments[repeatedIdx]!.path}: ${input.comments[repeatedIdx]!.body.slice(0, 200)}"`
           : `it has been sent back ${rounds.length} times`;
+      // Offered only when the reviewers fail nothing but checks that can only be made on the live work (BOS-422).
+      // With several reviewers each one must qualify on its own (their numbered verdicts would clash if read as one text).
+      const criteria = readCriteria(t!.acceptanceCriteria);
+      const parts = input.parts?.length ? input.parts : [{ notes: input.message, comments: input.comments }];
+      const each = parts.map((p) => movableFailures(criteria, p.comments, p.notes));
+      const movable = each.every((m) => m.length) ? [...new Set(each.flat())] : [];
       const ask = {
         companyId: t!.companyId,
-        question: `Review of "${t!.title}" looks stuck: ${why}. Send the review back again, or stop work on the ticket?`,
-        options: [SEND_BACK, STOP_WORK],
-        context: { type: "review_loop", ticketId: input.ticketId, message: input.message, reviewer: input.reviewer },
+        question: `Review of "${t!.title}" looks stuck: ${why}. Send the review back again, or stop work on the ticket?${movable.length ? ` Or move ${movable.map((c) => `"${c}"`).join(", ")} to after the merge, since it can only be checked once the work is live?` : ""}`,
+        options: movable.length ? [SEND_BACK, STOP_WORK, MOVE_AFTER_MERGE] : [SEND_BACK, STOP_WORK],
+        context: { type: "review_loop", ticketId: input.ticketId, message: input.message, reviewer: input.reviewer, ...(movable.length ? { movable } : {}) },
       };
       const [d] = opts.alert
         ? [await opts.alert({ ...ask, cardKind: "approval", kind: "review_loop", recommended: STOP_WORK, ticketId: input.ticketId, from: "ceo" })]
@@ -111,7 +118,7 @@ export function loopGuards(
         } else {
           await db
             .insert(decisions)
-            .values({ companyId: input.companyId, kind: "question", question, options: ["Got it"], recommendedOption: "Got it", tier: "owner", dedupeKey: `account:${outage.fundingSourceId}:account_limit`, context: { type: "question", decisionsKind: "alert:account_limit", clearWhen: [{ kind: "limitReset", fundingSourceId: outage.fundingSourceId }], items: [{ question, at: now().toISOString() }] } })
+            .values({ companyId: input.companyId, kind: "question", question, options: ["Got it"], recommendedOption: "Got it", tier: "owner", dedupeKey: `account:${input.companyId}:${outage.fundingSourceId}:account_limit`, context: { type: "question", decisionsKind: "alert:account_limit", clearWhen: [{ kind: "limitReset", fundingSourceId: outage.fundingSourceId }], items: [{ question, at: now().toISOString() }] } })
             .onConflictDoNothing();
         }
         return { count: n, circular: true };
