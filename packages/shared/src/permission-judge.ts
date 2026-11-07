@@ -748,11 +748,14 @@ function hasUnlistedOption(list: OptionList, args: string[]): boolean {
       continue;
     }
     let cluster: string | null = null;
+    let old = false;
     if (a.startsWith("-") && a.length > 1) cluster = a.slice(1);
-    else if (list.oldStyle && i === 0) cluster = a;
+    else if (list.oldStyle && i === 0) { cluster = a; old = true; }
     if (cluster === null) continue;
     for (const ch of cluster) {
-      if (list.valued.includes(ch)) break; // the rest of the word (or the next word) is its value
+      // Dash cluster: the rest of the word is the value of a valued letter. Old-style first word (`tar xfI a.tar x.sh`): every
+      // letter is an option and the values come from the following words, so every letter must be on the list.
+      if (list.valued.includes(ch)) { if (old) continue; break; }
       if (!list.flags.includes(ch)) return true;
     }
   }
@@ -860,6 +863,8 @@ function usesScratchUnsafely(c: string): boolean {
       args = args.slice(i + 1);
     }
     if (head === "") continue;
+    // A command word that is a variable or backtick may expand to a file the command wrote (`X=c; $X`): unread code.
+    if (/^["']?(?:\$|\x60)/.test(head) && (written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) return true;
     const sh = head.replace(/^.*\//, "");
     // F4: once a command has unpacked an archive or copied a folder in, files it never wrote by name may exist. Only readers
     // and file tools may follow in the same command.
