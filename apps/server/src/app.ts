@@ -15,7 +15,7 @@ import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agentNotes, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
@@ -85,6 +85,7 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
+import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
@@ -680,9 +681,26 @@ export async function buildApp(opts: AppOptions) {
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
+  // In server mode (BOS-316, BOS-597) it reports the server-owned check queue's own mode, slots, and
+  // running and waiting counts for the company, so the screen can show "waiting for a check slot".
+  // The counts read only the live states, through check_jobs_state_queued: check_jobs has no company
+  // index, so a company-only filter would read the whole table.
+  const checkQueueSvc = checkQueue(db);
   const mergeQueue = mergeQueueService(db, {
     runningMerges: () => review.runningMerges(),
     limit: () => checkGate(db).limit(),
+    queueStatus: async (companyId) => {
+      const mode = await checkQueueSvc.mode();
+      if (mode !== "server") return { mode, slots: await checkQueueSvc.slots(), running: 0, waiting: 0 };
+      const [live] = (await db
+        .select({
+          running: sql<number>`(count(*) filter (where ${checkJobs.state} = 'running'))::int`.mapWith(Number),
+          waiting: sql<number>`(count(*) filter (where ${checkJobs.state} = 'queued'))::int`.mapWith(Number),
+        })
+        .from(checkJobs)
+        .where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.state, ["queued", "running"])))) as [{ running: number; waiting: number }];
+      return { mode: mode as CheckQueueMode, slots: await checkQueueSvc.slots(), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
+    },
     now: opts.now,
   });
   decisionsSvc.setLoopHooks({
