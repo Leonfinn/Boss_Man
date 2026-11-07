@@ -346,6 +346,18 @@ if command -v flock >/dev/null; then
   for _ in $(seq 300); do grep -q "lock held" "$t/new.out" 2>/dev/null && break; sleep 0.2; done
   grep -q "lock held" "$t/new.out" || fail "replace: the newer check never got the slot: $(cat "$t/new.out")"
   wait "$n" "$o" || true
+  # Only hand-run entries are ever replaced: a "replaced" marker for a waiting merge check's pid must not bounce it.
+  rm -rf "$t/lock.queue" "$t/mc.out"; hold 1 3600; h1=$!; sleep 0.3
+  ( lock env BOSSMAN_MERGE_CHECK=1 >"$t/mc.out" 2>&1 ) & mc=$!
+  for _ in $(seq 300); do ls "$t/lock.queue"/0-* >/dev/null 2>&1 && grep -q "waiting for a free check slot" "$t/mc.out" 2>/dev/null && break; sleep 0.2; done
+  mqe=$(ls "$t/lock.queue" | grep '^0-' | head -n 1); [ -n "$mqe" ] || fail "merge marker: merge check never queued: $(cat "$t/mc.out")"
+  : >"$t/lock.replaced.${mqe##*-}"
+  sleep 3
+  kill -0 "$mc" 2>/dev/null || fail "merge marker: a merge check left the line on a replaced marker: $(cat "$t/mc.out")"
+  ! grep -q "replaced by a newer check" "$t/mc.out" || fail "merge marker: merge check was replaced: $(cat "$t/mc.out")"
+  pkill -P "$mc" 2>/dev/null || true; kill "$mc" 2>/dev/null || true; wait "$mc" 2>/dev/null || true
+  rm -f "$t"/lock.replaced.*
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   kill "$mproc" 2>/dev/null || true; wait "$mproc" 2>/dev/null || true
   echo "A=600s B=640s no OOM" >"$t/proof"
 

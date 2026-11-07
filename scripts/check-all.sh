@@ -261,7 +261,7 @@ if command -v flock >/dev/null; then
   }
   waited_from=$SECONDS; last_said=-1000; got=no; typical=""; stuck=no; seen=""; moved_at=$SECONDS; stall_sig=""; stall_since=$SECONDS
   while :; do
-    if [ -e "$REPLACED" ]; then
+    if [ "$prio" = 1 ] && [ -e "$REPLACED" ]; then
       echo "check-all: replaced by a newer check of this folder ($FOLDER); leaving the line" >&2; exit 75
     fi
     read -r place total newer linesig < <(queue_place)
