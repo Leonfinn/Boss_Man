@@ -1180,6 +1180,21 @@ describe("rules judge: quoted targets, obfuscated -c strings, more shells, shred
       expect(Date.now() - t).toBeLessThan(100);
     }
   });
+
+  it("stays fast on nested -c shells: the work is capped across every level (Dougal's three shapes)", () => {
+    const shapes = [
+      ('bash -c "' + "sh -c ".repeat(1600) + '"').slice(0, 10000),
+      ("bash -c '" + "sh -c ls; ".repeat(900) + "'").slice(0, 10000),
+      ('bash -c "'.repeat(9) + "sh -c sh -c ".repeat(500) + "ls" + '"'.repeat(9)).slice(0, 10000),
+    ];
+    for (const cmd of shapes) {
+      const t = performance.now();
+      const r = judge(cmd);
+      const ms = performance.now() - t;
+      expect(ms).toBeLessThan(250);
+      expect(r.verdict).not.toBe("allow"); // out of budget or unplaceable: never Allow
+    }
+  });
 });
 
 // BOS-638 (split from BOS-378 by the CEO): Jane's round-5 security review of BOS-378 found four commands that got an automatic
