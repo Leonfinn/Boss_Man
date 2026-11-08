@@ -153,7 +153,7 @@ describe("Always allow on a permission card (BOS-294)", () => {
   });
   it("applies a one-agent deny rule when a replayed request is checked again (BOS-598)", async () => {
     const sent: Array<{ type: string; requestId?: string; verdict?: string }> = [];
-    ctx.runners.connect(ctx.runner.id, (cmd: never) => { sent.push(cmd); return true; });
+    ctx.runners.connect(ctx.runner.id, (cmd) => { sent.push(cmd as unknown as (typeof sent)[number]); return true; });
     const runId = randomUUID();
     const ev = (requestId: string) => ctx.ingest({ type: "run.permission_request", runId, requestId, title: MD, kind: "other", rawInput: { url: "https://x.dev" }, optionKinds: ["allow_once", "reject_once"] });
     await ctx.ingest({ type: "run.started", runId, agentId: ctx.dev.id, acpSessionId: "s", model: null });
