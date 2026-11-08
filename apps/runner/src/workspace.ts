@@ -1346,6 +1346,10 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      // A clone's branch reaches the shared repo only when it's synced (BOS-343). Merge and push sync
+      // first; so must this check, or it merges a stale branch (BOS-832: false clashes, and real ones missed).
+      const dir = this.ticketDir(spec.ticketId);
+      if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
       return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
     });

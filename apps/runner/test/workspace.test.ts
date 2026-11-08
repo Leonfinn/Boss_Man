@@ -537,15 +537,17 @@ describe("the clash check reads a current branch and a current main (BOS-832)", 
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
     const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
     const w = await ws.ensure(spec);
-    writeFileSync(path.join(w.path, "ticket.txt"), "ticket work\n");
-    git(w.path, "add", ".");
-    git(w.path, "commit", "-qm", "ticket work");
-    // Main moves on, then the branch brings it all in: the branch head contains main's tip (HOL-585's shape).
-    for (let i = 2; i <= 4; i++) r.commit(`v${i}`);
+    // The branch and main both touch the same line. The branch commit reaches the shared repo (a turn
+    // checkpoint), then main moves and the agent merges main in on the branch (the HOL-585 shape): the
+    // branch head holds main's tip and merges clean, but the shared ref is still the pre-merge commit.
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    await ws.checkpoint(spec, "after a turn");
+    r.commit("main side");
     git(w.path, "fetch", "-q", "origin");
-    git(w.path, "merge", "-q", "--no-edit", "origin/main");
-    const repo = ws.repoDir(ids.project);
-    expect(git(repo, "merge-base", "--is-ancestor", git(r.dir, "rev-parse", "main"), `refs/heads/${branchFor(ids.a)}`)).toBe("");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", "-X", "ours", "origin/main");
+    // HOL-585's shape: the branch head already holds main's tip, so no clash is possible.
+    expect(git(w.path, "merge-base", "--is-ancestor", git(r.dir, "rev-parse", "main"), "HEAD")).toBe("");
     expect(await ws.clash(spec, "main")).toEqual({ clashes: false, files: [] });
   });
 
