@@ -495,6 +495,21 @@ host_extra_facts() {
     ports+="$psep$(jstr "$k"): $(jstr "$v")"; psep=", "
   done
   out+="$sep\"network\": {\"addresses\": [$addrs], \"ports\": {$ports}}"
+  # --- BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries only. Compose uses
+  # only the last line, so two or more means an earlier list is silently ignored. Nothing else on the line is kept
+  # (any token that isn't host:port is dropped), and no other key is read.
+  local nlines="" nlsep="" nl tok toks tsep nc=0 envfound=false
+  local -a ntoks
+  [[ -r $REPO/.env ]] && envfound=true
+  while IFS= read -r nl; do
+    ((nc < 16)) || break
+    nl="${nl#*=}"; nl="${nl%%[[:space:]]#*}"; nl="${nl//[\"\']/}"
+    IFS=$', \t' read -r -a ntoks <<<"$nl" || true
+    toks="" tsep=""
+    for tok in "${ntoks[@]}"; do [[ $tok =~ ^[A-Za-z0-9.-]{1,253}:[0-9]{1,5}$ ]] && { toks+="$tsep$(jstr "$tok")"; tsep=", "; }; done
+    nlines+="${nlsep}[$toks]"; nlsep=", "; nc=$((nc + 1))
+  done < <(grep -sE '^[[:space:]]*(export[[:space:]]+)?BOSSMAN_NETGUARD_ALLOW[[:space:]]*=' "$REPO/.env" || true)
+  out+="$sep\"netguardEnv\": {\"envFound\": $envfound, \"lines\": [$nlines]}"
   # --- memory, in kB, from /proc/meminfo
   local mt ma
   mt="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null)" || mt=""

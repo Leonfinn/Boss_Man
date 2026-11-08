@@ -2206,6 +2206,64 @@ export function ThisHost() {
   );
 }
 
+type NetguardAllowView = {
+  report: {
+    mode: string | null;
+    entries: { entry: string; coveredBy: string[]; note: string | null }[] | null;
+    lineCanGo: boolean;
+    env: { lines: string[][]; reportedAt: string; envFound: boolean } | null;
+    warnings: string[];
+  } | null;
+};
+
+/** Settings → Network guard allow list (BOS-770): the BOSSMAN_NETGUARD_ALLOW entries in .env, and which ones Boss Man already covers. Read only. */
+export function NetguardAllow() {
+  const q = usePoll((signal) => api<NetguardAllowView>("/api/netguard-allow", { signal }), 60_000, "netguard-allow");
+  const r = q.data?.report;
+  if (!r) return null;
+  const lines = r.env?.lines ?? [];
+  return (
+    <Section id="netguard-allow-h" title="Network guard: extra allowed addresses">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Addresses on your private network that every runner may reach, from the BOSSMAN_NETGUARD_ALLOW line in your .env. Boss Man already lets each company reach its own tool servers and its projects' git hosts, so those don't need a line here. This page only reports; it never changes .env.
+      </p>
+      {r.mode === "off" && <p>The network guard is turned off (BOSSMAN_NETGUARD=off), so this list isn't used.</p>}
+      {r.entries === null ? (
+        <p className="muted">The launcher didn't say which entries it uses (it isn't running, or it is older than this page).</p>
+      ) : r.entries.length === 0 ? (
+        <p data-testid="netguard-allow-empty">The launcher has no extra entries.</p>
+      ) : (
+        <ul data-testid="netguard-allow-entries" style={{ fontSize: 14 }}>
+          {r.entries.map((e) => (
+            <li key={e.entry}>
+              <span className="mono">{e.entry}</span>
+              {e.note && <span className="muted"> · {e.note}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {r.lineCanGo && r.entries && r.entries.length > 1 && <p data-testid="netguard-allow-line-can-go">Every entry is already allowed by Boss Man; this line can go.</p>}
+      {r.env && lines.length > 1 && (
+        <div style={{ fontSize: 14 }}>
+          <p>Lines in .env (the host reported {when(r.env.reportedAt)}):</p>
+          <ol>
+            {lines.map((l, i) => (
+              <li key={i}>
+                <span className="mono">{l.join(" ") || "(empty)"}</span> <span className="muted">{i === lines.length - 1 ? "(used)" : "(ignored)"}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {r.warnings.map((w) => (
+        <p key={w} className="error" role="alert">
+          {w}
+        </p>
+      ))}
+    </Section>
+  );
+}
+
 function ServerPanel() {
   const h = usePoll((signal) => api<Health>("/api/health", { signal }), 10_000, "server-role");
   const bg = usePoll((signal) => api<BlueGreen>("/api/bluegreen", { signal }), 10_000, "bluegreen");
@@ -2580,6 +2638,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <ServerPanel />
             <SelfDeploy go={go} />
             <ThisHost />
+            <NetguardAllow />
             <RunLimits />
           </>
         )}

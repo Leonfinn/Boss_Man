@@ -555,4 +555,19 @@ describe("the runner launcher (R55)", () => {
     const fresh = fake.containers.get("boss-man-runner-app-co")!.id;
     expect(fresh).not.toBe(old);
   }, 20_000);
+
+  it("reports the guard mode and its BOSSMAN_NETGUARD_ALLOW entries on GET /netguard, and nothing else (BOS-770)", async () => {
+    const cfg = { ...config(), guardMode: "enforce" as const, guardAllow: parseAllow("git.example.lan:3000 penpot.example.lan:9001") };
+    const server = launcherServer(launcher(cfg, fakeDocker().docker), Buffer.from(KEY), () => undefined);
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    close = () => new Promise((r) => server.close(() => r()));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const res = await fetch(`${base}/netguard`, { headers: { authorization: `Bearer ${KEY}` } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ mode: "enforce", allow: ["git.example.lan:3000", "penpot.example.lan:9001"] });
+    expect((await fetch(`${base}/netguard`, {})).status).toBe(401);
+    expect((await fetch(`${base}/netguard`, { method: "POST", headers: { authorization: `Bearer ${KEY}` } })).status).toBe(405);
+    // No list set: an empty list and the default mode.
+    expect(launcher(config(), fakeDocker().docker).netguard()).toEqual({ mode: "auto", allow: [] });
+  });
 });

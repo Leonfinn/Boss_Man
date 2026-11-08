@@ -162,6 +162,8 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
   return {
     /** What the CPU reserve decided at start (cpu-layout.ts): on or off, which threads, and why. */
     cpu: () => cfg.cpuPlan ?? { on: false, reserved: [] as number[], runnerThreads: [] as number[], hostThreads: 0, reason: "Not worked out." },
+    /** The guard mode and the BOSSMAN_NETGUARD_ALLOW entries this launcher started with (host:port only), so the owner can see them (BOS-770). */
+    netguard: () => ({ mode, allow: [...(cfg.guardAllow ?? [])] }),
     /** Writes the token, then creates (or recreates) and starts the runner. Data folders are kept. */
     put: (slug: string, token: string, allow?: string[]) => locked(slug, async () => {
       mkdirSync(companyDir(cfg, slug), { recursive: true, mode: 0o700 });
@@ -383,6 +385,10 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
       if (url.pathname === "/cpu") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, api.cpu());
+      }
+      if (url.pathname === "/netguard") {
+        if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
+        return send(200, api.netguard());
       }
       if (url.pathname === "/runners") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
