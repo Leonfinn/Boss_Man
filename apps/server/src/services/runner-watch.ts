@@ -39,9 +39,15 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
   // The owner's page is also marked in settings (runnerPagedKey), so a restart never pages twice for one outage.
   const offlineSince = new Map<string, number>();
   const paged = new Set<string>(); // owner paged (or already paged before a restart) for this outage
-  const carded = new Set<string>(); // CEO card raised for this outage; until then it is tried again every pass
-  const swept = new Set<string>(); // connected runners whose old cards were already checked once
-  const handChecked = new Set<string>(); // connected runners already compared with the launcher's list this connection
+  // CEO card raised for this outage; until then it is tried again every pass.
+  // Lost on restart, harmless because the card is deduped by its key, so raising it again changes nothing.
+  const carded = new Set<string>();
+  // Connected runners whose old cards were already checked once.
+  // Lost on restart, harmless because the first pass after a start checks every connected runner again.
+  const swept = new Set<string>();
+  // Connected runners already compared with the launcher's list this connection.
+  // Lost on restart, harmless because it only costs one extra launcher call per runner after a start; the result is kept in settings.
+  const handChecked = new Set<string>();
   let boot: { at: number; expected: Set<string>; done: boolean } | null = null;
   let lastHold = false;
   let liftedAt = 0; // when an update hold last lifted: runners it swapped get the usual grace from then
