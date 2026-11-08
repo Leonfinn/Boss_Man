@@ -23,7 +23,7 @@ export const SandboxReport = z.object({
   errno: z.string().max(200).nullable(),
   level: z.enum(["full", "partial", "unavailable"]),
   missing: z.array(z.string().max(100)).max(10),
-  /** Unprivileged user namespaces (what bubblewrap needs); for information only. */
+  /** Unprivileged user namespaces (what bubblewrap needs); for information only: nothing uses them, and runs are kept apart by Landlock, not namespaces (BOS-555). */
   userns: z.boolean(),
   probe: z.boolean().nullable(),
 });
@@ -242,6 +242,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** The git commit this image was built from (BOS-764); absent from an image built before it was recorded. */
+    imageCommit: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
     /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
     harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
@@ -340,10 +342,13 @@ export const MERGE_MISSED_AFTER_MS = VERIFY_TIMEOUT_MS + 60_000 + 5 * 60_000;
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };
 
 /** The outcome of merging a ticket's branch (R46). */
+export type MigrationRenamed = { from: string; to: string };
+
 export type MergeResult =
   /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
-  | { status: "prepared"; commit: string; tree: string; targetSha: string }
-  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number } }
+  | { status: "prepared"; commit: string; tree: string; targetSha: string; renamed?: MigrationRenamed[] }
+  /** `renamed`: the gate renumbered the branch's migrations itself (BOS-690): the SQL is unchanged, only the name and journal line moved. */
+  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
   | { status: "uncommitted"; files: string[] }

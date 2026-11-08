@@ -89,6 +89,28 @@ describe("company import (docs/11, step 2)", () => {
     expect(decisions).toContain("Holiday Hours Copy was imported");
   });
 
+  // BOS-763: standing rules travel as plain text and the checklist lists them.
+  it("carries standing rules through export and import as plain text", async () => {
+    const { req } = await setup();
+    const { company } = (await req("POST", "/api/companies", { name: "Rules Co" })).json() as { company: { id: string } };
+    expect((await req("PUT", `/api/companies/${company.id}/standing-rules`, { text: "Never write a token to a file." })).statusCode).toBe(200);
+    const zipOf = async () => Buffer.from((await req("GET", `/api/companies/${company.id}/export`)).rawPayload);
+    const files = unzipSync(new Uint8Array(await zipOf()));
+    expect(JSON.parse(strFromU8(files["company.json"]!)).standingRules).toBe("Never write a token to a file.");
+
+    const res = await req("POST", "/api/companies/import", { zip: (await zipOf()).toString("base64"), name: "Rules Copy" });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+    expect(checklist.some((x) => x.includes("Never write a token to a file."))).toBe(true);
+    const copy = (await req("GET", `/api/companies/${companyId}/standing-rules`)).json();
+    expect(copy.text).toBe("Never write a token to a file.");
+
+    // Too long, or holding a credential: left out with a warning, import still works.
+    const bad = { ...files, "company.json": strToU8(JSON.stringify({ ...JSON.parse(strFromU8(files["company.json"]!)), standingRules: "x".repeat(2001) })) };
+    const pre = (await req("POST", "/api/companies/import/preview", { zip: Buffer.from(zipSync(bad)).toString("base64") })).json();
+    expect(pre.warnings.join(" ")).toContain("standing rules");
+  });
+
   // BOS-198: lists of reviewers survive the trip, and an older package's "marked" cells name its marked agent.
   it("remaps reviewer lists and an older package's marked reviewers", async () => {
     const { req } = await setup();
@@ -109,6 +131,58 @@ describe("company import (docs/11, step 2)", () => {
     const { companyId } = res.json() as { companyId: string };
     const ann = ((await req("GET", "/api/companies")).json() as Array<{ id: string; agents: Array<{ id: string; name: string }> }>).find((c) => c.id === companyId)!.agents.find((a) => a.name === "Ann")!;
     expect((await req("GET", `/api/companies/${companyId}/review-policy`)).json().medium.kinds).toEqual({ security: [ann.id], infra: ann.id });
+  });
+
+  it("never lets a package loosen the owner's safeguards, and says what it asked for (BOS-754)", async () => {
+    const { req } = await setup();
+    const companiesNow = async () => (await req("GET", "/api/companies")).json() as Array<{ id: string; name: string; ownerApprovesEngagements: boolean }>;
+    const policyOf = async (companyId: string) => (await req("GET", `/api/companies/${companyId}/review-policy`)).json();
+    const projectPolicyOf = async (companyId: string) => {
+      const [project] = (await req("GET", `/api/companies/${companyId}/projects`)).json() as Array<{ id: string }>;
+      return (await req("GET", `/api/projects/${project!.id}/review-policy`)).json().policy;
+    };
+    const exportOf = async (companyId: string) => Buffer.from((await req("GET", `/api/companies/${companyId}/export`)).rawPayload).toString("base64");
+
+    // A new company starts with the safeguards on.
+    const plain = ((await req("POST", "/api/companies", { name: "Plain Co" })).json() as { company: { id: string } }).company.id;
+    await req("POST", `/api/companies/${plain}/projects`, { name: "Site" });
+    expect((await companiesNow()).find((c) => c.id === plain)!.ownerApprovesEngagements).toBe(true);
+    const defaults = await policyOf(plain);
+    expect(defaults.high).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+
+    // An existing company whose owner loosened them on purpose: its company and project settings.
+    const loose = ((await req("POST", "/api/companies", { name: "Loose Co" })).json() as { company: { id: string } }).company.id;
+    const site = (await req("POST", `/api/companies/${loose}/projects`, { name: "Site" })).json() as { id: string };
+    expect((await req("PATCH", `/api/companies/${loose}`, { ownerApprovesEngagements: false })).statusCode).toBe(200);
+    const looseHigh = { ...defaults.high, ownerSignoff: false, planApprover: "ceo" };
+    expect((await req("PUT", `/api/companies/${loose}/review-policy`, { ...defaults, high: looseHigh })).statusCode).toBe(200);
+    expect((await req("PUT", `/api/projects/${site.id}/review-policy`, { ...defaults, high: looseHigh, critical: { ...defaults.critical, ownerSignoff: false } })).statusCode).toBe(200);
+
+    // Its export, imported as a new company, keeps the safeguards on and says so in plain words.
+    const res = await req("POST", "/api/companies/import", { zip: await exportOf(loose), name: "Loose Copy" });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+    expect((await companiesNow()).find((c) => c.id === companyId)!.ownerApprovesEngagements).toBe(true);
+    expect((await policyOf(companyId)).high).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+    const copied = await projectPolicyOf(companyId);
+    expect(copied.high).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+    expect(copied.critical).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+    expect(checklist).toEqual(
+      expect.arrayContaining([
+        "Kept on: your approval before this company takes on work for another company. The package had it switched off.",
+        "Kept on: your sign-off on high-risk work and your approval of high-risk plans. The package had them switched off. To change them, use Settings → Reviews.",
+        "Kept on in project Site: your sign-off on high-risk work, your approval of high-risk plans and your sign-off on critical-risk work. The package had them switched off. To change them, use the project's review settings.",
+      ]),
+    );
+
+    // The existing company is unchanged: the import only shapes the new one.
+    expect((await companiesNow()).find((c) => c.id === loose)!.ownerApprovesEngagements).toBe(false);
+    expect((await policyOf(loose)).high).toMatchObject({ ownerSignoff: false, planApprover: "ceo" });
+    expect((await projectPolicyOf(loose)).critical).toMatchObject({ ownerSignoff: false });
+
+    // A package that keeps the defaults imports with no such line.
+    const ok = (await req("POST", "/api/companies/import", { zip: await exportOf(plain), name: "Plain Copy" })).json() as { checklist: string[] };
+    expect(ok.checklist.filter((l) => l.startsWith("Kept on"))).toEqual([]);
   });
 
   it("previews each tool server's host:port and refuses ones aimed at Boss Man's own services unless ticked", async () => {

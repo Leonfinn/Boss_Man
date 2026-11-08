@@ -3,11 +3,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
+import { BUILT_IN_RULES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, ceoChapters, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
-import { issueRunToken } from "../src/mcp.js";
+import { issueRunToken, READ_ONLY_TOOLS, TRACED_TOOLS } from "../src/mcp.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -110,6 +110,8 @@ describe("owner chat", () => {
     // The chat's tool description names the tools it now shares with its runs (BOS-224).
     expect(start.prompt).toContain("server_status");
     expect(start.prompt).toContain("decisions (");
+    // The built-in safety rules, in a company that set no standing rules (BOS-754).
+    expect(start.prompt).toContain(BUILT_IN_RULES.join("\n"));
     expect((await c.db.select().from(runs).where(eq(runs.id, start.runId)))[0]).toMatchObject({ purpose: "chat", chapterId: null });
     // Only the CEO's own run made a chapter.
     expect((await c.db.select().from(ceoChapters)).length).toBe(1);
@@ -177,7 +179,15 @@ describe("owner chat", () => {
     const chat = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json();
     expect(chat.state).toBe("idle");
     expect(chat.items.map((m: { role: string }) => m.role)).toEqual(["owner", "owner", "assistant"]);
+    // Both tickets were created or read by this run, so the link check says nothing; the changes are listed in code (BOS-758).
     expect(chat.items[2].text).toContain(`#/tickets/${rateId}`);
+    expect(chat.items[2].text).toContain("Done in this reply:");
+    expect(chat.items[2].text).toContain("nudged Engineer");
+    // A busy run lists the first 5 changes and counts the rest; the two created tickets are traced and counted (BOS-806).
+    expect(chat.items[2].text).toContain("(and 4 more)");
+    expect(chat.items[2].text).not.toContain("Ticket link check");
+    // A run that made changes doesn't also need a run-end note.
+    expect(chat.items.map((m: { role: string }) => m.role)).not.toContain("system");
   });
 
   it("keeps server_status and decisions to the calling company", async () => {
@@ -336,8 +346,8 @@ describe("owner chat", () => {
     await c.settle();
     const items = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items as Array<{ role: string; text: string }>;
     expect(items.map((m) => m.role)).toEqual(["owner", "assistant", "system"]);
-    // Tickets made in the chat are the owner's requests, so they aren't in the agent's activity; decisions are.
-    expect(items[2]!.text).toBe("CEO finished after its last message. Since that message: 1 decision sent to Decisions.");
+    // The run-end line lists what this run did after its last reply, from its own record (BOS-758).
+    expect(items[2]!.text).toBe("CEO finished after its last message. Since that message: 1 decision sent to Decisions; changed Engineer's instructions; created a ticket APP-1.");
 
     // No reply at all, and nothing done: still said, so the owner isn't left waiting.
     await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Anything else?" });
@@ -404,8 +414,157 @@ describe("owner chat", () => {
 
     await c.emit({ type: "run.update", runId: workerStart.runId, update: { kind: "agent_message", text: "The login page." } });
     await c.settle();
-    expect((await c.req("GET", `${base}?agentId=${c.worker.id}`)).json()).toMatchObject({ state: "answering", items: [{ role: "owner" }, { role: "assistant", text: "The login page.", agentId: c.worker.id }] });
+    expect((await c.req("GET", `${base}?agentId=${c.worker.id}`)).json()).toMatchObject({ state: "answering", items: [{ role: "owner" }, { role: "assistant", text: "The login page.\n\nNo changes made in this reply.", agentId: c.worker.id }] });
     expect((await c.req("POST", base, { text: "hi", agentId: "00000000-0000-4000-8000-000000000000" })).statusCode).toBe(404);
+  });
+
+  it("checks a reply's claims against what the run actually changed (BOS-758)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("PUT", `/api/companies/${c.company.id}/agent-approvals`, { approvals: "hires_and_edits" });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Remember that I like short summaries." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    // A reply that claims a note it never saved: Boss Man says so in code, without touching the words.
+    const words = "Saved a note: keep replies short. I created BOS-12 for the rest.";
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: words } });
+    await c.settle();
+    let saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toBe(`${words}\n\nNo changes made in this reply.`);
+
+    // A later reply in the same run, after a real note and a real ticket, lists each.
+    const client = await c.mcp(start.runId);
+    await client.callTool({ name: "notes", arguments: { action: "save", title: "Short replies", text: "Keep them short.", why: "Remember that I like short summaries." } });
+    const made = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Tidy the inbox", project: "App" } }));
+    const madeId = /#\/tickets\/([0-9a-f-]{36})/.exec(made)![1]!;
+    await client.close();
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: `Noted. Ticket: #/tickets/${madeId}.` } });
+    await c.settle();
+    saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toContain("Done in this reply: saved note \"Short replies\"; created a ticket APP-1.");
+    expect(saved.text).not.toContain("Ticket link check");
+
+    // A third reply lists only what came since the last one: nothing, so "No changes made".
+    // A ticket that wasn't created or read by this run is named, and the reply is otherwise as written.
+    const linked = "That's #/tickets/00000000-0000-4000-8000-0000000000aa, I think. Ticket #/tickets/0000abcd-0000-4000-8000-0000000000aa too.";
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: linked } });
+    await c.settle();
+    saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text.startsWith(linked)).toBe(true);
+    expect(saved.text).toContain("No changes made in this reply.");
+    expect(saved.text).not.toContain("Done in this reply:");
+    expect(saved.text).toContain("Ticket link check: these ticket links are to a ticket this run didn't create or read: #/tickets/00000000-0000-4000-8000-0000000000aa, #/tickets/0000abcd-0000-4000-8000-0000000000aa.");
+    expect(saved.text).toContain("The text was saved as written.");
+  });
+
+  it("lists only a run's own changes when two runs of the same agent overlap (BOS-758)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("PUT", `/api/companies/${c.company.id}/agent-approvals`, { approvals: "hires_and_edits" });
+    // A ticket run of the CEO's own, still live while the chat run starts.
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Rebalance the sprint", assigneeAgentId: c.ceo.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const ticketStart = c.sent.find((x): x is Start => x.type === "run.start")!;
+    expect(ticketStart.agentId).toBe(c.ceo.id);
+
+    // The chat run is beside it; Boss Man lets it through while the CEO works (BOS-349).
+    c.sent.length = 0;
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Tidy the team's instructions." });
+    await c.req("PUT", `/api/companies/${c.company.id}/agent-approvals`, { approvals: "hires_and_edits" });
+    await c.scheduler.tick();
+    const chatStart = c.sent.find((x): x is Start => x.type === "run.start")!;
+    expect(chatStart).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true });
+
+    // Each run changes something different.
+    const ticketClient = await c.mcp(ticketStart.runId);
+    await ticketClient.callTool({ name: "update_instructions", arguments: { agent: "Engineer", instructions: "Work only on the API.", reason: "Ticket run." } });
+    await ticketClient.close();
+    const chatClient = await c.mcp(chatStart.runId);
+    await chatClient.callTool({ name: "notes", arguments: { action: "save", title: "Short replies", text: "Keep them short.", why: "Tidy the team's instructions." } });
+    await chatClient.close();
+
+    // The chat reply lists only the chat's note, not the ticket run's change.
+    await c.emit({ type: "run.update", runId: chatStart.runId, update: { kind: "agent_message", text: "All tidy." } });
+    await c.settle();
+    const items = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items as Array<{ role: string; text: string }>;
+    expect(items.at(-1)!.text).toBe("All tidy.\n\nDone in this reply: saved note \"Short replies\".");
+    // The ticket run's end adds nothing to the chat, and its change never appears in the chat's lines.
+    const before = items.length;
+    await c.emit({ type: "run.ended", runId: ticketStart.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    const after = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items as Array<{ role: string; text: string }>;
+    expect(after).toHaveLength(before);
+    expect(after.some((m) => m.text.includes("changed Engineer's instructions"))).toBe(false);
+    expect(t).toBeDefined();
+  });
+
+  it("names a notify_owner note in the what-changed line, not \"No changes made\" (BOS-806)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Tell me when you're done." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const client = await c.mcp(start.runId);
+    // BOS-806's repro: a real note, which the old changeTrace left out of the line.
+    expect(textOf(await client.callTool({ name: "notify_owner", arguments: { level: "note", title: "Probe note" } }))).toBe("Sent as a note.");
+    await client.close();
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "I told the owner." } });
+    await c.settle();
+    const saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toBe("I told the owner.\n\nDone in this reply: sent the owner a note.");
+    expect(saved.text).not.toContain("No changes made in this reply.");
+  });
+
+  it("counts neither a read nor a failed call as a change, and names an updated or moved ticket by its ref (BOS-806, QA BOS-821)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Look around." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const client = await c.mcp(start.runId);
+    const saidAs = async (words: string) => {
+      await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: words } });
+      await c.settle();
+      return ((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string }).text;
+    };
+    // Read actions of tools that also write, plain reads, and a call that fails: none is a change.
+    await client.callTool({ name: "notes", arguments: { action: "list" } });
+    await client.callTool({ name: "decisions", arguments: { action: "list" } });
+    await client.callTool({ name: "board", arguments: {} });
+    expect((await client.callTool({ name: "set_ticket_state", arguments: { ticketId: randomUUID(), state: "done", summary: "x" } })).isError).toBe(true);
+    expect(await saidAs("Had a look.")).toBe("Had a look.\n\nNo changes made in this reply.");
+    // A real change to a ticket the run made names the ticket by its ref, not just "a ticket".
+    const made = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Tidy the inbox", project: "App" } }));
+    const id = /#\/tickets\/([0-9a-f-]{36})/.exec(made)![1]!;
+    await client.callTool({ name: "update_ticket", arguments: { ticketId: id, title: "Tidy the owner inbox", reason: "Clearer." } });
+    await client.callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary: "Not needed." } });
+    await client.callTool({ name: "notify_owner", arguments: { level: "flag", title: "FYI" } });
+    await client.close();
+    const text = await saidAs(`Done: #/tickets/${id}.`);
+    expect(text).toContain("Done in this reply: created a ticket APP-1; updated a ticket APP-1; moved a ticket APP-1; sent the owner a flag.");
+    expect(text).not.toContain("No changes made");
+  });
+
+  it("has every chat tool either listed as a change in the what-changed line or named as read-only (BOS-806)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Hello." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const client = await c.mcp(start.runId);
+    const names = (await client.listTools()).tools.map((t) => t.name).sort();
+    await client.close();
+    // A new tool cannot be added silently: it is either listed as a change (in TRACED_TOOLS, with a case
+    // in changeTrace) or named as read-only. The two sets must not overlap, so a read can't be counted as a change.
+    const readOnly = names.filter((n) => READ_ONLY_TOOLS.has(n));
+    const changing = names.filter((n) => TRACED_TOOLS.has(n));
+    const missed = names.filter((n) => !READ_ONLY_TOOLS.has(n) && !TRACED_TOOLS.has(n));
+    expect(missed).toEqual([]);
+    expect(names.filter((n) => READ_ONLY_TOOLS.has(n) && TRACED_TOOLS.has(n))).toEqual([]);
+    // Every tool is one or the other, and the sets hold no name the chat no longer has.
+    expect([...readOnly, ...changing].sort()).toEqual(names);
+    expect([...READ_ONLY_TOOLS].filter((n) => !names.includes(n))).toEqual([]);
+    expect([...TRACED_TOOLS].filter((n) => !names.includes(n))).toEqual([]);
   });
 
   it("needs a CEO and a message", async () => {

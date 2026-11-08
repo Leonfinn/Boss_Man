@@ -37,7 +37,10 @@ export type RunningNow = {
   overLimit: boolean;
 };
 
-export type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision";
+export type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket";
+
+/** Approved work held by the carried-work guard (BOS-130): the ticket(s) it waits for, by ref and title. */
+export type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
 
 export type WaitingRow = {
   ticketId: string;
@@ -59,6 +62,8 @@ export type WaitingRow = {
   urgent: boolean;
   /** True when its own last check failed (shown with the failing step). */
   failedCheck: boolean;
+  /** The tickets this one waits for, when its branch carries their unapproved work (waiting_for_other_ticket). */
+  carried?: CarriedHold[];
 };
 
 export type RecentRow = {
@@ -80,6 +85,8 @@ export type MergeQueueView = {
   recent: RecentRow[];
   /** How many approved tickets are waiting to merge (the side menu's badge). */
   waitingCount: number;
+  /** How many items look stuck: running past the limit, or waiting rows flagged stuck (BOS-767). */
+  stuckCount: number;
 };
 
 /** One plain line from a check's last output: the first error-looking line, or the last line. */
@@ -109,6 +116,51 @@ export const PHASE_LABEL: Record<MergePhase, string> = {
   merging: "merging",
   waiting_to_retry: "trying again after the runner restarted",
 };
+
+/** The prefix of the carried-work note `refuseCarried` writes on the held ticket (BOS-130). */
+export const CARRIED_NOTE_PREFIX = "Waiting: its branch also carries";
+
+/**
+ * The carried-work hold's note and the titles it names, kept apart so a title is never parsed back out of
+ * the prose (BOS-819): a title with a quote or an apostrophe used to be cut short there. `titles` is stored
+ * as JSON in the note's own line, after the sentence the owner reads; a note without it is read the old way.
+ */
+export function carriedHold(note: string | null | undefined): { titles: string[]; note: string | null } {
+  if (!note?.startsWith(CARRIED_NOTE_PREFIX)) return { titles: [], note: null };
+  // The hidden line is the last one: the owner's sentence first, then the titles exactly as they are.
+  const cut = note.lastIndexOf("\n");
+  if (cut >= 0) {
+    const rest = note.slice(cut + 1).trim();
+    if (rest.startsWith("[")) {
+      try {
+        const parsed: unknown = JSON.parse(rest);
+        if (Array.isArray(parsed) && parsed.every((t) => typeof t === "string")) return { titles: parsed, note: note.slice(0, cut) };
+      } catch {
+        // Not our marker (a title that happens to look like one): the sentence carries no titles.
+      }
+    }
+  }
+  // An older note, written before the titles were kept apart: quoted titles, best effort.
+  return { titles: [...note.matchAll(/"([^"]+)"/g)].map((m) => m[1]!), note };
+}
+
+/** The ticket titles a carried-work hold names, as carriedHold reads them. */
+export function carriedTitles(note: string | null | undefined): string[] {
+  return carriedHold(note).titles;
+}
+
+/** What the owner reads for a hold on `titles`: the sentence only, never the hidden title list. */
+export function carriedNoteText(note: string | null | undefined): string {
+  return carriedHold(note).note ?? (note ?? "");
+}
+
+/** One plain duration for the owner, e.g. "1 h 10 min". */
+export function waitedText(minutes: number): string {
+  if (minutes < 60) return `${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
 
 /**
  * The queries the screen runs, at module level so a test can EXPLAIN exactly what ships and prove
@@ -200,6 +252,23 @@ export function mergeQueueService(
       .as("latest");
     const rows = await db.select({ ticketId: latest.ticketId, passed: latest.passed, kind: latest.kind, at: latest.at, detail: latest.detail }).from(latest);
     return new Map(rows.map((r) => [r.ticketId, r]));
+  }
+
+  /**
+   * The tickets named by a carried-work hold, found by their titles (the note names only titles), inside
+   * the same company: a branch may carry work from a ticket in another project. A title that matches
+   * nothing keeps its name, with no ref.
+   */
+  async function carriedOf(companyId: string, prefix: string | null, titles: string[]): Promise<CarriedHold[]> {
+    if (!titles.length) return [];
+    const found = await db
+      .select({ id: tickets.id, title: tickets.title, number: tickets.number })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), inArray(tickets.title, titles)));
+    return titles.map((title) => {
+      const hit = found.find((f) => f.title === title);
+      return { title, ticketId: hit?.id ?? null, ref: ticketRef(prefix, hit?.number) };
+    });
   }
 
   /** Recently finished merges and failed checks, newest first. */
@@ -308,7 +377,26 @@ export function mergeQueueService(
           continue;
         }
         if (r.pullRequestUrl && r.pullRequestNote) {
-          waiting.push({ ...base, state: "waiting_host", label: `pull request waiting on the host: ${r.pullRequestNote.slice(0, 120)}`, stuck: overAnHour || failedCheck, next: "Boss Man checks the host again every couple of minutes.", actor: "system", decisionId: null });
+          waiting.push({ ...base, state: "waiting_host", label: `pull request waiting on the host: ${carriedNoteText(r.pullRequestNote).slice(0, 120)}`, stuck: overAnHour || failedCheck, next: "Boss Man checks the host again every couple of minutes.", actor: "system", decisionId: null });
+          continue;
+        }
+        // The carried-work guard held it (BOS-130, BOS-766): its branch also has another ticket's unapproved
+        // work, so it waits for that ticket, not for a check slot. A card here was handled above.
+        const heldTitles = carriedTitles(r.pullRequestNote);
+        if (!r.pullRequestUrl && heldTitles.length) {
+          const carried = await carriedOf(companyId, prefix, heldTitles);
+          const names = carried.map((c) => c.ref ?? `"${c.title}"`).join(", ");
+          const one = carried.length === 1;
+          waiting.push({
+            ...base,
+            state: "waiting_for_other_ticket",
+            label: `waiting for ${names} to merge first`,
+            stuck: overAnHour || failedCheck,
+            next: one ? `${names} has to be reviewed and merged first.` : `${names} have to be reviewed and merged first.`,
+            actor: "system",
+            decisionId: null,
+            carried,
+          });
           continue;
         }
         if (failedCheck) {
@@ -331,6 +419,7 @@ export function mergeQueueService(
         waiting,
         recent: await recent(companyId, prefix, t),
         waitingCount: waiting.length,
+        stuckCount: running.filter((r) => r.overLimit).length + waiting.filter((w) => w.stuck).length,
       };
     },
   };

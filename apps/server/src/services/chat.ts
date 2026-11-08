@@ -5,15 +5,49 @@
 // Boss Man's board tools is refused. Each agent has its own conversation and answers one
 // message batch at a time.
 import path from "node:path";
-import { and, count, desc, eq, gt, inArray, isNull, ne, or } from "drizzle-orm";
-import { agentIdentity } from "@boss-man/shared";
+import { and, count, desc, eq, gt, inArray, isNull } from "drizzle-orm";
+import { agentIdentity, BUILT_IN_RULES } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, companies, decisions, ownerChatMessages, projects, runs, wakes } from "../db/schema.js";
+import { agents, companies, decisions, ownerChatMessages, projects, runs, tickets, wakes } from "../db/schema.js";
 import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
+import { forgetRunTrace, runTrace } from "../mcp.js";
 import { missingPageNote } from "./wiki.js";
 
 export const CHAT_REASON = "owner_chat";
 const HISTORY = 30;
+/** A `#/tickets/<id>` link in a reply, which the run must have created or read (BOS-758). */
+const TICKET_LINK = /#\/tickets\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
+const CHANGE_LIST_MAX = 5;
+
+/**
+ * Under a chat reply, in code from what the run actually changed and the tickets it touched (BOS-758):
+ * its changes, or that there were none, then a ticket link it neither created nor read. The reply's own
+ * words are never changed. `before` is how many changes the run had at its previous reply, so a second
+ * reply lists only what came since.
+ */
+export async function doneInThisReply(db: Db, runId: string, text: string, before = 0): Promise<string | null> {
+  const trace = runTrace(runId);
+  // not state: one reply's own lines, thrown away when it returns.
+  const said = new Set<string>();
+  const changes = trace.changes.slice(before, before + CHANGE_LIST_MAX);
+  const total = trace.changes.length - before;
+  const more = total > changes.length ? ` (and ${total - changes.length} more)` : "";
+  said.add(changes.length ? `Done in this reply: ${changes.join("; ")}${more}.` : "No changes made in this reply.");
+  // A ticket the run made or read needs no line; another company's, an unknown id or a malformed one does.
+  const linked = [...new Set([...text.matchAll(TICKET_LINK)].map((m) => m[1]!))].filter((id) => !trace.tickets.includes(id));
+  const found = linked.length
+    ? (
+        await db
+          .select({ id: tickets.id })
+          .from(tickets)
+          .innerJoin(runs, eq(runs.id, runId))
+          .where(and(eq(tickets.companyId, runs.companyId), inArray(tickets.id, linked)))
+      ).map((t) => t.id)
+    : [];
+  const missing = linked.filter((id) => !found.includes(id));
+  if (missing.length) said.add(`Ticket link check: ${missing.length === 1 ? "this ticket link is" : "these ticket links are"} to a ticket this run didn't create or read: ${missing.map((id) => `#/tickets/${id}`).join(", ")}. Check the id, or read the ticket with tickets. The text was saved as written.`);
+  return said.size ? [...said].join("\n\n") : null;
+}
 
 export class ChatError extends Error {
   constructor(
@@ -29,6 +63,8 @@ type Agent = typeof agents.$inferSelect;
 export function chatService(db: Db, deps: { notify: (agentId: string, input: { reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string }) {
   // shortcut: replies being saved, by run, so the end-of-run check sees them; lost on restart, harmless because a run dies with the restart.
   const saving = new Map<string, Promise<unknown>>();
+  // shortcut: how many changes the run had when it last replied, so the run-end line lists only what came after (BOS-758).
+  const changesAtReply = new Map<string, number>();
   async function agentOf(companyId: string, agentId: string): Promise<Agent> {
     const [a] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, agentId)));
     if (!a) throw new ChatError(404, "No such agent in this company.");
@@ -149,6 +185,9 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
         ...agentIdentity(agent, company?.name ?? "this company").instructions,
         ...(ceo ? await ceoNotesLines(db, companyId, agentId) : []),
         "",
+        // The same built-in rules as a ticket run (BOS-754); here they mostly guard what goes into tickets and pages.
+        ...BUILT_IN_RULES,
+        "",
         `In this chat your tools are Boss Man's: board (projects, objectives and milestones, agents, open tickets), tickets (find any ticket, read it in full with what it produced, and read files from its work in the repo), create_ticket, create_feature, link_tickets (one ticket waits on another), set_milestone, roadmap (the CEO and managers list, add objectives and milestones, and put tickets in them), set_ticket_state and update_ticket (the CEO and managers move, close and reorganise tickets: closing one whose change shipped on another ticket names that ticket), features (the feature requests, by priority), log_feedback (file feedback the owner passes on), wiki (read, write and file the company's pages) skills (the skill library; the CEO can give and take them), model_options, propose_hire, propose_model_change, agent_instructions and update_instructions (the CEO builds the team, sees the valid harnesses, providers, models and funding sources, and reads and revises each agent's instructions; every hire and every model change waits for the owner's approval), rename_agent and set_agent_picture (the CEO renames an agent and sets its picture: display only, logged and undoable by the owner; a rename waits for them when they approve instruction changes), propose_team (when the owner asks for a team or a project needs one: one decision listing every proposed hire, with all four model fields and skills), and nudge (ask a colleague to do something you can't do here: ask them yourself rather than asking the owner to pass it on).${ceo ? " You also have the same tools here as in your ticket runs (BOS-224): server_status (a read-only view of the server: the live commit and when it went live, whether this server leads, your runner's health, wakes waiting or failed to start with their age, recent run starts and failures with reasons, the latest migration, and recent errors with secrets redacted), decisions (list, read and settle the company's decision cards, including agents' permission requests), runs (list and steer the company's running agents), raise_decision and withdraw_decision (ask the owner to decide or do something, and take back your own card), assign_ticket and set_ticket_risk, schedule_check and clear_check, ticket_reply, notify_owner, feedback, review (a ticket's diff and verdict), deploy, engagement and request_engagement, handoff, request_note, list_my_work, sizing_guide and attach_image." : ""} You still can't read or change code, run commands or browse; Claude's own file and shell tools are off here.`,
         ...(ceo
           ? [
@@ -186,16 +225,23 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       // A chat reply has no tool result to come back in, so a link to a page that isn't there is
       // named in a line under the saved reply (BOS-359); the agent's words are left as written.
       const links = await missingPageNote(db, r.companyId, text);
-      const saved = links ? `${text}\n\n${links}` : text;
+      // What the run actually changed is checked against its claims, in code (BOS-758).
+      const done = await doneInThisReply(db, runId, text, changesAtReply.get(runId));
+      const notes = [links, done].filter(Boolean);
+      const saved = notes.length ? `${text}\n\n${notes.join("\n\n")}` : text;
       // Started once and shared: awaiting a query builder twice would insert the reply twice.
       const save = db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "assistant", text: saved, runId }).then(() => {});
       saving.set(runId, save.catch(() => {}));
+      changesAtReply.set(runId, runTrace(runId).changes.length);
       await save;
     },
 
     async onRunEnded(runId: string, error: string | null, interrupted = false) {
+      const allChanges = runTrace(runId).changes;
+      // After any reply save still in flight, so it can still read the trace.
       await saving.get(runId);
       saving.delete(runId);
+      forgetRunTrace(runId);
       const [r] = await db
         .select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, startedAt: runs.startedAt, name: agents.name, duty: agents.duty })
         .from(runs)
@@ -218,17 +264,14 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
         .orderBy(desc(ownerChatMessages.createdAt))
         .limit(1);
       const since = last?.at ?? r.startedAt ?? new Date(0);
-      // What the agent did is kept per agent, not per run, so it is only listed when no other run of theirs overlapped.
-      const [other] = await db
-        .select({ id: runs.id })
-        .from(runs)
-        .where(and(eq(runs.agentId, agentId), ne(runs.id, runId), or(isNull(runs.endedAt), gt(runs.endedAt, since))))
-        .limit(1);
-      const done = other ? [] : await db.select({ summary: activity.summary }).from(activity).where(and(eq(activity.agentId, agentId), gt(activity.at, since))).orderBy(activity.at);
-      const [asked] = other ? [{ n: 0 }] : await db.select({ n: count() }).from(decisions).where(and(eq(decisions.raisedByAgentId, agentId), gt(decisions.createdAt, since)));
-      // With a reply and nothing known to be done after it, the reply is the last word.
-      if (last && (other || (!done.length && !asked!.n))) return;
-      const parts = [...(asked!.n ? [`${asked!.n} decision${asked!.n === 1 ? "" : "s"} sent to Decisions`] : []), ...done.slice(0, 5).map((a) => a.summary)];
+      // What this run did after its last reply, from its own record (BOS-758): kept per run, so another
+      // run of the same agent can't be mixed in. A run without a reply lists everything it did.
+      const done = last ? allChanges.slice(changesAtReply.get(runId) ?? allChanges.length) : allChanges;
+      changesAtReply.delete(runId);
+      const [asked] = await db.select({ n: count() }).from(decisions).where(and(eq(decisions.raisedByAgentId, agentId), gt(decisions.createdAt, since)));
+      // With a reply and nothing done after it, the reply is the last word.
+      if (last && !done.length && !asked!.n) return;
+      const parts = [...(asked!.n ? [`${asked!.n} decision${asked!.n === 1 ? "" : "s"} sent to Decisions`] : []), ...done.slice(0, 5)];
       const more = done.length > 5 ? ` (and ${done.length - 5} more)` : "";
       const head = `${r.name} finished${last ? " after its last message" : " without a reply"}.`;
       const text = parts.length ? `${head} ${last ? "Since that message" : "In this run"}: ${parts.join("; ")}${more}.` : head;

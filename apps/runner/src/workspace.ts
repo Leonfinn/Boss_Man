@@ -26,7 +26,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
+import { checkMigrations, journalAt, journalProblems, rebaseMigrations } from "./migrations.js";
 import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
 const run = promisify(execFile);
@@ -965,6 +965,12 @@ export class Workspaces {
     }
     if (!this.jobFence || this.jobFence.level === "unavailable") return { env };
     const readOnly = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
+    // BOS-805: the job waits in the shared check line, so it may write the queue folder and read the gate folder (slot count).
+    if (this.coordDir) {
+      const grant = checkQueueGrant(this.coordDir);
+      readWrite.push(grant.readWrite);
+      readOnly.push(grant.readOnly);
+    }
     const rules = fenceProfile({ cwd: dir, home, tmp, repo: repoGrant(repo, dir), readOnly, readWrite });
     return { env, wrap: (bin, args) => fencedCommand(rules, bin, args) };
   }
@@ -992,13 +998,19 @@ export class Workspaces {
       // a job on a runner that can't fence falls back to the shared job store, never this.pnpmStore (the gate's), so it
       // doesn't start a store in HOME either (BOS-568 review).
       const storeEnv = job ? (job.fence ? job.fence.env : this.jobFence?.pnpmStore ? { npm_config_store_dir: this.jobFence.pnpmStore } : {}) : this.pnpmStore ? { npm_config_store_dir: this.pnpmStore } : {};
-      let env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? { BOSSMAN_CHECK_NO_LOCK: "1" } : this.coordDir ? checkQueueEnv(this.coordDir, this.baseEnv.BOSSMAN_CHECK_SLOT) : {}), ...storeEnv } as NodeJS.ProcessEnv;
+      // BOS-805: a job also takes a runner slot from the same coord dir (the server's slot orders jobs, the runner's slots are the
+      // machine's real limit, shared with hand-run checks and the vitest guard). Only the lock, the slot count (proof) and the
+      // runner's slot script are passed on: the job keeps its own result store ("off" in its fence env).
+      const queueEnv = this.coordDir ? checkQueueEnv(this.coordDir, this.baseEnv.BOSSMAN_CHECK_SLOT) : null;
+      const jobTakesSlot = !!job && !!queueEnv?.BOSSMAN_CHECK_SLOT && existsSync(path.join(dir, "scripts", "check-all.sh"));
+      const jobQueueEnv = jobTakesSlot && queueEnv ? { CHECK_ALL_LOCK: queueEnv.CHECK_ALL_LOCK, CHECK_ALL_PAIR_PROOF: queueEnv.CHECK_ALL_PAIR_PROOF, BOSSMAN_CHECK_SLOT: queueEnv.BOSSMAN_CHECK_SLOT } : { BOSSMAN_CHECK_NO_LOCK: "1" };
+      let env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? jobQueueEnv : queueEnv ?? {}), ...storeEnv } as NodeJS.ProcessEnv;
       // BOS-614: a tree that takes part in the check line (it has scripts/check-all.sh) waits for its slot through the runner's
       // own check-slot.sh, not through the branch's copy of the queue rules: a branch based on older main brought older rules,
       // and old and new waiters jammed with both slots free. Inside, the branch's script gets a private lock and goes straight on.
       // The slot is then held for the whole command (light steps too); that costs a minute, a jammed line cost hours.
-      // Never for a job: its env carries no BOSSMAN_CHECK_SLOT, and the server's slot is already held.
-      const inner = !job && env.BOSSMAN_CHECK_SLOT && existsSync(path.join(dir, "scripts", "check-all.sh")) ? 'bash "$BOSSMAN_CHECK_SLOT" sh -c "$0"' : 'sh -c "$0"';
+      // A job does the same (BOS-805) unless it has no slot script or coord dir: then it runs with BOSSMAN_CHECK_NO_LOCK as before.
+      const inner = (job ? jobTakesSlot : env.BOSSMAN_CHECK_SLOT && existsSync(path.join(dir, "scripts", "check-all.sh"))) ?'bash "$BOSSMAN_CHECK_SLOT" sh -c "$0"' : 'sh -c "$0"';
       // Own process group, so a timeout can take down pnpm, tsc, vitest and their workers, not just the shell.
       // The check starts with default HUP/INT/TERM handling: a server started with those ignored would pass that on, and a shell can't undo it
       // (so check-all's own signal trap and its tests never fire). env --default-signal needs GNU coreutils; without it the command runs as before.
@@ -1148,7 +1160,7 @@ export class Workspaces {
         const who = this.authorEnv();
         const commit = await this.git(["commit-tree", tree, "-p", targetSha, "-p", branchSha, "-m", message], { cwd: repo, env: who });
         const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
-        if (pushed.code === 0) return { status: "merged", commit };
+        if (pushed.code === 0) return { status: "merged", commit, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
         if (attempt === 1) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
       }
       throw new Error("unreachable");
@@ -1181,7 +1193,7 @@ export class Workspaces {
       if (phase.phase === "prepare") {
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         await this.git(["update-ref", keep, commit], { cwd: repo });
-        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha };
+        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
       }
       // The target moved to something whose merge differs from what was checked: check again.
       if (tried.tree !== phase.tree) return { status: "main_moved" };
@@ -1197,7 +1209,7 @@ export class Workspaces {
         return { status: "main_moved" };
       }
       await this.git(["update-ref", "-d", keep], { cwd: repo }).catch(() => undefined);
-      return { status: "merged", commit: toPush, checked: { sha: phase.commit, tree: tried.tree, ms: 0 } };
+      return { status: "merged", commit: toPush, checked: { sha: phase.commit, tree: tried.tree, ms: 0 }, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
     });
   }
 
@@ -1252,7 +1264,7 @@ export class Workspaces {
         const same = checked.targetSha === tried.targetSha && checked.branchSha === tried.branchSha;
         const toPush = same ? checked.commit : commit;
         const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
-        if (pushed.code === 0) return { status: "merged", commit: toPush, checked: { sha: checked.commit, tree: tried.tree, ms: checkedMs } };
+        if (pushed.code === 0) return { status: "merged", commit: toPush, checked: { sha: checked.commit, tree: tried.tree, ms: checkedMs }, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
         // Rejected: either the target moved again, or the push is refused for good (protected branch, bad token,
         // hook). The next round tells them apart: if the target sha is unchanged, it throws git's message.
         refused = { targetSha: tried.targetSha, stderr: pushed.stderr };
@@ -1298,13 +1310,30 @@ export class Workspaces {
     const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
     if (ancestor.code === 0) return { status: "already_merged" as const, commit: targetSha };
     const tried = await this.gitCode(["merge-tree", "--write-tree", "--name-only", "--messages", targetSha, branchSha], { cwd: repo });
+    // When the only trouble is migration bookkeeping, the gate renumbers the branch's migration itself (BOS-690, DR-037).
+    // Anything it can't do safely comes back "refused" and the merge result is what it was before.
+    const rebuild = async () => {
+      const mb = await this.gitCode(["merge-base", targetSha, branchSha], { cwd: repo });
+      if (mb.code !== 0 || !mb.stdout) return null;
+      const r = await rebaseMigrations((args, env) => this.gitCode(args, { cwd: repo, env }), { base: mb.stdout, branch: branchSha, main: targetSha });
+      return r.status === "rebuilt" ? r : null;
+    };
     if (tried.code === 1) {
       const lines = tried.stdout.split("\n");
       const files = lines.slice(1, lines.indexOf("") === -1 ? undefined : lines.indexOf("")).filter(Boolean);
+      const rebuilt = await rebuild();
+      if (rebuilt) return { status: "clean" as const, tree: rebuilt.tree, targetSha, branchSha, renamed: rebuilt.renamed };
       return { status: "conflicts" as const, files };
     }
     if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
-    return { status: "clean" as const, tree: tried.stdout.split("\n")[0]!, targetSha, branchSha };
+    const tree = tried.stdout.split("\n")[0]!;
+    // A clean merge can still leave the journal wrong (an old "when"); the rebuild lifts it.
+    const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
+    if (journalProblems(await journalAt(gitIn, targetSha), await journalAt(gitIn, tree), Date.now(), target).length) {
+      const rebuilt = await rebuild();
+      if (rebuilt) return { status: "clean" as const, tree: rebuilt.tree, targetSha, branchSha, renamed: rebuilt.renamed };
+    }
+    return { status: "clean" as const, tree, targetSha, branchSha, renamed: undefined };
   }
 
   /**
