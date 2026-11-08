@@ -297,6 +297,7 @@ export async function buildApp(opts: AppOptions) {
   const releaseLog = releaseLogService(db, {
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     notify: (agentId, input) => scheduler.notify(agentId, input),
+    notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.

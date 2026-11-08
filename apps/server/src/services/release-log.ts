@@ -7,6 +7,7 @@ import { and, asc, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, decisions, projects, settings, tickets, wakes } from "../db/schema.js";
 import { ownerSetupKey, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
+import type { NotifyInput } from "./notifications.js";
 
 /** The Release Manager's wake reason. */
 export const RELEASE_REASON = "live release";
@@ -49,6 +50,8 @@ export const releaseLogService = (
     createTicket: (projectId: string, input: { title: string; body: string; assigneeAgentId: string; state: "ready"; noCode: true; risk: "trivial" }) => Promise<{ id: string; title: string }>;
     /** Queues the wake on that ticket (scheduler.notify). */
     notify: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<{ status?: string; statusReason?: string | null } & Record<string, unknown>>;
+    /** Tells the owner when a setup card Boss Man closes itself leaves its notice (BOS-740). */
+    notifyOwner?: (n: NotifyInput) => Promise<unknown>;
     log?: (msg: string) => void;
   },
 ) => {
@@ -188,7 +191,7 @@ export const releaseLogService = (
       // merge at all, so a rollback went back past it). A ticket whose own merge commit Boss Man can't
       // place is left alone rather than guessed at.
       if (at >= 0 && (steppedBack || (liveAt >= 0 && at > liveAt))) {
-        if (t.ownerSetupDecisionId && (await withdrawOwnerSetup(db, t.id, `Switched back: "${t.title}" isn't running any more. You'll get this card again if it goes live once more.`))) withdrew++;
+        if (t.ownerSetupDecisionId && (await withdrawOwnerSetup(db, t.id, `Switched back: "${t.title}" isn't running any more. You'll get this card again if it goes live once more.`, deps.notifyOwner ? { notify: deps.notifyOwner } : undefined))) withdrew++;
         continue;
       }
       if (!t.ownerSetupDecisionId) {
