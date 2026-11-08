@@ -1,5 +1,5 @@
 {
-  "id": "52b2855c-07ab-4970-af2e-1a6195423d79",
+  "id": "a7b53337-9629-4210-99c5-3198778804af",
   "prevId": "e9efed9a-8629-4803-9b90-dfa609035613",
   "version": "7",
   "dialect": "postgresql",
@@ -3912,13 +3912,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "allow_private": {
-          "name": "allow_private",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5324,6 +5317,24 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_decision_id": {
+          "name": "source_decision_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -5339,6 +5350,19 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "policy_rules_source_decision_id_decisions_id_fk": {
+          "name": "policy_rules_source_decision_id_decisions_id_fk",
+          "tableFrom": "policy_rules",
+          "tableTo": "decisions",
+          "columnsFrom": [
+            "source_decision_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

@@ -39,3 +39,21 @@ docker run --rm --cap-add NET_ADMIN --net container:boss-man-runner-<slug> -e NE
 - Tool servers from an imported company package are checked at import (flagged in the preview and refused unless the owner ticks "allow private addresses"); once allowed, the tick is kept per server so the guard doesn't drop it later (BOS-708).
 - Published host ports reached through a public address of the host are not blocked (only private ranges are).
 - Not covered: a runner using `network_mode: host` (the launcher refuses it).
+
+## When a runner is removed because its guard failed (BOS-467)
+
+"No guard, no runner": if the guard doesn't load its rules (for example 20 s is not enough while a deploy has the host busy), the launcher removes that runner. Before BOS-467 it stayed gone until the owner started it by hand.
+
+- **Self-heal.** A company with a `runner.token` file but no runner container is one the launcher removed and the owner did not stop (Stop deletes the token). Every 5 s the launcher makes it again, waiting 10 s, 20 s, 40 s … up to 5 min between failed tries. Look for `runner made again after it was removed` and `could not make runner again; will retry` in the launcher log.
+- **Never retried:** a company whose guard exits with code 3 in `enforce` mode (this host can't load the rules; retrying cannot help), and any runner the owner stopped.
+- **Telling people.** The server's runner watch (`services/runner-watch.ts`) pages the owner and raises a card in that company when a runner is offline for 3 minutes, and withdraws both when it reconnects. After a server restart it says once whether every runner came back within 5 minutes.
+- **Watch details (BOS-497).** A runner registered by hand on a server that also has a launcher still pages: its company is counted as wanted when the launcher was never given it, or when its runner was seen connected while the launcher didn't run it (kept as a `runner-hand:<company>` setting; Stop through the launcher removes it). An offline runner the launcher doesn't want and that was never seen running by hand is an old stop: its last-seen time is cleared, so it stays quiet even when the launcher can't be reached later. After an update hold lifts, runners get the usual 3 minutes from the lift, and the 5-minute deploy check also counts from the lift. The owner is paged once per outage, even across a server restart (a `runner-offline-paged:<runner>` setting, removed on reconnect); the company's card is tried again every pass until it is raised. At server start the launcher's runner and token for a company that no longer exists are removed, so its self-heal stops retrying them.
+- **Roll back:** revert the commits for BOS-467; the launcher goes back to remove-and-stay-down. No data or migration is involved.
+
+### Per host
+
+The mechanism is the same on every host: the launcher, Docker and the token files. Only whether the guard exists differs.
+
+- **TrueNAS (Docker/Apps), plain Linux, Proxmox VM:** the guard loads (nftables in the kernel), so self-heal applies.
+- **Proxmox LXC:** usually has no nftables inside the container. In `auto` mode the guard is "unavailable", the runner starts unguarded and is never removed for a guard failure, so there is nothing to heal. A runner that is offline there is a stopped container: use Settings → Server and runner → that company's runner → Start / Reconnect, or have the container set to restart on boot (`docker update --restart unless-stopped <container>`, name from `docker ps`).
+- After a host or VM reboot, runners come back with Docker's restart policy and the guard is added again by the launcher within 5 s.

@@ -142,6 +142,22 @@ case "$probe" in
 esac
 echo "Network guard: a connection opened before it was up is cut off."
 
+# Self-heal (BOS-467): a runner that disappears while its token file is still there (what a guard failure leaves
+# behind) is made again by the launcher, with the guard, without anyone pressing a button.
+docker rm -f "$runner" >/dev/null
+for _ in $(seq 80); do
+  if docker exec "$runner" true 2>/dev/null && check_guard 2>/dev/null; then healed=1; break; fi
+  sleep 3
+done
+[[ "${healed:-0}" == 1 ]] || { echo "The launcher didn't bring the removed runner back" >&2; docker compose logs launcher 2>&1 | tail -30; exit 1; }
+for _ in $(seq 30); do
+  status="$(curl -fs -b "$jar" "$base/api/companies/$id/runner")"
+  grep -q '"connected":true' <<<"$status" && break
+  sleep 2
+done
+grep -q '"connected":true' <<<"$status" || { echo "The recreated runner never connected: $status" >&2; exit 1; }
+echo "Self-heal: removed runner recreated, guarded and connected."
+
 # The launcher publishes no ports.
 [[ -z "$(docker compose port launcher 3105 2>/dev/null || true)" ]]
 

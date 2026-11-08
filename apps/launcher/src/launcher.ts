@@ -1,7 +1,7 @@
 // The launcher's API (R55): five calls, each about one company's runner, and nothing else.
 // The server holds the key; Docker is reached only from here, with a spec the launcher builds.
 import { timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
@@ -75,6 +75,10 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
   }
 
   const mode = cfg.guardMode ?? "auto";
+  /** Companies whose runner the launcher removed (guard failure) and will make again: a token file without a container. Backoff per company. */
+  const healing = new Map<string, { fails: number; nextAt: number }>();
+  /** Companies the guard can't ever run for on this host (enforce mode, exit 3): retrying won't help. */
+  const noRetry = new Set<string>();
   /**
    * The guard's real state, read from Docker each time (a launcher restart or a guard that died
    * later can't leave a stale answer). "unavailable": auto mode and the guard exited with
@@ -121,6 +125,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
         console.error(JSON.stringify({ at: new Date().toISOString(), msg: "network guard unavailable on this host; the runner is not guarded", slug }));
         return;
       }
+      if (err instanceof GuardUnavailable && err.hostCannot) noRetry.add(slug);
       if (err instanceof GuardUnavailable) throw new LauncherError(502, `${err.message}${err.hostCannot ? " This host can't load firewall rules; set BOSSMAN_NETGUARD=auto to run runners without the guard, or off to turn it off." : ""}`);
       throw err;
     }
@@ -169,6 +174,8 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       chmodSync(tmp, 0o600);
       renameSync(tmp, tokenFile(cfg, slug));
       if (allow) writeAllow(slug, parseAllow(allow), trusted);
+      healing.delete(slug);
+      noRetry.delete(slug);
       const id = await create(slug);
       return { slug, id };
     }),
@@ -199,6 +206,8 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       const g = await guardOf(slug);
       if (g) await docker.remove(g.Id);
       if (c) await removeSettled(docker, c.Id);
+      healing.delete(slug);
+      noRetry.delete(slug);
       rmSync(tokenFile(cfg, slug), { force: true });
       return { slug, removed: !!c };
     }),
@@ -214,6 +223,24 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
           return { slug, state: c.State, status: c.Status, image: c.Image, current: !!current && c.ImageID === current, guard: await guardStatus(slug, info?.State.StartedAt) };
         }),
       );
+    },
+
+    /**
+     * The companies this launcher means to keep running: a runner container exists, or a token file
+     * is left (the self-heal will make it again). Stop deletes the token and the container, so a
+     * stopped, removed or never-started company is not listed. The server's runner watch uses this
+     * to tell a runner that should be back from one that was set aside on purpose.
+     */
+    async wanted(): Promise<string[]> {
+      const slugs = new Set((await this.list()).map((r) => r.slug));
+      let dirs: string[] = [];
+      try {
+        dirs = readdirSync(path.join(cfg.dataRoot, "companies"));
+      } catch {
+        /* no company directory yet: nothing is wanted beyond what runs */
+      }
+      for (const d of dirs) if (SLUG.test(d) && existsSync(tokenFile(cfg, d))) slugs.add(d);
+      return [...slugs].sort();
     },
 
     /**
@@ -248,6 +275,44 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       }
       if (errors.length) throw new Error(errors.join("; "));
       return fixed;
+    },
+
+    /**
+     * Self-heal: a company with a token file but no runner container is one the launcher removed
+     * (its guard failed, "no guard, no runner") and the owner didn't stop (Stop deletes the token).
+     * Makes it again, with a wait that doubles from 10 s up to 5 min between failed tries. Skips a
+     * host that can't load the guard rules at all. Runs on the same timer as reconcileGuards.
+     * Returns the companies it brought back; throws with each failure.
+     */
+    async healMissing(now = Date.now()) {
+      const healed: string[] = [];
+      const errors: string[] = [];
+      let slugs: string[];
+      try {
+        slugs = readdirSync(path.join(cfg.dataRoot, "companies"));
+      } catch {
+        return healed;
+      }
+      const present = new Set((await this.list()).map((r) => r.slug));
+      for (const slug of slugs) {
+        if (!SLUG.test(slug) || present.has(slug) || noRetry.has(slug) || !existsSync(tokenFile(cfg, slug))) continue;
+        if (now < (healing.get(slug)?.nextAt ?? 0)) continue;
+        await locked(slug, async () => {
+          // Looked at again inside the lock: a put, remove or restart may have just run.
+          if (!existsSync(tokenFile(cfg, slug)) || (await ours(slug))) return;
+          try {
+            await create(slug);
+            healing.delete(slug);
+            healed.push(slug);
+          } catch (err) {
+            const fails = (healing.get(slug)?.fails ?? 0) + 1;
+            healing.set(slug, { fails, nextAt: now + Math.min(10_000 * 2 ** (fails - 1), 300_000) });
+            throw err;
+          }
+        }).catch((err: unknown) => errors.push(`${slug}: ${String((err as Error)?.message ?? err)}`));
+      }
+      if (errors.length) throw new Error(errors.join("; "));
+      return healed;
     },
 
     /** One company's runner again on the current image, with its own token: how a drain swaps runners one by one. // leader-only (the server decides when) */
@@ -335,6 +400,10 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
       if (url.pathname === "/runners") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, await api.list());
+      }
+      if (url.pathname === "/wanted") {
+        if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
+        return send(200, await api.wanted());
       }
       const m = /^\/runners\/([^/]+)(\/restart|\/recreate|\/allow)?$/.exec(url.pathname);
       if (!m) throw new LauncherError(404, "Unknown call.");

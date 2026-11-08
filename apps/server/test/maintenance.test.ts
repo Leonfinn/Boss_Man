@@ -231,6 +231,30 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await c.open()).toHaveLength(0);
   });
 
+  it("pages once when no runner has been swapped for twice the reconnect time, and says plainly the wait is for running work (BOS-497)", async () => {
+    const c = (ctx = await setup({ reconnectMs: 5 * MIN }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 60 });
+    await c.maintenance.step();
+    c.advance(9 * MIN);
+    await c.maintenance.step();
+    expect((await c.titles()).filter((t) => t.includes("Runner update is"))).toHaveLength(0);
+    c.advance(2 * MIN);
+    await c.maintenance.step();
+    await c.maintenance.step();
+    const all = await c.db.select().from(notifications);
+    // The only company waited on has a work run going: that wait is on purpose, so it is not called stuck.
+    expect(all.filter((n) => n.title === "Runner update is stuck")).toHaveLength(0);
+    const waiting = all.filter((n) => n.title === "Runner update is waiting for running work");
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]).toMatchObject({ level: "page" });
+    expect(waiting[0]!.body).toContain("app-co still has work runs going");
+    expect(waiting[0]!.body).toContain("on purpose");
+    expect(await getHold(c.db)).not.toBeNull(); // the hold stays; the owner decides
+  });
+
   it("cancel lifts the hold and lets queued wakes run", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
@@ -278,9 +302,13 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     c.fake.broken.add("broken-co");
     await c.maintenance.start();
     await c.maintenance.step();
-    expect(await getHold(c.db)).not.toBeNull(); // Silent Co has been given time to dial in
-    c.advance(5_000);
+    expect(await getHold(c.db)).not.toBeNull(); // Silent Co has been given time to dial in; Broken Co is tried again, not given up on
+    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
+    c.advance(31_000);
     await c.maintenance.step();
+    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
+    c.advance(31_000);
+    await c.maintenance.step(); // third failed try: now it counts as failed
     expect(await getHold(c.db)).toBeNull();
     const page = (await c.db.select().from(notifications)).find((n) => n.title === "Runner update finished with problems");
     expect(page).toMatchObject({ level: "page" });
@@ -294,6 +322,10 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     c.fake.broken.add("app-co");
     await c.maintenance.start();
     await c.maintenance.step();
+    c.advance(31_000);
+    await c.maintenance.step();
+    c.advance(31_000);
+    await c.maintenance.step(); // third failed try: now it counts as failed
     expect(await getHold(c.db)).toBeNull();
     expect(await c.maint()).toMatchObject({ on: false, last: { ok: false }, healthy: false });
     c.fake.runnersBySlug.get("app-co")!.current = true; // it came back by itself (compose recreated it)
