@@ -151,6 +151,7 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
             companyId: r.companyId,
             question: `Your company's runner is offline (${minutes}+ minutes), so your agents cannot start work. Boss Man has told the owner. The owner's fix: ${steps(r.name)} This card clears by itself when the runner reconnects.`,
             from: "ceo",
+            kind: "alert",
             dedupeKey: runnerOfflineKey(r.id),
           });
           carded.add(r.id);

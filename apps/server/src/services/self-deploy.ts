@@ -16,6 +16,7 @@ import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
+import { imageContains, mergeCommitOrder, runnerImageCommit } from "./runner-image.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
@@ -553,7 +554,44 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   const RUNNER_DUE = "self_deploy_runner_due";
   const LAST_SERVER = "self_deploy_last_server";
   /** `offer`: the runner needs updating once the window is over; without it the hold only blocks (a row from before BOS-401 is an offer). */
-  type RunnerDue = { commit: string; fromCommit: string; after: string; offer?: boolean };
+  type RunnerDue = { commit: string; fromCommit: string; after: string; offer?: boolean; /** The newest commit that carried a runner change (BOS-764): the offer is dropped when the live runner image already has it. */ needs?: string };
+
+  /** Whether the live runner image was built from `commit` or a merge after it (BOS-764). False when the image's commit isn't recorded. */
+  async function imageHas(commit: string | null | undefined) {
+    const companyId = await homeCompany();
+    if (!companyId || !commit) return false;
+    const image = await runnerImageCommit(db, companyId);
+    if (!image) return false;
+    return imageContains(image, commit, await mergeCommitOrder(db, companyId));
+  }
+
+  /**
+   * Closes every open "Build and update runners" card the live runner image already has the change for
+   * (BOS-764), e.g. after the owner rebuilt by hand or from another card: asking again would be a click
+   * that changes nothing. The card is withdrawn with a note saying so, and the held offer is dropped when the
+   * image has the commit that carried the runner change.
+   */
+  async function closeBuiltRunnerCards() {
+    const open = await openFor("runner");
+    const due = await getSetting<RunnerDue>(RUNNER_DUE);
+    if (!open.length && !due?.needs) return;
+    const companyId = await homeCompany();
+    const image = companyId ? await runnerImageCommit(db, companyId) : null;
+    if (!companyId || !image) return;
+    const order = await mergeCommitOrder(db, companyId);
+    for (const o of open) {
+      const c = o.context as SelfDeployContext;
+      // A rebuild the owner asked for with the button (its key carries a random suffix) is never closed under them.
+      if (/^self-deploy:runner:[0-9a-f]+:[0-9a-f]{6}$/.test(o.dedupeKey ?? "")) continue;
+      if (!c.commit || !imageContains(image, c.commit, order)) continue;
+      const withdrawal = { by: "system" as const, note: `The runners were already rebuilt from commit ${short(image)}, which has this change, so there is nothing left to build. You don't need to do anything.`, at: new Date().toISOString() };
+      await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(o.context as object), withdrawn: withdrawal } }).where(and(eq(decisions.id, o.id), eq(decisions.status, "open")));
+      await markDecisionNotificationRead(db, o.id);
+      await record(db, { companyId: o.companyId, kind: "decision_withdrawn", summary: withdrawal.note, at: new Date() });
+      deps.log?.(`self-deploy: runner update card for ${short(c.commit)} closed; the runner image is built from ${short(image)}`);
+    }
+    if (due?.needs && imageContains(image, due.needs, order)) await putSetting(RUNNER_DUE, null);
+  }
   const DEFAULT_SOAK_SECONDS = 900;
   const TRIAL_MARGIN_SECONDS = 120;
   type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };
@@ -594,6 +632,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (!due || Date.now() < Date.parse(due.after)) return;
     await putSetting(RUNNER_DUE, null);
     if (due.offer === false) return;
+    // The image was rebuilt from a commit that already has the runner change (BOS-764): nothing to ask.
+    if (await imageHas(due.needs ?? due.commit)) {
+      deps.log?.(`self-deploy: runner update for ${short(due.commit)} not offered; the live runner image already has the change`);
+      return;
+    }
     const last = await getSetting<LastServer>(LAST_SERVER);
     if (last?.result === "deployed" && last.to === due.commit && a?.deployed === due.commit) await raise("runner", due.commit, due.fromCommit, a);
     else deps.log?.(`self-deploy: runner update for ${short(due.commit)} dropped; the server is not on it after its trial`);
@@ -649,7 +692,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const wants = s.runner_changed === "true" || s.runner_changed === "false" ? s.runner_changed === "true" : ctx?.type === "self_deploy" && !!ctx.runnerChanged;
       // A newer server update inside the window must not drop the older commit's runner change: keep its range and its offer.
       const held = old && old.offer !== false;
-      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held } satisfies RunnerDue);
+      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held, ...(wants ? { needs: s.to_commit } : old?.needs ? { needs: old.needs } : {}) } satisfies RunnerDue);
     }
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
@@ -783,6 +826,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (s && s.result !== "running") await finished(s, a);
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
       if (a) await this.clearDoneOwnerTodos(a, s);
+      // Close any runner card, and drop any held offer, that the live image already has the change for (BOS-764).
+      await closeBuiltRunnerCards().catch((err) => deps.log?.(`self-deploy: closing built runner cards failed: ${(err as Error).message}`));
       if (s?.result !== "running") await releaseRunnerDue(a);
       // The database/proxy step is its own card, never part of a server update (BOS-487).
       await clearServiceCards(a);
