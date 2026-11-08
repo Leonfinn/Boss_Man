@@ -70,7 +70,7 @@ describe("fence profile", () => {
 
 describe("the runner's fence setting", () => {
   it("puts agent homes in the data volume and uses the workspaces volume's pnpm store", () => {
-    expect(runnerFence("full", "/data", "/ws")).toEqual({ level: "full", agentsRoot: "/data/agents", pnpmStore: "/ws/.pnpm-store" });
+    expect(runnerFence("full", "/data", "/ws")).toEqual({ level: "full", agentsRoot: "/data/agents", runTmpRoot: "/data/run-tmp", pnpmStore: "/ws/.pnpm-store" });
   });
 
   // BOS-568: the store can be moved with PNPM_STORE_DIR, e.g. to a folder on a bigger volume; never a relative path.

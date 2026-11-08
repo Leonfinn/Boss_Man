@@ -1581,12 +1581,22 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
       : sb.level === "unavailable"
         ? "This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). Agents run as before."
         : `This host fences agents ${sb.level === "full" ? "fully" : "partly"}${sb.missing.length ? ` (not covered: ${sb.missing.join(", ")})` : ""}.${sb.probe === false ? " Its self-test did not see a write outside the agent's folders refused." : ""} Last checked ${status.data?.sandboxCheckedAt ? when(status.data.sandboxCheckedAt) : "never"}.`;
+  // What the fence means for runs reading each other (BOS-555): said plainly, so Off never looks safe.
+  const isolationLine =
+    mode === "off" || sb?.level === "unavailable"
+      ? "Agent runs are not isolated: one run can read another run's memory and start-up keys."
+      : !sb
+        ? null
+        : sb.level === "partial"
+          ? "Agent runs are isolated from each other, except that one run can send signals to another (this host's kernel is older than 6.12)."
+          : "Agent runs are isolated from each other.";
   return (
     <Section id="fence-h" title="Agent fence">
       <p className="muted" style={{ fontSize: 14 }}>
         The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
       </p>
       <p style={{ fontSize: 14 }}>{hostLine}</p>
+      {isolationLine && <p style={{ fontSize: 14 }}>{isolationLine}</p>}
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="fence-mode">Fence</label>
         <select
@@ -1602,7 +1612,9 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
           }
         >
           <option value="off">Off: agents run as before</option>
-          <option value="watch">Watch: agents run inside the fence and every refusal is logged</option>
+          <option value="watch" disabled={sb?.level === "unavailable" && mode !== "watch"}>
+            {sb?.level === "unavailable" ? "Watch: not available, this host can't fence agents" : "Watch: agents run inside the fence and every refusal is logged"}
+          </option>
           <option value="enforce" disabled>
             Enforce: not available yet (waiting for a security fix, BOS-323)
           </option>
@@ -1611,7 +1623,7 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
       <details style={{ marginTop: 10 }}>
         <summary>Setting up a host</summary>
         <ul style={{ fontSize: 14 }}>
-          <li>The fence needs a Linux kernel with Landlock (5.13 or newer, and 6.x for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
+          <li>The fence needs a Linux kernel with Landlock (5.19 or newer, and 6.12 or newer for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
           <li>The runner tests the fence each time it starts. If this page says "can't fence", update the host's kernel, or check that the container's security profile doesn't block Landlock, then restart the runner.</li>
           <li>A fenced agent has its own temporary folder for each run and can't write to the shared /tmp. A skill that hard-codes /tmp needs to use the folder in $TMPDIR instead.</li>
           <li>Start with Watch on one company, look at the permission log after a few days, and fix what it shows before anything stricter.</li>
