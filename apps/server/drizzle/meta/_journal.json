@@ -745,10 +745,10 @@
       "breakpoints": true
     },
     {
-      "idx": 123,
+      "idx": 125,
       "version": "7",
-      "when": 1794158059952,
-      "tag": "0123_watchdog_on_by_default",
+      "when": 1794172800000,
+      "tag": "0125_watchdog_on_by_default",
       "breakpoints": true
     }
   ]
