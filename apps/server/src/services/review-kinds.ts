@@ -92,7 +92,7 @@ export function evaluate(rows: ReviewRow[]): "waiting" | "failed" | "passed" {
 export async function passedReviewTickets(db: Db, ticketIds: string[]): Promise<Set<string>> {
   if (!ticketIds.length) return new Set();
   const rows = await db.select().from(reviewRequests).where(inArray(reviewRequests.ticketId, ticketIds));
-  const newest = new Map<string, ReviewRow[]>();
+  const newest = new Map<string, ReviewRow[]>(); // not state: local to passedReviewTickets
   for (const r of rows) {
     const cur = newest.get(r.ticketId);
     if (!cur || cur[0]!.round < r.round) newest.set(r.ticketId, [r]);

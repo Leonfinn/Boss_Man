@@ -445,8 +445,8 @@ const AFTER_LABEL = /^(?:on|in|at|to|for|from|under|next|below|above|beside|near
  * with a bracketed note ("Update runners (finish runs first)") also matches without it, as cards name it that way.
  */
 const CONTROLS = (() => {
-  const exact = new Set<string>();
-  const prefix = new Set<string>();
+  const exact = new Set<string>(); // not state: local to the CONTROLS lookup-table builder
+  const prefix = new Set<string>(); // not state: local to the CONTROLS lookup-table builder
   for (const labels of Object.values(OWNER_CONTROLS) as ReadonlyArray<readonly string[]>) {
     for (const l of labels) {
       if (l.endsWith("…")) { prefix.add(norm(l)); continue; }
@@ -540,7 +540,7 @@ export function hostTokensIn(steps: readonly string[]): string[] {
  * a value that would break a command block: a newline or a backtick); those tokens are left as they are, so the lint
  * and the card can't go out with a hole in it. */
 export function fillHostTokens(steps: readonly string[], values: Readonly<Record<string, string>>): { steps: string[]; missing: string[] } {
-  const missing = new Set<string>();
+  const missing = new Set<string>(); // not state: local to fillHostTokens
   const filled = steps.map((s) =>
     s.replace(HOST_TOKEN, (token, key: string) => {
       const v = Object.hasOwn(values, key) ? values[key]! : undefined;
