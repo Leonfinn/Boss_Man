@@ -123,13 +123,11 @@ describe("evaluatePermission defaults", () => {
     expect(evaluatePermission({ title: "mcp__frobnicator__run", kind: "other", rawInput: {} }, [rule])).toMatchObject({ outcome: "allow", rule: "Allow frobnicator" });
   });
 
-  it("falls through to the CEO first for unmatched kinds, with no company rule (BOS-752)", () => {
-    expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toMatchObject({ outcome: "ceo", rule: UNMATCHED_RULE });
-    // The card's shape: a shell command whose tool kind the adapter didn't mark as execute.
-    const cmd = `agent-browser --session $A get text "heading Hello"`;
-    for (const kind of [undefined, "other"]) {
-      expect(decidePermission({ title: "bash", kind, rawInput: { command: cmd } }, []), String(kind)).toMatchObject({ outcome: "ceo", rule: UNMATCHED_RULE, row: 8 });
-    }
+  it("falls through to the CEO first for a command no rule covers, and to the owner for delete/move (BOS-752)", () => {
+    expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toMatchObject({ outcome: "owner", rule: "No rule matched" });
+    // A command arriving under a kind that is not "execute" and is not a built-in allow.
+    const info = { title: "bash", kind: "delete", rawInput: { command: `agent-browser --session $A get text "heading Hello"` } };
+    expect(decidePermission(info, [])).toMatchObject({ outcome: "ceo", rule: UNMATCHED_RULE, row: 8 });
   });
 
   it("company rules win over defaults, first match first", () => {
