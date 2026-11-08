@@ -1418,6 +1418,10 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
       "npm --workspace packages/shared init x",
       "npm -w packages/shared init x",
       "cd /tmp/p && npm --loglevel info init x",
+      "npm -- init x",
+      "npm -y -- init x",
+      "npm --loglevel info -- init x",
+      "pnpm -- init x",
     ]);
     allows([
       "npm init",

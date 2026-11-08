@@ -1133,8 +1133,8 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     if (/^(?:pnpm|npm|bun)$/.test(head)) {
       const initAt = args.indexOf("init");
       const before = initAt < 0 ? [] : args.slice(0, initAt);
-      const onlyOpts = before.every((a, i) => a.startsWith("-") || (a !== "" && (before[i - 1] ?? "").startsWith("-") && !(before[i - 1] ?? "").includes("=")));
-      if (initAt >= 0 && !before.includes("--") && onlyOpts && args.slice(initAt + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
+      const onlyOpts = before.every((a, i) => a.startsWith("-") || (a !== "" && (before[i - 1] ?? "").startsWith("-") && (before[i - 1] ?? "") !== "--" && !(before[i - 1] ?? "").includes("=")));
+      if (initAt >= 0 && onlyOpts && args.slice(initAt + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
     }
     // BOS-717: npm reads `init-module=<file>` from the folder's `.npmrc` and runs that file on `npm init`, so outside the checkout
     // any `npm init` gets no Allow (pnpm and bun do not read init-module). Inside the checkout the .npmrc is ours.
