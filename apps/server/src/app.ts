@@ -70,6 +70,7 @@ import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
+import { mergeJamService } from "./services/merge-jam.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
@@ -90,7 +91,7 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
-import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
+import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
@@ -332,6 +333,10 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => decisionsSvc.drainSecondOpinions());
   const deploysSvc = deploysService(db, {
     now: opts.now,
+    // DR-033: the runner resolves a deploy's commit and moves its tag; a tag it can't move goes to the CEO (`alerts` is built below).
+    runners,
+    alert: (input) => alerts.raise(input),
+    log: (m) => app.log.warn(m),
     onShipped: async (ticketId) => {
       const [t] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(t?.featureId);
@@ -646,6 +651,9 @@ export async function buildApp(opts: AppOptions) {
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing cards failed"));
   });
   const sweeps = sweepService(db, {
+    // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
+    // built below, so this resolves it per pass.
+    mergeJam: () => mergeJam.run(),
     clearAlerts: () => clearing.check(),
     // A feature the roadmap commits to but nothing is working on (BOS-595): the sweep raises one CEO
     // card, which the one closer above withdraws as soon as a ticket is linked to the feature.
@@ -835,6 +843,13 @@ export async function buildApp(opts: AppOptions) {
         .where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.state, ["queued", "running"])))) as [{ running: number; waiting: number }];
       return { mode: mode as CheckQueueMode, slots: await checkQueueSvc.slots(), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
     },
+    now: opts.now,
+  });
+  // The merge line jam alert (BOS-766): the same view the Merge queue screen reads, and the owner's own
+  // notification service, so quiet hours and caps apply as for every other notification.
+  const mergeJam = mergeJamService(db, {
+    view: (companyId) => mergeQueue.get(companyId),
+    notify: (input) => notes.notify(input),
     now: opts.now,
   });
   decisionsSvc.setLoopHooks({
@@ -1328,6 +1343,35 @@ export async function buildApp(opts: AppOptions) {
       const g = approveGate(s, s.ntfy?.tokenSecretId ? await secretsSvc.reveal(s.ntfy.tokenSecretId) : null);
       return g.on ? { on: true } : { on: false, why: g.why };
     };
+    // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
+    // Owner only: no agent tool or route writes these settings.
+    const checkQueueView = async () => {
+      const rows = await db.select({ id: runnersTable.id, company: companies.name }).from(runnersTable).innerJoin(companies, eq(companies.id, runnersTable.companyId));
+      const live = rows.filter((r) => runners.isConnected(r.id));
+      return {
+        mode: await checkQueueSvc.mode(),
+        slots: await checkQueueSvc.slots(),
+        maxSlots: MAX_CHECK_SLOTS,
+        defaultSlots: DEFAULT_CHECK_SLOTS,
+        // Connected runners on an image too old to run queued checks: their companies' jobs would wait until the runners are updated.
+        runnersTooOld: live.filter((r) => !runners.can(r.id, "check-jobs")).map((r) => r.company),
+      };
+    };
+    owner.get("/api/settings/check-queue", async () => checkQueueView());
+    owner.put("/api/settings/check-queue", async (req) => {
+      const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS) }).parse(req.body);
+      const was = await checkQueueSvc.mode();
+      await checkQueueSvc.setSlots(b.slots);
+      await checkQueueSvc.setMode(b.mode);
+      // Back to legacy: nothing starts queued jobs any more, so each is cancelled with its reason and whoever asked is told
+      // (an agent is woken to run check-quick.sh itself; a merge waiting on one gets the usual "check stopped" card). Running jobs finish.
+      let cancelled = 0;
+      if (was === "server" && b.mode === "legacy")
+        for (const id of await checkQueueSvc.queuedIds())
+          if (await checks.cancel(id, "The owner switched the check queue off (back to legacy), so this queued check will not run. Run scripts/check-quick.sh yourself, as before.")) cancelled++;
+      if (b.mode === "server") await checks.pump();
+      return { ...(await checkQueueView()), cancelled };
+    });
     // BOS-313: check the merged result before pushing it (off by default while it rolls out).
     owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
     owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
@@ -2836,12 +2880,21 @@ export async function buildApp(opts: AppOptions) {
       endpoint: z.string().trim().min(1).max(500),
       isProduction: z.boolean().optional(),
       requiresApproval: z.boolean().optional(),
+      /** DR-033: the tag to move after a successful deploy; null turns it off. Owner-only, like every target setting. */
+      liveTag: z.object({ projectId: Uuid, name: z.string().trim().min(1).max(100) }).nullable().optional(),
     });
     const deployErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
       if (err instanceof DeployError) return reply.code(err.status).send({ error: "deploy", message: err.message });
       throw err;
     };
-    owner.get("/api/companies/:id/deploy-targets", async (req) => deploysSvc.listTargets(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/deploy-targets", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const [targets, last] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id)]);
+      return targets.map((t) => {
+        const d = last.get(t.id);
+        return { ...t, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
+      });
+    });
     owner.post("/api/companies/:id/deploy-targets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       return deploysSvc
@@ -2973,5 +3026,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
+  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue };
 }
