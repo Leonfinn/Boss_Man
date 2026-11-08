@@ -305,7 +305,7 @@ describe("a sign-off and the branch moving on (BOS-734)", () => {
     expect(c.merges()).toBe(0);
   });
 
-  it("pressing a card for older code is refused with the reason, and a card for the current code replaces it", async () => {
+  it("pressing a card for older code is refused with the reason, the card is withdrawn and the ticket goes back for review, with no new card", async () => {
     const c = await setup({ covers: NOT });
     const t = await c.approvedHighRisk();
     const [card] = await openCard(c, t.id, "d".repeat(40));
@@ -313,11 +313,10 @@ describe("a sign-off and the branch moving on (BOS-734)", () => {
     expect(res.statusCode).toBeGreaterThanOrEqual(400);
     expect(res.body).toMatch(/changed after this card was raised/);
     expect(c.merges()).toBe(0);
-    const open = await c.cards(t.id, "open");
-    expect(open).toHaveLength(1);
-    expect(open[0]!.id).not.toBe(card!.id);
-    expect((open[0]!.context as { head?: string }).head).toBe("b".repeat(40));
-    expect(open[0]!.question).toMatch(/1 new commit/);
+    // Unreviewed code never gets a fresh "Approve and merge" card: the reviewers must pass it first.
+    expect(await c.cards(t.id, "open")).toHaveLength(0);
+    expect((await c.row(t.id)).systemState).toBe("in_progress");
+    expect(c.merges()).toBe(0);
   });
 
   it("the sweep moves a card to the new head when only clean main merges came in, and replaces it otherwise", async () => {
@@ -335,9 +334,8 @@ describe("a sign-off and the branch moving on (BOS-734)", () => {
     const t2 = await diff.approvedHighRisk();
     const [old] = await openCard(diff, t2.id, "d".repeat(40));
     await diff.sweeps.run();
-    const open = await diff.cards(t2.id, "open");
-    expect(open).toHaveLength(1);
-    expect(open[0]!.id).not.toBe(old!.id);
-    expect((open[0]!.context as { head?: string }).head).toBe("b".repeat(40));
+    expect(await diff.cards(t2.id, "open")).toHaveLength(0);
+    expect((await diff.cards(t2.id, "withdrawn")).map((x) => x.id)).toContain(old!.id);
+    expect((await diff.row(t2.id)).systemState).toBe("in_progress");
   });
 });

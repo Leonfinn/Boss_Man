@@ -13,7 +13,7 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard, signoffState, type SignoffCover } from "./signoff.js";
 import { checkGate, checkPriority } from "./check-gate.js";
 import { checkQueue } from "./check-queue.js";
@@ -962,12 +962,19 @@ export function reviewService(
       if (!head || head === cardHead) return null;
       const c = await this.signoffCovers(ticketId, cardHead);
       if (c?.covers) return null;
+      // The runner couldn't say: keep the card, refuse the press, nothing is replaced or merged.
+      if (!c) return `The branch changed after this card was raised (${cardHead.slice(0, 8)} is now ${head.slice(0, 8)}) and Boss Man couldn't check what came in right now, so nothing was merged. Try again in a few minutes.`;
+      // New code of the ticket's own: the reviewers haven't seen it, so no new card until they pass it again (security review, BOS-734).
+      return this.withdrawStaleSignoff(ticketId, cardHead, head, c.reason || "new code came in");
+    },
+
+    /** Withdraws a sign-off card for older code and sends the ticket back for a new review round; the next round raises the new card. */
+    async withdrawStaleSignoff(ticketId: string, cardHead: string, head: string, why: string): Promise<string> {
       const { t } = await ticketWithRepo(ticketId);
-      const why = c?.reason || "Boss Man couldn't check what came in";
-      const s = await signoffState(db, t);
-      const reviewer = s.state === "missing" ? s.reviewer : "The reviewers";
-      await raiseSignoffCard(db, t, { reviewer, reviewerAgentId: s.state === "missing" ? s.reviewerAgentId : null, head, changed: why });
-      return `The branch changed after this card was raised (${why}), so it can't be merged as it stands. Boss Man replaced it with a new card for the current code: please look at that one.`;
+      await supersedeSignoffs(db, t.id, { by: "system", note: `The branch changed after the card was raised (${why}).`, at: new Date().toISOString() });
+      await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_card_moved", summary: `The sign-off card was for ${cardHead.slice(0, 8)} but the branch is at ${head.slice(0, 8)} (${why}), so it was withdrawn and the ticket sent back for a new review.` });
+      await this.sendBack(t.id, `The owner's sign-off card was for ${cardHead.slice(0, 8)}, but the branch is now at ${head.slice(0, 8)} (${why}). The card was withdrawn. Make sure the work is committed, then move the ticket back to review for a new review round and sign-off.`, "Boss Man");
+      return `The branch changed after this card was raised (${why}), so it can't be merged as it stands. The card was withdrawn and the ticket sent back for a new review; a new card comes once the reviewers have passed the current code.`;
     },
 
     /** Claims the ticket's merge marker, so the page shows the merge from its first moment. */

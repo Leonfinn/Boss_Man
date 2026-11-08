@@ -214,7 +214,7 @@ export async function restoreSignoffCard(db: Db, t: Ticket, why: string, head?: 
  */
 export async function refreshSignoffCards(
   db: Db,
-  deps: { headOf: (ticketId: string) => Promise<string | null>; covers: (ticketId: string, signed: string) => Promise<SignoffCover | null> },
+  deps: { headOf: (ticketId: string) => Promise<string | null>; covers: (ticketId: string, signed: string) => Promise<SignoffCover | null>; withdraw: (ticketId: string, cardHead: string, head: string, why: string) => Promise<unknown> },
 ): Promise<number> {
   const open = await db
     .select({ id: decisions.id, context: decisions.context, question: decisions.question })
@@ -231,11 +231,15 @@ export async function refreshSignoffCards(
     if (c?.covers) {
       const line = `\n\nUpdated: the branch moved to ${head.slice(0, 8)} since this card was raised, but only main was merged in automatically, with no clashes and no new code from the ticket.`;
       await db.update(decisions).set({ question: card.question + line, context: sql`${decisions.context} || ${JSON.stringify({ head })}::jsonb` }).where(and(eq(decisions.id, card.id), eq(decisions.status, "open")));
+    } else if (!c) {
+      continue; // the runner couldn't say: leave the card, try again next pass
     } else {
-      const s = await signoffState(db, t);
-      await raiseSignoffCard(db, t, { reviewer: ctx.reviewer, reviewerAgentId: s.state === "missing" ? s.reviewerAgentId : null, head, changed: c?.reason || "Boss Man couldn't check what came in" });
+      // New code the reviewers haven't seen: withdraw the card and send the ticket back for a new review (security review).
+      await deps.withdraw(t.id, ctx.head, head, c.reason || "new code came in");
+      changed++;
+      continue;
     }
-    await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_card_moved", summary: `The sign-off card was for ${ctx.head.slice(0, 8)} but the branch is at ${head.slice(0, 8)}, so it was ${c?.covers ? "moved to the new commit" : "replaced by a card for the new commit"}.` });
+    await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_card_moved", summary: `The sign-off card was for ${ctx.head.slice(0, 8)} but the branch is at ${head.slice(0, 8)}, so it was moved to the new commit.` });
     changed++;
   }
   return changed;
