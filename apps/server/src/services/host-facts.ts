@@ -45,6 +45,8 @@ const HostRecord = z.object({
   memory: z.object({ totalKb: z.number().int().nonnegative(), availableKb: z.number().int().nonnegative() }).optional().catch(undefined),
   addons: z.record(z.string(), z.string()).optional().catch(undefined),
   checks: z.record(z.string(), z.record(z.string(), z.union([z.number(), z.string()]))).optional().catch(undefined),
+  /** BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries (Compose uses only the last). */
+  netguardEnv: z.object({ envFound: z.boolean().default(true), lines: z.array(z.array(z.string().regex(/^[A-Za-z0-9.-]{1,253}:\d{1,5}$/)).max(100)).max(16) }).optional().catch(undefined),
 });
 export type HostRecord = z.infer<typeof HostRecord>;
 
@@ -188,5 +190,11 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
     return r?.name ?? null;
   }
 
-  return { read, hosts, serverHost, load, sync, confirm, value, valuesFor, reportedAddons };
+  /** The BOSSMAN_NETGUARD_ALLOW lines the host last reported from .env (BOS-770), with when; null when it reports none (an older deployer, or no deployer). */
+  async function netguardEnv(): Promise<{ envFound: boolean; lines: string[][]; reportedAt: string } | null> {
+    const r = await read();
+    return r?.netguardEnv ? { ...r.netguardEnv, reportedAt: r.writtenAt } : null;
+  }
+
+  return { read, hosts, serverHost, load, sync, confirm, value, valuesFor, reportedAddons, netguardEnv };
 }

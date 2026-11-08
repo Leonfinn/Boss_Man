@@ -3,7 +3,8 @@
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
 import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
-import type { ClosedNotice } from "./closed-notice.js";
+import { leaveClosedNotice, switchedBackNotice, type ClosedNotice } from "./closed-notice.js";
+import type { NotifyInput } from "./notifications.js";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -593,19 +594,26 @@ export async function nameRunnerSetupTickets(db: Db, companyId: string, commit: 
  * because one card can cover several tickets (BOS-741): every ticket in `ticketIds` that points at it has
  * its pointer cleared, so none keeps a stale card for a card that is gone. Frees the key so the next
  * go-live raises it again with its steps. Returns null when the card is already answered or withdrawn.
+ *
+ * BOS-740: it leaves the same closed-card notice as BOS-739's hand-apply cards (why it closed, what's
+ * live, that the owner can stop, and anything to undo), so the card doesn't just vanish from Decisions.
  */
-export async function withdrawOwnerSetup(db: Db, cardId: string, ticketIds: string[], note: string) {
+export async function withdrawOwnerSetup(db: Db, cardId: string, ticketIds: string[], note: string, deps?: { notify?: (n: NotifyInput) => Promise<unknown>; now?: () => Date }) {
   const [open] = await db.select().from(decisions).where(and(eq(decisions.id, cardId), eq(decisions.status, "open")));
   if (!open) return null;
-  const withdrawal: Withdrawal = { by: "system", note, at: new Date().toISOString() };
+  const now = deps?.now?.() ?? new Date();
+  const withdrawal: Withdrawal = { by: "system", note, at: now.toISOString() };
+  // The whole context goes back as the closed notice reads it: the steps the card showed stay readable with it.
+  const closedNotice = switchedBackNotice({ steps: (open.context as { steps?: string[] }).steps, now });
   const [row] = await db
     .update(decisions)
-    .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(open.context as object), withdrawn: withdrawal } })
+    .set({ status: "withdrawn", answeredAt: now, dedupeKey: null, context: { ...(open.context as object), withdrawn: withdrawal, closedNotice } })
     .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")))
     .returning({ id: decisions.id, companyId: decisions.companyId });
   if (row) {
     if (ticketIds.length) await db.update(tickets).set({ ownerSetupDecisionId: null }).where(inArray(tickets.id, ticketIds));
-    await record(db, { companyId: row.companyId, ticketId: ticketIds[0] ?? (open.context as { ticketId?: string }).ticketId ?? null, kind: "decision_withdrawn", summary: note, at: new Date() });
+    await record(db, { companyId: row.companyId, ticketId: ticketIds[0] ?? (open.context as { ticketId?: string }).ticketId ?? null, kind: "decision_withdrawn", summary: note, at: now });
+    if (deps?.notify) await leaveClosedNotice(db, row.id, closedNotice, { notify: deps.notify, now: deps.now });
   }
   return row ?? null;
 }
@@ -1809,7 +1817,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // runner again, and the ask gets no second card. Only when the rules would instead raise a card: a
         // replayed request the rules deny (a home-network fetch) must still be denied, never allowed by an
         // earlier Allow for a different request (security review).
-        const info: PermissionInfo = { title: payload.title, kind: payload.kind, rawInput: payload.rawInput };
+        // The asking agent counts too: a rule limited to one agent must apply here as it did at the first ask (BOS-598).
+        const [asker] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, p.runId));
+        const info: PermissionInfo = { title: payload.title, kind: payload.kind, rawInput: payload.rawInput, agentId: asker?.agentId ?? null };
         const { outcome } = evaluatePermission(info, await rulesFor(runner.companyId));
         const mayRepeat = outcome !== "allow" && outcome !== "deny";
         const allowed = mayRepeat ? await allowedCommandOnRun(p.runId, payload, fingerprint) : null;
@@ -2560,14 +2570,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->'settled' is not null`, sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
-      // Cards the CEO cleared as stale or duplicates (BOS-149), with the reason they gave. Kept for
-      // 30 days so the owner can still trace a withdrawal after a day.
+      // Cards the CEO cleared as stale or duplicates (BOS-149), with the reason they gave, and every card
+      // Boss Man closed by itself (BOS-740: the add-on setup card, a switched-back setup card, a hand-apply
+      // card that went live). Kept for 30 days so the owner can still trace a withdrawal after a day.
       const withdrawnSince = new Date(now().getTime() - 30 * 24 * 3_600_000);
       const withdrawn = await db
         .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context })
         .from(decisions)
-        // Plus an add-on setup card Boss Man closed once the add-on worked (BOS-522): the owner set it up, so they see it's done.
-        .where(and(eq(decisions.status, "withdrawn"), sql`(${decisions.context}->'withdrawn'->>'by' = 'ceo' or (${decisions.context}->'withdrawn'->>'by' = 'system' and ${decisions.context}->>'setsUp' is not null))`, sql`(${decisions.context}->'withdrawn'->>'at')::timestamptz > ${withdrawnSince.toISOString()}::timestamptz`))
+        .where(and(eq(decisions.status, "withdrawn"), sql`${decisions.context}->'withdrawn'->>'by' in ('ceo', 'system')`, sql`(${decisions.context}->'withdrawn'->>'at')::timestamptz > ${withdrawnSince.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
       // Alerts the Scrum Master settled from the watchdog tool: alert_resolved records who and why (BOS-119).
@@ -2610,7 +2620,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }),
         ...withdrawn.map((r) => {
           const w = (r.context as { withdrawn: Withdrawal }).withdrawn;
-          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), withdrawn: { by: w.name ?? (w.by === "system" ? "Boss Man" : "the CEO"), note: w.note } };
+          const closed = (r.context as { closedNotice?: { text?: string } }).closedNotice;
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), about: aboutOf(r), withdrawn: { by: w.name ?? (w.by === "system" ? "Boss Man" : "the CEO"), note: w.note, ...(closed?.text ? { notice: closed.text } : {}) } };
         }),
         ...fromAlerts,
       ];
@@ -2662,7 +2673,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (ctx.type === "model_change" && answer === MODEL_EDIT && !extra.modelConfig) throw new AnswerError("Edit needs the harness, provider, model and paid-from you want.");
       if (ctx.type === "team_plan" && extra.picks?.some((i) => !Number.isInteger(i) || i < 0 || i >= ctx.hires.length)) throw new AnswerError("That hire isn't in the plan.");
       // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
-      let saveRule: (() => Promise<void>) | undefined;
+      let saveRule: ((h: typeof db) => Promise<void>) | undefined;
       const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
       if (always) {
         // Standing rules are the owner's call, never an agent's, whatever the answer path (BOS-294).
@@ -2679,14 +2690,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const condition: PolicyMatch = { ...always.match, safeOnly: true, ...(scope === "agent" ? { agentIds: [asker!.id] } : {}) };
         const problems = ruleProblems(condition);
         if (problems.length) throw new AnswerError(`That rule can't be saved: ${problems.join(" ")}`);
-        saveRule = async () => {
-        const [last] = await db.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
+        saveRule = async (h) => {
+        const [last] = await h.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
         const on = formatDate("en-GB", now(), { day: "numeric", month: "short" });
-        await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name}${scope === "agent" ? ` for ${asker!.name}` : ""} (from a request on ${on})`, trigger: "permission", condition, outcome: "allow", position: (last?.position ?? -1) + 1, createdAt: now(), createdBy: extra.by ?? "the owner", sourceDecisionId: d.id });
+        await h.insert(policyRules).values({ companyId: d.companyId, name: `${always.name}${scope === "agent" ? ` for ${asker!.name}` : ""} (from a request on ${on})`, trigger: "permission", condition, outcome: "allow", position: (last?.position ?? -1) + 1, createdAt: now(), createdBy: extra.by ?? "the owner", sourceDecisionId: d.id });
         };
         answer = ALLOW;
       }
-      if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) saveRule = async () => { await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule, createdBy: extra.by ?? "the owner", sourceDecisionId: d.id }); };
+      if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) saveRule = async (h) => { await policyRulesService(h).create({ companyId: d.companyId, ...ctx.rule, createdBy: extra.by ?? "the owner", sourceDecisionId: d.id }); };
       // Kept on the decision so the owner can see who settled it and why (BOS-111). Written on a copy, not
       // on ctx itself, so reopening a card later restores the pre-answer context without this record.
       let settled: Settled | undefined;
@@ -2700,7 +2711,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // was read on, so whoever closes it first wins and the loser changes nothing. The tier clause
       // closes the race where the ladder hands the open card to the owner between the CEO reading it
       // and answering: the answer then matches nothing instead of closing the owner's card (BOS-159).
-      const [closed] = await db
+      // The rule is saved in the same transaction as the close, so a failed save leaves the card open and
+      // no rule behind, and a crash between the two cannot allow once with no rule (BOS-598).
+      const close = async (h: typeof db) => {
+      const [row] = await h
         .update(decisions)
         // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again; so does a
         // loop alert (alert-ladder.ts), whose key only stops a repeat while it is open.
@@ -2713,6 +2727,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), eq(decisions.tier, d.tier), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
+      // Only the request that closed the card saves the rule, so a double tap or retry cannot save it twice.
+      if (row) await saveRule?.(h);
+      return row;
+      };
+      const closed = saveRule ? await db.transaction((tx) => close(tx)) : await close(db);
       // A repeat of this command waited on this card (BOS-376): an Allow once settles it too, and a Deny
       // never turns into one. The card keeps what settled, so the audit shows the repeat.
       if (closed && ctx.type === "permission" && repeatsNow?.length) {
@@ -2724,8 +2743,6 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.update(decisions).set({ context: { ...ctx, repeats: repeatsNow } as DecisionContext }).where(eq(decisions.id, id));
       }
       if (!closed) return null;
-      // The rule is saved only by the request that closed the card, so a double tap or retry cannot save it twice.
-      await saveRule?.();
       // The card is settled, so its notification is read now rather than on the next feed poll (BOS-413).
       await markDecisionNotificationRead(db, id, now());
 

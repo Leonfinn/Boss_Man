@@ -42,6 +42,8 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron'
 D="${BOSSMAN_DEPLOYER:-$(cd "$(dirname "$0")" && pwd)}"
 REPO="$D/../src"
 WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SECONDS=300
+BG_STOP_SECONDS="${BG_STOP_SECONDS:-60}" # a planned stop's grace before Docker sends SIGKILL (BOS-794); the server's shutdown drains work
+[[ $BG_STOP_SECONDS =~ ^[0-9]{1,4}$ ]] || BG_STOP_SECONDS=60
 BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}" SOAK_CHECK_SECONDS="${SOAK_CHECK_SECONDS:-60}"
 CONF="$D/host.conf"
 if [[ -e $CONF ]]; then
@@ -495,6 +497,21 @@ host_extra_facts() {
     ports+="$psep$(jstr "$k"): $(jstr "$v")"; psep=", "
   done
   out+="$sep\"network\": {\"addresses\": [$addrs], \"ports\": {$ports}}"
+  # --- BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries only. Compose uses
+  # only the last line, so two or more means an earlier list is silently ignored. Nothing else on the line is kept
+  # (any token that isn't host:port is dropped), and no other key is read.
+  local nlines="" nlsep="" nl tok toks tsep nc=0 envfound=false
+  local -a ntoks
+  [[ -r $REPO/.env ]] && envfound=true
+  while IFS= read -r nl; do
+    ((nc < 16)) || break
+    nl="${nl#*=}"; nl="${nl%%[[:space:]]#*}"; nl="${nl//[\"\']/}"
+    IFS=$', \t' read -r -a ntoks <<<"$nl" || true
+    toks="" tsep=""
+    for tok in "${ntoks[@]}"; do [[ $tok =~ ^[A-Za-z0-9.-]{1,253}:[0-9]{1,5}$ ]] && { toks+="$tsep$(jstr "$tok")"; tsep=", "; }; done
+    nlines+="${nlsep}[$toks]"; nlsep=", "; nc=$((nc + 1))
+  done < <(grep -sE '^[[:space:]]*(export[[:space:]]+)?BOSSMAN_NETGUARD_ALLOW[[:space:]]*=' "$REPO/.env" || true)
+  out+="$sep\"netguardEnv\": {\"envFound\": $envfound, \"lines\": [$nlines]}"
   # --- memory, in kB, from /proc/meminfo
   local mt ma
   mt="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null)" || mt=""
@@ -726,7 +743,7 @@ switch_back() {
   if ((ok)); then flip_proxy "$BG_LIVE" || ok=0; fi
   if ((ok)); then wait_ready proxy leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
   if ((ok)); then
-    if compose stop "server-$BG_IDLE" >>"$LOG" 2>&1; then plan_stopped "$BG_IDLE"; fi
+    stop_colour "$BG_IDLE" || true
     g reset --quiet --hard "$BG_PREV" || true
   else
     # The old colour did not take over: put the new one back in charge and keep it running (the checkout stays on what runs).
@@ -804,7 +821,18 @@ take_baseline() {
 }
 # Colours the deployer stopped on purpose (soak over, rollback, undone deploy): a stop that is not on this list is a crash.
 plan_stopped() { grep -qxs "$1" "$STATE/stopped-by-plan" || printf '%s\n' "$1" >>"$STATE/stopped-by-plan"; } # colour
-unplan_stopped() { { grep -vx "$1" "$STATE/stopped-by-plan" 2>/dev/null || true; } >"$STATE/stopped-by-plan.tmp"; mv "$STATE/stopped-by-plan.tmp" "$STATE/stopped-by-plan"; } # colour
+unplan_stopped() { { grep -vx "$1" "$STATE/stopped-by-plan" 2>/dev/null || true; } >"$STATE/stopped-by-plan.tmp"; mv "$STATE/stopped-by-plan.tmp" "$STATE/stopped-by-plan"; rm -f "$STATE/stop-took.$1"; } # colour
+# A planned stop of a colour (BOS-794): an explicit grace longer than the server's SIGTERM shutdown, and the time it took is
+# logged and kept (state/stop-took.<colour>), so a slow shutdown that still ended in SIGKILL (exit 137) stays visible.
+stop_colour() { # colour
+  local t0=$SECONDS
+  if compose stop -t "$BG_STOP_SECONDS" "server-$1" >>"$LOG" 2>&1; then
+    plan_stopped "$1"; printf '%s\n' "$((SECONDS - t0))" >"$STATE/stop-took.$1"
+    log "Stopped server-$1 in $((SECONDS - t0))s (grace ${BG_STOP_SECONDS}s)."
+    return 0
+  fi
+  log "Could not stop server-$1."; return 1
+}
 
 # Writes outbox/health.json and keeps the same fields for the status file (HEALTH_KV, read by write_status).
 hc_record() { # phase commit
@@ -824,7 +852,7 @@ hc_record() { # phase commit
 # Runs the checklist. plan = what the other colour should be doing: standby (during the trial) or stopped (after it).
 # Returns 1 if any item fails; VERIFY_WHY then says which and what was seen (the live colour's own message first).
 stack_check() { # commit seconds phase plan
-  local commit=$1 secs=$2 phase=$3 plan=$4 live other st line s why="" bad="" n leaders=0 rolelist="" id started restarts oom running code bid bst bn p bp note=""
+  local commit=$1 secs=$2 phase=$3 plan=$4 live other st line s why="" bad="" n leaders=0 rolelist="" id started restarts oom running code bid bst bn p bp took note=""
   if [[ ! -s $STATE/baseline ]] && ! ((DRY)); then take_baseline; note=" (no baseline from before the deploy; taken now)"; fi
   # 1. The live colour, through the proxy.
   if verify_live "$commit" "$secs"; then
@@ -838,7 +866,8 @@ stack_check() { # commit seconds phase plan
   if [[ -z $live ]]; then hc_set other fail "no live colour is set in the proxy include"
   else
     other="$(other_colour "$live")"; st="$(cstate "server-$other")"; running=absent code=""
-    if [[ $st != none ]]; then read -r _ _ _ _ running code <<<"$st"; fi
+    oom=false
+    if [[ $st != none ]]; then read -r _ _ _ oom running code <<<"$st"; fi
     if [[ $plan == standby ]]; then
       if [[ $running != true ]]; then hc_set other fail "server-$other should be running as a standby but is $([[ $running == absent ]] && echo missing || echo "stopped (exit code $code)")"
       elif [[ $(colour_role "$other") != standby ]]; then hc_set other fail "server-$other is running but not as a standby (role '$(colour_role "$other")')"
@@ -846,9 +875,21 @@ stack_check() { # commit seconds phase plan
     else
       if [[ $running == true ]]; then hc_set other fail "server-$other is running but the plan says it should be stopped"
       elif [[ $running == absent ]]; then hc_set other pass "server-$other has no container (nothing to run)"
-      elif [[ $code != 0 ]]; then hc_set other fail "server-$other stopped with exit code $code, so it crashed or was killed"
-      elif ! grep -qxs "$other" "$STATE/stopped-by-plan"; then hc_set other fail "server-$other is stopped but the deployer did not stop it"
-      else hc_set other pass "server-$other was stopped by plan (exit code 0)"; fi
+      # The plan first (BOS-794): a planned stop that outlived its grace ends in SIGKILL (137) and is still a planned stop.
+      # Both colours are restart: unless-stopped, so a crash or OOM kill alone would have been restarted, not left stopped.
+      elif ! grep -qxs "$other" "$STATE/stopped-by-plan"; then
+        if [[ $code != 0 ]]; then hc_set other fail "server-$other stopped with exit code $code, so it crashed or was killed"
+        else hc_set other fail "server-$other is stopped but the deployer did not stop it"; fi
+      elif [[ $oom == true ]]; then hc_set other fail "server-$other was killed for running out of memory (exit code $code)"
+      else
+        took="$(cat "$STATE/stop-took.$other" 2>/dev/null || true)"; [[ $took =~ ^[0-9]+$ ]] || took=""
+        case $code in
+          0) hc_set other pass "server-$other was stopped by plan (exit code 0)" ;;
+          143) hc_set other pass "server-$other was stopped by plan (exit code 143, SIGTERM)" ;;
+          137) hc_set other pass "server-$other was stopped by plan; it did not shut down in time and needed SIGKILL${took:+ after ${took}s} (exit code 137)" ;;
+          *) hc_set other fail "server-$other was stopped by plan but exited with code $code" ;;
+        esac
+      fi
     fi
   fi
   # 3. Exactly one leader across both colours.
@@ -897,7 +938,7 @@ health_degraded() { # commit prev
 }
 
 pre_fail() { # message: undo what happened before the hand-over; the live colour was never touched
-  if compose stop "server-$BG_IDLE" >>"$LOG" 2>&1; then plan_stopped "$BG_IDLE"; fi
+  stop_colour "$BG_IDLE" || true
   g reset --quiet --hard "$BG_PREV" || true
   bg_fail failed "$1 The live colour ($BG_LIVE) was not touched. Backup: $BG_BACKUP"
 }
@@ -963,7 +1004,7 @@ do_deploy_bluegreen() {
 
 soak_end() { # old commit prev soakfile: time is up and the live colour is fine
   log "Soak over: stopping the old colour ($1)."
-  if compose stop "server-$1" >>"$LOG" 2>&1; then plan_stopped "$1"; else log "Could not stop server-$1."; fi
+  stop_colour "$1" || true
   rm -f "$4"
   # The end of the window: the same checklist with the old colour now planned to be stopped.
   if ! stack_check "$2" "$SOAK_CHECK_SECONDS" end stopped; then log "End-of-window check: $VERIFY_WHY"; health_degraded "$2" "$3"; fi
@@ -1052,7 +1093,7 @@ do_rollback_bluegreen() {
     return 1
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.
-  if compose stop "server-$BG_LIVE" >>"$LOG" 2>&1; then plan_stopped "$BG_LIVE"; else log "Could not stop server-$BG_LIVE."; fi
+  stop_colour "$BG_LIVE" || true
   printf '%s\n' "$BG_PREV" >"$STATE/hold" # the release just rejected: refresh_available must not offer it again
   rm -f "$STATE/previous"
   if [[ -n $ocommit ]] && g cat-file -e "$ocommit^{commit}" 2>/dev/null; then g reset --quiet --hard "$ocommit" || log "Could not move the checkout to ${ocommit:0:8}."; fi
@@ -1115,7 +1156,19 @@ main() {
     local ap=stopped
     [[ -f $STATE/soak && ! -L $STATE/soak ]] && ap=standby
     take_baseline; rm -f "$STATE/last-health-alert" "$STATE/planned-db"
-    if stack_check "$(g rev-parse HEAD)" "$SOAK_CHECK_SECONDS" ack "$ap"; then log "Health accepted: baseline renewed; the checklist passes."; exit 0; fi
+    local head sf="$OUTBOX/status.json" st=""
+    head="$(g rev-parse HEAD)"
+    if stack_check "$head" "$SOAK_CHECK_SECONDS" ack "$ap"; then
+      # The ack must clear what it was asked to clear (BOS-794): the "partial" page health_degraded left in the status
+      # file keeps the server saying "degraded" until another result replaces it. Only that page is replaced, and with
+      # nothing_new, not deployed: deployed would start a new standby window and runner hold on the server for a swap that never ran.
+      [[ -f $sf && ! -L $sf ]] && st="$(cat "$sf")"
+      if [[ $(jfield result <<<"$st") == partial && $(jfield target <<<"$st") == server ]]; then
+        REQ_ID="ack-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$head" COMMIT="$head"
+        finish nothing_new "Health accepted on the host: the whole-stack check passes at ${head:0:8}, so the earlier warning is cleared. Nothing was deployed or changed."
+      fi
+      log "Health accepted: baseline renewed; the checklist passes."; exit 0
+    fi
     log "Baseline renewed, but the checklist still fails: $VERIFY_WHY"; exit 1
   fi
   recover_interrupted
