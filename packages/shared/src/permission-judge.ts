@@ -1012,25 +1012,38 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     // (update, dedupe, remove, link, version, prune, ...) reifies the tree or runs lifecycle scripts, so it needs the flag too. The
     // flags are read in order up to `--`; the flag counts only when nothing undoes it (`--no-ignore-scripts`, `=false`, a following
     // `false`) and any other spelling of the setting is unreadable, which is no Allow.
+    // BOS-711 group 4 (CEO decision): code the judge can't read also loads from config files even with --ignore-scripts.
+    // pnpm loads the folder's `.pnpmfile.cjs` on install/add/update, so outside the checkout pnpm also needs `--ignore-pnpmfile`
+    // (read in order like the first flag). yarn 1 runs the file named by `yarn-path` in the folder's `.yarnrc` and no flag turns
+    // that off, so outside the checkout a yarn install/add/upgrade (or bare `yarn`) gets no Allow: a person decides. Inside the
+    // checkout nothing changes: that is our own repo's reviewed config.
     if (away && /^(?:pnpm|npm|yarn|bun)$/.test(head)) {
       const verb = args.find((a) => !a.startsWith("-") && a !== "");
-      if (verb !== undefined && !/^(?:init|audit|list|ls|outdated|why|licenses|fetch|prefetch|store|config|c|set)$/.test(verb)) {
-        let on = false;
-        let bad = false;
+      const bareYarn = head === "yarn" && verb === undefined && args.length === 0;
+      if (bareYarn || (verb !== undefined && !/^(?:init|audit|list|ls|outdated|why|licenses|fetch|prefetch|store|config|c|set)$/.test(verb))) {
+        if (head === "yarn") return true;
         const end = args.indexOf("--");
         const flags = end < 0 ? args : args.slice(0, end);
-        for (let i = 0; i < flags.length; i++) {
-          const a = flags[i]!;
-          if (!/ignore-?scripts/i.test(a)) continue;
-          if (a === "--ignore-scripts" || a === "--ignore-scripts=true") {
-            on = true;
-            const nextWord = flags[i + 1];
-            if (a === "--ignore-scripts" && (nextWord === "true" || nextWord === "false")) { if (nextWord === "false") bad = true; i++; }
-          } else {
-            bad = true; // --no-ignore-scripts, =false, =0, odd case or spelling
+        // True when the setting `name` ends up on: read in order, undone or oddly spelled means off.
+        const flagOn = (name: string): boolean => {
+          let on = false;
+          let bad = false;
+          const loose = new RegExp(name.replace(/-/g, "-?"), "i");
+          for (let i = 0; i < flags.length; i++) {
+            const a = flags[i]!;
+            if (!loose.test(a)) continue;
+            if (a === `--${name}` || a === `--${name}=true`) {
+              on = true;
+              const nextWord = flags[i + 1];
+              if (a === `--${name}` && (nextWord === "true" || nextWord === "false")) { if (nextWord === "false") bad = true; i++; }
+            } else {
+              bad = true; // --no-<name>, =false, =0, odd case or spelling
+            }
           }
-        }
-        if (!on || bad) return true;
+          return on && !bad;
+        };
+        if (!flagOn("ignore-scripts")) return true;
+        if (head === "pnpm" && !flagOn("ignore-pnpmfile")) return true;
       }
     }
     // find's `-exec`/`-execdir`/`-ok`/`-okdir` program: a path that leaves the checkout is code from elsewhere.

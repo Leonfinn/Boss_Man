@@ -1183,7 +1183,7 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
       "env -u X -C /tmp/p pnpm run evil",
     ]);
     allows([
-      "cd /tmp/p && pnpm -w install --ignore-scripts",
+      "cd /tmp/p && pnpm -w install --ignore-scripts --ignore-pnpmfile",
       "env -0u X -C packages/shared pnpm run build",
       "env -iP /bin -C packages/shared pnpm run build",
       "env -0u X pnpm run build",
@@ -1198,8 +1198,7 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     ]);
     allows([
       "cd /tmp/p && npm --production install --ignore-scripts",
-      "cd /tmp/p && pnpm --prod install --ignore-scripts",
-      "cd /tmp/p && yarn install --production --ignore-scripts",
+      "cd /tmp/p && pnpm --prod install --ignore-scripts --ignore-pnpmfile",
     ]);
   });
 
@@ -1229,9 +1228,32 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
       "cd /tmp/p && npm update --ignore-scripts",
       "cd /tmp/p && npm remove x --ignore-scripts",
       "cd /tmp/p && npm version patch --ignore-scripts",
-      "cd /tmp/p && corepack pnpm install --ignore-scripts",
+      "cd /tmp/p && corepack pnpm install --ignore-scripts --ignore-pnpmfile",
       "cd /tmp/p && npm ls",
       "cd packages/shared && npm update",
+    ]);
+  });
+
+  // BOS-711 group 4 (CEO decision): .pnpmfile.cjs and yarn-path run code even with --ignore-scripts.
+  describe("A6. outside install: pnpmfile and yarn-path (BOS-711)", () => {
+    deny([
+      "cd /tmp/p && pnpm install --ignore-scripts",
+      "cd /tmp/p && pnpm add x --ignore-scripts",
+      "cd /tmp/p && pnpm install --ignore-scripts --ignore-pnpmfile --no-ignore-pnpmfile",
+      "cd /tmp/p && pnpm install --ignore-scripts --ignore-pnpmfile=false",
+      "cd /tmp/p && corepack pnpm install --ignore-scripts",
+      "cd /tmp/p && yarn install --ignore-scripts",
+      "cd /tmp/p && yarn add x --ignore-scripts",
+      "cd /tmp/p && yarn upgrade --ignore-scripts",
+      "cd /tmp/p && yarn --ignore-scripts install",
+      "cd /tmp/p && yarn",
+    ]);
+    allows([
+      "cd /tmp/p && pnpm install --ignore-scripts --ignore-pnpmfile",
+      "cd /tmp/p && corepack pnpm install --ignore-scripts --ignore-pnpmfile",
+      "cd /tmp/p && yarn list",
+      "cd packages/shared && pnpm install",
+      "cd packages/shared && yarn install",
     ]);
   });
 
