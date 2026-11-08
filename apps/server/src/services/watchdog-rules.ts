@@ -119,12 +119,21 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
       if (x.awaitingPlan || x.scheduled) continue;
       const mine = runs.filter((r) => r.agentId === x.assigneeAgentId);
       const last = mine.sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())[0];
-      // Rule 1 of the idle-capacity rules (BOS-659): the agent took this ticket in progress and nothing
-      // has run on it since, for the short limit. This one rule owns that case, at any age, so an idle
-      // ticket is handed over exactly once however long it sits (it clears when a run starts on it). A
-      // ticket whose run has started is judged by the crash, "ended without moving" and long rules below.
+      // Rule 1 of the idle-capacity rules (BOS-659): the agent is idle on an in-progress ticket and nothing
+      // is scheduled for it. Two shapes, both handed to the Scrum Master at the short limit:
+      //   - it never ran on it (or every run it had was before it entered in-progress, so none is kept);
+      //   - it picked it up and then let go: a run started just after the ticket moved (the scheduler's
+      //     pickup) and has ended normally, nothing since. Its normal end used to fall through to the
+      //     45-minute grace and the two-hour long rule, so half the slots sat empty for hours (BOS-659 live
+      //     follow-up). A crash keeps its own rule and grace, because Boss Man's free recovery goes first; a
+      //     run that straddles or precedes the move stays the long rules' shape, so one idle spell is one flag.
       if (!last) {
         const idle = t - since;
+        if (idle >= s.idleAgentMinutes * 60_000) add("idle_agent", { idleMs: idle, limitMs: s.idleAgentMinutes * 60_000 });
+        continue;
+      }
+      if (last.endedAt && !isCrash(last.outcome) && since < last.startedAt.getTime() && t - last.endedAt.getTime() < RUN_ENDED_GRACE_MS) {
+        const idle = t - last.endedAt.getTime();
         if (idle >= s.idleAgentMinutes * 60_000) add("idle_agent", { idleMs: idle, limitMs: s.idleAgentMinutes * 60_000 });
         continue;
       }

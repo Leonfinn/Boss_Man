@@ -122,6 +122,18 @@ export const BLOCKED_UNTIL_REASON_MAX = 240;
 export const BLOCKED_UNTIL_MAX_DAYS = 30;
 export const BLOCKED_UNTIL_MAX_MS = BLOCKED_UNTIL_MAX_DAYS * 24 * 3_600_000;
 
+/**
+ * Whether a ticket was parked on purpose, so a finished blocker must not start it (BOS-742): a
+ * "blocked until" time still ahead, or a state note that says "parked". Plain words only: the note
+ * is what the CEO or the owner wrote when they meant to hold the ticket back.
+ */
+const PARKED_NOTE = /\bparked\b/i;
+
+export function parkedOnPurpose(t: { stateNote?: string | null; blockedUntil?: Date | null }, at: Date): boolean {
+  if (t.blockedUntil && t.blockedUntil.getTime() > at.getTime()) return true;
+  return !!t.stateNote && PARKED_NOTE.test(t.stateNote);
+}
+
 /** Plain-English heading for each logged action, as the owner reads it in the Scrum Master's log and a ticket's activity. A new action kind must have one (the type enforces it). */
 export const WATCHDOG_ACTION_LABEL: Record<WatchdogActionKind, string> = {
   sweep_wake: "Woke the Scrum Master",

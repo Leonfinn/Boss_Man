@@ -4,7 +4,7 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -178,6 +178,19 @@ export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP
  */
 const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|(GH_TOKEN|GH_PAT|GITHUB_TOKEN|GITHUB_PAT|GITLAB_TOKEN|GL_TOKEN|GITEA_TOKEN|CI_JOB_TOKEN|BITBUCKET_TOKEN|ATLASSIAN_API_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|YARN_NPM_AUTH_TOKEN|VERCEL_TOKEN)(_[A-Z0-9_]+)?)$/;
 
+/**
+ * The MCP servers as Claude Code's own config file (BOS-553). Handed over in session/new they would end up in the
+ * command line of Claude Code (`--mcp-config {...Bearer bm_run_...}`), which every agent on the runner can read
+ * from /proc. The adapter is told to pass this file's path instead.
+ */
+export function claudeMcpConfig(servers: McpServer[]): string {
+  const mcpServers: Record<string, unknown> = {};
+  for (const s of servers) {
+    if ("type" in s && (s.type === "http" || s.type === "sse")) mcpServers[s.name] = { type: s.type, url: s.url, headers: Object.fromEntries(s.headers.map((h) => [h.name, h.value])) };
+  }
+  return JSON.stringify({ mcpServers });
+}
+
 /** A run's granted secrets without the git credential, for the agent's own environment. */
 export function withoutGitCredentials(secrets: Record<string, string>): Record<string, string> {
   return Object.fromEntries(Object.entries(secrets).filter(([k]) => !GIT_CREDENTIAL_NAMES.test(k)));
@@ -244,6 +257,23 @@ export class SessionManager {
    * so the server can start a recovery run (R42). Call once, before handling commands.
    */
   recoverInterrupted() {
+    // A crash can leave a run's token file behind (BOS-553). Only folders older than 10 minutes go:
+    // the file is deleted seconds after the session opens, and another process sharing this tmp
+    // folder (parallel test files) may own a younger one that is still being read.
+    try {
+      for (const name of readdirSync(tmpdir())) {
+        if (!name.startsWith("bossman-mcp-")) continue;
+        const dir = path.join(tmpdir(), name);
+        try {
+          if (Date.now() - statSync(dir).mtimeMs < 600_000) continue;
+        } catch {
+          continue;
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    } catch {
+      /* best effort */
+    }
     const file = this.opts.stateFile;
     if (!file || !existsSync(file)) return [];
     let leftover: string[] = [];
@@ -442,6 +472,21 @@ export class SessionManager {
         }
         (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
           .then((secrets) => ws.clash({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
+      case "workspace.covers": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.signoffCovers({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.signed, secrets, command.head))
           .then(
             (data) => reply(command.requestId, { ok: true, data }),
             (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
@@ -759,6 +804,9 @@ export class SessionManager {
     // and the tmp sweep leave alone: /tmp is gone at the next restart, and so is the session's own temp folder.
     if (cmd.workspace) this.rescueTmp(cmd.workspace.ticketId, [tmpdir(), ...(runTmp ? [runTmp] : [])]);
     const dropTmp = () => runTmp && rmSync(runTmp, { recursive: true, force: true });
+    // Where this run's MCP config file lives (Claude only): its own 0700 folder, removed when the run ends.
+    let mcpDir: string | null = null;
+    const dropMcp = () => mcpDir && rmSync(mcpDir, { recursive: true, force: true });
     // OpenCode's database is being vacuumed (BOS-616): wait, since OpenCode gives up on its lock after 5 s.
     if (cmd.agentKind === "opencode" && this.opencodeHeld) {
       emit({ type: "runner.log", level: "info", message: `Run ${cmd.runId} waits a few minutes while OpenCode's database is compacted.` });
@@ -914,6 +962,7 @@ export class SessionManager {
       killGroup(child);
       dropSkills();
       dropTmp();
+      dropMcp();
     };
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
@@ -990,7 +1039,19 @@ export class SessionManager {
       }
       // Board tools only (owner chat): Claude's built-in tools are switched off through the
       // adapter's session options, so only the Boss Man MCP tools remain.
-      const sessionMeta = cmd.boardToolsOnly && cmd.agentKind === "claude" ? { _meta: { claudeCode: { options: { tools: [] } } } } : {};
+      // Claude: the servers go in a 0600 file in a folder of this run's own, not in session/new (BOS-553).
+      let sentServers = mcpServers;
+      let claudeOptions: Record<string, unknown> | null = cmd.boardToolsOnly && cmd.agentKind === "claude" ? { tools: [] } : null;
+      if (cmd.agentKind === "claude") {
+        dropMcp(); // a second pass must not leak the first folder
+        mcpDir = runTmp ? path.join(runTmp, "mcp") : mkdtempSync(path.join(tmpdir(), "bossman-mcp-"));
+        mkdirSync(mcpDir, { recursive: true, mode: 0o700 });
+        const file = path.join(mcpDir, "mcp.json");
+        writeFileSync(file, claudeMcpConfig(mcpServers), { mode: 0o600 });
+        sentServers = [];
+        claudeOptions = { ...claudeOptions, extraArgs: { "mcp-config": file } };
+      }
+      const sessionMeta = claudeOptions ? { _meta: { claudeCode: { options: claudeOptions } } } : {};
       const extraDirs = skillsDir ? { additionalDirectories: [skillsDir] } : {};
       // Recovery (R42): reopen the interrupted session if the agent can, else start fresh.
       // A crash before Claude Code flushes its transcript leaves nothing to load (spike S4).
@@ -998,18 +1059,20 @@ export class SessionManager {
         if (cmd.resumeSessionId && (init.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession) {
           try {
             replaying = true;
-            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta }).finally(() => (replaying = false));
+            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers: sentServers, ...extraDirs, ...sessionMeta }).finally(() => (replaying = false));
             emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "load" } });
             return { sessionId: cmd.resumeSessionId, configOptions: (loaded as { configOptions?: unknown[] | null } | null)?.configOptions ?? null, resumed: true };
           } catch (err) {
             this.opts.log?.(`couldn't reopen session ${cmd.resumeSessionId}: ${String((err as Error)?.message ?? err)}; starting fresh`);
           }
         }
-        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta });
+        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers: sentServers, ...extraDirs, ...sessionMeta });
         if (cmd.resumeSessionId) emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "fresh" } });
         return { ...(fresh as { sessionId: string; configOptions?: unknown[] | null }), resumed: false };
       };
       const session = await openSession();
+      // Claude Code has read the file by now. Production runs are unfenced and share one user, so don't leave the token readable for the whole run (BOS-553 review).
+      if (cmd.agentKind === "claude") dropMcp();
       state.sessionId = session.sessionId;
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
 

@@ -89,32 +89,74 @@ done
 echo "Network guard: back in place after a restart."
 
 # A connection opened while no guard is up (the launcher is stopped and the runner has a new namespace) must be
-# cut off when the guard arrives, not kept alive. The client opens db:5432, then writes a byte every half second;
-# the database closing it (end or reset) would mean the connection survived; the guard's reject is another error.
+# cut off when the guard arrives, not kept alive. How the socket closes proves nothing (Postgres hangs up on an idle
+# or malformed connection by itself, and the guard's ICMP reject is only a soft error on an open TCP socket), so we
+# ask the database a question over the connection after the guard is up: Postgres answers an SSLRequest at once
+# with one byte. First, with no guard, the same question on a fresh connection must get its answer, so a silence
+# later means the guard stopped it, not that the probe is broken.
 docker compose stop launcher >/dev/null
 docker restart "$runner" >/dev/null
 for _ in $(seq 30); do docker exec "$runner" true 2>/dev/null && break; sleep 1; done
-docker exec "$runner" rm -f /tmp/guard-conn
-docker exec -d "$runner" node -e '
-const fs = require("node:fs");
+# The SSLRequest: length 8, then the code 80877103.
+ssl_request='const b = Buffer.alloc(8); b.writeInt32BE(8, 0); b.writeInt32BE(80877103, 4);'
+unguarded="$(docker exec "$runner" node -e "$ssl_request"'
 const s = require("node:net").connect(5432, "db");
-const done = (what) => { fs.writeFileSync("/tmp/guard-conn", what); process.exit(0); };
-s.on("connect", () => { fs.writeFileSync("/tmp/guard-conn-open", "1"); });
+const done = (what) => { console.log(what); process.exit(0); };
+setTimeout(() => done("silent"), 10000);
+s.on("connect", () => s.write(b));
+s.on("data", () => done("reply"));
 s.on("error", (e) => done("error " + e.code));
 s.on("end", () => done("end"));
-setInterval(() => { try { s.write("x"); } catch (e) { done("error " + e.code); } }, 500);
+')"
+[[ "$unguarded" == reply ]] || { echo "With no guard up the database didn't answer the probe ($unguarded), so the guard can't be tested" >&2; exit 1; }
+docker exec "$runner" rm -f /tmp/guard-conn /tmp/guard-conn-open /tmp/guard-probe
+docker exec -d "$runner" node -e "$ssl_request"'
+const fs = require("node:fs");
+const s = require("node:net").connect(5432, "db");
+let probed = false;
+const done = (what) => { fs.writeFileSync("/tmp/guard-conn", probed ? what : what + " before the probe"); process.exit(0); };
+s.on("connect", () => fs.writeFileSync("/tmp/guard-conn-open", "1"));
+s.on("data", () => done("reply"));
+s.on("error", (e) => done("error " + e.code));
+s.on("end", () => done("end"));
+setInterval(() => {
+  if (probed || !fs.existsSync("/tmp/guard-probe")) return;
+  probed = true;
+  s.write(b);
+  setTimeout(() => done("silent"), 10000);
+}, 200);
 '
 for _ in $(seq 20); do docker exec "$runner" test -e /tmp/guard-conn-open 2>/dev/null && break; sleep 1; done
 docker exec "$runner" test -e /tmp/guard-conn-open || { echo "Couldn't open a connection to the database before the guard was up" >&2; exit 1; }
-docker exec "$runner" rm -f /tmp/guard-conn
 docker compose start launcher >/dev/null
-for _ in $(seq 40); do docker exec "$runner" test -s /tmp/guard-conn 2>/dev/null && break; sleep 2; done
-ended="$(docker exec "$runner" cat /tmp/guard-conn 2>/dev/null || true)"
-echo "Connection opened before the guard: $ended"
-[[ -n "$ended" && "$ended" != "end" && "$ended" != "error ECONNRESET" && "$ended" != "error EPIPE" ]] || { echo "A connection opened before the guard survived it: '$ended'" >&2; exit 1; }
 for _ in $(seq 30); do check_guard 2>/dev/null && ok=1 && break; sleep 3; done
-[[ "${ok:-0}" == 1 ]]
+[[ "${ok:-0}" == 1 ]] || { echo "The guard didn't come up after the launcher started" >&2; exit 1; }
+docker exec "$runner" touch /tmp/guard-probe
+for _ in $(seq 15); do docker exec "$runner" test -s /tmp/guard-conn 2>/dev/null && break; sleep 1; done
+probe="$(docker exec "$runner" cat /tmp/guard-conn 2>/dev/null || true)"
+echo "Connection opened before the guard, asked after it: ${probe:-no result}"
+case "$probe" in
+  reply) echo "A connection opened before the guard still reaches the database" >&2; exit 1 ;;
+  silent | end | "error "*) ;;
+  *) echo "Couldn't tell whether the guard cut the connection off ('${probe:-no result}')" >&2; exit 1 ;;
+esac
 echo "Network guard: a connection opened before it was up is cut off."
+
+# Self-heal (BOS-467): a runner that disappears while its token file is still there (what a guard failure leaves
+# behind) is made again by the launcher, with the guard, without anyone pressing a button.
+docker rm -f "$runner" >/dev/null
+for _ in $(seq 80); do
+  if docker exec "$runner" true 2>/dev/null && check_guard 2>/dev/null; then healed=1; break; fi
+  sleep 3
+done
+[[ "${healed:-0}" == 1 ]] || { echo "The launcher didn't bring the removed runner back" >&2; docker compose logs launcher 2>&1 | tail -30; exit 1; }
+for _ in $(seq 30); do
+  status="$(curl -fs -b "$jar" "$base/api/companies/$id/runner")"
+  grep -q '"connected":true' <<<"$status" && break
+  sleep 2
+done
+grep -q '"connected":true' <<<"$status" || { echo "The recreated runner never connected: $status" >&2; exit 1; }
+echo "Self-heal: removed runner recreated, guarded and connected."
 
 # The launcher publishes no ports.
 [[ -z "$(docker compose port launcher 3105 2>/dev/null || true)" ]]

@@ -1903,6 +1903,14 @@ describe("rules judge: each heredoc on a line has its own owner and body (BOS-72
     "cat <<'EOF' | xargs rm -rf\n/etc\nEOF",
     "cat <<'EOF' | tee /tmp/x | xargs rm -rf\n/etc\nEOF",
     "tee >(bash) <<'EOF'\nrm -rf /etc\nEOF",
+    // A `<<` inside quotes, a comment or arithmetic is not a heredoc: it must not eat the real interpreter's body (Rex).
+    "cat '<<A'; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat \"x<<A\"; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "echo foo > /tmp/x\ncat '<<A'; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat x # <<A\nbash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat \\<<A; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat $((1<<A)); bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "echo \"a\ncat <<A\"; bash <<'B'\nrm -rf /etc\nB\nA\nB",
   ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
   // BOS-728: with no cat/tee skip these are Deny; the harmless one stays Allow.
   it.each([
@@ -1920,6 +1928,10 @@ describe("rules judge: each heredoc on a line has its own owner and body (BOS-72
     `source <(cat <<'EOF'\nrm -rf /etc\nEOF\n)`,
     `. <(cat <<'EOF'\nrm -rf /etc\nEOF\n)`,
     `eval "$(cat <<'EOF'\nrm -rf /etc\nEOF\n)"`,
+    // Jane's BOS-727 head findings: a comment line before Rex's form, and the cat output run through a variable
+    "# note\ncat '<<A'; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    `source <(cat <<'A'\nrm -rf /etc\nA\n)`,
+    `x=$(cat <<'A'\nrm -rf /etc\nA\n); $x`,
   ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
   it.each([
     "cat <<'A' > /tmp/x; bash <<'B'\nplain text\nA\nls\nB",
@@ -1955,9 +1967,22 @@ describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-72
     "echo / | xargs shred",
   ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
   it.each(["shred -u /tmp/a", "rm -rf /tmp/a /tmp/b"])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  // Measured against a plain line of the same length, timed in turn on the same machine, not in wall-clock ms: a 150 ms
+  // limit failed on GitHub's shared runners (271 ms) and still passed the quadratic scan's 236 ms case on a fast machine.
+  // The file-tool lines cost at most ~8x the plain one now; before this fix they cost 43-100x.
   it.each(["rm ".repeat(3333), "cp a ".repeat(2000), "shred ".repeat(1666)])("stays fast on a 10,000-char line", (cmd) => {
-    const t = performance.now();
-    judge(cmd);
-    expect(performance.now() - t).toBeLessThan(150);
+    const plain = "echo ".repeat(2000);
+    const time = (c: string) => {
+      const t = performance.now();
+      judge(c);
+      return performance.now() - t;
+    };
+    let tool = Infinity;
+    let base = Infinity;
+    for (let i = 0; i < 6; i++) {
+      tool = Math.min(tool, time(cmd));
+      base = Math.min(base, time(plain));
+    }
+    expect(tool / base).toBeLessThan(20);
   });
 });
