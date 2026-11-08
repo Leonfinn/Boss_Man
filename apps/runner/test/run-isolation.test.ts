@@ -65,7 +65,7 @@ async function crossRun(sameAgent: boolean) {
     baseEnv: { PATH: process.env.PATH, HOME: root },
     adapterBins: { claude: FAKE_PEER },
     fence,
-    resolveEnv: async (runId) => {
+    resolveEnv: async (runId): Promise<Record<string, string>> => {
       if (runId === runA) return { PEER_ROLE: "holder", PEER_SECRET: secret };
       const h = readHolder();
       return { PEER_ROLE: "prober", PEER_TMP: h.tmp, PEER_MCP: h.mcpConfig, PEER_MCP_EXISTS: existsSync(h.mcpConfig) ? "1" : "0", PEER_HOME: homeA, PEER_TOKEN: token, PEER_SECRET: secret };
