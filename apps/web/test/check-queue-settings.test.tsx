@@ -1,0 +1,48 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CheckQueueSetting } from "../src/pages/Settings";
+
+// Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue and its slots.
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
+const view = { mode: "legacy", slots: 1, maxSlots: 8, defaultSlots: 1, runnersTooOld: [] as string[] };
+
+describe("Checks in Settings", () => {
+  it("shows both modes with a plain line each, and saves the switch to server with the slots", async () => {
+    const calls: Array<{ method: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : null });
+        return json(init?.method === "PUT" ? { ...view, mode: "server", slots: 2, cancelled: 0 } : view);
+      }),
+    );
+    render(<CheckQueueSetting />);
+    const legacy = (await screen.findByRole("radio", { name: /Agents run their own/ })) as HTMLInputElement;
+    const server = screen.getByRole("radio", { name: /Boss Man runs them/ }) as HTMLInputElement;
+    expect(legacy.checked).toBe(true);
+    expect(server.parentElement!.textContent).toContain("woken with the result");
+    expect(server.parentElement!.textContent).toContain("merge check");
+    const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true); // nothing changed yet
+    fireEvent.click(server);
+    fireEvent.change(screen.getByLabelText(/Checks at once/), { target: { value: "2" } });
+    fireEvent.click(save);
+    await vi.waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({ mode: "server", slots: 2 });
+  });
+
+  it("won't save slots outside 1 to 8, and warns about a runner too old for queued checks", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...view, runnersTooOld: ["App Co"] })));
+    render(<CheckQueueSetting />);
+    expect((await screen.findByTestId("check-queue-old-runner")).textContent).toContain("App Co");
+    fireEvent.change(screen.getByLabelText(/Checks at once/), { target: { value: "9" } });
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
