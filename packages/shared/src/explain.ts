@@ -44,7 +44,7 @@ const SHELLS = new Set("bash sh zsh dash python python3 node".split(" "));
 const READS = new Set("set export local declare readonly unset shift return exit printf read trap break continue cat grep egrep rg ls head tail wc stat du df free ps which pwd echo cd date whoami uname sort uniq cut tr diff file test [ true sleep".split(" "));
 const CHANGES = new Set("tee mv cp mkdir touch chmod chown ln".split(" "));
 const DELETES = new Set("rm rmdir unlink shred".split(" "));
-const NETWORK = new Set("curl wget ssh scp nc ncat rsync".split(" "));
+const NETWORK = new Set("curl wget ssh scp nc ncat rsync agent-browser".split(" "));
 const GIT_READS = new Set("status log diff show branch rev-parse ls-files blame remote grep describe merge-base show-ref cat-file shortlog rev-list for-each-ref ls-tree reflog name-rev symbolic-ref check-ignore count-objects merge-tree range-diff whatchanged version help fsck cherry".split(" "));
 const GIT_CHANGES = new Set("add commit checkout switch merge reset rebase stash restore cherry-pick tag apply mv revert am notes init gc prune config sparse-checkout bisect format-patch update-ref".split(" "));
 const GIT_NETWORK = new Set(["fetch", "pull", "clone", "ls-remote", "submodule"]);
@@ -79,6 +79,12 @@ function segments(command: string): string[] {
   const heredocs: string[] = [];
   for (let i = 0; i < command.length; i++) {
     const c = command[i]!;
+    // A backslash outside single quotes escapes the next character: \" stays inside the quote, \; is not a separator, and \ at the end of a line joins it to the next (BOS-752).
+    if (c === "\\" && quote !== "'" && i + 1 < command.length) {
+      cur += command[i + 1] === "\n" ? " " : c + command[i + 1];
+      i++;
+      continue;
+    }
     if (quote) {
       if (c === quote) quote = "";
     } else if (c === "'" || c === '"') quote = c;
@@ -182,7 +188,7 @@ function scratchSafe(seg: string, program: string, rest: string[]): boolean {
 const SAFE_FIRST_WORD = /^[a-z0-9_-]+$/;
 
 function explainSegment(seg: string): Part {
-  const all = (seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote);
+  const all = (seg.match(/'[^']*'|"(?:\\.|[^"\\])*"|\S+/g) ?? []).map(unquote);
   const comment = all.findIndex((t) => t.startsWith("#"));
   const inline = all.some((t) => t.startsWith("<<") && !t.startsWith("<<<"));
   const tokens = all.slice(0, comment < 0 ? all.length : comment).filter((t) => !t.startsWith("<<") || t.startsWith("<<<"));
@@ -245,6 +251,8 @@ function explainSegment(seg: string): Part {
   else if (CHANGES.has(program)) p = part("changes", "Changes files", program === "cp" || program === "tee" ? operands.slice(program === "cp" ? -1 : 0) : program === "chmod" || program === "chown" ? operands.slice(1) : operands);
   else if (READS.has(program)) p = part("reads", "", paths);
   else if (inline && SHELLS.has(program)) p = part("unknown", `Runs a script written into the command (${program})`);
+  // A word that is an option, a variable or a piece of quoted text is not a program name: say the command couldn't be read, and don't list it as a program (BOS-752).
+  else if (!/^[\w.+@-]+$/.test(program) || program.startsWith("-")) p = part("unknown", "Runs a command Boss Man couldn't read");
   else p = part("unknown", "Runs a program Boss Man doesn't recognise", [program]);
 
   if (/\$\(|`/.test(nested ? seg.slice(seg.indexOf("$(") + 2) : seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");

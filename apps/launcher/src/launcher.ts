@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writ
 import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
-import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, parseTrusted, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
+import { COMPANY_LABEL, companyDir, containerName, containerSpec, LABEL, listLabel, runnerImage, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, parseTrusted, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
 const MAX_BODY = 4096;
@@ -48,19 +48,19 @@ class GuardUnavailable extends Error {
 export function launcher(cfg: LauncherConfig, docker: Docker) {
   /** The container for a slug, if the launcher made it; anything else under that name is refused. */
   async function ours(slug: string) {
-    const c = await docker.inspect(containerName(slug));
+    const c = await docker.inspect(containerName(slug, cfg.stack));
     if (!c) return null;
     const labels = c.Config.Labels ?? {};
-    if (labels[LABEL] !== "1" || labels[COMPANY_LABEL] !== slug) throw new LauncherError(409, `A container called ${containerName(slug)} exists that the launcher didn't make; it won't touch it.`);
+    if (labels[LABEL] !== "1" || labels[COMPANY_LABEL] !== slug) throw new LauncherError(409, `A container called ${containerName(slug, cfg.stack)} exists that the launcher didn't make; it won't touch it.`);
     return c;
   }
 
   /** The slug's network guard, if there is one; a container of that name that isn't ours is refused. */
   async function guardOf(slug: string) {
-    const g = await docker.inspect(netguardName(slug));
+    const g = await docker.inspect(netguardName(slug, cfg.stack));
     if (!g) return null;
     const labels = g.Config.Labels ?? {};
-    if (labels[NETGUARD_LABEL] !== "1" || labels[COMPANY_LABEL] !== slug) throw new LauncherError(409, `A container called ${netguardName(slug)} exists that the launcher didn't make; it won't touch it.`);
+    if (labels[NETGUARD_LABEL] !== "1" || labels[COMPANY_LABEL] !== slug) throw new LauncherError(409, `A container called ${netguardName(slug, cfg.stack)} exists that the launcher didn't make; it won't touch it.`);
     return g;
   }
 
@@ -100,7 +100,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     const deadline = Date.now() + (cfg.guardReadyMs ?? 20_000);
     for (;;) {
       const g = await guardOf(slug);
-      if (!g || g.State.Status === "exited" || g.State.Status === "dead") throw new GuardUnavailable(g?.State.ExitCode === NETGUARD_UNAVAILABLE_EXIT, `The network guard for ${slug} stopped (exit code ${g?.State.ExitCode ?? "unknown"}); see \`docker logs ${netguardName(slug)}\`.`);
+      if (!g || g.State.Status === "exited" || g.State.Status === "dead") throw new GuardUnavailable(g?.State.ExitCode === NETGUARD_UNAVAILABLE_EXIT, `The network guard for ${slug} stopped (exit code ${g?.State.ExitCode ?? "unknown"}); see \`docker logs ${netguardName(slug, cfg.stack)}\`.`);
       if (g.State.Health?.Status === "healthy") return;
       if (Date.now() > deadline) throw new GuardUnavailable(false, `The network guard for ${slug} didn't load its rules in time.`);
       await sleep(250);
@@ -118,7 +118,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       const old = await guardOf(slug);
       if (old) await removeSettled(docker, old.Id);
       mkdirSync(netguardDir(cfg, slug), { recursive: true, mode: 0o755 });
-      await docker.start(await docker.create(netguardName(slug), netguardSpec(cfg, slug, runnerId)));
+      await docker.start(await docker.create(netguardName(slug, cfg.stack), netguardSpec(cfg, slug, runnerId)));
       await guardReady(slug);
     } catch (err) {
       if (err instanceof GuardUnavailable && err.hostCannot && mode === "auto") {
@@ -150,7 +150,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     if (!existsSync(path.join(netguardDir(cfg, slug), "allow"))) writeAllow(slug, []);
     const old = await ours(slug);
     if (old) await removeSettled(docker, old.Id);
-    const id = await docker.create(containerName(slug), containerSpec(cfg, slug));
+    const id = await docker.create(containerName(slug, cfg.stack), containerSpec(cfg, slug));
     await docker.start(id);
     try {
       await guard(slug, id);
@@ -213,13 +213,13 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     }),
 
     async list(): Promise<RunnerStatus[]> {
-      const all = await docker.list(`${LABEL}=1`);
-      const current = await docker.imageId(IMAGE);
-      const mine = all.filter((c) => SLUG.test(c.Labels[COMPANY_LABEL] ?? "") && c.Names.includes(`/${containerName(c.Labels[COMPANY_LABEL]!)}`));
+      const all = await docker.list(listLabel(cfg.stack));
+      const current = await docker.imageId(runnerImage(cfg.stack));
+      const mine = all.filter((c) => SLUG.test(c.Labels[COMPANY_LABEL] ?? "") && c.Names.includes(`/${containerName(c.Labels[COMPANY_LABEL]!, cfg.stack)}`));
       return Promise.all(
         mine.map(async (c) => {
           const slug = c.Labels[COMPANY_LABEL]!;
-          const info = mode === "off" ? null : await docker.inspect(containerName(slug)).catch(() => null);
+          const info = mode === "off" ? null : await docker.inspect(containerName(slug, cfg.stack)).catch(() => null);
           return { slug, state: c.State, status: c.Status, image: c.Image, current: !!current && c.ImageID === current, guard: await guardStatus(slug, info?.State.StartedAt) };
         }),
       );
