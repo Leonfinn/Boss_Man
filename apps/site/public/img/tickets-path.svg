@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 560" width="1160" height="560" role="img" aria-labelledby="tp-title tp-desc">
+  <title id="tp-title">A ticket's path from the backlog to done</title>
+  <desc id="tp-desc">A ticket moves from backlog to in progress, to review, to the merge queue, to done. High and critical tickets also stop for the owner's sign-off between review and the merge queue. If the check fails, the ticket goes back to in progress.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+    <marker id="aa" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8a5a00"/></marker>
+  </defs>
+  <rect width="1160" height="560" fill="#ffffff"/>
+
+  <!-- failure loop -->
+  <path d="M821 110 V66 H339 V104" fill="none" stroke="#3d4757" stroke-width="2.5" stroke-dasharray="3 7" stroke-linecap="round" marker-end="url(#ar)"/>
+  <text x="580" y="52" text-anchor="middle" class="bb" font-size="15" fill="#3d4757">Check fails: back to in progress</text>
+
+  <!-- main route arrows -->
+  <g stroke="#17202c" stroke-width="3" fill="none" marker-end="url(#ar)">
+    <path d="M196 158 H239"/><path d="M437 158 H480"/><path d="M678 158 H721"/><path d="M919 158 H962"/>
+  </g>
+
+  <!-- stage boxes -->
+  <g fill="#17202c">
+    <rect x="0" y="110" width="196" height="100" rx="10"/>
+    <rect x="241" y="110" width="196" height="100" rx="10"/>
+    <rect x="482" y="110" width="196" height="100" rx="10"/>
+    <rect x="723" y="110" width="196" height="100" rx="10"/>
+    <rect x="964" y="110" width="196" height="100" rx="10"/>
+  </g>
+  <g class="d" font-size="22" fill="#eef2f6">
+    <text x="20" y="152">Backlog</text>
+    <text x="261" y="152">In progress</text>
+    <text x="502" y="152">Review</text>
+    <text x="743" y="152">Merge queue</text>
+    <text x="984" y="152">Done</text>
+  </g>
+  <g class="b" font-size="15" fill="#c3cbd6">
+    <text x="20" y="178">The ticket waits</text>
+    <text x="261" y="178">An agent does</text><text x="261" y="197">the work</text>
+    <text x="502" y="178">Another agent</text><text x="502" y="197">reviews it</text>
+    <text x="743" y="178">Boss Man runs the</text><text x="743" y="197">check, then merges</text>
+    <text x="984" y="178">On your</text><text x="984" y="197">main branch</text>
+  </g>
+
+  <!-- numbered pins -->
+  <g class="bb" font-size="15" text-anchor="middle" fill="#ffffff">
+    <circle cx="20" cy="110" r="14" fill="#c8282f"/><text x="20" y="115.5">1</text>
+    <circle cx="261" cy="110" r="14" fill="#c8282f"/><text x="261" y="115.5">2</text>
+    <circle cx="502" cy="110" r="14" fill="#c8282f"/><text x="502" y="115.5">3</text>
+    <circle cx="743" cy="110" r="14" fill="#c8282f"/><text x="743" y="115.5">4</text>
+    <circle cx="984" cy="110" r="14" fill="#c8282f"/><text x="984" y="115.5">5</text>
+  </g>
+
+  <!-- sign-off detour (high and critical only) -->
+  <path d="M580 210 V340 H608" fill="none" stroke="#8a5a00" stroke-width="3" stroke-dasharray="9 6" marker-end="url(#aa)"/>
+  <path d="M796 340 H821 V214" fill="none" stroke="#8a5a00" stroke-width="3" stroke-dasharray="9 6" marker-end="url(#aa)"/>
+  <rect x="612" y="294" width="180" height="92" rx="10" fill="#f0b75c"/>
+  <text x="632" y="336" class="d" font-size="22" fill="#17202c">Your sign-off</text>
+  <text x="632" y="362" class="b" font-size="15" fill="#17202c">Approve and merge,</text>
+  <text x="632" y="380" class="b" font-size="15" fill="#17202c">or send it back</text>
+  <text x="566" y="272" text-anchor="end" class="bb" font-size="15" fill="#8a5a00">High and critical only</text>
+
+  <!-- risk legend -->
+  <line x1="0" y1="428" x2="1160" y2="428" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="0" y="460" class="d" font-size="18" fill="#17202c" style="font-weight:650">Who reviews, by risk</text>
+  <g class="bb" font-size="16" fill="#17202c">
+    <text x="0" y="498">Trivial, Low</text>
+    <text x="400" y="498">Medium</text>
+    <text x="760" y="498">High, Critical</text>
+  </g>
+  <g class="b" font-size="16" fill="#3d4757">
+    <text x="0" y="520">Reviewed by the CEO.</text>
+    <text x="0" y="540">No sign-off from you.</text>
+    <text x="400" y="520">Reviewed by a senior developer.</text>
+    <text x="400" y="540">No sign-off from you.</text>
+    <text x="760" y="520">Reviewed by a senior developer,</text>
+    <text x="760" y="540">then your sign-off.</text>
+  </g>
+</svg>

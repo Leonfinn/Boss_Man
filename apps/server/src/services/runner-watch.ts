@@ -54,15 +54,17 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
 
   const steps = (name: string) => `Open Settings > Server and runner, find ${name}'s runner and click "Reconnect runner" (or "Start runner" if it is stopped). Do not use "Update runners" for this. If it goes offline again, tell the CEO what the page says.`;
 
-  async function clear(runnerId: string, name: string) {
+  async function clear(runnerId: string, name: string, back = true) {
     const cleared = await db
       .update(decisions)
       .set({ status: "withdrawn", dedupeKey: null })
       .where(and(eq(decisions.dedupeKey, runnerOfflineKey(runnerId)), eq(decisions.status, "open")))
       .returning({ id: decisions.id });
     const unmarked = await db.delete(settings).where(eq(settings.key, runnerPagedKey(runnerId))).returning({ key: settings.key });
+    const wasPaged = paged.delete(runnerId);
     carded.delete(runnerId);
-    if (paged.delete(runnerId) || cleared.length || unmarked.length) await deps.notify({ companyId: null, level: "note", title: `${name}'s runner is back`, body: "It reconnected by itself or after a restart. Nothing to do.", link: "#/settings" });
+    // A runner the owner stopped did not come back, so no "is back" note (BOS-735).
+    if (back && (wasPaged || cleared.length || unmarked.length)) await deps.notify({ companyId: null, level: "note", title: `${name}'s runner is back`, body: "It reconnected by itself or after a restart. Nothing to do.", link: "#/settings" });
   }
 
   /** Pages the owner once per outage: the outage is named by the runner's lastSeenAt, which only a reconnect changes. */
@@ -114,10 +116,12 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
           continue;
         }
         handChecked.delete(r.id);
-        // Stopped on purpose (the launcher stop clears lastSeenAt): not an outage.
+        // Stopped on purpose (the launcher stop clears lastSeenAt): not an outage, and any card raised for the
+        // outage before the stop is withdrawn, or it keeps saying the company's work cannot start (BOS-735).
         if (!r.lastSeenAt) {
           offlineSince.delete(r.id);
           swept.delete(r.id);
+          if (carded.has(r.id) || paged.has(r.id)) await clear(r.id, r.name, false);
           continue;
         }
         if (!isWanted(r)) {
@@ -147,6 +151,7 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
             companyId: r.companyId,
             question: `Your company's runner is offline (${minutes}+ minutes), so your agents cannot start work. Boss Man has told the owner. The owner's fix: ${steps(r.name)} This card clears by itself when the runner reconnects.`,
             from: "ceo",
+            kind: "alert",
             dedupeKey: runnerOfflineKey(r.id),
           });
           carded.add(r.id);

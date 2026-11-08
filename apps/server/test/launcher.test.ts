@@ -33,6 +33,7 @@ function fakeLauncher() {
     if (failing) return json(502, { error: "Creating the runner failed: No such image: boss-man-runner:current" });
     const slug = url.pathname.split("/")[2];
     if (method === "GET" && url.pathname === "/wanted") return json(200, [...running.keys()].sort());
+    if (method === "GET" && url.pathname === "/netguard") return json(200, { mode: "auto", allow: ["git.example.lan:3003", "penpot.example.lan:9001"] });
     if (method === "GET" && url.pathname === "/runners") return json(200, [...running.entries()].map(([s, state]) => ({ slug: s, state, status: "Up 2 seconds", image: "boss-man-runner:current", guard: "on" })));
     if (method === "PUT") return running.set(slug!, "running"), json(200, { slug, id: "abc" });
     if (method === "DELETE") return json(200, { slug, removed: running.delete(slug!) });
@@ -114,6 +115,23 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [] }));
     expect(toolServerAddress("https://tools.lan/mcp")).toBe("tools.lan:443");
     expect(toolServerAddress("http://[fd00::1]/mcp")).toBeNull();
+  });
+
+  it("shows the owner the launcher's BOSSMAN_NETGUARD_ALLOW entries and marks the ones a project's git host covers (BOS-770)", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+    const before = (await c.req("GET", "/api/netguard-allow")).json() as { report: { entries: Array<{ entry: string; note: string | null }> } };
+    expect(before.report.entries.map((e) => e.note)).toEqual([null, null]);
+    const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://git.example.lan:3003/team/site.git" });
+    const after = (await c.req("GET", "/api/netguard-allow")).json() as { report: { mode: string; entries: Array<{ entry: string; coveredBy: string[]; note: string | null }>; lineCanGo: boolean } };
+    expect(after.report).toMatchObject({ mode: "auto", lineCanGo: false });
+    expect(after.report.entries[0]).toMatchObject({ entry: "git.example.lan:3003", coveredBy: ["git host"] });
+    expect(after.report.entries[0]!.note).toMatch(/^Already allowed by Boss Man/);
+    expect(after.report.entries[1]).toMatchObject({ entry: "penpot.example.lan:9001", note: null });
+    // The CEO's server status carries the same report.
+    const status = (await c.serverStatus.status(company.id)) as { netguardAllow: { entries: unknown[] } | null };
+    expect(status.netguardAllow?.entries).toHaveLength(2);
   });
 
   it("lets the runner reach the company's own git host only, and follows a changed repo address", async () => {

@@ -17,6 +17,8 @@ mkdir -p "$T/w/scripts" "$T/w/apps/server"
 cat >"$T/w/scripts/deploy.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "deploy.sh $*" >>"$STUB_LOG"
+# A restart (BOS-647) adds --force before --commit.
+if [[ ${3:-} == --force ]]; then set -- "$1" "$2" "${@:4}"; fi
 [[ ${1:-} == --yes && ${2:-} == --no-runner && ${3:-} == --commit ]] || exit 9
 if [[ ${STUB_RC:-0} == 0 ]]; then git merge --ff-only --quiet "$4"; r=deployed; m=ok; else r=${STUB_RESULT:-failed}; m="the stub failed"; fi
 printf '{"result":"%s","message":"%s","to_commit":"%s","backup":"/b/x.sql.gz"}\n' "$r" "$m" "$4" >"$BOSSMAN_DEPLOY_STATUS"
@@ -118,6 +120,20 @@ hasnt "$D/outbox/host.json" 'abc123'
 hasnt "$D/outbox/host.json" 'SECRET_TOKEN'
 hasnt "$D/outbox/host.json" 'PENPOT_BIND'
 rm -f "$T/src/.env"
+# BOS-770: every BOSSMAN_NETGUARD_ALLOW line in .env is reported in order, host:port entries only, so a duplicate
+# (Compose uses only the last) shows; a comment, a commented-out line and anything that isn't host:port are left out.
+printf 'BOSSMAN_NETGUARD_ALLOW=git.example.lan:3000\n# BOSSMAN_NETGUARD_ALLOW=old.example.lan:1\nSECRET_TOKEN=abc123\nexport BOSSMAN_NETGUARD_ALLOW="penpot.example.lan:9001, 10.0.0.9:22 bad;entry" # the design tool\n' >"$T/src/.env"
+host
+node -e '
+const h=require(process.argv[1]);const g=h.netguardEnv;
+if(!g||g.envFound!==true||JSON.stringify(g.lines)!==JSON.stringify([["git.example.lan:3000"],["penpot.example.lan:9001","10.0.0.9:22"]])){console.error(JSON.stringify(g));process.exit(1)}
+' "$D/outbox/host.json" || fail "netguardEnv is wrong: $(cat "$D/outbox/host.json")"
+hasnt "$D/outbox/host.json" 'old.example.lan'
+hasnt "$D/outbox/host.json" 'abc123'
+hasnt "$D/outbox/host.json" 'design tool'
+rm -f "$T/src/.env"
+host
+has "$D/outbox/host.json" '"netguardEnv": {"envFound": false, "lines": []}'
 # The repo probe is cached for an hour: a second run does not repeat it.
 cp "$D/state/repo-probe" "$T/probe1"; sleep 1.1; host; cmp -s "$D/state/repo-probe" "$T/probe1" || fail "repo probe was repeated within the hour"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
@@ -178,12 +194,18 @@ const p=JSON.parse(lines[lines.length-1]);const got=Object.keys(p).sort().join("
 if(got!==want){console.error("keys: "+got);process.exit(1)}
 ' "$T/hook.out" || fail "webhook payload keys"
 
-# 5. Not the tip of main: refused (the old commit is real, but main has moved).
+# 5. A commit that is not on main is refused (BOS-753: an older commit on main is no longer refused; see 13b).
 rm "$D/state/last-server"
-req server "$c1"
+side="$(git -C "$T/w" commit-tree "$c1^{tree}" -p "$c1" -m "side branch")"
+git -C "$T/w" push -q origin "$side:refs/heads/side" 2>/dev/null
+printf '%s\n' "$side" >"$D/inbox/checked" # even listed as checked: off main is never deployed
+req server "$side"
 host
-has "$D/outbox/status.json" "is not the tip of main"
-[[ ! -e $D/outbox/available.json ]] || fail "a stale offer survived a not-the-tip refusal"
+[[ $(status result) == rejected ]] || fail "a commit off main was not refused: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "is not on main any more"
+[[ ! -e $D/outbox/available.json ]] || fail "a stale offer survived an off-main refusal"
+[[ $(calls) == 1 ]] || fail "a commit off main was deployed"
+rm -f "$D/inbox/checked"
 
 # 6. A change to deployment files is refused, however it got to main.
 c3="$(push docker-compose.yml)"
@@ -282,6 +304,79 @@ chmod 600 "$D/host.conf"
 a="$(grep -o "^RUNNER_PATHS='[^']*'" "$here/host-deployer.sh" | sed "s/^RUNNER_PATHS='//; s/'\$//")"
 grep -qF -- "grep -Eq '$a'" "$here/deploy.sh" || fail "runner paths differ between host-deployer.sh and deploy.sh"
 
+# 13b. Restart (BOS-647), single server: deploy.sh --force at the commit that runs; never a fetch or a move.
+rm -f "$D/state/last-server" "$D/state/last-restart"
+head="$(git -C "$T/src" rev-parse HEAD)"; before="$(calls)"
+req restart "$head"; host --dry-run
+has "$T/out" "would run: scripts/deploy.sh --yes --no-runner --force --commit ${head:0:8}"
+rm -f "$D/inbox/request.json"
+req restart "$head"; host
+[[ $(status result) == deployed && $(status target) == restart && $(status to_commit) == "$head" ]] || fail "restart status: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "Restarted at ${head:0:8}"
+has "$STUB_LOG" "deploy.sh --yes --no-runner --force --commit $head"
+[[ $(calls) == $((before + 1)) && $(git -C "$T/src" rev-parse HEAD) == "$head" ]] || fail "restart moved the checkout or ran twice"
+# It shares the server's rate limit (one slot, state/last-server), both ways.
+[[ -e $D/state/last-server && ! -e $D/state/last-restart ]] || fail "restart did not use the server's rate-limit slot"
+req restart "$head"; host
+[[ $(status result) == rejected ]] || fail "second restart inside the limit: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "updated or restarted less than 10 minutes ago"
+[[ $(calls) == $((before + 1)) ]] || fail "a restart ran inside the rate limit"
+# A commit that is not what runs (an update ran since the click): refused, nothing runs.
+rm -f "$D/state/last-server"
+req restart "$base"; host
+[[ $(status result) == rejected ]] || fail "restart of another commit: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "The version running changed since you asked"
+[[ $(calls) == $((before + 1)) && $(git -C "$T/src" rev-parse HEAD) == "$head" ]] || fail "a restart for another commit ran something"
+# Only the exact lower-case target is accepted.
+req Restart "$head"; host; has "$D/outbox/status.json" "expected format"
+# A restart that fails its health check says so.
+STUB_RC=1 STUB_RESULT=failed req restart "$head"; STUB_RC=1 STUB_RESULT=failed host
+[[ $(status result) == failed && $(status target) == restart ]] || fail "failed restart: $(cat "$D/outbox/status.json")"
+# 13g. BOS-753: main moved on after the owner approved (a merge between the card and the press, or before this tick).
+# The approval is not refused: the newest commit on main that the merge gate checked goes out, and the status says so.
+# It starts from what runs now (the restart tests above left main and the checkout at $head).
+rm -f "$D/state/last-server"
+deployed="$(git -C "$T/src" rev-parse HEAD)"
+c5="$(push apps/server/d)"; c6="$(push apps/server/e)" # main: deployed c5 c6; c6 has not passed its check yet
+printf '%s\n' "$c5" >"$D/inbox/checked"
+before="$(calls)"
+req server "$deployed"; host
+[[ $(status result) == deployed && $(status to_commit) == "$c5" && $(status requested_commit) == "$deployed" ]] || fail "13g: newest checked commit not deployed: $(cat "$D/outbox/status.json")"
+has "$STUB_LOG" "deploy.sh --yes --no-runner --commit $c5"
+has "$D/outbox/status.json" "Deployed ${deployed:0:8} to ${c5:0:8}. You approved ${deployed:0:8}; main had moved on to ${c6:0:8}"
+has "$D/outbox/status.json" "have not passed their merge check yet. ${c5:0:8} is the newest one that has"
+[[ $(status runner_changed) == false ]] || fail "13g: runner_changed: $(cat "$D/outbox/status.json")"
+[[ $(calls) == $((before + 1)) ]] || fail "13g: deploy ran $(($(calls) - before)) times"
+# 13h. Deploy latest pressed for the tip, then two more merges land, both checked: the new tip goes out, and the runner
+# change it brings is reported, though the card's own range had none.
+rm -f "$D/state/last-server"
+c7="$(push apps/runner/x)"; c8="$(push apps/server/f)"
+printf '%s\n' "$c5" "$c6" "$c7" "$c8" >"$D/inbox/checked"
+before="$(calls)"
+req server "$c6"; host
+[[ $(status result) == deployed && $(status to_commit) == "$c8" && $(status requested_commit) == "$c6" ]] || fail "13h: tip not deployed: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "You approved ${c6:0:8}; main had moved on to ${c8:0:8} by the time the deployer ran, so the deployer took that newest checked version instead."
+[[ $(status runner_changed) == true ]] || fail "13h: runner_changed: $(cat "$D/outbox/status.json")"
+[[ $(calls) == $((before + 1)) ]] || fail "13h: deploy ran $(($(calls) - before)) times"
+# 13i. An older server that writes no checked list: the approved commit goes out as approved (still on main), not a refusal.
+rm -f "$D/state/last-server" "$D/inbox/checked"
+c9="$(push apps/server/g)"; c10="$(push apps/server/h)"
+req server "$c9"; host
+[[ $(status result) == deployed && $(status to_commit) == "$c9" ]] || fail "13i: approved commit not deployed: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "Boss Man did not say which newer commits passed their merge check, so the deployer kept to ${c9:0:8}"
+# 13j. A newer checked commit that needs a hand-apply is skipped: the approved one goes out, and the status says why.
+rm -f "$D/state/last-server"
+c11="$(push docker-compose.yml)"
+printf '%s\n' "$c10" "$c11" >"$D/inbox/checked"
+req server "$c10"; host
+[[ $(status result) == deployed && $(status to_commit) == "$c10" ]] || fail "13j: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "the newer commits change deployment files and have to be applied by hand"
+git -C "$T/w" reset -q --hard "$c10"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop the compose change again
+# 13k. A stale card for a commit that already runs: nothing new, never a refusal, and no newer unchecked commit is taken.
+rm -f "$D/state/last-server" "$D/inbox/checked"
+req server "$c10"; host
+[[ $(status result) == nothing_new && $(status to_commit) == "$c10" ]] || fail "13k: $(cat "$D/outbox/status.json")"
+
 # ================= Blue/green (opt-in): fake docker, fake world =================
 # The script resets PATH, so the tests run a copy that looks in our fake bin first.
 mkdir -p "$T/bin"; sed "s#^export PATH=.*#export PATH=$T/bin:\$PATH#" "$here/host-deployer.sh" >"$T/hd.sh"; chmod +x "$T/hd.sh"
@@ -327,7 +422,8 @@ case "$a" in
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
   "kill -s USR1 server-"*) c=${a##*server-}; echo "signal USR1 $c" >>"$DL"; [[ -n ${FAKE_NO_DEMOTE:-} ]] || echo standby >"$W/role.$c" ;;
   "kill -s USR2 server-"*) c=${a##*server-}; echo "signal USR2 $c" >>"$DL"; echo leader >"$W/role.$c" ;;
-  "stop server-"*) c=${a##*server-}; rm -f "$W/running.$c"; touch "$W/exists.$c"; echo "stopped $c" >>"$DL" ;;
+  "stop server-"*) echo "plain stop without a grace: $a" >>"$DL"; exit 98 ;; # BOS-794: every planned stop names its grace
+  "stop -t "*" server-"*) c=${a##*server-}; echo "stop grace ${a#stop -t }" >>"$DL"; rm -f "$W/running.$c"; touch "$W/exists.$c"; echo "stopped $c" >>"$DL" ;;
   "exec -T server-"*)
     c=${a#exec -T server-}; c=${c%% *}
     case "$a" in
@@ -575,6 +671,40 @@ hasnt "$DL" "signal"; live_is green
 unset COMPOSE_FILE; "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without blue/green should fail"; has "$T/out" "does not use blue/green"
 export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
 
+# 23. Restart (BOS-647), blue/green: a fresh copy of the commit that runs, swapped in like an update; no fetch, no move.
+reset_world blue "$P"; git -C "$T/src" reset -q --hard "$P"
+echo "green $cur" >"$D/state/previous"; echo "$b6" >"$D/state/hold"; before="$(calls)"
+rm -f "$D/state/last-server"; req restart "$P"; bg --dry-run
+has "$T/out" "would run: a blue/green restart (fresh copy) at ${P:0:8}"; rm -f "$D/inbox/request.json"
+req restart "$P"; bg
+[[ $(status result) == deployed && $(status target) == restart && $(status to_commit) == "$P" ]] || fail "bg restart status: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "Restarted at ${P:0:8}: a fresh green is live"
+order "$DL" "pg_dump" "build green commit=$P" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "signal USR1 blue" "signal USR2 green" "reload now green"
+live_is green; [[ -e $W/running.blue && $(cat "$W/role.green") == leader ]] || fail "world after a bg restart"
+[[ $(git -C "$T/src" rev-parse HEAD) == "$P" && $(calls) == "$before" ]] || fail "bg restart moved the checkout or ran deploy.sh"
+has "$D/state/soak" "old=blue new=green"; has "$D/state/soak" "commit=$P prev=$P"
+# The rebuilt colour held the release before: the rollback record goes, so --rollback refuses rather than "going back" to the same code.
+[[ ! -e $D/state/previous ]] || fail "state/previous kept after a restart"
+[[ $(cat "$D/state/hold") == "$b6" ]] || fail "a restart dropped the hold on a rejected release"
+# A restart during the trial window is refused: it would rebuild the copy the window switches back to.
+: >"$DL"; rm -f "$D/state/last-server"; req restart "$P"; bg
+[[ $(status result) == rejected ]] || fail "restart during the trial: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "still in its 15-minute trial"; hasnt "$DL" "pg_dump"; live_is green
+# The fresh copy fails its checks during the window: switched back to the copy it replaced, worded as a restart.
+: >"$DL"; FAKE_VERIFY_FAIL=green bg
+[[ $(status result) == rolled_back && $(status target) == restart ]] || fail "restart switch-back: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "The fresh copy started by the restart was switched back"
+live_is blue; [[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout moved by a restart switch-back"
+# A restart that was cut off is marked failed like an update, and a trial window for another version is dropped.
+reset_world blue "$P"; git -C "$T/src" reset -q --hard "$P"
+printf '{"id": "%s", "target": "restart", "result": "running", "message": "Running", "from_commit": "%s", "to_commit": "%s", "started": "2026-11-08T10:00:00Z", "ended": "", "at": "2026-11-08T10:00:00Z", "backup": ""}\n' "44444444-4444-4444-4444-444444444444" "$P" "$P" >"$D/outbox/status.json"
+printf 'old=blue new=green deadline=%s commit=%s prev=%s\n' "$(($(date +%s) + 900))" "$b1" "$P" >"$D/state/soak"
+: >"$DL"; bg
+[[ $(status result) == failed && $(status target) == restart ]] || fail "interrupted restart: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "The restart run for ${P:0:8} was cut off"
+[[ ! -e $D/state/soak ]] || fail "soak for a version that is not running kept after an interrupted restart"
+hasnt "$DL" "signal"; live_is blue
+
 # 30. A run that was cut off (status stuck on "running"): the next tick marks it failed, puts the checkout back on what answers,
 # drops a trial window for a version that is not running, and touches no container (BOS-494).
 reset_world blue "$P"; git -C "$T/src" fetch -q origin 2>/dev/null || true; git -C "$T/src" reset -q --hard "$b1"
@@ -717,9 +847,27 @@ swap; echo true >"$W/oom.green"; bg; [[ $(hget check_restarts) == fail ]] || fai
 swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
 [[ $(hget phase) == end ]] || fail "no end-of-window check"; all_pass
 grep -qx blue "$D/state/stopped-by-plan" || fail "planned stop not recorded"
-# ...but stopped with a non-zero exit code, or running when the plan says stopped, is not.
-swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; bg
-[[ $(hget phase) == end && $(hget check_other) == fail ]] || fail "exit 137 after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exit code 137"
+has "$DL" "stop grace 60 server-blue"; has "$D/deployer.log" "Stopped server-blue in"
+# 31h2 (BOS-794). A planned stop that outlived its grace and needed SIGKILL (137), or ended on SIGTERM (143), is still planned:
+# healthy, not paged, and the detail says it needed SIGKILL.
+for x in 137 143; do
+  swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo "$x" >"$W/exit.blue"; bg
+  [[ $(hget phase) == end ]] || fail "no end check for a planned stop with exit $x"; all_pass
+  [[ $(status result) != partial ]] || fail "a planned stop with exit $x paged: $(cat "$D/outbox/status.json")"
+  [[ $x != 137 ]] || has "$D/outbox/health.json" "needed SIGKILL after"
+done
+# The same grace on a stop by hand or a recreate: the compose file sets it for both colours.
+grep -qE '^  stop_grace_period: [0-9]+s$' "$here/../deploy/truenas-bluegreen.yml" || fail "x-server has no stop_grace_period"
+# ...but OOM-killed after the plan stop, a planned stop with another exit code, an unplanned 137, or running when the plan says stopped, is not.
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; echo true >"$W/oom.blue"; bg
+[[ $(hget phase) == end && $(hget check_other) == fail ]] || fail "OOM kill after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "server-blue was killed for running out of memory"
+rm -f "$W/oom.blue"
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 1 >"$W/exit.blue"; bg
+[[ $(hget check_other) == fail ]] || fail "exit 1 after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exited with code 1"
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; bg; all_pass
+grep -vx blue "$D/state/stopped-by-plan" >"$T/sbp" || true; cp "$T/sbp" "$D/state/stopped-by-plan"
+! BG_POLL_SECONDS=0 SOAK_CHECK_SECONDS=1 "$T/hd.sh" --ack-health >"$T/out" 2>&1 || fail "ack passed with an unplanned exit 137: $(cat "$T/out")"
+[[ $(hget check_other) == fail ]] || fail "unplanned exit 137: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exit code 137, so it crashed or was killed"
 # 31j. A failed item other than the live colour does not keep the window open: the old colour is still stopped at the deadline,
 # the stop is recorded, the end check says degraded, and there is one page that names the way to accept the new state.
 swap; echo 1 >"$W/restarts.proxy"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
@@ -731,6 +879,11 @@ has "$D/outbox/status.json" "--ack-health"
 live_is green
 # ...and --ack-health accepts the current state: baseline renewed, checklist healthy.
 bg --ack-health; all_pass; [[ $(hget phase) == ack ]] || fail "ack did not re-run the checklist: $(cat "$D/outbox/health.json")"
+# BOS-794: the passing ack replaces the page in the status file, so the server stops saying "degraded"; nothing_new, not deployed.
+[[ $(status result) == nothing_new && $(status target) == server ]] || fail "ack did not clear the partial status: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "Health accepted"; has "$D/outbox/status.json" '"stack": "healthy"'
+# A second ack has no page to replace and leaves the status file alone.
+cp "$D/outbox/status.json" "$T/st.before"; bg --ack-health; cmp -s "$T/st.before" "$D/outbox/status.json" || fail "a second ack rewrote the status file"
 # 31k. The same for the database, and an unreadable database start time (a hung or unreachable psql) is a failed db item.
 swap; echo 2026-11-07T09:00:00Z >"$W/start.db"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
 [[ ! -e $D/state/soak ]] || fail "a db failure kept the window open"; [[ $(hget check_db) == fail ]] || fail "db at window end"
