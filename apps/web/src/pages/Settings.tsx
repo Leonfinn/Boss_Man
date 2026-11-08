@@ -1981,16 +1981,19 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
 
 type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 
-/** How many agents may run at once, in total and per company; the per-agent limit is fixed at one. */
-function RunLimits() {
-  const view = usePoll((signal) => api<{ instance: number; company: number; defaults: { instance: number; company: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
+/**
+ * How many agents may run at once, in total and per company, plus the separate background slots for
+ * Infinite-mode agents (BOS-279); the per-agent limit is fixed at one.
+ */
+export function RunLimits() {
+  const view = usePoll((signal) => api<{ instance: number; company: number; background: number; defaults: { instance: number; company: number; background: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
   const act = useAction();
-  const [edit, setEdit] = useState<{ instance: string; company: string } | null>(null);
+  const [edit, setEdit] = useState<{ instance: string; company: string; background: string } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { instance: String(d.instance), company: String(d.company) };
-  const [i, c] = [Number(v.instance), Number(v.company)];
-  const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i;
+  const v = edit ?? { instance: String(d.instance), company: String(d.company), background: String(d.background) };
+  const [i, c, g] = [Number(v.instance), Number(v.company), Number(v.background)];
+  const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i && Number.isInteger(g) && g >= 0 && g <= 16;
   return (
     <Section id="run-limits-h" title="How many agents run at once">
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -2007,6 +2010,13 @@ function RunLimits() {
           Agents running at once in one company (default {d.defaults.company}). Stops one busy company from using every slot. Higher: that company's tickets and reviews start sooner; spend can rise faster. Lower: tickets wait in the queue (you'll see "at a concurrency limit: this company").
         </p>
       </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="limit-background">Background (infinite mode) runs at once (0 to 16)</label>
+        <input id="limit-background" type="number" min={0} max={16} value={v.background} onChange={(e) => setEdit({ ...v, background: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Agents on Synthetic's Infinite mode ("free, slow" models) get their own slots (default {d.defaults.background}), separate from the two numbers above. They don't spend your Synthetic plan's credits, so they never wait for the quota; keeping them on their own small number means a slow free run can't take a normal slot or hold up paid work. 0 stops background runs starting.
+        </p>
+      </div>
       <p className="muted" style={{ fontSize: 14 }}>
         Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits.
       </p>
@@ -2017,10 +2027,77 @@ function RunLimits() {
           disabled={act.busy || !valid}
           onClick={() =>
             void act.run(async () => {
-              await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c } });
+              await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c, background: g } });
               setEdit(null);
               view.reload();
               return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number };
+
+/** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
+export function CheckQueueSetting() {
+  const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
+  const act = useAction();
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string } | null>(null);
+  const d = view.data;
+  if (!d) return null;
+  const v = edit ?? { mode: d.mode, slots: String(d.slots) };
+  const n = Number(v.slots);
+  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots;
+  const changed = v.mode !== d.mode || n !== d.slots;
+  return (
+    <Section id="check-queue-h" title="Checks">
+      <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+        <legend>Who runs agents' checks</legend>
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input type="radio" name="check-queue-mode" value="legacy" checked={v.mode === "legacy"} onChange={() => setEdit({ ...v, mode: "legacy" })} />
+          <span>
+            <strong>Agents run their own (legacy).</strong> <span className="muted">Each agent runs the quick check inside its own session. A check dies if the session ends or the runner restarts, and agents wait in line for a free slot.</span>
+          </span>
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input type="radio" name="check-queue-mode" value="server" checked={v.mode === "server"} onChange={() => setEdit({ ...v, mode: "server" })} />
+          <span>
+            <strong>Boss Man runs them (server queue).</strong> <span className="muted">Agents ask for a check and Boss Man runs it on the runner. The check keeps going after the agent's session ends or the runner restarts, a pass on the same code is reused, and the agent is woken with the result. The merge check before each merge uses this queue too.</span>
+          </span>
+        </label>
+      </fieldset>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="check-slots">Checks at once (1 to {d.maxSlots})</label>
+        <input id="check-slots" type="number" min={1} max={d.maxSlots} value={v.slots} onChange={(e) => setEdit({ ...v, slots: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors.
+        </p>
+      </div>
+      {d.runnersTooOld.length > 0 && (
+        <p style={{ fontSize: 14 }} data-testid="check-queue-old-runner">
+          <span className="tag red">Update needed</span> The runner for {d.runnersTooOld.join(", ")} is too old to run queued checks; their checks would wait until you update the runners (Updates → Build and update runners).
+        </p>
+      )}
+      <p className="muted" style={{ fontSize: 14 }}>
+        Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid || !changed}
+          onClick={() =>
+            void act.run(async () => {
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n } });
+              setEdit(null);
+              view.reload();
+              return r.cancelled ? `Saved. ${r.cancelled} waiting check${r.cancelled === 1 ? " was" : "s were"} cancelled.` : "Saved.";
             })
           }
         >
@@ -2640,6 +2717,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <ThisHost />
             <NetguardAllow />
             <RunLimits />
+            <CheckQueueSetting />
           </>
         )}
         {current.id === "transfer" && <ImportCompany go={go} onChanged={onChanged} />}

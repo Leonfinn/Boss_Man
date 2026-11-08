@@ -2,7 +2,7 @@
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useState, type FormEvent } from "react";
 import { Star } from "lucide-react";
-import { describeRoles, HARNESSES, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
+import { describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource, type ReviewPolicy } from "../api";
 import { Avatar } from "../components/Avatar";
 import { SaveButton, useSaveState } from "../components/SaveButton";
@@ -37,7 +37,12 @@ type AgentRow = {
 type Change = { c: { id: string; field: string; before: unknown; after: unknown; undoneAt: string | null; createdAt: string; byAgentId: string | null }; by: string | null };
 
 type ModelChoice = { value: string; name: string; description?: string | null };
-type ModelLists = { runner: Record<string, { models: ModelChoice[]; observedAt: string }>; api: Array<{ fundingSourceId: string; name: string; provider: string; models: ModelChoice[]; error: string | null }> };
+type ModelLists = {
+  runner: Record<string, { models: ModelChoice[]; observedAt: string }>;
+  api: Array<{ fundingSourceId: string; name: string; provider: string; models: ModelChoice[]; error: string | null }>;
+  /** Synthetic's Infinite mode (free, slow) for this funding source (BOS-279); empty for other providers. */
+  infinite?: Array<{ fundingSourceId: string; name: string; model: ModelChoice }>;
+};
 const OTHER = "__other__";
 const KINDS: Array<[string, string]> = HARNESSES.map((h) => [h.value, h.label]);
 function KindSelect({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
@@ -80,13 +85,16 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, r
   // The adapter's own "default" is the same as leaving the model blank.
   const fromRunner = (lists?.runner[agentKind]?.models ?? []).filter((m) => m.value !== "default");
   const fromApi = lists?.api.find((a) => a.fundingSourceId === fundingSourceId);
-  const known = [...fromRunner, ...(fromApi?.models ?? [])].some((m) => m.value === value);
+  // Infinite mode is its own group, labelled free and slow, so it's never mistaken for a normal model (BOS-279).
+  const infinite = agentKind === "opencode" ? lists?.infinite?.find((i) => i.fundingSourceId === fundingSourceId)?.model : undefined;
+  const known = [...fromRunner, ...(fromApi?.models ?? []), ...(infinite ? [infinite] : [])].some((m) => m.value === value);
   const [typing, setTyping] = useState(false);
   const [q, setQ] = useState("");
   const match = (m: { value: string; name: string }) => `${m.name} ${m.value}`.toLowerCase().includes(q.trim().toLowerCase());
   const runnerShown = fromRunner.filter(match);
   const apiShown = (fromApi?.models ?? []).filter(match);
-  const offered = fromRunner.length + (fromApi?.models.length ?? 0) > 0;
+  const infiniteShown = infinite && match(infinite) && ![...fromRunner, ...(fromApi?.models ?? [])].some((m) => m.value === infinite.value) ? [infinite] : [];
+  const offered = fromRunner.length + (fromApi?.models.length ?? 0) + (infinite ? 1 : 0) > 0;
   if (!offered || typing)
     return (
       <>
@@ -130,10 +138,19 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, r
             ))}
           </optgroup>
         )}
+        {infiniteShown.length > 0 && (
+          <optgroup label="Synthetic Infinite mode (free, slow, background runs)">
+            {infiniteShown.map((m) => (
+              <option key={`i-${m.value}`} value={m.value}>
+                {m.name}
+              </option>
+            ))}
+          </optgroup>
+        )}
         <option value={OTHER}>Other…</option>
       </select>
       <small className="muted">
-        {q.trim() && `${runnerShown.length + apiShown.length} of ${fromRunner.length + (fromApi?.models.length ?? 0)} models match.`}
+        {q.trim() && `${runnerShown.length + apiShown.length + infiniteShown.length} of ${fromRunner.length + (fromApi?.models.length ?? 0) + (infinite ? 1 : 0)} models match.`}
         {refreshButton}
       </small>
       {fromApi?.error && <small className="error">{fromApi.error}</small>}
@@ -701,6 +718,14 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
               )}
               {" · "}
               <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
+              {isInfiniteModel(a.model) && (
+                <>
+                  {" "}
+                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › How many agents run at once.">
+                    Infinite mode · free, slow
+                  </span>
+                </>
+              )}
             </div>
             {a.pa && (
               <div className="muted" style={{ fontSize: 13 }}>

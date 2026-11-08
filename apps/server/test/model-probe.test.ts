@@ -66,7 +66,8 @@ describe("model lists without a chat message", () => {
     await c.grant("SYNTHETIC_API_KEY");
     await c.wait();
     expect(c.sent.filter((x) => x.type === "models.probe")).toMatchObject([{ agentKind: "opencode" }]);
-    expect((await c.lists()).runner.opencode.models.map((m: { value: string }) => m.value)).toEqual(["default", "sonnet"]);
+    // OpenCode on a Synthetic plan also offers Infinite mode (BOS-279), which a stock OpenCode doesn't list.
+    expect((await c.lists()).runner.opencode.models.map((m: { value: string }) => m.value)).toEqual(["default", "sonnet", "synthetic/infinite:small:vision"]);
   });
 
   it("probes after a credential is saved, and the refresh endpoint probes on demand", async () => {

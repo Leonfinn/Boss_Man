@@ -62,6 +62,30 @@ export const DEFAULT_REVIEW_POLICY: ReviewPolicy = {
   critical: { planApprover: "owner", reviewer: SENIOR_DEV, ownerSignoff: true },
 };
 
+/**
+ * The policy with the owner's safeguards from `floor` kept on (BOS-754): at each tier where the floor
+ * has the owner signing off or approving the plan, so does the result. Reviewers and review kinds stay
+ * as given. For a policy that came from outside (an imported package), which may tighten the defaults
+ * but never loosen them; the owner loosens a tier on purpose in Settings. `tightened` says what changed.
+ */
+export function noLooserThan(policy: ReviewPolicy, floor: ReviewPolicy = DEFAULT_REVIEW_POLICY): { policy: ReviewPolicy; tightened: string[] } {
+  const tightened: string[] = [];
+  const out = { ...policy };
+  for (const tier of RISK_TIERS) {
+    const rule = { ...policy[tier] };
+    if (floor[tier].ownerSignoff && !rule.ownerSignoff) {
+      rule.ownerSignoff = true;
+      tightened.push(`your sign-off on ${tier}-risk work`);
+    }
+    if (floor[tier].planApprover === "owner" && rule.planApprover !== "owner") {
+      rule.planApprover = "owner";
+      tightened.push(`your approval of ${tier}-risk plans`);
+    }
+    out[tier] = rule;
+  }
+  return { policy: out, tightened };
+}
+
 /** The rule for a ticket's tier (unrated is medium). */
 export const ruleFor = (policy: ReviewPolicy, risk: RiskTier | null | undefined): ReviewRule => policy[riskOf(risk)];
 

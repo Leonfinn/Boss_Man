@@ -1,6 +1,6 @@
 {
   "id": "e5402217-5596-4909-847a-88ab840dbc51",
-  "prevId": "d6c8f6c0-e014-4f4a-bde1-72ebc956195b",
+  "prevId": "b17f6553-0973-4633-92a8-1d804bb2dbae",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -77,6 +77,28 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "activity_merge_line": {
+          "name": "activity_merge_line",
+          "columns": [
+            {
+              "expression": "ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"activity\".\"kind\" = 'merge_line'",
           "concurrently": false,
           "method": "btree",
           "with": {}

@@ -5,7 +5,7 @@
 import { eq } from "drizzle-orm";
 import { strFromU8, unzipSync } from "fflate";
 import { z } from "zod";
-import { columnProblems, DEFAULT_REVIEW_POLICY, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
+import { columnProblems, DEFAULT_REVIEW_POLICY, noLooserThan, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, wikiRevisions, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
@@ -336,14 +336,25 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // Tickets keep their numbers (a repeat gets a new one); tickets without one are numbered after the highest.
     const seen = new Set<number>();
     const numberOf = new Map(pkg.tickets.map((t) => [t.ref, t.number && !seen.has(t.number) && seen.add(t.number) ? t.number : null]));
-    // A package may tighten the owner's safeguards but never loosen them (BOS-754, BOS-762). The
-    // watchdog is liveness rather than safety (DR-041), but it still starts on for a new company and
-    // a package can't switch it off. The insert leaves `watchdog` unset, so it takes the safe default.
+    // A package may tighten the owner's safeguards but never loosen them (BOS-754, BOS-762): approving
+    // engagements keeps its default (on), each review policy keeps the default's owner sign-offs and plan
+    // approvals, and the watchdog starts on for a new company. The checklist says what the package asked
+    // for, so the owner can loosen it on purpose.
     const tightened: string[] = [];
+    if (pkg.company.ownerApprovesEngagements === false) tightened.push("Kept on: your approval before this company takes on work for another company. The package had it switched off.");
     if (pkg.company.watchdog?.enabled === false) tightened.push("Kept on: the Scrum Master watchdog, which checks the board for stuck work. The package had it switched off. To change it, use Settings → Watchdog.");
+    const listed = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]!);
+    const floored = (policy: ReviewPolicy, project?: string) => {
+      const r = noLooserThan(policy);
+      if (r.tightened.length)
+        tightened.push(
+          `Kept on${project ? ` in project ${project}` : ""}: ${listed(r.tightened)}. The package had ${r.tightened.length > 1 ? "them" : "it"} switched off. To change ${r.tightened.length > 1 ? "them" : "it"}, use ${project ? "the project's review settings" : "Settings → Reviews"}.`,
+        );
+      return r.policy;
+    };
     const [c] = await tx
       .insert(companies)
-      .values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ownerApprovesEngagements: pkg.company.ownerApprovesEngagements, ticketPrefix: pkg.company.ticketPrefix ?? defaultTicketPrefix(name), ...(pkg.company.standingRules ? { standingRules: pkg.company.standingRules, standingRulesBy: "import", standingRulesAt: new Date() } : {}), nextTicketNumber: Math.max(0, ...seen) + 1 })
+      .values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ticketPrefix: pkg.company.ticketPrefix ?? defaultTicketPrefix(name), ...(pkg.company.standingRules ? { standingRules: pkg.company.standingRules, standingRulesBy: "import", standingRulesAt: new Date() } : {}), nextTicketNumber: Math.max(0, ...seen) + 1 })
       .returning();
     const companyId = c!.id;
 
@@ -360,7 +371,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // An older package marks reviewers on the agent; its "marked" cells name them instead (BOS-198).
     const marks: Partial<Record<ReviewKind, string[]>> = {};
     for (const a of pkg.agents) if (a.reviewKind && (REVIEW_KINDS as readonly string[]).includes(a.reviewKind)) (marks[a.reviewKind as ReviewKind] ??= []).push(agentId.get(a.slug)!);
-    await tx.update(companies).set({ reviewPolicy: remapPolicy(pkg.company.reviewPolicy, agentRef, marks) }).where(eq(companies.id, companyId));
+    await tx.update(companies).set({ reviewPolicy: floored(remapPolicy(pkg.company.reviewPolicy, agentRef, marks)) }).where(eq(companies.id, companyId));
 
     for (const s of pkg.skills) {
       const m = s.meta;
@@ -376,7 +387,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       const { slug, columns, reviewPolicy, ...fields } = p;
       const [row] = await tx
         .insert(projects)
-        .values({ companyId, ...fields, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : remapPolicy(reviewPolicy, agentRef, marks) })
+        .values({ companyId, ...fields, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : floored(remapPolicy(reviewPolicy, agentRef, marks), fields.name) })
         .returning();
       projectId.set(slug, row!.id);
       columnsOf.set(row!.id, await tx.insert(workflowColumns).values(columns.map((col, i) => ({ projectId: row!.id, name: col.name, systemState: col.systemState, wipLimit: col.wipLimit ?? null, position: i }))).returning({ id: workflowColumns.id, systemState: workflowColumns.systemState }));
