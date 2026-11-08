@@ -1,0 +1,1 @@
+CREATE INDEX "failure_signatures_company_recent" ON "failure_signatures" USING btree ("company_id","created_at");

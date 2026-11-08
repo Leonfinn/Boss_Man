@@ -2,7 +2,7 @@
 // wake; the stall count covers only the current round's unanswered wakes; and a run cut off by a restart
 // (interrupted, or lost by the server) is not a missed verdict for either no-verdict detector.
 import { randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq, like } from "drizzle-orm";
 import { SENIOR_DEV_TEMPLATE } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
@@ -190,6 +190,62 @@ describe("interrupted or lost review runs are not a missed verdict", () => {
     await runAt(a2.id, id2, "end_turn", 60);
     expect((await ctx.sweeps.run()).progress.reviewsMoved).toBe(1);
     expect(await ctx.silentCards(req2!.id)).toHaveLength(1);
+  });
+
+  // BOS-426: a branch that no longer merges is why the reviewer sits idle; wake the author, not the reviewer.
+  it("wakes the author, not the reviewer, when the branch clashes with main; and not twice in an hour", async () => {
+    ctx = await setup();
+    const reviewer = await ctx.hire("Reviewer", { template: SENIOR_DEV_TEMPLATE });
+    const id = await ctx.ticket("Clashing");
+    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: reviewer.id, round: 1, createdAt: new Date(Date.now() - 4 * HOUR) });
+    const spy = vi.spyOn(ctx.review, "branchClash").mockResolvedValue(["src/a.ts"]);
+    expect((await ctx.sweeps.run()).stalledReviews).toEqual({ woken: 0, gaveUp: 0 });
+    expect(await ctx.reviewWakes(reviewer.id)).toHaveLength(0);
+    const authorWakes = () => ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.worker.id), eq(wakes.reason, "review clash")));
+    expect(await authorWakes()).toHaveLength(1);
+    expect((await authorWakes())[0]!.note).toContain("src/a.ts");
+    await ctx.sweeps.run();
+    expect(await authorWakes()).toHaveLength(1);
+    // The runner is asked once per quiet period, not on every sweep (infra review, BOS-426).
+    for (let i = 0; i < 5; i++) {
+      ctx.advance(2 * MIN);
+      await ctx.sweeps.run();
+    }
+    expect(spy).toHaveBeenCalledTimes(1);
+    // Never counted as a missed review: after many hours of clash, no stall card is raised.
+    for (let i = 0; i < 5; i++) {
+      ctx.advance(61 * MIN);
+      await ctx.sweeps.run();
+    }
+    expect(await ctx.stallCards()).toHaveLength(0);
+    expect(await ctx.reviewWakes(reviewer.id)).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it("asks the runner once, not every sweep, on the give-up path (review already past its wakes)", async () => {
+    ctx = await setup();
+    const reviewer = await ctx.hire("Reviewer", { template: SENIOR_DEV_TEMPLATE });
+    const id = await ctx.ticket("Stuck clean");
+    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: reviewer.id, round: 1, createdAt: new Date(Date.now() - 4 * HOUR) });
+    for (const h of [3, 2, 1]) {
+      await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: reviewer.id, ticketId: id, reason: REVIEW_REASON, status: "launched", note: `- ${id} "x": r1`, createdAt: new Date(Date.now() - h * HOUR) });
+    }
+    const spy = vi.spyOn(ctx.review, "branchClash").mockResolvedValue([]);
+    for (let i = 0; i < 5; i++) {
+      await ctx.sweeps.run();
+      ctx.advance(2 * MIN);
+    }
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it("wakes the reviewer as before when the clash check cannot answer", async () => {
+    ctx = await setup();
+    const reviewer = await ctx.hire("Reviewer", { template: SENIOR_DEV_TEMPLATE });
+    const id = await ctx.ticket("Unknown");
+    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: reviewer.id, round: 1, createdAt: new Date(Date.now() - 4 * HOUR) });
+    // No runner, no repo: the real check answers null.
+    expect((await ctx.sweeps.run()).stalledReviews.woken).toBe(1);
   });
 
   it("does not let an interrupted run hold the stall sweep back as if it had looked", async () => {

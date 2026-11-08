@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings, type DeviceMeasures } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -71,6 +71,8 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
+  /** The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323). Existing companies stay off. */
+  fenceMode: text("fence_mode", { enum: FENCE_MODES }).notNull().default("off"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -197,6 +199,22 @@ export const runnerEvents = pgTable(
     // A run's transcript is read by the run id inside the event (R43).
     index("runner_events_run").on(sql`(${t.payload}->>'runId')`, t.seq),
   ],
+);
+
+/**
+ * How many times applying one event of a runner has failed transiently (BOS-606), kept apart from the
+ * event row because a retry rolls that row back and the count must survive it. An event that keeps
+ * failing with no code is stored, marked and acked after a few tries so it can't stall the stream.
+ * The row is removed once the event lands or is skipped.
+ */
+export const runnerEventAttempts = pgTable(
+  "runner_event_attempts",
+  {
+    runnerId: uuid("runner_id").notNull().references(() => runners.id, { onDelete: "cascade" }),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    tries: integer("tries").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.runnerId, t.seq] })],
 );
 
 // ---------- Work structure ----------
@@ -362,6 +380,12 @@ export const tickets = pgTable(
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /**
+     * "Fixes live" (BOS-639): one sentence naming the live symptom this ticket fixes, e.g. "server freezes
+     * as memory climbs". Set by hand (CEO, author or reviewer), never guessed from priority or urgency.
+     * A deploy card whose range carries a marked merge leads with it and pages the owner once.
+     */
+    fixesLive: text("fixes_live"),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
@@ -378,6 +402,14 @@ export const tickets = pgTable(
     /** Optional "blocked until" time and reason (BOS-59); the same trigger clears both when the ticket leaves blocked. */
     blockedUntil: timestamp("blocked_until", { withTimezone: true }),
     blockedUntilReason: text("blocked_until_reason"),
+    /** The branch head the missed-work sweep last saw, and when it changed (BOS-612): a new commit is progress, a run start is not. */
+    progressHead: text("progress_head"),
+    progressAt: timestamp("progress_at", { withTimezone: true }),
+    /** The CEO's plan for this ticket and its deadline (BOS-612): the stuck alert stays quiet until the deadline plus a grace, then raises one card. */
+    ceoPlan: text("ceo_plan"),
+    ceoPlanDeadline: timestamp("ceo_plan_deadline", { withTimezone: true }),
+    /** When the "plan deadline passed" card was raised, so it comes once per plan. */
+    ceoPlanAlertedAt: timestamp("ceo_plan_alerted_at", { withTimezone: true }),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1011,7 +1043,10 @@ export const failureSignatures = pgTable(
     sample: text("sample").notNull(),
     createdAt: createdAt(),
   },
-  (t) => [index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt)],
+  (t) => [
+    index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt),
+    index("failure_signatures_company_recent").on(t.companyId, t.createdAt),
+  ],
 );
 
 /** Agent-to-agent nudges (R86), kept for the pair rate limit and ping-pong detection. */
@@ -1712,3 +1747,27 @@ export const agentAvatars = pgTable("agent_avatars", {
   /** The ticket image the CEO picked (BOS-265): copies are shared by it, so agents sharing a picture keep one copy. Null for one the owner uploaded. */
   imageId: uuid("image_id").references(() => ticketImages.id, { onDelete: "set null" }),
 });
+
+// ---------- Device profiles (BOS-641) ----------
+
+/**
+ * The owner's own browsers measure their screens (width, height, the real 100vh/100dvh/100svh/lvh,
+ * visual viewport, pixel ratio, touch, standalone mode) and report them here, so a layout ticket is
+ * checked at the real device, not a guessed emulated size. One row per signed-in browser, replaced
+ * on each report through its fingerprint. Only screen facts are kept: no personal data.
+ */
+export const deviceProfiles = pgTable(
+  "device_profiles",
+  {
+    id: id(),
+    ownerId: uuid("owner_id").notNull().references(() => owners.id, { onDelete: "cascade" }),
+    /** Kept by the browser in local storage, so a second report replaces its row. */
+    fingerprint: text("fingerprint").notNull(),
+    label: text("label").notNull(),
+    browser: text("browser").notNull(),
+    /** Each reading's measured units, load and after the first scroll, in report order. */
+    readings: jsonb("readings").$type<DeviceMeasures[]>().notNull(),
+    reportedAt: timestamp("reported_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("device_profiles_owner_fingerprint").on(t.ownerId, t.fingerprint), index("device_profiles_owner").on(t.ownerId)],
+);

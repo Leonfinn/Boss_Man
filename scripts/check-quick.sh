@@ -10,9 +10,37 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 base="${BASE:-origin/main}"
+# One CPU budget for every step, the web build outside the slot included (BOS-674; see scripts/check-threads.mjs and check-all.sh).
+BOSSMAN_CHECK_THREADS="${BOSSMAN_CHECK_THREADS:-$(node scripts/check-threads.mjs 2>/dev/null || true)}"
+[[ "$BOSSMAN_CHECK_THREADS" =~ ^[1-9][0-9]{0,3}$ ]] || BOSSMAN_CHECK_THREADS=2
+export BOSSMAN_CHECK_THREADS GOMAXPROCS="${GOMAXPROCS:-$BOSSMAN_CHECK_THREADS}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-$BOSSMAN_CHECK_THREADS}" TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-$BOSSMAN_CHECK_THREADS}"
 
-changed="$(git diff --name-only "$base"...HEAD)" || { echo "FAIL  diff against $base"; exit 1; }
-if [ -z "$changed" ]; then echo "PASS  nothing changed against $base"; exit 0; fi
+# A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592, set by the runner): keep the whole output of this run there too,
+# so a failed step can be read back after the runner restarted. Best effort, and for the outer run only: the heavy
+# phase (CHECK_QUICK_PHASE=heavy) runs inside check-all.sh, which keeps its own log. scripts/sweep-tmp.sh never
+# touches this folder, unlike /tmp.
+SCRATCH_LOG="" SCRATCH_NAME=""
+if [ -n "${BOSSMAN_SCRATCH:-}" ] && [ -d "${BOSSMAN_SCRATCH:-}" ] && [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
+  SCRATCH_LOG="$BOSSMAN_SCRATCH/check-quick.log"
+  # A fenced agent may not write the scratch folder: keep it under a name in /tmp the runner moves into the scratch.
+  if [ ! -w "$BOSSMAN_SCRATCH" ] && [ -n "${BOSSMAN_TICKET:-}" ] && [ -d /tmp ] && [ -w /tmp ]; then
+    SCRATCH_LOG="/tmp/bossman-scratch-$BOSSMAN_TICKET-quick.log"
+  fi
+fi
+finish() { # finish <exit code>: put this run's whole output into the kept log, marked with how it ended
+  local rc=$1 text
+  [ -n "$SCRATCH_LOG" ] || exit "$rc"
+  # The tee below is this run's only copy of its output: this finishes it (the one stream already drained, no second tee).
+  text="$(dirname "$SCRATCH_LOG")/bossman-scratch-$(basename "$SCRATCH_LOG").$$.done"
+  { printf 'check-quick: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$SCRATCH_NAME" 2>/dev/null; } >"$text" 2>/dev/null || exit "$rc"
+  [ ! -s "$SCRATCH_LOG" ] || mv -f "$SCRATCH_LOG" "$SCRATCH_LOG.previous" 2>/dev/null || true
+  mv -f "$text" "$SCRATCH_LOG" 2>/dev/null || rm -f "$text" 2>/dev/null
+  exit "$rc"
+}
+
+main() {
+changed="$(git diff --name-only "$base"...HEAD)" || { echo "FAIL  diff against $base"; return 1; }
+if [ -z "$changed" ]; then echo "PASS  nothing changed against $base"; return 0; fi
 
 failed=0 skipped=0 partial=0
 
@@ -43,7 +71,7 @@ if [ -n "$tree" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -z "${CHECK_QUICK_RE
     echo "PASS  reused: this exact tree ($tree) already passed check-quick against $base at ${prev%% *} (coverage=$cov); not running it again (CHECK_QUICK_RERUN=1 runs it anyway)"
     quick_log quick-reuse "$cov"
     echo "check-quick: all steps passed (the merge gate still runs the full check)"
-    exit 0
+    return 0
   fi
 fi
 
@@ -66,6 +94,8 @@ fi
   if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
   step "merge with $base is clean" git merge-tree --write-tree "$base" HEAD
   if has '^apps/server/drizzle/|^scripts/lint-migrations'; then step "migration lint" node scripts/lint-migrations.mjs; fi
+  # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
+  if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi
 fi
 
@@ -94,7 +124,7 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     # shellcheck disable=SC2086  # one argument per file; paths have no spaces
     step "tests related to $name changes" pnpm --filter "$name" exec vitest related --run $files
   done
-  exit "$failed"
+  return "$failed"
 fi
 
 if [ -n "${BOSSMAN_FULL_CHECK_NEXT:-}" ]; then
@@ -102,9 +132,9 @@ if [ -n "${BOSSMAN_FULL_CHECK_NEXT:-}" ]; then
   # tickets (BOS-665). It repeats everything below (typecheck, tests, ShellCheck, web build), so only the cheap steps above
   # run here, and a broken merge or migration still fails before the long check starts.
   echo "SKIP  typecheck, related tests, ShellCheck, web build: the full check runs next (BOSSMAN_FULL_CHECK_NEXT)"
-  if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; exit 1; fi
+  if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
   echo "check-quick: cheap steps passed; the full check runs the rest"
-  exit 0
+  return 0
 fi
 
 need_slot=0
@@ -129,9 +159,22 @@ fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
 if has '^apps/web/|^packages/shared/'; then step "build web" pnpm --filter @boss-man/web build; fi
 
-if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; exit 1; fi
-if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; exit 75; fi
+if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
+if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; return 75; fi
 echo "check-quick: all steps passed (the merge gate still runs the full check)"
 # Recorded only when the files are still exactly the tree the run started on (nothing edited while it ran).
 [ -z "$tree" ] || [ "$(clean_tree)" != "$tree" ] || quick_log quick-pass "$([ "$partial" = 1 ] && echo partial || echo all)"
-exit 0
+return 0
+}
+
+# One tee for the whole outer run (which is what the kept log holds), or a plain run when there is nowhere to keep it.
+# The exit code comes back through finish either way, so the skipped (75) and failed outcomes keep their codes.
+if [ -n "$SCRATCH_LOG" ] && command -v tee >/dev/null; then
+  SCRATCH_NAME="$(mktemp)"
+  echo "check-quick: the full output of this run is kept in $SCRATCH_LOG"
+  main 2>&1 | tee "$SCRATCH_NAME"
+  finish "${PIPESTATUS[0]}"
+else
+  main
+  exit $?
+fi

@@ -114,6 +114,41 @@ export const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket i
 /** Wakes held for a full subscription window: re-checked every pass, so adding or reordering an account releases them (BOS-449). */
 const QUOTA_HOLD_LIKE = "subscription % nearly used up%";
 
+/**
+ * Why a closed ticket's wake is dropped (BOS-256). A wake that waited for a reason (quiet hours, the
+ * subscription quota, a paused company) can outlive the ticket it is for. When nothing on the ticket has
+ * happened since a person or Boss Man closed it, starting it would only replay the old note or nudge, so
+ * the wake is dropped instead. Said in plain words, as it is the wake's recorded reason.
+ */
+const CLOSED_TICKET_REASON = "the ticket was already finished, so there was nothing to do";
+
+/**
+ * The wakes whose only job is to replay something that already happened: a note that the owner moved the
+ * ticket, a colleague's nudge or message, a chase, an assignment or an unblock (BOS-256). Every other
+ * reason is left alone, because it can still be real work on a closed ticket: a watch or tree wake gives
+ * its final update, a review or check wake closes one out, and a decision or alert card is answered on
+ * the card. Only these replays are dropped for a ticket that was finished before they could start.
+ */
+const REPLAY_REASONS = new Set(["woken by owner", "nudge", "message", "chased", "assigned", "unblocked"]);
+
+/**
+ * Whether these waiting wakes for this ticket have nothing to act on any more (BOS-256): every one is a
+ * replay, the ticket is closed (done, cancelled included), and every one was queued at or before the
+ * moment it closed. `stateChangedAt` is when it closed (a database trigger sets it on every state
+ * change), so a wake created after that is something new — a nudge or message sent once the ticket was
+ * finished — and is not a replay. It compares wake times with the close time, not the ticket's last
+ * activity: nudges, messages and chases don't update that, so they would be mistaken for replays (R
+ * review on BOS-256). Someone who reopens it moves the state clock, so their work keeps its wake too.
+ */
+function finishedSince(open: Array<{ reason: string; createdAt: Date }>, t: { systemState: string; stateChangedAt: Date | null }): boolean {
+  // Only replays; a watch, review, check or card wake is left to its own handling even on a closed ticket.
+  if (!open.length || !open.every((w) => REPLAY_REASONS.has(w.reason))) return false;
+  if (t.systemState !== "done") return false;
+  // No close time recorded: treat it as just closed, so a replay is still dropped rather than waking anyone.
+  if (!t.stateChangedAt) return true;
+  return open.every((w) => w.createdAt.getTime() <= t.stateChangedAt!.getTime());
+}
+
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
@@ -144,6 +179,10 @@ export type WakeResult = typeof wakes.$inferSelect & { outcome: WakeOutcome };
 const outcomeOf = (row: typeof wakes.$inferSelect, merged = false): WakeResult => ({ ...row, outcome: row.status === "dropped" ? "dropped" : row.status === "steered" ? "steered" : merged ? "merged" : row.status === "deferred" ? "deferred" : "queued" });
 /** A message the owner didn't send via a run counts as the owner's; one an agent sent is agent-started. */
 const wakeClassOf = (w: { reason: string; causedByRunId?: string | null }): WakeClass => (fromOwner(w) ? "waiting" : w.reason === "message" ? "agent" : wakeClass(w.reason));
+
+/** Runs still going that are real work, not the owner's chat or the CEO's reply lane (BOS-349). */
+const liveWorkRuns = async (db: Db) =>
+  (await db.select({ id: runs.id }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`))).length;
 
 /** Boss Man's own alerts go up the alert ladder (BOS-64): the Scrum Master, then the CEO, then the owner. */
 type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "companyId" | "question">) => Promise<unknown>;
@@ -687,7 +726,11 @@ export function schedulerService(
         if (brief)
           lines.push("", `The project has a brief in the wiki, a map of its code: wiki read slug="${brief.slug}" section="Code map" (sections: ${brief.headings.join(", ")}).${brief.commit ? ` It describes commit ${brief.commit} on ${brief.branch}.` : ""} It is a map, not the source of truth: check the code before you change it, and if the brief is wrong, say so in your ticket.`);
         lines.push("", planningGuidance(t.t.risk));
-        lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
+        lines.push(
+          "",
+          "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.",
+          "Keep proofs and check logs (a recording, a screenshot, a long test output, a check log) in $BOSSMAN_SCRATCH, this ticket's folder on the runner's kept disk: it survives runner restarts, where /tmp is wiped. scripts/check-quick.sh and scripts/check-all.sh write their logs there by themselves when it is set. If it isn't set on this run, /tmp is all you have; say where you put the proof in your state note. Never commit proofs or logs to the repo.",
+        );
         if (t.repoUrl) lines.push("", "Commit your work on the ticket's branch but never git push: Boss Man merges or pushes it once it passes review.");
         if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {
           const team = await db
@@ -833,6 +876,24 @@ export function schedulerService(
       .catch((err) => deps.log?.(`claude account notice failed: ${(err as Error).message}`));
   }
 
+  /**
+   * The waiting wakes for this wake's ticket that have outlived it (BOS-256), or null when it still has
+   * work. It reads the ticket once, and only for a wake with a ticket; a wake with none launches as
+   * before. The ids are the ticket's other waiting wakes, so the whole replay goes in one step.
+   */
+  async function finishedTicketWake(w: typeof wakes.$inferSelect): Promise<{ finished: true; ids: string[] } | null> {
+    if (!w.ticketId) return null;
+    const [t] = await db.select({ systemState: tickets.systemState, stateChangedAt: tickets.stateChangedAt }).from(tickets).where(eq(tickets.id, w.ticketId));
+    if (!t || t.systemState !== "done") return null;
+    const waiting = await db
+      .select({ id: wakes.id, reason: wakes.reason, createdAt: wakes.createdAt })
+      .from(wakes)
+      .where(and(eq(wakes.ticketId, w.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
+    if (!finishedSince(waiting, t)) return null;
+    return { finished: true, ids: waiting.map((x) => x.id).filter((id) => id !== w.id) };
+  }
+
+  /** The launch of one wake, or why it doesn't start (BOS-256); see launch(). */
   async function launch(w: typeof wakes.$inferSelect, onSource?: string): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
     const [agent] = await db.select().from(agents).where(eq(agents.id, w.agentId));
     const [company] = await db.select().from(companies).where(eq(companies.id, w.companyId));
@@ -928,6 +989,8 @@ export function schedulerService(
       ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
       ...(skillSet.length ? { skills: skillSet } : {}),
       ...(toolServers.length ? { mcpServers: toolServers } : {}),
+      // The company's fence setting (BOS-325); a runner that can't fence is not asked, and its run goes on unfenced.
+      ...(company.fenceMode !== "off" && deps.runners.can(runner.id, "fence") ? { fence: true } : {}),
     });
     if (!sent) {
       if (w.deployId) await deps.deploys?.unbindRun(w.deployId);
@@ -995,8 +1058,32 @@ export function schedulerService(
       if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
       const { maxTotal, maxCompany } = await limitsNow();
       const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
-      const live = await db.select({ companyId: runs.companyId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
-      const waiting = await db.select({ companyId: wakes.companyId }).from(wakes).where(and(inArray(wakes.status, ["queued", "deferred"]), ne(wakes.reason, CHAT_REASON), ne(wakes.reason, CEO_REPLY_REASON)));
+      const live = await db.select({ companyId: runs.companyId, agentId: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
+      // Only wakes that would take a slot of their own (BOS-667). A wake held until later (quiet hours, a
+      // retry time) or by the quota can't start now, and a wake whose agent already has its runs going
+      // starts only in the slot that run frees, so neither stands in for a slot that is in use. Counting
+      // them let the idle-slot sweep see a full house while slots sat empty (7 Nov, 5 of 10 slots).
+      const t = now();
+      const queue = await db
+        .select({ companyId: wakes.companyId, agentId: wakes.agentId })
+        .from(wakes)
+        .where(
+          and(
+            or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)), sql`coalesce(${wakes.statusReason}, '') not like ${QUOTA_HOLD_LIKE}`)),
+            sql`coalesce(${wakes.statusReason}, '') <> 'agent paused'`,
+            ne(wakes.reason, CHAT_REASON),
+            ne(wakes.reason, CEO_REPLY_REASON),
+          ),
+        );
+      const room = new Map<string, number>();
+      for (const r of live) if (r.agentId) room.set(r.agentId, (room.get(r.agentId) ?? limits.agent) - 1);
+      const waiting: typeof queue = [];
+      for (const w of queue) {
+        const left = room.get(w.agentId) ?? limits.agent;
+        if (left <= 0) continue;
+        room.set(w.agentId, left - 1);
+        waiting.push(w);
+      }
       const total = live.length + waiting.length;
       const mine = live.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
       // A company with nothing running or waiting still gets one, however full other companies'
@@ -1421,7 +1508,7 @@ export function schedulerService(
     settled: () => lane.catch(() => undefined),
 
     async tickOnce() {
-      const result = { launched: 0, deferred: 0, waiting: 0, paused: false };
+      const result = { launched: 0, deferred: 0, waiting: 0, dropped: 0, paused: false };
       if (await globallyPaused()) return { ...result, paused: true };
       const t = now();
       const queue = await db
@@ -1443,10 +1530,19 @@ export function schedulerService(
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
+      // The owner's chat (and the CEO's reply) is the exception (BOS-349): while at least one work run is still
+      // going, the update cannot apply anyway, so chatting costs no delay. Once no work run is left the update
+      // may swap at any moment, so chats are held too, exactly as before.
+      let pass = queue;
       if (await getHold(db)) {
-        const unmarked = queue.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
+        const work = await liveWorkRuns(db);
+        // While work runs are still going, only chat and reply wakes go on to launch; every other wake is held.
+        const through = work > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];
+        pass = through;
+        const held = queue.filter((w) => !through.includes(w));
+        const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
         if (unmarked.length) await db.update(wakes).set({ status: "queued", statusReason: HOLD_REASON }).where(inArray(wakes.id, unmarked));
-        return { ...result, waiting: queue.length };
+        if (through.length === 0) return { ...result, waiting: queue.length };
       }
 
       const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
@@ -1486,7 +1582,7 @@ export function schedulerService(
 
       // Fair share (BOS-582, DR-032): a company with no work run going has its best wake looked at
       // first, so a busy company's steady stream of wakes can't hold it off the server for ever.
-      for (const w of fairOrder(queue, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || x.reason === CEO_REPLY_REASON)) {
+      for (const w of fairOrder(pass, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || x.reason === CEO_REPLY_REASON)) {
         const defer = async (reason: string, notBefore: Date | null) => {
           // A quota-held wake is looked at again every pass (BOS-449); only write when something changed.
           if (w.status === "deferred" && w.statusReason === reason && (w.notBefore?.getTime() ?? null) === (notBefore?.getTime() ?? null)) {
@@ -1507,6 +1603,16 @@ export function schedulerService(
         }
         if (pausedAgents.has(w.agentId)) {
           await wait("agent paused");
+          continue;
+        }
+        // A wake that outlived its ticket is a replay of an old note or nudge, and starting it wakes its
+        // agent for nothing (BOS-256). Once the ticket is closed (done, cancelled included) and nothing on it
+        // changed after it closed, the wake is dropped. As with the loop guards, the whole of a ticket's
+        // waiting wakes go together, so the next pass doesn't start the one that was beside it.
+        const finished = await finishedTicketWake(w);
+        if (finished) {
+          await db.update(wakes).set({ status: "dropped", statusReason: CLOSED_TICKET_REASON }).where(inArray(wakes.id, [w.id, ...finished.ids]));
+          result.dropped += 1 + finished.ids.length;
           continue;
         }
         const isChat = w.reason === CHAT_REASON;

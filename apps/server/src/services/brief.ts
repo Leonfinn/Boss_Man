@@ -1,10 +1,10 @@
 // The brief an agent gets at every wake (R84): built by code from live tables, no model call.
 // Every section is capped, and says how many more there are.
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { runLabel, untrusted } from "@boss-man/shared";
+import { DEVICE_UNITS, isRenderableProfile, runLabel, tallestReading, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
-import { activity, agents, decisions, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
 import { runOriginQuery } from "./runs.js";
 import { getStandingRules, standingRulesSection } from "./standing-rules.js";
 
@@ -37,6 +37,19 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const stale = t.stateNoteStaleAt != null && (!t.stateNoteAt || t.stateNoteStaleAt > t.stateNoteAt);
     return ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}${stale ? " (may be out of date: the owner acted after it, so check before repeating it)" : ""}`;
   };
+  /** The owner's recorded screens (BOS-641): a layout ticket that names one is checked at its
+   * measured figures, in a rendering test, not by reading the CSS. Just the facts, one line each. */
+  const deviceLines = async () => {
+    const rows = await db.select().from(deviceProfiles).orderBy(desc(deviceProfiles.reportedAt));
+    return rows
+      .map((r) => ({ label: r.label, browser: r.browser, readings: r.readings }))
+      .filter((p) => isRenderableProfile(p) && p.readings.every((x) => DEVICE_UNITS.every((k) => typeof x.units?.[k] === "number")))
+      .map((p) => {
+        const t = tallestReading(p);
+        return `- ${one(p.label, 40)} (${one(p.browser, 20)}): ${t.width}×${t.height} CSS px, ratio ${t.pixelRatio}, ${t.coarsePointer ? "touch" : "mouse"}, ${t.displayMode}; 100vh ${t.units.vh}, 100dvh ${t.units.dvh}, 100svh ${t.units.svh}, 100lvh ${t.units.lvh}, visual ${t.units.visual} px`;
+      });
+  };
+
   const from = since ?? new Date(now.getTime() - 24 * 3_600_000);
   const notMe = agentId ? sql`${activity.agentId} is distinct from ${agentId}` : undefined;
 
@@ -138,6 +151,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const relevant = [...new Set([...ids, ...deps.flatMap((d) => [d.blocked, d.blocker])])].filter((x): x is string => !!x);
     body = [
       ...section("My open tickets", capped(myLines, 5)),
+      ...section("Your devices (layout tickets: check at these, not a guessed size)", capped(await deviceLines(), 3)),
       ...section("Open decisions on my tickets", capped(asked.map((d) => `- "${one(d.question, 120)}" (recommended: ${one(d.recommendedOption, 80)})`), 3)),
       ...section("Changed since my last run", capped((await changes(relevant)).map(changeLine), 10)),
       ...section("In flight elsewhere", capped(await flightLines(), 8)),
