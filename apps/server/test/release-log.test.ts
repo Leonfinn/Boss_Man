@@ -291,3 +291,148 @@ describe("owner setup cards (DR-011)", () => {
     expect(await setupCards(c)).toHaveLength(0);
   });
 });
+
+describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 follow-up 2)", () => {
+  const openCards = (c: Awaited<ReturnType<typeof setupApp>>) => setupCards(c).then((all) => all.filter((d) => d.status === "open"));
+
+  it("three tickets with identical setup steps in one go-live raise one card listing all three, and one Done clears it", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    const steps = "Settings → Funding → Add account";
+    const a = await doneTicket(c, projectId, { title: "Add the second Claude account", mergeCommit: "1".repeat(40), ownerSetup: steps, at: new Date("2026-11-03T12:00:00Z") });
+    // The same step written with different spacing still groups: it normalises.
+    const b = await doneTicket(c, projectId, { title: "Add the third Claude account", mergeCommit: "2".repeat(40), ownerSetup: "Settings  →  Funding → Add account", at: new Date("2026-11-03T12:05:00Z") });
+    const d = await doneTicket(c, projectId, { title: "Add the fourth Claude account", mergeCommit: "3".repeat(40), ownerSetup: steps, at: new Date("2026-11-03T12:10:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C); // the last merge is the live commit
+    await c.releaseLog.releaseManagerWakes("deployed");
+
+    const cards = await openCards(c);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.question).toContain(a.title);
+    expect(cards[0]!.question).toContain(b.title);
+    expect(cards[0]!.question).toContain(d.title);
+    expect(cards[0]!.question).toContain("Add account");
+    // Every ticket records the one card.
+    for (const t of [a, b, d]) expect((await (await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!).ownerSetupDecisionId).toBe(cards[0]!.id);
+
+    // One Done clears it, and none of them raises a fresh card on the next pass.
+    expect((await c.req("POST", `/api/decisions/${cards[0]!.id}/answer`, { answer: "Done, it's applied" })).statusCode).toBe(200);
+    expect(await openCards(c)).toHaveLength(0);
+    expect((await setupCards(c)).filter((x) => x.status === "open")).toHaveLength(0);
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await openCards(c)).toHaveLength(0);
+  });
+
+  it("a runner-update-only setup step raises no separate card, and its ticket is named on the runner-update card", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    // Boss Man's own runner-update card for the live commit, as self-deploy raises it.
+    await c.db.insert(decisions).values({ companyId, kind: "approval", question: `Update the runners to ${C.slice(0, 8)}?`, options: ["Update runners", "Not now"], recommendedOption: "Update runners", dedupeKey: `self-deploy:runner:${C}`, context: { type: "self_deploy", target: "runner", commit: C, fromCommit: B } });
+    const t = await doneTicket(c, projectId, {
+      title: "The runner needs the new tooling",
+      mergeCommit: C,
+      ownerSetup: "Build and update runners",
+      at: new Date("2026-11-03T12:00:00Z"),
+    });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+
+    expect(await openCards(c)).toHaveLength(0);
+    const [runnerCard] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `self-deploy:runner:${C}`));
+    expect(runnerCard!.question).toContain(t.title);
+    expect(runnerCard!.question).toMatch(/runner update above/);
+    // Named once, not stacked on a repeat pass.
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const [again] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `self-deploy:runner:${C}`));
+    expect(again!.question.match(new RegExp(t.title, "g"))).toHaveLength(1);
+  });
+
+  it("steps that differ still get their own card", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await doneTicket(c, projectId, { title: "Add the second account", mergeCommit: B, ownerSetup: "Settings → Funding → Add account", at: new Date("2026-11-03T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Turn on the second storage bucket", mergeCommit: C, ownerSetup: "Settings → Storage → Turn on the second bucket", at: new Date("2026-11-03T12:05:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const cards = await openCards(c);
+    expect(cards).toHaveLength(2);
+    expect(cards.map((x) => x.question).join("\n")).toContain("Add account");
+    expect(cards.map((x) => x.question).join("\n")).toContain("second bucket");
+  });
+
+  it("a ticket whose steps are only the runner update plus its own keeps a card for its own step", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await c.db.insert(decisions).values({ companyId, kind: "approval", question: `Update the runners to ${C.slice(0, 8)}?`, options: ["Update runners", "Not now"], recommendedOption: "Update runners", dedupeKey: `self-deploy:runner:${C}`, context: { type: "self_deploy", target: "runner", commit: C, fromCommit: B } });
+    await doneTicket(c, projectId, { title: "Add the second account", mergeCommit: C, ownerSetup: "Build and update runners\nSettings → Funding → Add account", at: new Date("2026-11-03T12:00:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const cards = await openCards(c);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.question).toContain("Add account");
+    // The runner-only step is taken out of that card (the runner card covers it).
+    expect(cards[0]!.question).not.toContain("Build and update runners");
+  });
+
+  it("a later deploy with the earlier grouped tickets still live still raises a card for a new differing ticket", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    const steps = "Settings → Funding → Add account";
+    await doneTicket(c, projectId, { title: "Add the second account", mergeCommit: B, ownerSetup: steps, at: new Date("2026-11-03T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Add the third account", mergeCommit: C, ownerSetup: steps, at: new Date("2026-11-03T12:05:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await openCards(c)).toHaveLength(1);
+
+    // A further deploy brings a ticket with different steps live while both grouped tickets are still
+    // live: its card is raised, and the grouped card isn't stacked on. The old code read an empty group
+    // here and threw, aborting the whole pass so this new card never went up.
+    const D = "4".repeat(40);
+    await doneTicket(c, projectId, { title: "Turn on the second bucket", mergeCommit: D, ownerSetup: "Settings → Storage → Turn on the second bucket", at: new Date("2026-11-03T12:10:00Z") });
+    await c.releaseLog.note(companyId, D);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const cards = await openCards(c);
+    expect(cards).toHaveLength(2);
+    expect(cards.map((x) => x.question).join("\n")).toContain("second bucket");
+  }, 20_000);
+
+  it("switching back past one ticket of a shared card takes the card back for all and clears every pointer", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    const steps = "Settings → Funding → Add account";
+    const a = await doneTicket(c, projectId, { title: "Add the second account", mergeCommit: B, ownerSetup: steps, at: new Date("2026-11-03T12:00:00Z") });
+    const b = await doneTicket(c, projectId, { title: "Add the third account", mergeCommit: C, ownerSetup: steps, at: new Date("2026-11-03T12:05:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const [shared] = await openCards(c);
+    expect(shared).toBeDefined();
+
+    // Switched back to before the newer (non-first) ticket's merge: the shared card covers both, so it is
+    // taken back, and BOTH tickets stop pointing at it. The old code found no card on the non-first key,
+    // so the newer ticket kept a stale pointer and never got a card again.
+    const before = await c.releaseLog.releaseManagerWakes("restarted");
+    expect(before).toBeGreaterThanOrEqual(0);
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("switched-back");
+    for (const t of [a, b]) expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.ownerSetupDecisionId).toBeNull();
+    const gone = await setupCards(c);
+    expect(gone.filter((x) => x.status === "open")).toHaveLength(0);
+
+    // C goes live again: both get a card again, as a shared pair.
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const again = await openCards(c);
+    expect(again).toHaveLength(1);
+    expect(again[0]!.question).toContain(a.title);
+    expect(again[0]!.question).toContain(b.title);
+  }, 20_000);
+});

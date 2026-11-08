@@ -231,7 +231,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await c.open()).toHaveLength(0);
   });
 
-  it("pages once when no runner has been swapped for twice the reconnect time, naming who is waited on", async () => {
+  it("pages once when no runner has been swapped for twice the reconnect time, and says plainly the wait is for running work (BOS-497)", async () => {
     const c = (ctx = await setup({ reconnectMs: 5 * MIN }));
     const a = await c.company("App Co", "app-co");
     await c.wake(a);
@@ -240,14 +240,18 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.maintenance.step();
     c.advance(9 * MIN);
     await c.maintenance.step();
-    expect((await c.titles()).filter((t) => t.includes("Runner update is stuck"))).toHaveLength(0);
+    expect((await c.titles()).filter((t) => t.includes("Runner update is"))).toHaveLength(0);
     c.advance(2 * MIN);
     await c.maintenance.step();
     await c.maintenance.step();
-    const stuck = (await c.db.select().from(notifications)).filter((n) => n.title === "Runner update is stuck");
-    expect(stuck).toHaveLength(1);
-    expect(stuck[0]).toMatchObject({ level: "page" });
-    expect(stuck[0]!.body).toContain("app-co");
+    const all = await c.db.select().from(notifications);
+    // The only company waited on has a work run going: that wait is on purpose, so it is not called stuck.
+    expect(all.filter((n) => n.title === "Runner update is stuck")).toHaveLength(0);
+    const waiting = all.filter((n) => n.title === "Runner update is waiting for running work");
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]).toMatchObject({ level: "page" });
+    expect(waiting[0]!.body).toContain("app-co still has work runs going");
+    expect(waiting[0]!.body).toContain("on purpose");
     expect(await getHold(c.db)).not.toBeNull(); // the hold stays; the owner decides
   });
 

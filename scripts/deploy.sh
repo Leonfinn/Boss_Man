@@ -70,7 +70,7 @@ needs_runner() { # old new
   git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
 }
 
-DRY=0 FORCE=0 RUNNER=auto YES=0 ROLLBACK=0 COMMIT=
+DRY=0 FORCE=0 RUNNER=auto YES=0 ROLLBACK=0 RECREATE=0 COMMIT=
 RESULT=running FROM="" TO="" BACKUP="" STARTED="" MESSAGE=""
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -127,6 +127,9 @@ rebuild_and_start() {
   run docker compose build "${svcs[@]}"
   step "Restarting"
   run docker compose up -d --no-deps "${svcs[@]}"
+  # With --force and nothing new the image is unchanged, so `up -d` leaves the running server alone: recreate it, or
+  # "restart" would do nothing (BOS-647). Only the server: the launcher is left as it is.
+  if ((RECREATE)); then run docker compose up -d --no-deps --force-recreate server; fi
   step "Waiting for the server to be healthy (up to ${HEALTH_TIMEOUT}s)"
   wait_healthy
 }
@@ -190,6 +193,7 @@ main() {
   if [[ $old == "$new" ]]; then
     ((FORCE)) || { say "Nothing new to deploy (at ${old:0:8})."; RESULT=nothing_new; MESSAGE="nothing new"; write_status; exit 0; }
     say "Nothing new, but --force was given: rebuilding what is checked out (${old:0:8})."
+    RECREATE=1
   else
     say "About to deploy these commits:"; git log --oneline "HEAD..$new"
   fi
@@ -198,8 +202,12 @@ main() {
   step "Backing up the database"
   backup_db
   write_status
-  ((DRY)) || printf '%s\n' "$old" >"$PREV_FILE"
-  say "Current commit recorded for rollback: ${old:0:8}"
+  # A --force at the same commit (a restart, BOS-647) keeps the record: overwriting it with the commit that runs would
+  # leave --rollback with nothing to go back to.
+  if [[ $old != "$new" ]]; then
+    ((DRY)) || printf '%s\n' "$old" >"$PREV_FILE"
+    say "Current commit recorded for rollback: ${old:0:8}"
+  fi
 
   step "Pulling the code"
   run git merge --ff-only --quiet "$new"
