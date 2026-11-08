@@ -515,6 +515,36 @@ describe("owner chat", () => {
     expect(saved.text).not.toContain("No changes made in this reply.");
   });
 
+  it("counts neither a read nor a failed call as a change, and names an updated or moved ticket by its ref (BOS-806, QA BOS-821)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Look around." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const client = await c.mcp(start.runId);
+    const saidAs = async (words: string) => {
+      await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: words } });
+      await c.settle();
+      return ((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string }).text;
+    };
+    // Read actions of tools that also write, plain reads, and a call that fails: none is a change.
+    await client.callTool({ name: "notes", arguments: { action: "list" } });
+    await client.callTool({ name: "decisions", arguments: { action: "list" } });
+    await client.callTool({ name: "board", arguments: {} });
+    expect((await client.callTool({ name: "set_ticket_state", arguments: { ticketId: randomUUID(), state: "done", summary: "x" } })).isError).toBe(true);
+    expect(await saidAs("Had a look.")).toBe("Had a look.\n\nNo changes made in this reply.");
+    // A real change to a ticket the run made names the ticket by its ref, not just "a ticket".
+    const made = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Tidy the inbox", project: "App" } }));
+    const id = /#\/tickets\/([0-9a-f-]{36})/.exec(made)![1]!;
+    await client.callTool({ name: "update_ticket", arguments: { ticketId: id, title: "Tidy the owner inbox", reason: "Clearer." } });
+    await client.callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary: "Not needed." } });
+    await client.callTool({ name: "notify_owner", arguments: { level: "flag", title: "FYI" } });
+    await client.close();
+    const text = await saidAs(`Done: #/tickets/${id}.`);
+    expect(text).toContain("Done in this reply: created a ticket APP-1; updated a ticket APP-1; moved a ticket APP-1; sent the owner a flag.");
+    expect(text).not.toContain("No changes made");
+  });
+
   it("has every chat tool either listed as a change in the what-changed line or named as read-only (BOS-806)", async () => {
     const c = await setup();
     await c.db.delete(wakes);
