@@ -127,6 +127,22 @@ export type AdvisedDecision = {
   withdrawn?: { by: string; note: string };
 };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
+/** A card Boss Man closed by itself in the last couple of hours (BOS-739): the notice, and the steps it showed. */
+export type ClosedNotice = {
+  why: "live" | "newer";
+  text: string;
+  at: string;
+  until: string;
+  commit?: string;
+  newer?: { decisionId: string; label: string };
+};
+export type ClosedNoticeCard = {
+  id: string;
+  companyId: string;
+  question: string;
+  context: { steps?: string[]; check?: string; rollback?: string };
+  notice: ClosedNotice;
+};
 
 /** An agent's harness/provider/model/paid-from setup on a model-change card (BOS-128). */
 export type ModelConfigView = { harness: string; provider: string; model: string; fundingSourceId: string; fundingSourceName?: string };
