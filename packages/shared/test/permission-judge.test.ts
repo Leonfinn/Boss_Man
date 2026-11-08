@@ -1419,6 +1419,12 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
       "npm -w packages/shared init x",
       "cd /tmp/p && npm --loglevel info init x",
     ]);
+    allows([
+      "npm init",
+      "cd packages/shared && yarn install",
+      "cd /tmp/p && pnpm init",
+      "cd /tmp/p && npm ls",
+    ]);
   });
 
   describe("B. node-options by flag", () => {
