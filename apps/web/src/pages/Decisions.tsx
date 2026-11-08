@@ -652,21 +652,25 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                   <a href="#/decisions">Follow the newer card: {n.notice.newer.label}</a>
                 </p>
               )}
-              {n.context.steps?.length ? (
-                <details style={{ marginTop: 6 }}>
-                  <summary className="muted">These steps are kept to read; there is nothing to press.</summary>
-                  <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
-                    {n.context.steps.map((s, i) => (
-                      <li key={i}><StepText text={s} /></li>
-                    ))}
-                  </ol>
-                  {n.context.check && (
-                    <p className="muted" style={{ fontSize: 13 }}>
-                      How to check it worked: <StepText text={n.context.check} />
-                    </p>
-                  )}
-                </details>
-              ) : null}
+              {(() => {
+                // A hand-apply card keeps its steps as `handSteps`; a hand-apply to-do as `steps` (BOS-739).
+                const steps = n.context.handSteps?.length ? n.context.handSteps : n.context.steps;
+                return steps?.length ? (
+                  <details style={{ marginTop: 6 }}>
+                    <summary className="muted">These steps are kept to read; there is nothing to press.</summary>
+                    <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                      {steps.map((s, i) => (
+                        <li key={i}><StepText text={s} /></li>
+                      ))}
+                    </ol>
+                    {n.context.check && (
+                      <p className="muted" style={{ fontSize: 13 }}>
+                        How to check it worked: <StepText text={n.context.check} />
+                      </p>
+                    )}
+                  </details>
+                ) : null;
+              })()}
             </article>
           ))}
         </section>

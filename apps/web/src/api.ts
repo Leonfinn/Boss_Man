@@ -140,7 +140,8 @@ export type ClosedNoticeCard = {
   id: string;
   companyId: string;
   question: string;
-  context: { steps?: string[]; check?: string; rollback?: string };
+  /** A hand-apply card keeps its steps as `handSteps`; a hand-apply to-do as `steps` (BOS-739). */
+  context: { steps?: string[]; handSteps?: string[]; check?: string; rollback?: string };
   notice: ClosedNotice;
 };
 
