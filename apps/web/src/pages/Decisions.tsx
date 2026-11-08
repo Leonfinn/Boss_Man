@@ -11,6 +11,7 @@ import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
 import { SkillProposal } from "../components/SkillProposal";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
+import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 
 // A card's note and own-word answer are kept in this browser as they are typed (BOS-637): a
 // freeze or a reload must not cost the owner what they wrote. The cards arrive one at a time, so
@@ -20,6 +21,14 @@ const draftOwn = (id: string) => `decision/${id}/own-answer`;
 
 /** The answer sent when it is too long for the box: the text is in the .txt file the line links. */
 export const ANSWER_IN_FILE = "My answer is too long to type here, so it's in this file (open it to read it whole):";
+
+/**
+ * The ticket a card's own-word answer is written on, so a picture or file pasted into it (BOS-759)
+ * sits with that work: the ticket it blocks, else the one it holds up. Absent: the company's.
+ */
+export function cardTicketId(d: Decision): string | undefined {
+  return d.blocks[0]?.ticketId ?? d.about?.[0]?.ticketId ?? undefined;
+}
 
 /** Attaches an owner's text as a .txt file, for an answer too long for the box; returns its Markdown. */
 async function uploadText(companyId: string, ticketId: string | undefined, text: string) {
@@ -461,6 +470,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     setOwnWords(({ [id]: _, ...rest }) => rest);
     clearDraft(draftOwn(id));
   };
+  // Pictures and files pasted or picked into an answer in the owner's own words (BOS-759). `answering`
+  // is the card whose box is open, so an upload goes to that card's ticket.
+  const answering = useRef<string | undefined>(undefined);
+  const img = useImageAttach(companies[0]?.id, undefined, { ticketIdOf: () => answering.current });
   // A team plan's ticked hires, by position; all of them until the owner unticks one.
   const [picks, setPicks] = useState<Record<string, number[]>>({});
   // A model-change card being edited before approval.
@@ -551,13 +564,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     inFlight.current.add(d.id);
     setBusy(d.id);
     setAttaching(d.id);
+    answering.current = cardTicketId(d);
     try {
       // Attach it to the ticket the card is about, so it sits with the work; else the company, which agents still open.
       const ticketId = d.context?.type === "risk_review" ? d.context.ticketId ?? undefined : d.context?.blockerTicketId ?? undefined;
-      const markdown = await uploadText(d.companyId, ticketId || undefined, long);
-      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: `${ANSWER_IN_FILE}\n\n${markdown}`, custom: true } });
+      const markdown = await uploadText(d.companyId, ticketId || cardTicketId(d), long);
+      // Anything pasted into the box goes with the file too, so nothing the owner attached is lost.
+      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: withAttachments(`${ANSWER_IN_FILE}\n\n${markdown}`, img.attached), custom: true } });
       setAnswered((a) => ({ ...a, [d.id]: ANSWER_IN_FILE }));
       forgetOwn(d.id);
+      img.clear();
       setErrors(({ [d.id]: _, ...rest }) => rest);
       setNotices(({ [d.id]: _, ...rest }) => rest);
       onAnswered();
@@ -568,20 +584,30 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       setAttaching(null);
     }
   };
+  // Sends an answer in the owner's own words; it needs some text or an attachment (BOS-759).
+  const sendOwn = (d: Decision) => {
+    const text = ownWords[d.id]?.trim() ?? "";
+    if (!text && !img.attached.length) return;
+    void answer(d, text, { custom: true });
+  };
   const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
     const isAlways = d.context?.always?.some((a) => a.label === option) ?? false;
     // A second click can land before React re-renders the disabled button: refuse it here too.
     if (inFlight.current.has(d.id)) return;
     inFlight.current.add(d.id);
     setBusy(d.id);
+    // An own-word answer carries its pictures and files on the end, as a message does (BOS-759). Only
+    // for this card: the box sends what is shown, and the server refuses a custom answer anywhere else.
+    const answerText = extra.custom && ownWords[d.id] !== undefined ? withAttachments(option.trim(), img.attached).trim() : option;
     try {
       const note = notes[d.id]?.trim();
       const reasonLink = reasonLinks[d.id]?.trim();
-      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: answerText, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
-      // The card is answered, so its kept note and answer are done with.
+      // The card is answered, so its kept note and answer are done with, and the attachments went with it.
       forgetNote(d.id);
       forgetOwn(d.id);
+      img.clear();
       setModelEdits(({ [d.id]: _, ...rest }) => rest);
       if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
@@ -1197,8 +1223,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             style={{ display: "flex", flexDirection: "column", gap: 8 }}
                             onSubmit={(e) => {
                               e.preventDefault();
-                              const text = ownWords[d.id]!.trim();
-                              if (text) void answer(d, text, { custom: true });
+                              sendOwn(d);
                             }}
                           >
                             <div className="field">
@@ -1212,6 +1237,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                 placeholder={d.recommendedOption ?? undefined}
                                 value={ownWords[d.id] ?? ""}
                                 onChange={(text) => editOwn(d.id, text)}
+                                onPaste={(e) => {
+                                  // A pasted picture or file is attached, unless text was copied with it (BOS-759).
+                                  answering.current = cardTicketId(d);
+                                  img.onPaste(e);
+                                }}
                                 onKeyDown={(e) => {
                                   if (e.key === "Tab" && !e.shiftKey && d.recommendedOption && !ownWords[d.id]) {
                                     e.preventDefault();
@@ -1220,8 +1250,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                 }}
                                 textareaStyle={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
                                 onSendAsFile={(long) => answerAsFile(d, long)}
-                                attaching={attaching === d.id}
-                              />
+                                attaching={attaching === d.id || img.busy}
+                                error={img.error}
+                              >
+                                {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+                              </OwnerMessageBox>
                               {d.recommendedOption && !ownWords[d.id] && (
                                 <button type="button" className="use-suggestion" onClick={() => editOwn(d.id, d.recommendedOption!)}>
                                   Use suggestion
@@ -1229,10 +1262,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               )}
                             </div>
                             <div className="actions">
-                              <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim() || tooLongToSend(ownWords[d.id] ?? "")}>
+                              {img.button}
+                              <button type="submit" className="btn primary" disabled={busy === d.id || img.busy || (!ownWords[d.id]?.trim() && !img.attached.length) || tooLongToSend(ownWords[d.id] ?? "", img.attached)}>
                                 Send my answer
                               </button>
-                              <button type="button" className="btn" onClick={() => forgetOwn(d.id)}>
+                              <button type="button" className="btn" onClick={() => { answering.current = undefined; img.clear(); forgetOwn(d.id); }}>
                                 Back to the options
                               </button>
                             </div>

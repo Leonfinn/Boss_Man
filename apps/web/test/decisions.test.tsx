@@ -571,6 +571,69 @@ describe("write my own answer", () => {
   });
 });
 
+describe("attaching a picture or file to my own answer (BOS-759)", () => {
+  const IMG = "11111111-2222-3333-4444-555555555555";
+  const openWithFetch = () => {
+    const d = decision({ kind: "question", question: "Which screen is wrong?", options: ["The list", "The detail"], recommendedOption: "The list", blocks: [{ ticketId: "t1", ref: "APP-3", title: "Checkout" }] });
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/companies/c1/images") {
+        const { name } = JSON.parse(String(init!.body)) as { name: string };
+        return new Response(JSON.stringify({ markdown: `![${name}](/api/ticket-images/${IMG})` }), { status: 201 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Write my own answer" }));
+    return { fetch, box: screen.getByLabelText("Your answer, in your own words") };
+  };
+  const send = () => screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement;
+
+  it("pastes a screenshot, shows it under the box, and sends its link on the end of the answer", async () => {
+    const { fetch, box } = openWithFetch();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeTruthy();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "wrong.png", { type: "image/png" });
+    fireEvent.paste(box, { clipboardData: { files: [file], getData: () => "" } });
+    await waitFor(() => expect(screen.getByRole("img", { name: "wrong.png" })).toBeTruthy());
+    expect(box.value).toBe("");
+    // Uploaded through the message box's own route, onto the ticket the card is about.
+    const [url, init] = fetch.mock.calls.find((c) => c[0] === "/api/companies/c1/images") as unknown as [string, RequestInit];
+    expect(url).toBe("/api/companies/c1/images");
+    expect(JSON.parse(String(init.body))).toMatchObject({ name: "wrong.png", ticketId: "t1" });
+    // An attachment alone is enough to send.
+    expect(send().disabled).toBe(false);
+    fireEvent.change(box, { target: { value: "It's the detail screen." } });
+    fireEvent.click(send());
+    await waitFor(() => expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(true));
+    const [, answer] = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer") as unknown as [string, RequestInit];
+    expect(JSON.parse(String(answer.body))).toEqual({ answer: `It's the detail screen.\n![wrong.png](/api/ticket-images/${IMG})`, custom: true });
+  });
+
+  it("a removed attachment is not sent", async () => {
+    const { fetch, box } = openWithFetch();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "wrong.png", { type: "image/png" });
+    fireEvent.paste(box, { clipboardData: { files: [file], getData: () => "" } });
+    await waitFor(() => expect(screen.getByRole("img", { name: "wrong.png" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.queryByRole("img")).toBeNull();
+    fireEvent.change(box, { target: { value: "Only text." } });
+    fireEvent.click(send());
+    await waitFor(() => expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(true));
+    const [, answer] = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer") as unknown as [string, RequestInit];
+    expect(JSON.parse(String(answer.body))).toEqual({ answer: "Only text.", custom: true });
+  });
+
+  it("Back to the options drops what was attached", async () => {
+    const { box } = openWithFetch();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "again.png", { type: "image/png" });
+    fireEvent.paste(box, { clipboardData: { files: [file], getData: () => "" } });
+    await waitFor(() => expect(screen.getByRole("img", { name: "again.png" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Back to the options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Write my own answer" }));
+    expect(screen.queryByRole("img")).toBeNull();
+  });
+});
+
 describe("approval card while the merge runs", () => {
   const approval = (over: Partial<Decision> = {}) =>
     decision({

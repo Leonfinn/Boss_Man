@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, decisions, ticketDependencies, tickets } from "../src/db/schema.js";
+import { activity, decisions, ticketDependencies, tickets, wakes as wakesTable } from "../src/db/schema.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, ceoAnswerRefusal, isSystemCard, raiseMergeStuck } from "../src/services/decisions.js";
 import { issueRunToken } from "../src/mcp.js";
 
@@ -591,5 +591,38 @@ describe("more attempts the CEO must fail (BOS-149 adversarial round 6)", () => 
       .values({ companyId: c.company.id, kind: "approval", question: "Sign off the release", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: t.id, reviewer: "the owner" } });
     await expect(c.review.land(t.id, "the owner")).rejects.toThrow(/sign-off/i);
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).not.toBe("done");
+  });
+});
+
+describe("an answer in the owner's own words carries attachments (BOS-759)", () => {
+  it("uploads a picture to the card's ticket and tells the agent to open it", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Paste a screenshot");
+    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which screen is wrong?", options: ["The list", "The detail"], recommended: "The list", blocksTicketId: t.id });
+    // The page's own upload endpoint, on the ticket the card blocks.
+    const up = await c.req("POST", `/api/companies/${c.company.id}/images`, { data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), name: "wrong.png", ticketId: t.id });
+    expect(up.statusCode).toBe(201);
+    const { markdown } = up.json() as { markdown: string };
+    expect(markdown).toMatch(/^!\[wrong\.png\]\(\/api\/ticket-images\/[0-9a-f-]{36}\)$/);
+    expect((await c.req("GET", `/api/tickets/${t.id}/images`)).json()).toHaveLength(1);
+
+    const answer = `It's the detail screen. Here:\n${markdown}\n`;
+    expect((await c.req("POST", `/api/decisions/${d.id}/answer`, { answer, custom: true })).statusCode).toBe(200);
+    const after = await row(d.id);
+    expect(after.answer).toContain(markdown);
+    // The asking agent is woken with the links and told how to open them.
+    const [w] = await c.db.select().from(wakesTable).where(and(eq(wakesTable.agentId, c.worker.id), eq(wakesTable.reason, "decision answered")));
+    expect(w!.note).toContain(markdown);
+    expect(w!.note).toContain("open_attachment");
+  });
+
+  it("says nothing about attachments when an ordinary answer has none", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("No screenshot");
+    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which one?", options: ["A", "B"], recommended: "A", blocksTicketId: t.id });
+    expect((await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "B, because it is simpler.", custom: true })).statusCode).toBe(200);
+    const [w] = await c.db.select().from(wakesTable).where(and(eq(wakesTable.agentId, c.worker.id), eq(wakesTable.reason, "decision answered")));
+    expect(w!.note).toContain("B, because it is simpler.");
+    expect(w!.note).not.toContain("open_attachment");
   });
 });
