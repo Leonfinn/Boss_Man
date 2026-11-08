@@ -530,6 +530,39 @@ describe("turn checkpoints (R39)", () => {
   });
 });
 
+// BOS-832: the review-time clash check (BOS-426) must read the same current branch and main the merge gate will.
+describe("the clash check reads a current branch and a current main (BOS-832)", () => {
+  it("reports no clash when the branch already contains origin's main tip", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "ticket.txt"), "ticket work\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "ticket work");
+    // Main moves on, then the branch brings it all in: the branch head contains main's tip (HOL-585's shape).
+    for (let i = 2; i <= 4; i++) r.commit(`v${i}`);
+    git(w.path, "fetch", "-q", "origin");
+    git(w.path, "merge", "-q", "--no-edit", "origin/main");
+    const repo = ws.repoDir(ids.project);
+    expect(git(repo, "merge-base", "--is-ancestor", git(r.dir, "rev-parse", "main"), `refs/heads/${branchFor(ids.a)}`)).toBe("");
+    expect(await ws.clash(spec, "main")).toEqual({ clashes: false, files: [] });
+  });
+
+  it("still reports a real clash", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    r.commit("main side");
+    const res = await ws.clash(spec, "main");
+    expect(res.clashes).toBe(true);
+    expect(res.files).toEqual(["README.md"]);
+  });
+});
+
 describe("images for a ticket", () => {
   it("reads a screenshot from the ticket's worktree or plain working folder, never outside them, and caps the size", () => {
     const root = mkdtempSync(path.join(tmpdir(), "bm-ws-img-"));
