@@ -89,7 +89,13 @@ describe.skipIf(!browser)("side menu at the owner's recorded device profiles", (
   for (const { file, parsed } of profiles) {
     it(`${file}: the menu reaches the window and its last item is reachable`, async () => {
       const t = tallestReading(parsed);
-      const gap = Math.max(0, t.units.lvh - t.units.dvh);
+      // The gap the test imitates is the profile's own 100lvh − 100dvh, from its tallest reading
+      // (lvh can't be shorter than dvh, so this is never clamped away).
+      const ownGap = t.units.lvh - t.units.dvh;
+      expect(ownGap).toBeGreaterThanOrEqual(0);
+      const gap = ownGap;
+      // The example foldable really has a toolbar gap, so the code that imitates it does run.
+      if (file === "example-foldable.json") expect(gap).toBeGreaterThan(0);
       const page = await browser!.newPage({ viewport: { width: t.width, height: t.height }, deviceScaleFactor: t.pixelRatio, hasTouch: t.coarsePointer, isMobile: t.coarsePointer });
       try {
         await page.setContent(HTML, { waitUntil: "load" });
