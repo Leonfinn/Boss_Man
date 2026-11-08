@@ -1,7 +1,9 @@
 // Company runners through the launcher (R55): the server issues the runner token and asks the
 // launcher to start the container with it, so nobody copies tokens into files. The launcher
 // is optional (BOSSMAN_LAUNCHER=1); without it the owner registers runners by hand as before.
+import { lookup as dnsLookup } from "node:dns/promises";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { and, eq, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, mcpServers, projects, settings } from "../db/schema.js";
@@ -47,8 +49,70 @@ export function toolServerAddress(url: string): string | null {
   }
 }
 
+/**
+ * Boss Man's own services on the compose network (docker-compose.yml: db, server, launcher, netguard, and the
+ * runner-* containers). A tool server aimed at one opens a direct path from the runner to it, whatever the port.
+ * The deployer is a file inbox, not a network service, so it has no entry. Matched on the host name alone.
+ */
+const STACK_SERVICE_HOSTS = /^(db|server|server-blue|server-green|proxy|migrate|ntfy|tailscale|launcher|netguard|postgres|runner(-[a-z0-9-]+)?)$/;
+export function isStackService(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+    return STACK_SERVICE_HOSTS.test(host);
+  } catch {
+    return false;
+  }
+}
+
+/** True for loopback, private, link-local, CGNAT and unspecified addresses (IPv4, IPv6, and IPv4-mapped IPv6): where the stack's containers live. */
+export function isPrivateAddress(ip: string): boolean {
+  const v = isIP(ip);
+  if (v === 4) {
+    const [a, b] = ip.split(".").map(Number) as [number, number];
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (v === 6) {
+    const l = ip.toLowerCase();
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(l);
+    if (mapped) return isPrivateAddress(mapped[1]!);
+    return l === "::" || l === "::1" || /^f[cd]/.test(l) || /^fe[89ab]/.test(l) || /^::ffff:/.test(l);
+  }
+  return false;
+}
+
+export type HostLookup = (host: string) => Promise<string[]>;
+const systemLookup: HostLookup = async (host) => (await dnsLookup(host, { all: true })).map((r) => r.address);
+
+/**
+ * Whether a tool server's URL could reach Boss Man's own services (best effort; the preview's host:port is the owner's real control).
+ * Flags: the known service names, any name with no dot (a compose or container name such as boss-man-db-1, localhost),
+ * .local/.internal/.localhost names, IP literals in private/loopback/link-local ranges (a LAN host is flagged too: the owner ticks to allow it),
+ * and any name that resolves to such an address. A lookup that fails or takes over 3 s counts as flagged (fail closed).
+ * The netguard re-resolves every 15 s, so a name can point somewhere else after the import.
+ */
+export async function reachesStack(url: string, lookup: HostLookup = systemLookup): Promise<boolean> {
+  if (isStackService(url)) return true;
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+  } catch {
+    return false;
+  }
+  if (host.startsWith("[")) return true;
+  if (isIP(host)) return isPrivateAddress(host);
+  if (!host.includes(".") || /\.(local|internal|localhost|lan|home|docker)$/.test(host)) return true;
+  try {
+    const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
+    return addrs.length === 0 || addrs.some(isPrivateAddress);
+  } catch {
+    return true;
+  }
+}
+
 /** The launcher's own check for an allow entry (apps/launcher/src/spec.ts): one bad entry makes it refuse the whole list, so never send one it would refuse. */
 const LAUNCHER_ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
+/** The host:port the guard would be told to allow for a tool server's URL, or null. */
+export const sendableAddress = (url: string): string | null => sendable(toolServerAddress(url));
 function sendable(addr: string | null): string | null {
   if (!addr || !LAUNCHER_ALLOW_ENTRY.test(addr)) return null;
   const [host, port] = [addr.slice(0, addr.lastIndexOf(":")), Number(addr.slice(addr.lastIndexOf(":") + 1))];
