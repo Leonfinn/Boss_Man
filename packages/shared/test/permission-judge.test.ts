@@ -1699,3 +1699,29 @@ describe("rules judge: find -exec behind a wrapper (BOS-723)", () => {
     expect(Date.now() - t).toBeLessThan(3000);
   });
 });
+
+// BOS-724 (Jane's review of BOS-723): find ends -exec at `+` only right after `{}`. Every "denies" row was Allow on e47ca118.
+describe("rules judge: a lone + inside find -exec (BOS-724)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  deny([
+    "cd /tmp/p && find . -exec env -u + ./foo \\;",
+    "cd /tmp/p && find . -exec flock + ./foo \\;",
+    "cd /tmp/p && find . -exec env -C + ./foo \\;",
+    "cd /tmp/p && find . -execdir env -u + ./foo \\;",
+    "cd /tmp/p && find . -exec env -u + -u + ./foo \\;",
+    "cd /tmp/p && find . -exec ls {} \\; -exec flock + ./foo \\;",
+    "cd /tmp/p && find . -exec env -u + ./foo {} +",
+  ]);
+  allows([
+    "cd /tmp/p && find . -exec ls {} +",
+    "cd /tmp/p && find . -exec env grep -l foo {} + -exec ls {} +",
+    "find . -exec env -u + ./scripts/check-quick.sh \\;",
+  ]);
+  it("a + right after {} still ends the slice", () => {
+    expect(judge("cd /tmp/p && find . -exec ls {} + ./foo").verdict).toBe("allow");
+  });
+});
