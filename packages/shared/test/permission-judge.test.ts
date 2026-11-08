@@ -940,6 +940,19 @@ describe("rules judge: shell options after -c (BOS-695)", () => {
     "bash -e -c 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
     "bash -ec 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
     "bash +e -c 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    // BOS-707 (Jane's BOS-695 round 2): `o`/`O` in the same option word as `c`, before or after it, takes the next word as
+    // its option name, so the command string sits one or more words on. The BOS-700 strip dropped the `o`, read `pipefail`
+    // as the command string and never checked the real one. Every row here got Allow on BOS-695's branch head 6dd2c9e9. The
+    // judge no longer places such a cluster at all: `c` with any `o`/`O` gives no Allow (write `-o pipefail -c 'cmd'`).
+    "bash -oc pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -Oc extglob 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -eoc pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "echo x > c.sh; bash -oc pipefail './c.sh'",
+    "bash -oec 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -oeOc pipefail nounset 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    // A cluster that fuses `o`/`O` with `c` gives no Allow even for an ordinary command.
+    "bash -co pipefail 'pnpm test'",
+    "bash -e -oc pipefail 'pnpm test'",
   ]);
   allows([
     "bash -c 'pnpm test'",
@@ -950,11 +963,14 @@ describe("rules judge: shell options after -c (BOS-695)", () => {
     "bash -c -eo pipefail 'pnpm test'",
     "bash -c -euo pipefail 'pnpm test'",
     "bash -ce 'pnpm test'",
-    "bash -co pipefail 'pnpm test'",
     "sh -c 'ls -la'",
     // Options before `-c` don't hide an ordinary command either.
     "bash -e -c 'pnpm test'",
     "bash -ec 'pnpm test'",
+    // BOS-707: an `o`/`O` with its own word before the `-c` word still allows an ordinary command (the `-c` word itself has
+    // no `o`/`O`). A cluster that fuses `o`/`O` with `c` (`-co`, `-oc`) gives no Allow even for an ordinary command.
+    "bash -o pipefail -c 'pnpm test'",
+    "bash -O extglob -c 'pnpm test'",
   ]);
 });
 
