@@ -329,4 +329,65 @@ describe("runner watch: stopping a runner withdraws its offline card (BOS-735)",
     await restarted.step();
     expect(fresh).toHaveLength(0);
   });
+
+  // QA, BOS-800: the cases around the one the ticket tested.
+  it("withdraws only the stopped runner's card, and leaves another company's open offline card alone", async () => {
+    const s = await setup(["Alpha", "Beta"]);
+    await s.watch.step();
+    s.up.clear();
+    await s.watch.step();
+    s.advance(OFFLINE_REPORT_MS);
+    await s.watch.step();
+    expect(s.alertsRaised).toHaveLength(2);
+    await s.db.update(runners).set({ lastSeenAt: null }).where(eq(runners.id, s.rows[0]!.id));
+    await s.watch.step();
+    const status = async (i: number) => (await s.db.select().from(decisions).where(eq(decisions.dedupeKey, runnerOfflineKey(s.rows[i]!.id))))[0]?.status;
+    // Alpha's card is withdrawn (its key is freed, so look it up by company); Beta's is still open under its key.
+    const [alpha] = await s.db.select().from(decisions).where(eq(decisions.companyId, s.rows[0]!.companyId));
+    expect(alpha!.status).toBe("withdrawn");
+    expect(await status(1)).toBe("open");
+    expect(await s.db.select().from(settings).where(eq(settings.key, runnerPagedKey(s.rows[1]!.id)))).toHaveLength(1);
+  });
+
+  it("raises a fresh card when the runner is started again and drops again, because the stop freed the card's key", async () => {
+    const s = await setup(["Alpha"]);
+    await s.watch.step();
+    s.up.clear();
+    await s.watch.step();
+    s.advance(OFFLINE_REPORT_MS);
+    await s.watch.step();
+    await s.db.update(runners).set({ lastSeenAt: null }).where(eq(runners.id, s.rows[0]!.id));
+    await s.watch.step();
+    // Started again (the connect writes lastSeenAt), then it drops for a new outage.
+    await s.db.update(runners).set({ lastSeenAt: new Date(Date.now() + 1000) }).where(eq(runners.id, s.rows[0]!.id));
+    s.up.add(s.rows[0]!.id);
+    await s.watch.step();
+    s.up.clear();
+    await s.watch.step();
+    s.advance(OFFLINE_REPORT_MS);
+    await s.watch.step();
+    expect(s.alertsRaised).toHaveLength(2);
+    const cards = await s.db.select().from(decisions).where(eq(decisions.companyId, s.rows[0]!.companyId));
+    expect(cards.map((c) => c.status).sort()).toEqual(["open", "withdrawn"]);
+  });
+
+  it("withdraws the card too when the launcher stops wanting the runner (the older stop path), with no \"is back\" note", async () => {
+    const s = await setup(["Alpha", "Beta"]);
+    await s.watch.step();
+    s.up.clear();
+    await s.watch.step();
+    s.advance(OFFLINE_REPORT_MS);
+    await s.watch.step();
+    expect(s.alertsRaised).toHaveLength(2);
+    // Only Beta is still wanted: Alpha was stopped through the launcher without its lastSeenAt being cleared.
+    s.launcherState.wanted = new Set([s.rows[1]!.companyId]);
+    const before = s.notes.length;
+    await s.watch.step(); // sets lastSeenAt null
+    await s.watch.step(); // the stopped-runner branch withdraws
+    const [alpha] = await s.db.select().from(decisions).where(eq(decisions.companyId, s.rows[0]!.companyId));
+    expect(alpha!.status).toBe("withdrawn");
+    expect(s.notes.slice(before).some((n) => n.title.endsWith("runner is back"))).toBe(false);
+    const [beta] = await s.db.select().from(decisions).where(eq(decisions.companyId, s.rows[1]!.companyId));
+    expect(beta!.status).toBe("open");
+  });
 });

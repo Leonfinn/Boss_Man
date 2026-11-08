@@ -8,7 +8,7 @@ import { ago } from "./Dashboard";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean };
-type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "held";
+type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
 type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
 type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number };
