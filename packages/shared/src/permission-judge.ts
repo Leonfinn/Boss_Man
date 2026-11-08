@@ -52,6 +52,18 @@ const SHELL_ALT = SHELL_NAMES.split(" ").sort((a, b) => b.length - a.length).joi
  */
 const FILE_TOOLS = new Set("rm rmdir shred unlink cp mv ln install touch truncate tee mkdir mkfifo mknod".split(" "));
 
+/**
+ * One work budget for the whole `-c` scan of a command, shared by every nesting level (BOS-715, Dougal's timing finding): each
+ * shell word found costs the characters from it to the end of the string, so nested or repeated `sh -c` can't multiply the
+ * work per level. When it runs out the line can't be placed and gets no Allow (opaque).
+ */
+type ScanBudget = { left: number };
+const SCAN_BUDGET = 250_000;
+function chargeScan(budget: ScanBudget, cost: number): boolean {
+  budget.left -= cost;
+  return budget.left >= 0;
+}
+
 const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allow" : "deny", row, reasonLabel: JUDGE_LABELS[row] });
 
 /**
@@ -64,7 +76,7 @@ const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allo
  * @param workspaceRoot the folder that holds `tickets/` and `reviews/`; the own folder is `<root>/(tickets|reviews)/<id>`
  *   and nothing else counts as it. Without it any `.../workspaces/(tickets|reviews)/<id>` path counts.
  */
-export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string, workspaceRoot?: string, depth = 0): JudgeReading {
+export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string, workspaceRoot?: string, depth = 0, budget: ScanBudget = { left: SCAN_BUDGET }): JudgeReading {
   if (!command) return judgeWithoutCommand(question, ownFolder, ownProject);
   // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
@@ -82,18 +94,18 @@ export function judgePermission(question: string, command: string | null, ownFol
   // outer line, so its redirects do not change how the outer line is read. A shell nested inside a shell is bounded by
   // `depth`; an unresolved inner string is already caught as opaque, so it is skipped here.
   if (depth < 8) {
-    for (const innerCmd of shellDashCInner(base)) {
+    for (const innerCmd of shellDashCInner(base, budget)) {
       // A command string that ends inside a quote (`bash -c 'rm -rf /tmp/a'\'' /etc'` is `rm -rf /tmp/a' /etc`) is read
       // differently by the judge and by bash, so it gets no Allow (BOS-725).
       if (endsInsideQuote(innerCmd)) return result("opaque");
-      const r = judgePermission(question, innerCmd, ownFolder, ownProject, workspaceRoot, depth + 1);
+      const r = judgePermission(question, innerCmd, ownFolder, ownProject, workspaceRoot, depth + 1, budget);
       if (r.verdict === "deny") return r;
     }
   }
   const c = base;
   // Opaque: the command string a shell runs for `-c` (in any combined flag, with all of its joined quoted pieces) is
   // unknown when it holds a substitution or a variable the judge can't resolve.
-  if (shellDashCOpaque(c)) return result("opaque");
+  if (shellDashCOpaque(c, budget)) return result("opaque");
   const ids = [...c.matchAll(WORKSPACE)].map((m) => m[1]!);
   const own = ownFolder ?? LEADING_CD.exec(c)?.[1] ?? [...ids].sort((a, b) => ids.filter((x) => x === b).length - ids.filter((x) => x === a).length)[0];
 
@@ -241,11 +253,16 @@ export function judgePermission(question: string, command: string | null, ownFol
     // An unresolved substitution or variable given to a file tool (`rm -rf $(curl ...)`, `cp $(cat /tmp/l) d`) is a target
     // the judge can't place, so it gets no Allow. `shred` and any file tool under `xargs` read their targets the same way, and a
     // substitution glued to a dash (`rm -$(cat /tmp/x)`) is unseen unless the dash word is tested too (BOS-715).
-    for (const m of c.matchAll(/\b(?:rm|rmdir|cp|mv|install|ln|shred|unlink)\b|\bxargs\b([^;&|\n]*)/g)) {
-      const rest = m[1] ?? c.slice(m.index! + m[0].length).split(/[;&|\n]/)[0]!;
+    // One greedy, non-overlapping capture per tool keeps the scan linear (BOS-729: re-slicing the rest of the line for every
+    // match was O(n²)). `xargs` appends its input to the command, so a file tool under it deletes or overwrites names the judge
+    // never sees (`echo /etc | xargs rm -rf`, `find / | xargs shred`): no Allow.
+    for (const m of c.matchAll(/\b(?:rm|rmdir|cp|mv|install|ln|shred|unlink|xargs)\b([^;&|\n]*)/g)) {
+      const rest = m[1]!;
       if (/<\(/.test(rest)) return result("outside"); // a process substitution is a path the judge can't place
       if (hasBraceExpansion(rest)) return result("outside"); // `rm -rf /tmp/a {/etc,/tmp/b}` is several paths (BOS-725)
-      for (const tok of shellWords(rest)) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
+      const words = shellWords(rest);
+      if (m[0].startsWith("xargs") && words.some((w) => FILE_TOOLS.has(w.replace(/^.*\//, "")))) return result("outside");
+      for (const tok of words) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
     }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
@@ -1141,8 +1158,9 @@ function setsUnknownEnvironment(assigns: string[], sh: string, args: string[]): 
  * can't resolve. The string is assembled the way bash joins adjacent quoted pieces (`bash -c 'echo '"$(cat /tmp/x)"`),
  * and only the word the shell actually runs (after any option words, BOS-695) is read.
  */
-function shellDashCOpaque(c: string): boolean {
+function shellDashCOpaque(c: string, budget: ScanBudget): boolean {
   for (const m of c.matchAll(new RegExp(`\\b(?:${SHELL_ALT})\\b`, "g"))) {
+    if (!chargeScan(budget, c.length - m.index!)) return true; // out of work: can't place it, so no Allow
     const words = shellWords(c.slice(m.index! + m[0].length).split(/\n/)[0]!);
     const at = words.findIndex((w) => /^[-+][A-Za-z]*c/.test(w));
     if (at < 0) continue;
@@ -1157,9 +1175,10 @@ function shellDashCOpaque(c: string): boolean {
  * `bash -c $'\x72m -rf /'` both read as `rm -rf /` (BOS-715). A string the judge can't resolve is left out; it is already
  * caught as opaque. The inner command genuinely runs, so the judge reads each one as an extra command in the same line.
  */
-function shellDashCInner(c: string): string[] {
+function shellDashCInner(c: string, budget: ScanBudget): string[] {
   const out: string[] = [];
   for (const m of c.matchAll(new RegExp(`\\b(?:${SHELL_ALT})\\b`, "g"))) {
+    if (!chargeScan(budget, c.length - m.index!)) break; // shellDashCOpaque then reports the line as opaque
     const words = shellWords(c.slice(m.index! + m[0].length).split(/\n/)[0]!);
     const at = words.findIndex((w) => /^[-+][A-Za-z]*c/.test(w));
     if (at < 0) continue;
