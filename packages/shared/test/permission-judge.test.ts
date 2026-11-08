@@ -824,6 +824,14 @@ describe("BOS-631: a file the command wrote (or a /tmp path) must not be loaded 
     "echo 'import os' > c.py; echo \"import c\" | stdbuf --out L python3",
     "echo 'import os' > c.py; env --sp 'python3 c.py'",
     "echo 'import os' > c.py; echo \"import c\" | timeout .5 python3",
+    // BOS-705: timeout's duration is read with strtod, so inf, infinity, +N and 1e3 are durations too.
+    "echo 'import os' > c.py; echo \"import c\" | timeout inf python3",
+    "echo 'import os' > c.py; echo \"import c\" | timeout +1 python3",
+    "echo 'import os' > c.py; echo \"import c\" | timeout INFINITY python3",
+    "echo 'import os' > c.py; timeout inf python3 -c \"import c\"",
+    "echo 'import os' > c.py; timeout +1 python3 -c \"import c\"",
+    "echo 'import os' > c.py; timeout -s KILL Infinity python3 -c \"import c\"",
+    "echo 'import os' > c.py; timeout 1e3 python3 -c \"import c\"",
   ]);
   allows([
     "ls /tmp; python3 -c \"import json\"",
