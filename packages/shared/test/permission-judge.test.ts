@@ -1981,9 +1981,17 @@ describe("rules judge: shred .., xargs behind a tool word, xargs/parallel delete
     "echo /etc | parallel rm -rf",
     "echo /etc | xargs -n 1 perl -e 'unlink @ARGV'",
     "echo /etc | xargs -I{} find {} -delete",
+    "echo /etc | xargs -r find cat -delete",
+    "echo / | xargs -t find ls -delete",
+    "echo / | parallel -r find ls -delete",
+    "echo /etc | xargs -r nice ls",
+    "echo /etc | xargs -t sh ls",
+    "cat /tmp/cmds.txt | parallel",
+    "echo /etc/passwd | xargs sort -o",
   ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
   it.each([
     "ls /tmp/a | xargs echo",
+    "ls /tmp/a | xargs -r ls",
     "ls /tmp/a | xargs -n 1 grep foo > /tmp/out.txt",
   ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
 });

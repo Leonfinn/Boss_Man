@@ -51,7 +51,7 @@ const SHELL_ALT = SHELL_NAMES.split(" ").sort((a, b) => b.length - a.length).joi
  * reading their targets from `xargs` input, they are unread code. `shred` overwrites in place, so it counts as a delete.
  */
 /** Programs that may run under `xargs` / `parallel` and still get Allow: they only read (BOS-730). */
-const XARGS_READONLY = new Set("echo printf cat grep egrep fgrep rg wc ls head tail sort uniq basename dirname stat file diff cmp md5sum sha256sum".split(" "));
+const XARGS_READONLY = new Set("echo printf cat grep egrep fgrep rg wc ls head tail uniq basename dirname stat file diff cmp md5sum sha256sum".split(" "));
 const FILE_TOOLS =new Set("rm rmdir shred unlink cp mv ln install touch truncate tee mkdir mkfifo mknod".split(" "));
 
 /**
@@ -273,11 +273,12 @@ export function judgePermission(question: string, command: string | null, ownFol
       for (let i = 0; i < words.length; i++) {
         const w = words[i]!;
         if (w === "" || w === ":::" || w === "::::") continue;
-        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJNTtr]$|^--(?:max-args|replace|delimiter|max-procs|max-lines|eof|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
+        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJN]$|^--(?:max-args|replace|delimiter|max-procs|max-lines|eof|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
         prog = w.replace(/^.*\//, "");
         break;
       }
-      if (prog !== undefined && !XARGS_READONLY.has(prog)) return result("outside");
+      // No program found: xargs then runs echo, but a bare `parallel` runs each input line as a command (BOS-731).
+      if (prog === undefined ? m[0].startsWith("parallel") : !XARGS_READONLY.has(prog)) return result("outside");
     }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
