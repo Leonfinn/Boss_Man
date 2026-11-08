@@ -1055,6 +1055,9 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     // No verb (`pnpm` alone) or a script-run verb, or a word that is not a known non-script verb (a bare script name).
     if (first === undefined) return true;
     if (PM_SCRIPT.test(first)) return true;
+    // BOS-716: `npm init <name>` is `npm exec create-<name>` (downloads and runs a package), like `npm exec`; a bare `init`
+    // (or one with only flags) writes a package.json and stays readable. Any word after init is a name, so no Allow.
+    if (first === "init" && args.slice(verbAt + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
     return !/^(?:install|i|ci|add|remove|rm|update|up|init|prune|audit|list|ls|outdated|why|licenses|dedupe|fetch|prefetch|store|config|c|set|link|unlink|patch|version)$/.test(first);
   };
   let away = false;
@@ -1122,6 +1125,11 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     }
     if (head === "popd") { away = true; continue; }
     if (away && (RUNS_REPO_CODE.test(head) || (PM.test(head) && pmRunsScript(head, args)))) return true;
+    // BOS-716: `npm init <name>` downloads and runs a package wherever it is run, so it is no Allow inside the checkout too.
+    if (/^(?:pnpm|npm|bun)$/.test(head)) {
+      const at = args.findIndex((a) => !a.startsWith("-") && a !== "");
+      if (at >= 0 && args[at] === "init" && args.slice(at + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
+    }
     // BOS-706 (CEO decision): outside the checkout an install runs that folder's own preinstall/install/postinstall/prepare
     // scripts, which the judge can't read. It gets no Allow unless `--ignore-scripts` (or `=true`) is given. Inside the checkout
     // and its workspaces installs stay Allow (BOS-329).
@@ -1134,11 +1142,15 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     // (read in order like the first flag). yarn 1 runs the file named by `yarn-path` in the folder's `.yarnrc` and no flag turns
     // that off, so outside the checkout a yarn install/add/upgrade (or bare `yarn`) gets no Allow: a person decides. Inside the
     // checkout nothing changes: that is our own repo's reviewed config.
-    if (away && /^(?:pnpm|npm|yarn|bun)$/.test(head)) {
+    // BOS-716 (extends group 4): yarn reads `yarn-path` from the folder's `.yarnrc` at start-up for every command, not just
+    // installs, so outside the checkout no yarn command gets an Allow. `npm audit fix` rebuilds the tree like `npm update` and runs
+    // dependency install scripts, so an `audit` with a `fix` word needs `--ignore-scripts` too (`pnpm audit --fix` only edits
+    // overrides in package.json, so a flag spelling stays Allow).
+    if (away && head === "yarn") return true;
+    if (away && /^(?:pnpm|npm|bun)$/.test(head)) {
       const verb = args.find((a) => !a.startsWith("-") && a !== "");
-      const bareYarn = head === "yarn" && verb === undefined && args.length === 0;
-      if (bareYarn || (verb !== undefined && !/^(?:init|audit|list|ls|outdated|why|licenses|fetch|prefetch|store|config|c|set)$/.test(verb))) {
-        if (head === "yarn") return true;
+      const auditFix = verb === "audit" && args.slice(args.indexOf(verb) + 1).some((a) => a === "fix");
+      if (auditFix || (verb !== undefined && !/^(?:init|audit|list|ls|outdated|why|licenses|fetch|prefetch|store|config|c|set)$/.test(verb))) {
         const end = args.indexOf("--");
         const flags = end < 0 ? args : args.slice(0, end);
         // True when the setting `name` ends up on: read in order, undone or oddly spelled means off.

@@ -1367,9 +1367,37 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     allows([
       "cd /tmp/p && pnpm install --ignore-scripts --ignore-pnpmfile",
       "cd /tmp/p && corepack pnpm install --ignore-scripts --ignore-pnpmfile",
-      "cd /tmp/p && yarn list",
       "cd packages/shared && pnpm install",
       "cd packages/shared && yarn install",
+    ]);
+  });
+
+  // BOS-716 (Jane's review of BOS-711): audit fix, every yarn verb outside the checkout, and `npm init <name>`.
+  describe("A7. audit fix, any yarn verb, init <name> (BOS-716)", () => {
+    deny([
+      "cd /tmp/p && npm audit fix",
+      "cd /tmp/p && npm audit fix --force",
+      "cd /tmp/p && npm audit --force fix",
+      "cd /tmp/p && npm audit fix --no-ignore-scripts",
+      "cd /tmp/p && yarn list",
+      "cd /tmp/p && yarn config list",
+      "cd /tmp/p && yarn --version",
+      "cd /tmp/p && corepack yarn list",
+      "cd /tmp/p && npm init x",
+      "cd /tmp/p && npm init @scope/x",
+      "cd /tmp/p && npm init -y x",
+      "cd /tmp/p && pnpm init x",
+      "npm init x",
+      "cd packages/shared && npm init x",
+    ]);
+    allows([
+      "cd /tmp/p && npm audit fix --ignore-scripts",
+      "cd /tmp/p && npm audit",
+      "cd /tmp/p && npm audit --json",
+      "cd /tmp/p && pnpm audit --fix",
+      "cd /tmp/p && npm init",
+      "cd /tmp/p && npm init -y",
+      "cd packages/shared && yarn list",
     ]);
   });
 
