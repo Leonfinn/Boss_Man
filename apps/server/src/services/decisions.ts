@@ -360,6 +360,36 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
 const STALE_ONLY_WITHDRAW_TYPES = new Set(["review_loop", "check_stuck"]);
 
 /**
+ * Withdraws the open "must merge first" cards the carried-work gate raised on this ticket (BOS-733) once every
+ * ticket a card names is done, so the card stops holding a merge that can now go ahead. A card still naming an
+ * unfinished ticket stays.
+ */
+export async function clearCarriedCards(db: Db, ticketId: string, withdrawal: Withdrawal) {
+  const rows = await db
+    .select()
+    .from(decisions)
+    .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'carried'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`));
+  let cleared = 0;
+  for (const r of rows) {
+    const named = ((r.context as { carried?: unknown[] }).carried ?? []).filter((id): id is string => typeof id === "string");
+    if (!named.length) continue;
+    // Merged counts as well as done: a ticket with an after-merge check left is merged but back in progress.
+    const open = await db.select({ id: tickets.id }).from(tickets).where(and(inArray(tickets.id, named), ne(tickets.systemState, "done"), isNull(tickets.mergeCommit)));
+    if (open.length) continue;
+    const [done] = await db
+      .update(decisions)
+      .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(r.context as object), withdrawn: withdrawal } })
+      .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (done) {
+      cleared++;
+      await markDecisionNotificationRead(db, r.id, new Date(withdrawal.at));
+    }
+  }
+  return cleared;
+}
+
+/**
  * Withdraws every open merge card for a ticket (BOS-149): one ticket never shows two, and a card for a
  * finished ticket goes away. The old dedupe key is freed so a fresh card can be raised later.
  */

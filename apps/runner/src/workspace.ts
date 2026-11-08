@@ -1345,6 +1345,14 @@ export class Workspaces {
     for (const line of log.stdout.split("\n").filter(Boolean).reverse()) {
       const [sha, ...msg] = line.split(" ");
       const text = msg.join(" ");
+      // A fast-forward merge before the branch's first commit moves it just as a reset does (BOS-733: BOS-726
+      // was made from main, then `git merge` fast-forwarded it onto BOS-725's tip). It has no commit of its own
+      // yet, so everything it moved onto came from elsewhere; the guards below still apply. git writes this
+      // reflog text untranslated.
+      if (/^merge [^:]+: Fast-forward$/.test(text) && sha) {
+        start = sha;
+        continue;
+      }
       if (/^commit|^merge|^rebase|^cherry-pick/.test(text)) break;
       if (/^reset: moving to|^branch: Reset to|^checkout: moving/.test(text) && sha) start = sha;
     }
@@ -1403,7 +1411,8 @@ export class Workspaces {
         const bLine = await refs(b.branch, true);
         if (bLine.some((sha) => mine.has(sha))) {
           // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
-          // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
+          // server may allow when B is approved (BOS-372). From the graph alone a fast-forward can't be told from a hole; B's
+          // reflog can, when the fast-forward was B's first move (realBase, BOS-733).
           const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
           // B stacked on this ticket (BOS-629): B was created from a commit this branch holds. The graph alone can't say who
           // wrote a shared commit, but the base the runner recorded when it created B's branch can: a shared commit that is

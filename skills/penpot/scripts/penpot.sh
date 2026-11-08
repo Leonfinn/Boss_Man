@@ -4,9 +4,10 @@
 #   PENPOT_URL    the Penpot address, e.g. http://192.168.1.20:9001
 #   PENPOT_TOKEN  the agent account's access token (never printed, never written to a file)
 #   PENPOT_EMAIL, PENPOT_PASSWORD  the same account's login; only `export` needs them (the export service wants a session, not a token)
-# Read:  penpot.sh check | teams | projects TEAM_ID | files PROJECT_ID | boards FILE_ID | shapes FILE_ID | link FILE_ID [PAGE_ID]
-#        penpot.sh export FILE_ID PAGE_ID BOARD_ID OUT.png
+# Read:  penpot.sh check | teams | projects TEAM_ID | files PROJECT_ID | pages FILE_ID | boards FILE_ID | shapes FILE_ID
+#        penpot.sh link FILE_ID [PAGE_ID] | export FILE_ID PAGE_ID BOARD_ID OUT.png
 # Write: penpot.sh agent-project TEAM_ID | create-file PROJECT_ID NAME | rename-file FILE_ID NAME | delete-file FILE_ID
+#        penpot.sh rename-page FILE_ID PAGE_ID NAME | delete-page FILE_ID PAGE_ID
 #        penpot.sh validate LAYOUT.json (checks only, writes nothing, needs no Penpot)
 #        penpot.sh apply FILE_ID LAYOUT.json | modify FILE_ID PAGE_ID SHAPE_ID key=value... | remove-shape FILE_ID PAGE_ID SHAPE_ID
 # Writes are only allowed in a file inside the agent project (PENPOT_AGENT_PROJECT, default "Agent designs") or in a
@@ -55,14 +56,17 @@ need() { [ -n "${2:-}" ] || die "usage: $1"; }
 get_file() { rpc get-file "$(jq -nc --arg f "$1" '{"id":$f}')" | jq -c 'walk(if type == "object" then with_entries(.key |= gsub("(?<u>[A-Z])"; "-\(.u | ascii_downcase)")) else . end)'; }
 
 # --- ownership guard -------------------------------------------------------------------------------------------
-# A write is allowed when the file was created by this helper, or sits in the agent project of a team the agent account owns.
-# This is a convenience check, not the security boundary: that is the agent account being only a Viewer in the owner's team.
+# A write is allowed when the file was created by this helper (in this run: the list lives in a temp folder), or sits in
+# the agent project of a team where the agent account can edit (owner, admin or editor; the agent is often only a member
+# of the owner's team, and its "Agent designs" project lives there). This is a convenience check, not the security
+# boundary: that is Penpot's own roles (the agent account is only a Viewer wherever it must not draw).
 guard() { # guard FILE_ID
   local f="$1" pid name t
   grep -qsx "$f" "$ledger" && return 0
   pid="$(get_file "$f" | jq -r '.["project-id"] // empty')" || exit 1
   [ -n "$pid" ] || die "can't tell which project file $f is in, so I won't change it."
-  for t in $(rpc get-teams | jq -r '.[] | select(.permissions.isOwner // .permissions["is-owner"] // false) | .id'); do
+  for t in $(rpc get-teams | jq -r '.[] | (.permissions // {}) as $p
+      | select([$p.isOwner, $p["is-owner"], $p.isAdmin, $p["is-admin"], $p.canEdit, $p["can-edit"]] | any) | .id'); do
     name="$(rpc get-projects "$(jq -nc --arg t "$t" '{"team-id":$t}')" | jq -r --arg p "$pid" '.[] | select(.id==$p) | .name')"
     [ "$name" = "$agent_project" ] && return 0
   done
@@ -90,8 +94,22 @@ def hexok: type == "string" and test("^#[0-9a-fA-F]{6}$");
 def res($p): . as $v
   | (if ($v | hexok) then $v elif ($v | type) == "string" and ($p | has($v)) then $p[$v] else null end)
   | if hexok then . else null end;
-def textsize($n): ($n.size // 16) as $s
-  | {w: ($n.w // (($n.text | length) * $s * 0.55 | ceil)), h: ($n.h // ($s * 1.3 | ceil))};
+# Text box size. Penpot's export doesn't regrow text, so a box that is too small loses words: estimate generously.
+# A character is taken as 0.6 of the font size (capitals and bold are wider than the 0.5 average). With `w`, the text is
+# word-wrapped to that width and the height is lines x size x line height; without `w` it is one line per paragraph
+# ("\n" starts a new one) and the width gets half a character of slack. An explicit `h` always wins.
+def lh($n): ($n.lineHeight // 1.2);
+def wraplines($p; $cpl): reduce ($p | split(" ") | .[]) as $wd ({n: 1, len: 0};
+    ($wd | length) as $l
+    | if .len == 0 then .len = $l
+      elif .len + 1 + $l <= $cpl then .len += 1 + $l
+      else .n += 1 | .len = $l end)
+  | .n + (if .len > $cpl then ((.len / $cpl) | ceil) - 1 else 0 end);
+def textsize($n): ($n.size // 16) as $s | ($s * 0.6) as $cw | (($n.text // "") | split("\n")) as $ps
+  | ($n.w // ((([$ps[] | length] | max // 0) * $cw + $s * 0.5) | ceil)) as $w
+  | ([1, (($w / $cw) | floor)] | max) as $cpl
+  | (if $n.w then ([$ps[] | wraplines(.; $cpl)] | add // 1) else ($ps | length) end) as $lines
+  | {w: $w, h: ($n.h // (([$lines, 1] | max) * $s * lh($n) + $s * 0.2 | ceil))};
 # Bounding box of a node in board coordinates (groups: union of children).
 def bbox($n): if $n.type == "group"
   then ([$n.children[] | select(has("remove") | not) | bbox(.)]) as $b
@@ -119,7 +137,13 @@ def chk($pal): .path as $p | .node as $n | ($p | lab) as $l | (($p | length) == 
      else empty end),
     (if $n.type == "text" and (($n.text | type) != "string" or $n.text == "") then "\($l): a text shape needs a \"text\" value. Add the words to show." else empty end),
     (if $n.type == "group" and ($n | kids | length) == 0 then "\($l): a group needs at least one shape in \"children\". Add one, or remove the group." else empty end),
-    (("x", "y", "w", "h", "size", "radius", "strokeWidth") as $k | select($n[$k] != null and ($n[$k] | type) != "number")
+    (if $n.type == "text" and $n.weight != null and (($n.weight | tostring) | IN("regular", "bold", "100", "200", "300", "400", "500", "600", "700", "800", "900") | not)
+      then "\($l): unknown weight \"\($n.weight)\". Use \"regular\" or \"bold\" (or 100 to 900 in steps of 100 for a Google font)." else empty end),
+    (if $n.type == "text" and ($n.font // "sourcesanspro") == "sourcesanspro" and $n.weight != null and (($n.weight | tostring) | IN("regular", "bold", "400", "700") | not)
+      then "\($l): the built-in font only has \"regular\" and \"bold\". Use one of those." else empty end),
+    (if $n.type == "text" and ($n.lineHeight | type) == "number" and ($n.lineHeight < 0.5 or $n.lineHeight > 4)
+      then "\($l): \"lineHeight\" is a multiple of the text size, like 1.5. Use a number between 0.5 and 4." else empty end),
+    (("x", "y", "w", "h", "size", "radius", "strokeWidth", "lineHeight") as $k | select($n[$k] != null and ($n[$k] | type) != "number")
       | "\($l): \"\($k)\" must be a number, not \"\($n[$k])\". Fix the value."),
     (("fill", "stroke") as $k | select($n[$k] != null and ($n[$k] | res($pal)) == null)
       | "\($l): \($k) \"\($n[$k])\" is not a #rrggbb colour and is not a name in \"colours\". Use a #rrggbb value, or add the name to \"colours\"."),
@@ -206,16 +230,23 @@ def base: {rotation:0,transform:ident,"transform-inverse":ident,proportion:1,"pr
 def fills($c): if $c then [{"fill-color":$c,"fill-opacity":1}] else [] end;
 def strokes($n): if $n.stroke then [{"stroke-color":$n.stroke,"stroke-opacity":1,"stroke-width":($n.strokeWidth // 1),"stroke-style":"solid","stroke-alignment":"inner"}] else [] end;
 def fontid($f): if $f == "sourcesanspro" then "sourcesanspro" else "gfont-" + ($f | ascii_downcase | gsub(" "; "-")) end;
+# Weight: "regular" or "bold" (or a number 100-900 for Google fonts). The built-in font's variant ids are "regular" and
+# "bold"; Google fonts' are "regular", "700" and so on, so "bold" there would match nothing and fall back to a serif.
+def wnum($n): ($n.weight // "regular" | tostring) | if . == "bold" then "700" elif . == "regular" then "400" else . end;
+def variant($n): wnum($n) as $w | if ($n.font // "sourcesanspro") == "sourcesanspro"
+  then (if $w == "400" then "regular" elif $w == "700" then "bold" else $w end)
+  else (if $w == "400" then "regular" else $w end) end;
 def textstyle($n): {
   "font-id": fontid($n.font // "sourcesanspro"), "font-family": ($n.font // "sourcesanspro"),
-  "font-variant-id": ($n.weight // "regular"), "font-size": (($n.size // 16) | tostring),
-  "font-weight": (if ($n.weight // "regular") == "bold" then "700" else "400" end), "font-style": "normal",
+  "font-variant-id": variant($n), "font-size": (($n.size // 16) | tostring),
+  "font-weight": wnum($n), "font-style": "normal",
   "text-align": ($n.align // "left"), "text-decoration": "none", "text-transform": "none",
-  "letter-spacing": "0", "line-height": "1.2", "vertical-align": "top",
+  "letter-spacing": "0", "line-height": (lh($n) | tostring), "vertical-align": "top",
   fills: fills($n.fill // "#000000")};
+# One paragraph per line of the text ("\n" starts a new paragraph).
 def textcontent($n): textstyle($n) as $st
   | {type:"root","vertical-align":"top",children:[{type:"paragraph-set",children:[
-      {type:"paragraph",children:[($st + {text:$n.text})]} + $st ]}]};
+      ($n.text | split("\n")[] | {type:"paragraph",children:[($st + {text:.})]} + $st) ]}]};
 
 def op($a; $v): {type:"set",attr:$a,val:$v,"ignore-touched":true};
 def delc($id): [{type:"del-obj",id:$id,"page-id":$page_id}];
@@ -359,6 +390,19 @@ case "${1:-}" in
   delete-file)
     need "delete-file FILE_ID" "${2:-}"; guard "$2"
     rpc delete-file "$(jq -nc --arg f "$2" '{id:$f}')" >/dev/null && echo "Deleted $2" ;;
+  pages)
+    need "pages FILE_ID" "${2:-}"
+    get_file "$2" | jq -r '.data as $d | ($d.pages // ($d["pages-index"] | keys))[] | "\(.)\t\($d["pages-index"][.].name)"' ;;
+  rename-page)
+    need "rename-page FILE_ID PAGE_ID NAME" "${4:-}"; guard "$2"
+    get_file "$2" | jq -e --arg p "$3" '.data["pages-index"] | has($p)' >/dev/null || die "file $2 has no page $3 (list them with: pages $2)."
+    update_file "$2" "$(jq -nc --arg p "$3" --arg n "$4" '[{type:"mod-page",id:$p,name:$n}]')" && echo "Renamed page to $4" ;;
+  delete-page)
+    need "delete-page FILE_ID PAGE_ID" "${3:-}"; guard "$2"
+    n="$(get_file "$2" | jq -r --arg p "$3" '.data["pages-index"] | if has($p) then length else "missing" end')" || exit 1
+    [ "$n" != missing ] || die "file $2 has no page $3 (list them with: pages $2)."
+    [ "$n" -gt 1 ] || die "page $3 is the file's only page, and a Penpot file needs one. Add your page first, or delete the whole file."
+    update_file "$2" "$(jq -nc --arg p "$3" '[{type:"del-page",id:$p}]')" && echo "Deleted page $3" ;;
   validate)
     need "validate LAYOUT.json" "${2:-}"; [ -r "$2" ] || die "can't read $2."
     if check_layout "$2"; then echo "Layout is fine: nothing was written."; else echo "Fix the errors above, then validate again. Nothing was written."; exit 1; fi ;;
@@ -479,5 +523,5 @@ case "${1:-}" in
     size="$(wc -c <"$out")"
     [ "$size" -le 5242880 ] || { rm -f "$out"; die "the PNG is over 5 MB, too big to attach. Export a smaller board."; }
     echo "Saved $out ($size bytes). Attach it with attach_image." ;;
-  *) die "usage: penpot.sh check | teams | projects TEAM_ID | files PROJECT_ID | boards FILE_ID | shapes FILE_ID | link FILE_ID [PAGE_ID] | export FILE_ID PAGE_ID BOARD_ID OUT.png | agent-project TEAM_ID | create-file PROJECT_ID NAME | rename-file FILE_ID NAME | delete-file FILE_ID | validate LAYOUT.json | apply FILE_ID LAYOUT.json | modify FILE_ID PAGE_ID SHAPE_ID key=value... | remove-shape FILE_ID PAGE_ID SHAPE_ID" ;;
+  *) die "usage: penpot.sh check | teams | projects TEAM_ID | files PROJECT_ID | pages FILE_ID | boards FILE_ID | shapes FILE_ID | link FILE_ID [PAGE_ID] | export FILE_ID PAGE_ID BOARD_ID OUT.png | agent-project TEAM_ID | create-file PROJECT_ID NAME | rename-file FILE_ID NAME | delete-file FILE_ID | rename-page FILE_ID PAGE_ID NAME | delete-page FILE_ID PAGE_ID | validate LAYOUT.json | apply FILE_ID LAYOUT.json | modify FILE_ID PAGE_ID SHAPE_ID key=value... | remove-shape FILE_ID PAGE_ID SHAPE_ID" ;;
 esac
