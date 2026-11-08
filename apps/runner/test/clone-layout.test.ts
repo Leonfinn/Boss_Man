@@ -133,7 +133,7 @@ describe("turning a ticket's worktree into a clone (BOS-323)", () => {
     await old.checkpoint(spec, "after a turn");
     const repo = old.repoDir(ids.project);
     const admin = path.resolve(w.path, readFileSync(path.join(w.path, ".git"), "utf8").replace("gitdir:", "").trim());
-    return { as, spec, w, repo, admin, head: git(w.path, "rev-parse", "HEAD") };
+    return { as, root, spec, w, repo, admin, head: git(w.path, "rev-parse", "HEAD") };
   }
 
   const expectEveryFileKept = (dir: string) => {
@@ -161,6 +161,21 @@ describe("turning a ticket's worktree into a clone (BOS-323)", () => {
     git(w.path, "commit", "-qm", "after the move");
     expect(await ws.pushForReview(spec, "main")).toMatchObject({ status: "pushed" });
     expect(git(spec.repoUrl, "log", "-1", "--format=%s", branchFor(ids.a))).toBe("after the move");
+  });
+
+  it("turns an existing worktree into a clone at its next run with no env set (BOS-343)", async () => {
+    const { root, spec, w, repo, head } = await workedWorktree();
+    expect(isClone(w.path)).toBe(false);
+    // A runner that sets nothing: the new default is clones, so the worktree converts in place.
+    const { BOSSMAN_TICKET_COPIES: _unused, ...noCopiesEnv } = process.env;
+    const ws = new Workspaces(root, noCopiesEnv);
+    const again = await ws.ensure(spec);
+    expect(again).toMatchObject({ path: w.path, created: false, branch: branchFor(ids.a) });
+    expect(isClone(w.path)).toBe(true);
+    expectEveryFileKept(w.path);
+    expect(git(w.path, "rev-parse", "HEAD")).toBe(head);
+    expect(git(w.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branchFor(ids.a));
+    expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
   });
 
   it("finishes a conversion cut short between moving the old .git aside and putting the new one in", async () => {

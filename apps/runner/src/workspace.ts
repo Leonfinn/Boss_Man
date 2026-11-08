@@ -12,8 +12,9 @@
 // branches, config and hooks to itself, so one ticket can't plant code the runner later runs for
 // another, or delete another ticket's branch. Its branch is fetched back into the shared repo
 // (syncBranch), where merges, pushes and other tickets read it. Every operation handles both
-// kinds; BOSSMAN_TICKET_COPIES=clone makes new copies clones. Worktrees stay the default until
-// every runner image in use understands clones, so rolling an image back can't lose one.
+// kinds; a new copy is a clone by default (BOS-343), turning a ticket's existing worktree into one
+// in place at its next run, so a rolling image back can't lose a clone. BOSSMAN_TICKET_COPIES=worktree
+// keeps the old kind for a runner rolled back to an image that predates clones; =clone says it outright.
 //
 // Lessons from cline/kanban: creation is serialised per repo, an existing worktree is never
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
@@ -112,6 +113,13 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** A ticket's copy that is its own clone (a .git folder), not a worktree of the shared repo (a .git file). */
 export const isClone = (dir: string) => statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
+
+/**
+ * What a new copy is made as (BOS-343): clones by default, so a rolling image back can't lose one.
+ * `BOSSMAN_TICKET_COPIES=worktree` keeps the old kind, for rolling an image back to one that predates
+ * clones; `=clone` says it outright. Anything else, or unset, is a clone.
+ */
+export const copiesAreClones = (env: NodeJS.ProcessEnv = process.env) => env.BOSSMAN_TICKET_COPIES !== "worktree";
 
 /** The project a copy belongs to, if its link to the shared repo still holds: a worktree's admin folder, or a clone's borrowed objects. */
 function copyProject(dir: string): string | null {
@@ -310,7 +318,7 @@ export class Workspaces {
   }
 
   /** What a new copy is made as (see the top of this file). */
-  private newCopiesAreClones = () => this.baseEnv.BOSSMAN_TICKET_COPIES === "clone";
+  private newCopiesAreClones = () => copiesAreClones(this.baseEnv);
 
   /**
    * An empty clone of the shared repo at tmp, with nothing checked out: it borrows the shared
