@@ -2651,6 +2651,12 @@ export async function buildApp(opts: AppOptions) {
       return "error" in r ? reply.code(409).send({ error: "cannot_update_runners", message: r.error }) : r;
     });
 
+    // "Restart the server" (BOS-647): owner session only; it writes a request file the host deployer acts on. No MCP tool reaches it.
+    owner.post("/api/self-deploy/restart", async (_req, reply) => {
+      const r = await selfDeploy.restartServer();
+      return "error" in r ? reply.code(409).send({ error: "cannot_restart", message: r.error }) : r;
+    });
+
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
     // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.

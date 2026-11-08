@@ -1876,7 +1876,7 @@ type SelfDeployView = {
   enabled: boolean;
   pending: boolean;
   status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
-  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[] } | null;
+  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[]; bluegreen?: boolean } | null;
 };
 
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
@@ -1929,6 +1929,25 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
           }
         >
           Build and update runners
+        </button>{" "}
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || v.pending || s?.result === "running" || !v.available?.deployed}
+          title="Starts the server again at the version it runs now (BOS-647). Use it when a server-health card says memory is high or freezes are piling up and no update is waiting."
+          onClick={() => {
+            const bg = v.available?.bluegreen === true;
+            const ask = bg
+              ? "Restart the server? It starts a fresh copy of the current version and switches over; pages keep working. The one-step rollback to the release before this one is lost. Continue?"
+              : "Restart the server? It stops for about a minute while it restarts; runs pick up again after. Continue?";
+            if (!window.confirm(ask)) return;
+            act.run(async () => {
+              await api("/api/self-deploy/restart", { method: "POST", body: {} });
+              return "Restart requested. The host picks it up within a minute; the line above shows how it went.";
+            });
+          }}
+        >
+          Restart the server
         </button>
       </div>
       {act.view}

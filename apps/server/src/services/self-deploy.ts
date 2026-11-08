@@ -2,7 +2,7 @@
 // The server never runs anything on the host. It reads what the host script publishes (outbox:
 // available.json, status.json), raises an owner decision when main has moved, and on approval
 // writes one small request file (inbox) that the host script validates and acts on.
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
@@ -47,7 +47,8 @@ export type Available = z.infer<typeof Available>;
 
 const Status = z.object({
   id: z.string(),
-  target: z.enum(["server", "runner"]),
+  // "restart": the Settings button (BOS-647), a fresh copy of the commit that already runs.
+  target: z.enum(["server", "runner", "restart"]),
   result: z.enum(["running", "deployed", "nothing_new", "rejected", "failed", "partial", "rolled_back"]),
   message: z.string(),
   from_commit: z.string(),
@@ -466,6 +467,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (n) await leaveClosedNotice(db, id, n, { notify: deps.notify });
   }
 
+  /** One request for the host: written beside its final name, then renamed, so the host never reads half a file. */
+  async function writeRequest(id: string, target: "server" | "runner" | "restart", commit: string) {
+    const [o] = await db.select({ id: owners.id }).from(owners).limit(1);
+    const body = { id, target, commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner" };
+    const tmp = `${inboxFile}.${randomBytes(4).toString("hex")}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(body)}\n`, { mode: 0o640 });
+    await rename(tmp, inboxFile!);
+  }
+
   async function saveSeen(key: string) {
     await db.insert(settings).values({ key: "self_deploy", value: { notified: key } }).onConflictDoUpdate({ target: settings.key, set: { value: { notified: key } } });
   }
@@ -542,7 +552,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // A runner "deploy" now only builds the image and asks for the drain; the swap's own result is reported by the drain (maintenance.ts).
     // A refused runner update is not a failure and needs nothing from the owner (the message says why): a quiet note, not a flag.
     const runnerRefused = s.target === "runner" && s.result === "rejected";
-    const title = runnerRefused ? `Runner update not started (${short(s.to_commit)})` : s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
+    const restart = s.target === "restart";
+    const title = restart
+      ? s.result === "deployed"
+        ? `Boss Man restarted (${short(s.to_commit)})`
+        : s.result === "rejected"
+          ? "Restart refused"
+          : s.result === "rolled_back"
+            ? `Restart switched back (${short(s.to_commit)})`
+            : `Restart failed (${short(s.to_commit)})`
+      : runnerRefused ?`Runner update not started (${short(s.to_commit)})` : s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
     const changes = s.result === "deployed" && ctx?.type === "self_deploy" ? (ctx.changes ?? []) : [];
     await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: changes.length ? `${s.message}\n\nWhat changed:\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
     // BOS-364 withdrew only cards for the commit it never reached; BOS-368 withdraws every open runner card, whichever way round the host names the commits.
@@ -785,13 +804,26 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed" && s.to_commit === ctx.commit) throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
     },
 
-    /** Hands the approved request to the host: written beside its final name, then renamed, so the host never reads half a file. // leader-only */
+    /** Hands the approved request to the host. // leader-only */
     async send(ctx: SelfDeployContext, decisionId: string) {
-      const [o] = await db.select({ id: owners.id }).from(owners).limit(1);
-      const body = { id: decisionId, target: ctx.target, commit: ctx.commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner" };
-      const tmp = `${inboxFile}.${randomBytes(4).toString("hex")}.tmp`;
-      await writeFile(tmp, `${JSON.stringify(body)}\n`, { mode: 0o640 });
-      await rename(tmp, inboxFile!);
+      await writeRequest(decisionId, ctx.target, ctx.commit);
+    },
+
+    /**
+     * The "Restart the server" button (BOS-647): asks the host for a fresh copy of the commit that runs now. The
+     * owner's click is the approval (like the other owner-only Settings actions), so no decision card is raised.
+     * The host checks the commit is still what runs, shares the server's rate limit and, with blue/green, refuses
+     * during a trial window; the checks here only stop a request that could never be acted on. // leader-only
+     */
+    async restartServer() {
+      if (!inboxFile) return { error: "Self-deploy is not set up on this install." } as const;
+      const a = await available();
+      if (!a?.deployed || !/^[0-9a-f]{40}$/.test(a.deployed)) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
+      if ((await status())?.result === "running") return { error: "A deploy is running now. Wait for it to finish." } as const;
+      if (await pending()) return { error: "A request is already waiting for the host. Try again in a minute." } as const;
+      const id = randomUUID();
+      await writeRequest(id, "restart", a.deployed);
+      return { requestId: id, commit: a.deployed, bluegreen: a.bluegreen === true } as const;
     },
   };
 }
