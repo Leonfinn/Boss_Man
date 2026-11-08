@@ -128,6 +128,24 @@ describe("ranked decision queue (R20)", () => {
     expect(q[0]!.score).toBeLessThan(q[1]!.score);
   });
 
+  // BOS-804: the card read "Raised just now" for a card 8 minutes old, and every card carried "Score 0: 0 for waiting".
+  // Both were the app's, not the design note's seed scripts: the age words came from the rank reasons, which use
+  // whole hours, and the age part is under 1 for anything raised within a day, so it rounded to 0 on every new card.
+  it("a normal card 8 minutes old ranks its age plainly and leaves zero parts out of the score line", async () => {
+    ctx = await setup();
+    const fresh = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+    // A new card blocks nothing and is due nothing. Raised at 0 minutes the score rounds to 0; at 8 minutes
+    // the age part is 0.1, which still rounds to 0 on the card while the score line said "0 for waiting".
+    const [justRaised] = await ctx.queue();
+    expect(justRaised!.id).toBe(fresh.id);
+    expect(Math.round(justRaised!.score)).toBe(0);
+    expect(justRaised!.reasons).toContain("Raised just now");
+    ctx.advance(8 * 60 * 1000);
+    const [after] = await ctx.queue();
+    expect(Math.round(after!.score)).toBe(0);
+    expect(after!.reasons).toContain("0 for waiting");
+  });
+
   describe("do-this-next ordering and the waiting group (BOS-551)", () => {
     type Ordered = Row & { step?: number | null; waiting?: string | null; doAfter?: string[]; doBefore?: string[] };
     const ordered = async () => (await ctx.queue()) as unknown as Ordered[];
