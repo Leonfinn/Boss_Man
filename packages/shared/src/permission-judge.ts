@@ -852,6 +852,9 @@ function shellDashCString(words: string[]): { word: string; ok: boolean } {
     // `-o pipefail` / `+o errexit` / bash's `-O extglob` / `+O nullglob`, and a cluster ending in o/O (`-eo pipefail`,
     // `-euo pipefail`, `-eO extglob`): the option name is the next word.
     if (/^[-+][A-Za-z]*[oO]$/.test(w)) { i++; continue; }
+    // A second `-c` word: bash runs the first command string and never reads this one as the shell's own option, so the
+    // words after it are not where the judge places them (BOS-707).
+    if (/^[-+][A-Za-z]*c/.test(w)) return { word: "", ok: false };
     // A bare `-` is a word, not an option.
     if (w === "-") return { word: w, ok: true };
     // Only plain short-option words (`-e`, `-ex`, `+e`, `-x`) are recognised, along with an `-o<name>`/`-O<name>` without a
@@ -1324,8 +1327,15 @@ function usesScratchUnsafely(c: string): boolean {
       // that is not `--` and not an option (BOS-695). An option word we can't place gives no Allow.
       // `bash -ce 'cmd'` / `bash -co pipefail 'cmd'` (BOS-700): `c` may sit inside a cluster, so the letters after it are
       // still options to place (`-ce` -> `-e`, `-co` -> `-o pipefail`) before the command string.
-      const tail = args[dashC]!.replace(/^-[A-Za-z]*?c(?=[A-Za-z]*$)/, "-");
-      const rest = tail.length > 1 ? [tail, ...args.slice(dashC + 1)] : args.slice(dashC + 1);
+      // `bash -oc pipefail 'cmd'` (BOS-707): an `o`/`O` anywhere in the same option word as the `c`, before or after it,
+      // takes the next word as its option name (`-oc`, `-Oc`, `-eoc`, `-oeOc`; `-oec` reads the command string itself as an
+      // "invalid option name" and aborts). Because the command string then sits one or more words on and the count is easy to
+      // misplace, the judge does not try to place it: a cluster with `c` and any `o`/`O` gives no Allow. Over-denial is
+      // accepted (write `-o pipefail -c 'cmd'` or `-c -o pipefail 'cmd'` instead). A `-c`-only cluster with other letters is
+      // still placed by `shellDashCString` as before.
+      const word = args[dashC]!;
+      if (/[oO]/.test(word.slice(1))) return true;
+      const rest = args.slice(dashC + 1);
       const at = shellDashCString(rest);
       if (at.ok === false) return true;
       const inner = at.word;
