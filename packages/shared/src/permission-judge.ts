@@ -821,6 +821,34 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
  * system binaries one level under /bin, /usr/bin, /usr/local/bin, /sbin, /usr/sbin (the image's own tools, not agent-writable).
  * Linear: one pass over the shell words of each segment.
  */
+/**
+ * Programs `xargs`/`parallel` may start and still get Allow (BOS-744). They read their names as plain data and never run
+ * code or write by themselves, so a value mistaken for one of them cannot hide a different program. A file tool reads its
+ * targets from the runner's input, so it is never listed; neither is an interpreter or any other program.
+ */
+const XARGS_PROGRAM_SAFE = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf test du df cut tr " +
+  "jq md5sum sha256sum sha1sum realpath dirname basename readlink sort uniq od xxd hexdump column nl tree true false sleep date").split(" "));
+// Options of `xargs`/`parallel` the scan fully understands: short letters that are bare vs take a value, and long names the
+// same way. Any other option gives no Allow: it may take the next word as its value, and that value is not the program
+// (`xargs --process-slot-var echo perl` runs perl, not echo; BOS-744). A list of value options always misses some, so an
+// unknown one fails closed instead of guessing.
+const XARGS_OPTS: Record<string, { bare: string; value: string; bareLong: string[]; valueLong: string[] }> = {
+  xargs: {
+    bare: "0rtpxei",
+    value: "EILPdnsa",
+    bareLong: ["--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit", "--show-limits", "--open-tty", "--help", "--version"],
+    valueLong: ["--eof", "--replace", "--max-lines", "--max-procs", "--delimiter", "--max-args", "--max-chars", "--arg-file", "--process-slot-var"],
+  },
+  parallel: {
+    bare: "kqtsX",
+    value: "jS",
+    bareLong: ["--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--serial", "--interactive", "--help", "--version"],
+    valueLong: ["--workdir", "--env", "--tmpdir", "--halt", "--delay", "--timeout", "--basefile", "--transfer-file", "--joblog", "--sshlogin",
+      "--sshloginfile", "--results", "--colsep", "--rpl", "--max-args", "--max-lines", "--max-procs", "--max-chars", "--number-of-cpus", "--load",
+      "--memfree", "--nice", "--tag", "--block", "--recstart", "--recend", "--pipepart", "--unbuffer", "--template"],
+  },
+};
+
 function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk = true): boolean {
   let relOk = startRelOk;
   let relCd = false;
@@ -831,7 +859,7 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
   }
   // BOS-722: a relative `cd` may follow a symlink the same command made (`ln -s /tmp/p l && cd l`), so it is outside.
   if (relCd && /(?:^|[;&|(\n{]\s*|\b(?:then|do|else)\s+)(?:\S*\/)?ln(?=\s)/.test(c)) relOk = false;
-  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
+  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|parallel|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
   // Wrappers whose first plain words are not the command (`flock l ./foo`, `taskset 1 ./foo`, `chroot dir ./foo`).
   const positional: Record<string, number> = { flock: 1, taskset: 1, chrt: 1, chroot: 1 };
   // Wrappers that run the string after `-c` / `--command` (`flock -c ./foo l`, `script -qc ./foo`) as a shell command.
@@ -871,21 +899,50 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
     let cmdNext = false;
     let lead = "";
     let pos = 0;
+    let xargsOptionsDone = false;
+    // Classify one option of `xargs`/`parallel`: "value" takes the next word, "bare" takes none, "unknown" may take either.
+    const classify = (w: string, s: { bare: string; value: string; bareLong: string[]; valueLong: string[] }): "bare" | "value" | "unknown" => {
+      if (w.startsWith("--")) {
+        const name = w.replace(/=.*$/s, "");
+        if (name !== w) return s.valueLong.includes(name) || s.bareLong.includes(name) ? "bare" : "unknown"; // value attached
+        if (s.valueLong.includes(name)) return "value";
+        if (s.bareLong.includes(name)) return "bare";
+        return "unknown";
+      }
+      for (let k = 1; k < w.length; k++) {
+        const ch = w[k]!;
+        if (s.value.includes(ch)) return k === w.length - 1 ? "value" : "bare"; // an attached value ends the word
+        if (!s.bare.includes(ch)) return "unknown";
+      }
+      return "bare";
+    };
     for (const w of words) {
       if (cmdNext) { if (runsByPathOutside(w, inOwn, relOk)) return true; break; }
       if (skipNext) { skipNext = false; continue; }
       // A system binary that runs its argument counts as that wrapper (`/usr/bin/env ./foo`).
       const base = sysBin.test(w) ? w.replace(/^.*\//, "") : w;
       // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
-      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; continue; }
+      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; xargsOptionsDone = false; continue; }
+      const xopts = lead === "xargs" || lead === "parallel" ? XARGS_OPTS[lead] : null;
       if (/^-/.test(w)) {
         if (cmdOpt.test(lead) && /^-[A-Za-z]*c$|^--command$/.test(w)) cmdNext = true;
         else if (cmdOpt.test(lead) && /^--command=/.test(w)) { if (runsByPathOutside(w.slice(10), inOwn, relOk)) return true; }
-        else if (takesValue[lead]?.test(w)) skipNext = true;
+        else if (xopts && !xargsOptionsDone) {
+          // `--` ends options; the next word is the program. Any option the scan doesn't know gives no Allow (BOS-744).
+          if (w === "--") xargsOptionsDone = true;
+          else {
+            const k = classify(w, xopts);
+            if (k === "unknown") return true;
+            if (k === "value") skipNext = true;
+          }
+        } else if (takesValue[lead]?.test(w)) skipNext = true;
         continue;
       }
       if (pos > 0) { pos--; continue; }
       if (/^\w+=/.test(w) || /^\d+[smhd]?$/.test(w)) continue;
+      // Under `xargs`/`parallel` the first plain word is the program, and only a known-safe reader may be it: otherwise the
+      // value of an option was read as the program in an earlier scan, and the real program got Allow (BOS-744).
+      if (xopts && !XARGS_PROGRAM_SAFE.has(base)) return true;
       if (bad(w)) return true;
       break; // the first real command word of the segment
     }

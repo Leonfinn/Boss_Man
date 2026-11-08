@@ -1965,12 +1965,29 @@ describe("rules judge: rules-judge rolling follow-ups (BOS-744)", () => {
     "`bash <<'E'`\nrm -rf /etc\nE\n",
     "echo `bash -c 'rm -rf /etc'`\n",
   ])("deny, backtick substitution (item 2): %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  // Kind: xargs/parallel option values read as the program (Jane's round-3 review of BOS-730). The scan that decides what
+  // runs under xargs/parallel must not take the value of an option it doesn't know as the program: `echo` is the value of
+  // `--process-slot-var` / `--workdir` / `--env`, and the real program after it is `perl -e 'unlink @ARGV'`. Only a program
+  // reached through options the scan fully understands may get Allow.
+  it.each([
+    "echo / | xargs --process-slot-var echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --workdir echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --env echo perl -e 'unlink @ARGV'",
+    // getopt_long accepts unique prefixes: `--process` is not `--process-slot-var`, so its value is not the program.
+    "echo / | xargs --process echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --tmpdir echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --halt echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --timeout echo perl -e 'unlink @ARGV'",
+  ])("deny: xargs/parallel option value is not the program: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
   it("reads long hostile input in linear time", () => {
     const t = Date.now();
     const inputs = [
       "cat `bash <<'E'` " + "x ".repeat(2000) + "\nrm -rf /etc\nE",
       "cat <<'A' " + "((".repeat(1500) + "\n" + "> >(".repeat(800) + "A",
       "cat x " + "`".repeat(3000) + " <<'A'\n" + "| tee ".repeat(500) + "\nA",
+      // The xargs/parallel option scan (BOS-744) reads each option word once: a long chain of unknown options stays linear.
+      "echo / | xargs " + "--unknown ".repeat(600) + "echo perl",
+      "echo / | parallel " + "-" + "z".repeat(3000) + " echo",
     ];
     for (const cmd of inputs) {
       expect(cmd.length).toBeLessThan(10_000);
