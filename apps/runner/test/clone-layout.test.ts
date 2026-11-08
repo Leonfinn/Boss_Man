@@ -67,6 +67,24 @@ describe("per-ticket clones (BOS-323)", () => {
     git(repo, "fsck", "--connectivity-only", "--no-progress");
   });
 
+  it("clash() reads a clone's committed work, not a stale shared branch (BOS-343)", async () => {
+    const { ws, a, spec } = await twoTickets();
+    // The ticket commits in its clone and does not checkpoint: only the clone has the commit.
+    writeFileSync(path.join(a.path, "README.md"), "ticket\n");
+    git(a.path, "add", ".");
+    git(a.path, "commit", "-qm", "ticket work");
+    // Main moves on the same line meanwhile.
+    const other = mkdtempSync(path.join(tmpdir(), "bm-rb-main-"));
+    git(other, "clone", "-q", spec(ids.a).repoUrl, ".");
+    writeFileSync(path.join(other, "README.md"), "main\n");
+    git(other, "add", ".");
+    git(other, "commit", "-qm", "main work");
+    git(spec(ids.a).repoUrl, "checkout", "-q", "--detach");
+    git(other, "push", "-q", "origin", "HEAD:main");
+    // Without the sync clash() would read the shared branch at the base and say "no clash".
+    expect((await ws.clash(spec(ids.a), "main")).clashes).toBe(true);
+  });
+
   it("never runs a filter one ticket sets up when the runner looks at another ticket's copy", async () => {
     const { ws, a, b, spec } = await twoTickets();
     const marker = path.join(mkdtempSync(path.join(tmpdir(), "bm-marker-")), "ran");

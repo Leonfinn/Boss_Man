@@ -1337,7 +1337,8 @@ export class Workspaces {
 
   /**
    * Whether the ticket's branch still merges into the target (BOS-426): the same merge-tree try as a
-   * merge, but nothing is built or pushed. A branch that is gone here, or a failed git call, throws:
+   * merge, but nothing is built or pushed. A clone's branch is synced first (BOS-343), so it reads the
+   * ticket's real head, not a stale one. A branch that is gone here, or a failed git call, throws:
    * the caller must not read "couldn't tell" as "clean".
    */
   async clash(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}): Promise<{ clashes: boolean; files: string[] }> {
@@ -1345,6 +1346,10 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      // A clone's branch moves in the clone (BOS-323), so bring it over first, as merge and push do: otherwise
+      // this checks a stale branch and reports no clash (BOS-343). It isn't an agent turn, so nothing new is uncommitted.
+      const dir = this.ticketDir(spec.ticketId);
+      if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
       return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
     });
