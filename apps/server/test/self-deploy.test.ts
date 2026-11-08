@@ -1130,7 +1130,8 @@ describe("self-deploy waits for a quiet machine (BOS-420)", () => {
 
     await headroom(c, 8192);
     await c.deployWait.step();
-    expect(await readdir(path.join(c.dir, "inbox"))).toEqual(["request.json"]);
+    // The request, plus the checked-merges list BOS-753 writes beside every server request.
+    expect((await readdir(path.join(c.dir, "inbox"))).sort()).toEqual(["checked", "request.json"]);
     expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ id: d!.id, commit: B });
     expect((await waitRow(c))?.phase).toBe("sent");
   });
