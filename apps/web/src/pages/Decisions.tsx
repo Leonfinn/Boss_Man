@@ -702,7 +702,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                 <span className="muted">
                   ·{" "}
                   {a.withdrawn
-                    ? `withdrawn by ${a.withdrawn.by}: ${a.withdrawn.note}`
+                    ? `withdrawn by ${a.withdrawn.by}: ${a.withdrawn.note}${a.withdrawn.notice ? ` (${a.withdrawn.notice})` : ""}`
                     : a.settled
                       ? `${settledWord(a.settled.answer)} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
                       : a.advice?.state === "reissued"

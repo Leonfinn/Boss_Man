@@ -260,6 +260,11 @@ describe("owner setup cards (DR-011)", () => {
     expect(after).toHaveLength(1);
     expect(after[0]!.status).toBe("withdrawn");
     expect(after[0]!.dedupeKey).toBeNull();
+    // BOS-740: it doesn't vanish from Decisions; the same closed-card notice says why it closed and what's left.
+    const notice = (after[0]!.context as { closedNotice?: { why: string; text: string } }).closedNotice;
+    expect(notice).toMatchObject({ why: "switched-back" });
+    expect(notice!.text).toContain("its setup steps no longer apply");
+    expect(notice!.text).toContain("nothing left to press");
     const [t] = await c.db.select().from(tickets).where(eq(tickets.mergeCommit, B));
     expect(t!.ownerSetupDecisionId).toBeNull();
 

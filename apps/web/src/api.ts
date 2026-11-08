@@ -124,7 +124,7 @@ export type AdvisedDecision = {
   about?: Array<{ ticketId: string; ref: string | null; title: string }>;
   advice?: Advice;
   settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean };
-  withdrawn?: { by: string; note: string };
+  withdrawn?: { by: string; note: string; /** The closed-card notice a card Boss Man closed by itself left (BOS-740). */ notice?: string };
 };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 /** A card Boss Man closed by itself in the last couple of hours (BOS-739): the notice, and the steps it showed. */
