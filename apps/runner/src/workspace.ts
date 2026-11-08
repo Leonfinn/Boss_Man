@@ -19,6 +19,7 @@ import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { checkQueueEnv, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
+import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
 const run = promisify(execFile);
 const VERIFY_KILL_GRACE_MS = 2000;
@@ -1016,6 +1017,25 @@ export class Workspaces {
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
       const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
       return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
+    });
+  }
+
+  /**
+   * Whether the owner's sign-off on `signed` still covers the ticket's branch head (BOS-734, DR-038): only
+   * clean automatic merges of the target came in since. Fails closed: any git doubt says "does not cover".
+   */
+  async signoffCovers(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, signed: string, secrets: Record<string, string | undefined> = {}, expectHead?: string): Promise<SignoffCover> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      const head = await this.git(["rev-parse", "--verify", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
+      // The caller checked this head; if the branch ref says otherwise, the answer would be about different code (BOS-734).
+      if (expectHead && !head.startsWith(expectHead) && !expectHead.startsWith(head)) {
+        return { covers: false, reason: "the branch moved while this was being checked", newCommits: 0, handMerges: 0 };
+      }
+      return checkSignoffCovers((args) => this.gitCode(args, { cwd: repo }), signed, head, `refs/remotes/origin/${target}`);
     });
   }
 

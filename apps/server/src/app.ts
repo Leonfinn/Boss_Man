@@ -670,6 +670,8 @@ export async function buildApp(opts: AppOptions) {
     releaseUnblocked: (ticketId) => scheduler.releaseIfUnblocked(ticketId),
     landingActive: (ticketId) => review.landingActive(ticketId),
     branchClash: (ticketId) => review.branchClash(ticketId),
+    signoffCovers: (ticketId, signed, head) => review.signoffCovers(ticketId, signed, head),
+    signoffWithdraw: (ticketId, cardHead, head, why) => review.withdrawStaleSignoff(ticketId, cardHead, head, why),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),
@@ -814,6 +816,8 @@ export async function buildApp(opts: AppOptions) {
   });
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
+    // A sign-off card for older code is replaced before the press is taken, with the reason (BOS-734).
+    signoffStale: (ticketId, cardHead) => review.signoffStale(ticketId, cardHead),
     // A stalled-review card's actions (BOS-404, BOS-426): take it, hand it to another reviewer, send it back, or leave it.
     reviewStall: (ctx, answer, byAgentId) => review.reviewStall(ctx, answer, byAgentId),
     // Answering "Approve and merge" on the sign-off card starts a tracked landing without holding the
