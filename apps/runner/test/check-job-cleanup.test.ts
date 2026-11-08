@@ -1,10 +1,10 @@
 // BOS-617 / BOS-565: a server-queued check job's HOME/TMPDIR folder goes when the job ends, and folders left by a
 // restart (no running job owns them) are swept at start-up.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { levelFor, probeLandlock } from "../src/fence.js";
 import { Workspaces } from "../src/workspace.js";
 
@@ -13,16 +13,26 @@ const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: ENV }).trim();
 const projectId = "11111111-1111-4111-8111-111111111111";
 
+const dirs: string[] = [];
+const tmp = (prefix: string) => {
+  const d = mkdtempSync(path.join(tmpdir(), prefix));
+  dirs.push(d);
+  return d;
+};
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function setup() {
-  const bare = mkdtempSync(path.join(tmpdir(), "bm-cjc-origin-"));
+  const bare = tmp("bm-cjc-origin-");
   git(bare, "init", "-q", "--bare", "-b", "main");
-  const seed = mkdtempSync(path.join(tmpdir(), "bm-cjc-seed-"));
+  const seed = tmp("bm-cjc-seed-");
   git(seed, "clone", "-q", bare, ".");
   writeFileSync(path.join(seed, "a.txt"), "a\n");
   git(seed, "add", ".");
   git(seed, "commit", "-qm", "init");
   git(seed, "push", "-q", "origin", "HEAD:main");
-  const root = mkdtempSync(path.join(tmpdir(), "bm-cjc-root-"));
+  const root = tmp("bm-cjc-root-");
   mkdirSync(path.join(root, "repos"), { recursive: true });
   git(root, "clone", "-q", "--bare", bare, path.join(root, "repos", `${projectId}.git`));
   return { root, commit: git(seed, "rev-parse", "HEAD") };

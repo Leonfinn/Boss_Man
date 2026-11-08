@@ -110,6 +110,17 @@ The owner enables it once by hand (it is an infra file): add it to `COMPOSE_FILE
 
 `result` is `running`, `deployed`, `nothing_new`, `rejected`, `failed`, `partial` (server deployed, runner update failed) or `rolled_back`. While Boss Man restarts the file still holds `running`; when the new server starts its poller reads the final state and notifies. `available.json` carries `deployed`, `tip`, up to 30 commit subjects, up to 300 changed paths, `infraPaths`, and `runnerChanged` (same rule as `needs_runner` in `deploy.sh`; a test keeps the two copies equal). It lets the server show a range and changed areas without a GitHub token and without a git checkout of its own.
 
+### Which services an update changes, and the database/proxy card (BOS-487, DR-020 B and C)
+
+A server update rolls only the server copies. It never starts, stops or recreates the database or the proxy (`--no-deps` on every compose call; a test in `scripts/host-deployer.test.sh` scans the three deploy scripts for it). Boss Man therefore works out for itself whether those two changed, instead of asking the owner to judge it:
+
+- **The host compares settings, not file paths.** When main is ahead, `host-deployer.sh` unpacks the live commit and the new one into one fixed folder under `state/` (the same path both times, so relative mounts render the same), copies in the checkout's `.env`, and runs `docker compose --project-name <the live stack's project> config --hash '*'` with the deployer's own `COMPOSE_FILE` and a pinned `BOSSMAN_COMMIT`. A Compose without `--hash` gets the same answer from a checksum of each service's block of `docker compose config`. It needs nothing beyond Docker, `git`, `tar` and coreutils. The compose project and files come from the deployer's own settings; nothing is host-specific.
+- **`available.json` gains** `changedServices` (names whose settings differ, including added and removed services), `servicesChecked` (false when it could not render: logged, never blocks an update), `pendingServices` (db/proxy still running with older settings than the live checkout asks for), `dbStartedAt` and `dbContainerId`. All are optional for the server, so an older host script just gets no mention of the database. `SERVICE_COMPARE=0` in `host.conf` turns the compare off (the card then says it could not compare).
+- **Pending** means: the live checkout's settings for the service differ from what it last ran with, and its container has not been recreated since. The host keeps `state/applied-services` (service, settings hash, container id at the last apply); a recreate gives a new container id and clears it, a restart or reboot keeps the id and does not. The first look records the present state as applied.
+- **The hand-apply card** says "This update changes the database's settings" (or the proxy's) when `changedServices` lists it, and says nothing about them otherwise. If the host could not compare and a compose file changed, it says so in one line.
+- **The separate card** ("`self-deploy:services:<service>:<commit>`", owner tier) is raised by the poller when a service is pending, the last server result is `deployed` for the live commit, the standby window is over, and the host is quiet (no agent run in flight and no merge landing). If it is not quiet, nothing is raised and the next pass tries again. It tells the owner Boss Man is unreachable for a few seconds, takes a database backup first (`pg_dump | gzip`, `gzip -t`, `ls -l`), gives the one restart command (`docker compose up -d --no-deps db` or `proxy`) with the recorded host name and install folder, then two checks (the service's uptime, and the live server's `/api/ready`). It clears itself when the host reports the service no longer pending.
+- **Not built:** DR-008's memory-headroom check. "Quiet" here is the part that exists today.
+
 ## Failure webhook
 
 `host.conf`, a root-owned file (shell `KEY=value` lines):
@@ -180,14 +191,15 @@ Before, a runner update recreated every runner at once and killed the agent runs
 ```
 owner approves "Update runners" (or runs scripts/update-runner.sh)
   1. update-runner.sh builds the new image, runs the canary, tags :current     (nothing running is touched)
-  2. it writes inbox/drain.json and returns                                    (the host lock is free again)
-  3. the server turns the maintenance hold on: banner, no new runs anywhere
-  4. every few seconds the drain step looks at each runner:
+  2. it rebuilds and recreates the launcher when one is running               (only the launcher restarts; BOS-335)
+  3. it writes inbox/drain.json and returns                                    (the host lock is free again)
+  4. the server turns the maintenance hold on: banner, no new runs anywhere
+  5. every few seconds the drain step looks at each runner:
        its company has no active run  ->  launcher recreates that runner on :current
        its company is still busy      ->  wait
-  5. deadline (30 min) with runs still going -> ONE owner decision:
+  6. deadline (30 min) with runs still going -> ONE owner decision:
        Stop the remaining runs and update now / Keep waiting another 30 min / Cancel the update
-  6. every runner is on :current (and has reconnected) -> the hold lifts, the owner is notified, the queue runs
+  7. every runner is on :current (and has reconnected) -> the hold lifts, the owner is notified, the queue runs
 ```
 
 ### Decisions made
