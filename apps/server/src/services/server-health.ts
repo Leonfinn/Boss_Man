@@ -116,7 +116,7 @@ export function serverHealthService(deps: ServerHealthDeps) {
       const title = card.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 100);
       return `What to do: approve the open server update card ("${title}"). Installing it restarts the server, which frees its memory and usually ends the freezes.`;
     }
-    return "What to do: no server update is waiting, so restart the server. Settings has no restart button yet; until it does, restart Boss Man's server container on the machine that runs it. It is back in a minute or two, and runs pick up again after.";
+    return "What to do: no server update is waiting, so restart the server: Settings → Server and runner → Updates → Restart the server. With blue/green it switches to a fresh copy without dropping pages; otherwise it is back in a minute or two, and runs pick up again after.";
   }
 
   async function raise(rule: HealthRule, question: string, extra: Record<string, unknown>) {

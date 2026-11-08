@@ -107,6 +107,8 @@ export const OWNER_CONTROLS = {
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
     // The update wait (BOS-420): the same button reads by phase.
     "Stop making room", "Lift the hold now",
+    // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
+    "Restart the server",
     // This host: confirm a fact only the owner can give.
     "Confirm",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.

@@ -310,6 +310,10 @@ describe("owner chat", () => {
     expect(last.text).toContain("I want to add a feature");
     expect(last.text).toContain("Description: (none yet)");
     expect(last.text).toContain("create_feature");
+    expect(last.text).not.toContain("Don't break it into tasks");
+    expect(last.text).toContain("plan it as a main ticket with sub-tasks where the work naturally divides");
+    expect(last.text).toContain("Keep it as one ticket when it is small or doesn't divide");
+    expect(last.text).toContain("Don't split just for the sake of it");
     expect((await c.req("POST", `/api/companies/${c.company.id}/chat/grill`, { kind: "task", title: "x", projectId: "00000000-0000-4000-8000-000000000000" })).statusCode).toBe(404);
     expect((await c.req("POST", `/api/companies/${c.company.id}/chat/grill`, { kind: "bug", title: "x" })).statusCode).toBe(400);
   });
