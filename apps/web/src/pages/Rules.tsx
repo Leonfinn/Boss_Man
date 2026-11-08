@@ -4,8 +4,8 @@ import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
-type Match = { kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; destructive?: boolean; pushing?: boolean };
-type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number };
+type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; destructive?: boolean; pushing?: boolean };
+type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number; createdAt?: string | null; createdBy?: string | null; sourceDecisionId?: string | null };
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }>; shadowedIds?: string[] };
 
 const KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"];
@@ -22,6 +22,7 @@ const outcomeTag = (o: Outcome) => {
 
 function describeMatch(m: Match) {
   const parts: string[] = [];
+  if (m.agentIds?.length) parts.unshift(`the request is from one named agent`);
   if (m.kinds?.length) parts.push(`tool kind is ${m.kinds.join(" or ")}`);
   if (m.commandPattern) parts.push(`command matches /${m.commandPattern}/`);
   if (m.titlePattern) parts.push(`title matches /${m.titlePattern}/`);
@@ -29,6 +30,7 @@ function describeMatch(m: Match) {
   if (m.destructive) parts.push("the command deletes or destroys data (Boss Man reads what each part runs, however it's written)");
   if (m.tempCleanupOnly) parts.push("its only deletes are of entries directly in /tmp");
   if (m.workingCopyOnly) parts.push("its deletes are plain paths in the agent's own working copy (or /tmp)");
+  if (m.safeOnly) parts.push("it is not a destructive or pushing command");
   if (m.pushing) parts.push("the command pushes or publishes");
   return parts.join(" and ");
 }
@@ -45,6 +47,11 @@ function RuleRows({ rules, shadowed, onMove, onChange, onDelete }: { rules: Rule
             <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
               When {describeMatch(r.match)}
             </p>
+            {r.createdBy && (
+              <p className="muted" style={{ fontSize: 12.5 }}>
+                Made by {r.createdBy}{r.createdAt ? ` on ${new Date(r.createdAt).toLocaleString()}` : ""}{r.sourceDecisionId ? " from a decision card (see Decisions, answered)" : ""}. Remove it with the button on this row.
+              </p>
+            )}
             {shadowed.includes(r.id) && <p className="muted" style={{ fontSize: 12.5 }}>Built-in rules already allow these requests, so this rule no longer asks about them. It still applies to delete, push and other guarded requests.</p>}
           </div>
           <select aria-label={`Outcome of ${r.name}`} value={r.outcome} onChange={(e) => onChange(r, e.target.value as Outcome)}>

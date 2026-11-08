@@ -8,6 +8,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
+  ruleProblems,
   isBossmanCall,
   readCriteria,
   unreportedAfterMerge,
@@ -31,6 +32,7 @@ import {
   explainPermission,
   formatDate,
   type AlwaysChoice,
+  type AlwaysScope,
   type PermissionExplanation,
   type PermissionInfo,
   type PolicyMatch,
@@ -183,7 +185,7 @@ export function fixesLiveHeading(fixes: Array<{ symptom: string; ref: string }>)
 }
 
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** The agent that asked, so an "always" rule can be limited to it (BOS-294). */ alwaysAgent?: { id: string; name: string }; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
   | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -679,6 +681,8 @@ export type AnswerExtra = {
   reasonLink?: string;
   /** The owner wrote their own answer to an agent's question instead of picking an option. */
   custom?: boolean;
+  /** With an "always" answer: whose requests the saved rule covers. Defaults to the asking agent only (BOS-294). */
+  alwaysScope?: AlwaysScope;
   /** Who answered: "ceo" when the CEO settled it ("handled" advice), else the owner's username (logged with a skill override). */
   by?: string;
   /** With by "ceo": the advice summary, stored in the same conditional update that closes the decision. */
@@ -1448,7 +1452,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const [r] = await db.select({ purpose: runs.purpose }).from(runs).where(eq(runs.id, event.runId));
         if (r?.purpose !== "chat") return planRequest(runner, event);
       }
-      const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput };
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+      const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput, agentId: run?.agentId ?? null };
       // The owner chat may use Boss Man's own (board) tools and nothing else.
       const [asking] = await db.select({ purpose: runs.purpose, agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
       const { outcome, rule, position } =
@@ -1522,7 +1527,6 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           .returning({ id: decisions.id });
         return { outcome, rule, decisionId: row?.id ?? null };
       }
-      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
       const [agent] = run?.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, run.agentId)) : [];
       const explain = explainPermission(info, agent?.name ?? "An agent");
       // A CEO never approves its own request: those go to the owner.
@@ -1573,7 +1577,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The model second opinion (BOS-338) is asked only when the rules judge allows: it can only make a card stricter.
       const askSecond = !!reading && reading.verdict === "allow" && judgeMode !== "off" && !!secondOpinion && (await secondOpinion.enabled(runner.companyId).catch(() => false));
       const judge: JudgeNote | undefined = reading && judgeMode !== "off" ? { mode: judgeMode, verdict: reading.verdict, row: reading.row, reason: reading.reasonLabel, ...(askSecond ? { second: { state: "pending" as const } } : {}) } : undefined;
-      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}), toolTitle: event.title, toolInput: inputFingerprint(event.rawInput), explain, ...(judge ? { judge } : {}), ...(always.length ? { always } : {}) };
+      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}), toolTitle: event.title, toolInput: inputFingerprint(event.rawInput), explain, ...(judge ? { judge } : {}), ...(always.length ? { always, ...(run?.agentId ? { alwaysAgent: { id: run.agentId, name: agent?.name ?? "This agent" } } : {}) } : {}) };
       // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
       const stored = { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? { ...(rule === TEMP_CLEANUP_RULE ? { tempCleanup: true } : {}), ladder } : {}) };
       const [row] = await db
@@ -2580,14 +2584,31 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (ctx.type === "model_change" && answer === MODEL_EDIT && !extra.modelConfig) throw new AnswerError("Edit needs the harness, provider, model and paid-from you want.");
       if (ctx.type === "team_plan" && extra.picks?.some((i) => !Number.isInteger(i) || i < 0 || i >= ctx.hires.length)) throw new AnswerError("That hire isn't in the plan.");
       // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
+      let saveRule: (() => Promise<void>) | undefined;
       const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
       if (always) {
+        // Standing rules are the owner's call, never an agent's, whatever the answer path (BOS-294).
+        if (extra.settledBy || extra.by === "ceo") throw new AnswerError("Only the owner can save a standing rule.");
+        // Built from the choice stored on the card, never from anything the browser sent; only the scope is the owner's pick.
+        const scope: AlwaysScope = extra.alwaysScope ?? "agent";
+        if (scope !== "agent" && scope !== "company") throw new AnswerError("The scope must be this agent or every agent.");
+        const asker = (ctx as Extract<DecisionContext, { type: "permission" }>).alwaysAgent;
+        if (scope === "agent" && !asker) throw new AnswerError("This request has no known agent, so the rule can only cover every agent.");
+        // Cards raised before file rules were withdrawn may still carry a kind-wide read/edit choice; never save it.
+        if (!always.match.commandPattern && !always.match.titlePattern && always.match.kinds?.some((k) => k === "read" || k === "edit" || k === "fetch")) throw new AnswerError("That rule is no longer offered: it would cover files or web addresses Boss Man can't check. Use Allow once.");
+        // Same for a server-wide tool choice (it would cover destructive tools and ones added later): only an exact-tool title ending in $ is saved.
+        if (always.match.titlePattern?.startsWith("^mcp__") && !always.match.titlePattern.endsWith("$")) throw new AnswerError("That rule is no longer offered: it would cover every tool on the server. Use Allow once.");
+        const condition: PolicyMatch = { ...always.match, safeOnly: true, ...(scope === "agent" ? { agentIds: [asker!.id] } : {}) };
+        const problems = ruleProblems(condition);
+        if (problems.length) throw new AnswerError(`That rule can't be saved: ${problems.join(" ")}`);
+        saveRule = async () => {
         const [last] = await db.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
         const on = formatDate("en-GB", now(), { day: "numeric", month: "short" });
-        await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name} (from a request on ${on})`, trigger: "permission", condition: always.match, outcome: "allow", position: (last?.position ?? -1) + 1 });
+        await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name}${scope === "agent" ? ` for ${asker!.name}` : ""} (from a request on ${on})`, trigger: "permission", condition, outcome: "allow", position: (last?.position ?? -1) + 1, createdAt: now(), createdBy: extra.by ?? "the owner", sourceDecisionId: d.id });
+        };
         answer = ALLOW;
       }
-      if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule });
+      if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) saveRule = async () => { await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule, createdBy: extra.by ?? "the owner", sourceDecisionId: d.id }); };
       // Kept on the decision so the owner can see who settled it and why (BOS-111). Written on a copy, not
       // on ctx itself, so reopening a card later restores the pre-answer context without this record.
       let settled: Settled | undefined;
@@ -2625,6 +2646,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.update(decisions).set({ context: { ...ctx, repeats: repeatsNow } as DecisionContext }).where(eq(decisions.id, id));
       }
       if (!closed) return null;
+      // The rule is saved only by the request that closed the card, so a double tap or retry cannot save it twice.
+      await saveRule?.();
       // The card is settled, so its notification is read now rather than on the next feed poll (BOS-413).
       await markDecisionNotificationRead(db, id, now());
 
