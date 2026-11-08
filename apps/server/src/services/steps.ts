@@ -72,9 +72,9 @@ const ADDON_WORDS: Record<Addon, { label: string; re: RegExp }> = {
 };
 const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up", stopped: "stopped", needs_login: "waiting for a login", running: "running", unknown: "unknown" };
 /** What the lint can be given: add-on facts for R9 (and the add-on this card sets up, whose steps are exempt),
- * the host facts for R6 (BOS-427), the card's options, and the machine's own update card for R15 (DR-036). Each
- * may be absent, and then that rule only checks what it can without them. */
-export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; options?: readonly string[]; selfDeploy?: SelfDeployFacts };
+ * the host facts for R6 (BOS-427) and the name the server runs on (BOS-774), the card's options, and the machine's
+ * own update card for R15 (DR-036). Each may be absent, and then that rule only checks what it can without them. */
+export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts };
 
 /** R9: a step that relies on an add-on that isn't running is refused; one Boss Man can't see is warned about. */
 function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: Addon | undefined, refuse: LintFinding[], warn: LintFinding[]) {
@@ -565,9 +565,12 @@ export function fillHostTokens(steps: readonly string[], values: Readonly<Record
  * button or field it names must be on the screen the path reaches (`OWNER_FIELDS` lists the fields); a step that
  * tells the owner to fill in a field must give the value or say that any value works. Both can be overridden.
  *
- * R6 (BOS-427) is the host and account check: every command block says where it runs and as whom, and a block
+ * R6 (BOS-427) is the host and account check: every command block says where it runs and as whom, a block that
+ * names the server says the name the host deployer reports (BOS-774: another name, like a remembered "truenas", is
+ * refused; with no report yet it is only warned about), and a block
  * run by the owner's login may not read a recorded folder that login can't read unless an earlier block on the
- * card stages a readable copy for it. Pass `hosts` (the host facts Boss Man recorded) to check the paths;
+ * card stages a readable copy for it. Pass `hosts` (the host facts Boss Man recorded) and `serverHost` (the name it
+ * runs on) to check the paths;
  * without them only the host/account presence is checked, so a caller that hasn't been taught the facts keeps
  * working. Backups are never made world-readable.
  *
@@ -646,7 +649,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     }
     for (const problem of screens.r8) refuse.push({ step, rule: "R8", problem });
     for (const problem of screens.r13) refuse.push({ step, rule: "R13", problem });
-    const host = lintHost(blockPieces, step, given.hosts, staged, step === 1);
+    const host = lintHost(blockPieces, step, given.hosts, given.serverHost, staged, step === 1);
     refuse.push(...host.refuse);
     warn.push(...host.warn);
     for (const c of code) refuse.push(...gitUmaskFindings(step, c));
@@ -908,17 +911,33 @@ function modeOpensUp(p: Prog): boolean {
 }
 
 /**
- * R6: every block says where and as whom it runs; a block run by the login may not read a recorded folder the
- * login can't read unless an earlier block on the card made a readable copy for it (a `sudo install -o <login>`
- * or a `cp`/`rsync` by the login); and a block that opens a backup folder to everyone is refused.
+ * R6: every block says where and as whom it runs; a block that names the server must name the one the host
+ * deployer reports (BOS-774); a block run by the login may not read a recorded folder the login can't read
+ * unless an earlier block on the card made a readable copy for it (a `sudo install -o <login>` or a
+ * `cp`/`rsync` by the login); and a block that opens a backup folder to everyone is refused.
  * `staged` carries the folders earlier blocks made readable, so the check runs across the whole card.
  */
-function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, step: number, hosts: HostFacts[] | undefined, staged: Map<string, Set<string>>, first: boolean): { refuse: LintFinding[]; warn: LintFinding[] } {
+function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, step: number, hosts: HostFacts[] | undefined, serverHost: string | undefined, staged: Map<string, Set<string>>, first: boolean): { refuse: LintFinding[]; warn: LintFinding[] } {
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
   // R6 runs only when the caller has the host facts (BOS-427): `checkAsk` always passes them, so every card is
   // checked there; a caller that only wanted another rule (R9) and passes none keeps working, as before.
   if (hosts === undefined) return { refuse, warn };
+  /** The server's own name as the host deployer reports it. `serverHost` given as a name is that name; given as
+   * null means Boss Man has no report yet; left undefined, the one host it has a record for stands in (the older
+   * call shape). Never a default like "the server". */
+  const ownName = serverHost !== undefined ? serverHost?.trim() || null : hosts.length === 1 ? hosts[0]!.name : null;
+  /** The first command block that names a host Boss Man has no record for at all (BOS-774): an agent's remembered
+   * host, an old runbook or a compose file name must never send the owner to a machine Boss Man no longer runs on.
+   * A name another recorded host carries is that host, checked below; the server's own name matches case-insensitively. */
+  const named = blockPieces.find((p) => p.where !== undefined && !hosts.some((h) => h.name === p.where!.host) && !(ownName !== null && p.where.host.toLowerCase() === ownName.toLowerCase()))?.where?.host;
+  if (named !== undefined) {
+    if (ownName) return { refuse: [{ step, rule: "R6", problem: `runs on "${named}", but Boss Man runs on "${ownName}" (what the host deployer reports). Use host="${ownName}" in the block` }], warn };
+    // No report yet (no deployer, or it hasn't ticked): the name can't be confirmed, so the card says so instead.
+    return { refuse, warn: [...warn, { step, rule: "warn" as const, problem: `runs on "${named}", but Boss Man has no host report yet, so it can't confirm that is the server it runs on. Check it is, then go on` }] };
+  }
+  /** A block that names the server itself (the reported name, whatever the case) is the one R6 reads. */
+  const onServer = (host: string) => ownName !== null && host.toLowerCase() === ownName.toLowerCase();
   const stagedForLogin = (host: string, folder: string) => {
     const set = staged.get(host) ?? new Set<string>();
     set.add(folder);
@@ -938,11 +957,12 @@ function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, s
       refuse.push({ step, rule: "R6", problem: `has a command that doesn't say where it runs or as which account. Put it in its own block as sh host="<name>" as="root" or as="login"` });
       continue;
     }
-    const known = hosts?.find((h) => h.name === where.host);
+    const known = ownName && onServer(where.host) ? hosts.find((h) => h.name === ownName) : hosts.find((h) => h.name === where.host);
     if (hosts && !known) {
-      // A host with no deployer yet (the move's new host) has no ownership record, so R6 can't check a step's
-      // paths. The card is allowed, but its first step should be a read-only check that shows what to look for.
-      if (first) warn.push({ step, rule: "warn", problem: `runs on "${where.host}", which Boss Man hasn't recorded, so it can't check what the owner's login can read there. Start with a read-only check (ls -ld, df -h) and say what the owner should see before anything is changed` });
+      // A host with no record (a second host the deployer hasn't written one for yet) has no ownership facts, so
+      // R6 can't check a step's paths. The card is allowed, but its first step should be a read-only check. The
+      // server's own name is never this case (BOS-774: it is refused above, or it has a record under that name).
+      if (first && !ownName) warn.push({ step, rule: "warn", problem: `runs on "${where.host}", which Boss Man hasn't recorded, so it can't check what the owner's login can read there. Start with a read-only check (ls -ld, df -h) and say what the owner should see before anything is changed` });
       continue;
     }
     if (!hosts || !known) continue;

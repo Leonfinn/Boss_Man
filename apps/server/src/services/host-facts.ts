@@ -181,5 +181,12 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
     return Number.isFinite(age) && age <= HOST_REPORT_FRESH_MS ? r.addons : {};
   }
 
-  return { read, hosts, load, sync, confirm, value, valuesFor, reportedAddons };
+  /** The name the host deployer reports for the server itself (BOS-774), for the card lint: a card that names a
+   * different host is refused. null when there is no report yet, so the lint can say so rather than guess. */
+  async function serverHost(): Promise<string | null> {
+    const r = await read();
+    return r?.name ?? null;
+  }
+
+  return { read, hosts, serverHost, load, sync, confirm, value, valuesFor, reportedAddons };
 }

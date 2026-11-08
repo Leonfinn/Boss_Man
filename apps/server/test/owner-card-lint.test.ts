@@ -98,10 +98,19 @@ describe("R6: where a command runs and as whom (BOS-427)", () => {
     expect(refuse([step("Go:", sh("cd /mnt/bm/src", { host: "nas01", as: "root" }))])).toEqual([]);
   });
 
-  it("warns, not refuses, on a host Boss Man hasn't recorded, and asks the card to start with a read-only check", () => {
-    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm", { host: "orange", as: "root" }))], HOSTS);
+  it("refuses a block that names a host with no record while Boss Man knows the server's name (BOS-774)", () => {
+    // The server is nas01; a block that names a host Boss Man has no record for is refused, never guessed at (the
+    // old name from memory case). A real second host needs its own record from its own deployer.
+    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm", { host: "orange", as: "root" }))], { hosts: HOSTS, serverHost: "nas01" });
+    expect(f.refuse.filter((x) => x.rule === "R6").map((x) => x.problem)).toEqual([expect.stringMatching(/runs on "orange", but Boss Man runs on "nas01"/)]);
+  });
+
+  it("warns, not refuses, on a host Boss Man hasn't recorded when it has no report of the server's name", () => {
+    // No report of the server's own name yet (serverHost: null): the name can't be confirmed, so the first step
+    // should be a read-only check rather than the card being refused (BOS-774).
+    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm", { host: "orange", as: "root" }))], { hosts: HOSTS, serverHost: null });
     expect(f.refuse.filter((x) => x.rule === "R6")).toEqual([]);
-    expect(f.warn.some((x) => /hasn't recorded/.test(x.problem))).toBe(true);
+    expect(f.warn.some((x) => /no host report yet/.test(x.problem))).toBe(true);
   });
 
   it("refuses a login-run block that reads a folder the login can't read, and passes it once an earlier block staged a copy", () => {
@@ -203,6 +212,44 @@ describe("R6: where a command runs and as whom (BOS-427)", () => {
   it("warns when a copy step touches a path with no recorded ownership", () => {
     const w = warn([step("Copy it:", sh("cp /mnt/bm/x /srv/somewhere/x", { host: "nas01", as: "root" }))]);
     expect(w.some((f) => f.rule === "warn" && /no recorded ownership/.test(f.problem))).toBe(true);
+  });
+});
+
+describe("R6: the server's name comes from the host report, never a remembered one (BOS-774)", () => {
+  const HOSTS = [{ name: "Docker01", ownership: [] }];
+  const R6 = (steps: string[], serverHost?: string | null) => lintOwnerSteps(steps, { hosts: HOSTS, ...(serverHost !== undefined ? { serverHost } : {}) });
+  const one = (steps: string[], serverHost?: string | null) => R6(steps, serverHost);
+
+  it("refuses a card that names \"truenas\" while the host report says \"Docker01\", and names the one on record", () => {
+    const r = one([step("List the containers:", sh("DOCKER_HOST=unix:///run/docker.sock docker ps", { host: "truenas", as: "root" }))], "Docker01");
+    const f = r.refuse.filter((x) => x.rule === "R6");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.problem).toMatch(/runs on "truenas", but Boss Man runs on "Docker01"/);
+  });
+
+  it("accepts the reported name, case aside, and finds the record by it even when it differs in case", () => {
+    expect(one([step("List the containers:", sh("docker ps", { host: "Docker01", as: "root" }))], "Docker01").refuse.filter((x) => x.rule === "R6")).toEqual([]);
+    expect(one([step("List the containers:", sh("docker ps", { host: "docker01", as: "root" }))], "Docker01").refuse.filter((x) => x.rule === "R6")).toEqual([]);
+  });
+
+  it("uses the one recorded host's name when the caller gives no server name, so an old name is still refused", () => {
+    const f = R6([step("List the containers:", sh("docker ps", { host: "truenas", as: "root" }))]).refuse.filter((x) => x.rule === "R6");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.problem).toMatch(/but Boss Man runs on "Docker01"/);
+  });
+
+  it("flags a card as unconfirmed when Boss Man has no host report yet, rather than passing it", () => {
+    const r = one([step("List the containers:", sh("docker ps", { host: "truenas", as: "root" }))], null);
+    expect(r.refuse.filter((x) => x.rule === "R6")).toEqual([]);
+    expect(r.warn.some((x) => /no host report yet/.test(x.problem))).toBe(true);
+    // The same with no facts at all: the name can't be confirmed either.
+    const none = lintOwnerSteps([step("List the containers:", sh("docker ps", { host: "truenas", as: "root" }))], { hosts: [], serverHost: null });
+    expect(none.warn.some((x) => /no host report yet/.test(x.problem))).toBe(true);
+  });
+
+  it("still lets another recorded host through: a name Boss Man has a record for is that host, not a stand-in for the server", () => {
+    const two = [{ name: "Docker01", ownership: [] }, { name: "nas01", ownership: [{ path: "/mnt/backups", owner: "root", group: "root", mode: "700" }] }];
+    expect(lintOwnerSteps([step("List it:", sh("ls /mnt/backups", { host: "nas01", as: "root" }))], { hosts: two, serverHost: "Docker01" }).refuse.filter((x) => x.rule === "R6")).toEqual([]);
   });
 });
 
