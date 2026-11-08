@@ -11,7 +11,11 @@ const run = (c: Case) => judgePermission(c.question, c.command, c.set === "attac
 // (or a tool with a /tmp path in its environment). The judge now says Deny; the CEO decision on these is open on the ticket.
 const BOS377_DENY = new Set(("14b1242b 2183ea06 2d9be3ef 32866b0f 3399d6d6 4872d9e2 4958a0e5 51c7b493 54ce5c30 6161cc4b 83efd390 8974beb5 8cd3ad38 " +
   "8d82ddca a2e5e91c a4c0cd3a a9f0eeed adc55b56 bd6516ca c6ec917e d4781bee dd1866ec e0b3918d e85f8114 f19add64").split(" "));
-const want = (c: Case): string => (BOS377_DENY.has(c.id.slice(0, 8)) ? "deny" : c.expected);
+// BOS-706 (CEO decision): an install in a folder outside the checkout runs that folder's lifecycle scripts, so it needs
+// `--ignore-scripts`. These four CEO-allowed eval cards (installs in a fresh /tmp folder or a /tmp worktree without it) now get
+// Deny on purpose; the CEO's decision on the ticket supersedes the earlier Allow.
+const BOS706_DENY = new Set("c0d5b751 aee48980 e1d1491d 597127c8".split(" "));
+const want = (c: Case): string => (BOS377_DENY.has(c.id.slice(0, 8)) || BOS706_DENY.has(c.id.slice(0, 8)) ? "deny" : c.expected);
 const agree = (cs: Case[]) => cs.filter((c) => run(c) === want(c)).length;
 
 describe("rules judge against the BOS-329 cases", () => {
@@ -1093,5 +1097,71 @@ describe("rules judge: BOS-378 checks lost in the merges (BOS-701)", () => {
     ]);
     // A known output option that names a /tmp path stays Allow (the build writes there), as it did before.
     allows(["pnpm run build --outDir /tmp/out", "npm --silent run build"]);
+  });
+});
+
+// BOS-706 (Jane's variants of the BOS-701 checks): the same checks, reached through a wrapper's own flag, a cd flag, an attached or
+// abbreviated env folder flag, `sh -c`, an option value taken for the verb, and node-options spelled around the absolute-path test.
+describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+
+  describe("A. repo code from a folder outside the checkout", () => {
+    deny([
+      "cd /tmp/p && nice -n 5 git status",
+      "cd /tmp/p && stdbuf -oL pnpm run evil",
+      "cd /tmp/p && timeout -s KILL 60 npm test",
+      "cd /tmp/p && command -p git status",
+      "cd /tmp/p && nohup nice -n 5 git status",
+      "cd -P /tmp/p && git status",
+      "cd -L /tmp/p && git status",
+      "cd -e -P /tmp/p && git status",
+      "pushd -n /tmp/p && git status",
+      "env -C/tmp/p pnpm run evil",
+      "env --ch=/tmp/p pnpm run evil",
+      "env --chd /tmp/p pnpm run evil",
+      "cd /tmp/p && sh -c 'pnpm run evil'",
+      "cd /tmp/p && npm --cache install run evil",
+      "cd /tmp/p && pnpm --reporter install run evil",
+    ]);
+    allows([
+      "cd packages/shared && nice -n 5 git status",
+      "cd -P packages/shared && git status",
+      "env -C packages/shared pnpm run build",
+      "cd /tmp/p && npm ci --ignore-scripts",
+      "cd /tmp/p && npm install --ignore-scripts=true",
+      "cd packages/shared && pnpm install",
+      "pnpm install",
+      "cd /tmp/p && ls",
+    ]);
+  });
+
+  // CEO decision (8 Nov, BOS-706): outside the checkout an install runs that folder's own lifecycle scripts, so it needs
+  // --ignore-scripts. The eval (>= 90%) and held-out (>= 91%) thresholds are unchanged; four eval cards are marked BOS706_DENY above.
+  describe("A2. install outside the checkout needs --ignore-scripts", () => {
+    deny([
+      "cd /tmp/p && npm install",
+      "cd /tmp/p && pnpm i",
+      "cd /tmp/p && npm ci",
+      "cd /tmp/p && yarn add left-pad",
+      "cd /tmp/p && npm install --ignore-scripts=false",
+      "env -C /tmp/p npm install",
+    ]);
+  });
+
+  describe("B. node-options by flag", () => {
+    deny([
+      "npm --node-options=--require=../x.js run build",
+      "npm --node-options='--require ../../../tmp/x.js' run build",
+      "npm --node-options=-r/tmp/x.js run build",
+      "npm --node-options=--require=$HOME/x.js run build",
+      "npm --node-options=--import=data:text/javascript,import('x') run build",
+      "pnpm --config.node-options=--loader=./x.mjs run build",
+      "npm --node-options --experimental-loader=./x.mjs run build",
+    ]);
+    allows(["npm --node-options=--max-old-space-size=4096 run build"]);
   });
 });
