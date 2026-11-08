@@ -40,13 +40,13 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
   const offlineSince = new Map<string, number>();
   const paged = new Set<string>(); // owner paged (or already paged before a restart) for this outage
   // CEO card raised for this outage; until then it is tried again every pass.
-  // Lost on restart, harmless because the card is deduped by its key, so raising it again changes nothing.
+  // State lost on restart, harmless because the card is deduped by its key, so raising it again changes nothing.
   const carded = new Set<string>();
   // Connected runners whose old cards were already checked once.
-  // Lost on restart, harmless because the first pass after a start checks every connected runner again.
+  // State lost on restart, harmless because the first pass after a start checks every connected runner again.
   const swept = new Set<string>();
   // Connected runners already compared with the launcher's list this connection.
-  // Lost on restart, harmless because it only costs one extra launcher call per runner after a start; the result is kept in settings.
+  // State lost on restart, harmless because it only costs one extra launcher call per runner after a start; the result is kept in settings.
   const handChecked = new Set<string>();
   let boot: { at: number; expected: Set<string>; done: boolean } | null = null;
   let lastHold = false;
