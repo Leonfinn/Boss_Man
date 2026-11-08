@@ -980,6 +980,13 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     }
     if (head === "popd") { away = true; continue; }
     if (away && (RUNS_REPO_CODE.test(head) || (PM.test(head) && pmRunsScript(args)))) return true;
+    // BOS-706 (CEO decision): outside the checkout an install runs that folder's own preinstall/install/postinstall/prepare
+    // scripts, which the judge can't read. It gets no Allow unless `--ignore-scripts` (or `=true`) is given. Inside the checkout
+    // and its workspaces installs stay Allow (BOS-329).
+    if (away && /^(?:pnpm|npm|yarn|bun)$/.test(head)) {
+      const verb = args.find((a) => !a.startsWith("-") && a !== "");
+      if (verb !== undefined && /^(?:install|i|ci|add|install-test|it|install-clean-slate|cit)$/.test(verb) && !args.some((a) => /^--ignore-scripts(?:=true)?$/.test(a))) return true;
+    }
     // find's `-exec`/`-execdir`/`-ok`/`-okdir` program: a path that leaves the checkout is code from elsewhere.
     if (head === "find") {
       for (let i = 0; i < args.length; i++) {
