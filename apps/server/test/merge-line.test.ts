@@ -172,6 +172,22 @@ describe("the merge line's timeline (BOS-769)", () => {
     expect(rows[4]!.at.toISOString()).toBe(endedAt.toISOString());
   });
 
+  // Nothing in the server deletes activity or check_jobs rows (no retention job); this guards against one
+  // being added that would cut Moony's history short. A full pass through the line runs in between.
+  it("keeps records and merge-check results older than 30 days readable", async () => {
+    const c = await setup();
+    const old = await c.newTicket("Old work");
+    const day = 24 * 60 * 60 * 1000;
+    const at = (days: number) => new Date(Date.now() - days * day);
+    await lineEvent(c.db, { id: old.id, companyId: c.company.id }, { event: "check_ended", check: "pnpm test", way: "gate", passed: true }, at(41));
+    await lineEvent(c.db, { id: old.id, companyId: c.company.id }, { event: "merged", commit: "d".repeat(40) }, at(40));
+    const [job] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: old.id, kind: "merge", scope: "full", commit: "e".repeat(40), tree: "8".repeat(40), state: "passed", exitCode: 0, queuedAt: at(41), startedAt: at(41), endedAt: at(40) }).returning();
+    await approveAndWait(c.req, c.ticket.id);
+    expect(events(await c.line(old.id))).toEqual(["check_ended", "merged"]);
+    expect((await c.line(old.id))[0]!.detail).toMatchObject({ passed: true });
+    expect(await c.db.select().from(checkJobs).where(eq(checkJobs.id, job!.id))).toHaveLength(1);
+  });
+
   it("keeps the rows out of the agents' brief", async () => {
     const c = await setup();
     await approveAndWait(c.req, c.ticket.id);
