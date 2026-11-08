@@ -20,6 +20,7 @@ import { checkQueue } from "./check-queue.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import { lineEvent, type CheckWay, type HoldReason } from "./merge-line.js";
+import { CARRIED_NOTE_PREFIX, carriedTitles } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
 
 export class ReviewError extends Error {
@@ -411,8 +412,11 @@ export function reviewService(
     const names = carried.map((c) => `"${c.title}"`).join(", ");
     const theirRisk = riskOf(highestRisk(carried.map((c) => c.risk)));
     const detail = { carried: carried.map((c) => ({ ticketId: c.ticketId, title: c.title, risk: c.risk })) };
-    // The ticket stays in review, with the reason on it, until the carried ticket has merged.
-    await db.update(tickets).set({ pullRequestNote: `Waiting: its branch also carries unapproved work from ${names} (${theirRisk} risk), which must merge first.` }).where(eq(tickets.id, t.id));
+    // The ticket stays in review, with the reason on it, until the carried ticket has merged. The sentence
+    // is what the owner reads; the carried tickets' titles sit on their own last line as JSON, so a title
+    // holding a quote or an apostrophe is never cut out of the prose (BOS-819).
+    const note = `${CARRIED_NOTE_PREFIX} unapproved work from ${names} (${theirRisk} risk), which must merge first.\n${JSON.stringify(carried.map((c) => c.title))}`;
+    await db.update(tickets).set({ pullRequestNote: note }).where(eq(tickets.id, t.id));
     await lineEvent(db, t, { event: "hold_started", hold: "carried", carried: carried.map((c) => ({ ticketId: c.ticketId, title: c.title })) });
     const policy = await effectivePolicy(db, t);
     if (carried.some((c) => ruleFor(policy, c.risk).ownerSignoff)) {
@@ -1224,8 +1228,9 @@ export function reviewService(
     /**
      * A ticket just merged: start the merge again on every approved ticket the carried-work gate held for it
      * (BOS-733). Without this they sat in review until someone happened to approve again, since the sweep's one
-     * retry was long spent. The hold names its tickets only by title in the note, so a same-titled ticket may
-     * be retried for nothing; that is harmless, as the gate runs again in full and refuses again if it must.
+     * retry was long spent. The hold names its tickets by title (kept apart from the sentence, BOS-819), so a
+     * same-titled ticket may be retried for nothing; that is harmless, as the gate runs again in full and refuses
+     * again if it must.
      */
     async retryHeldBy(mergedId: string): Promise<string[]> {
       if (deps.isLeader && !deps.isLeader()) return [];
@@ -1237,7 +1242,7 @@ export function reviewService(
         .where(and(eq(tickets.projectId, m.projectId), eq(tickets.systemState, "review"), ne(tickets.id, mergedId), sql`${tickets.pullRequestNote} like 'Waiting: its branch also carries %'`));
       const started: string[] = [];
       for (const h of held) {
-        if (!h.note?.includes(`"${m.title}"`)) continue;
+        if (!carriedTitles(h.note).includes(m.title)) continue;
         // The owner's "merge that one first" card has done its job once every ticket it names has merged.
         await clearCarriedCards(db, h.id, { by: "system", note: `"${m.title}" has merged.`, at: new Date().toISOString() });
         if (!(await approvedAndWaiting(h.id))) continue;
