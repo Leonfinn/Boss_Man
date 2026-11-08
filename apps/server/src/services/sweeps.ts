@@ -6,7 +6,7 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
-import { MERGE_MISSED_AFTER_MS, ticketRef } from "@boss-man/shared";
+import { MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
@@ -743,22 +743,30 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
 
   /**
    * Backlog or blocked tickets whose blockers are all resolved but were never released (BOS-603: BOS-290 sat
-   * two days). Also the one-off catch-up after deploy: a released ticket is ready, so it never matches again.
+   * two days). A ticket parked on purpose (a "blocked until" time still ahead, or a note that says parked) is
+   * left where it is; its assignee is told the blocker finished, once (BOS-742). Also the one-off catch-up after
+   * deploy: a released ticket is ready, so it never matches again.
    */
   async function releaseUnblocked() {
-    const result = { released: 0 };
+    const result = { released: 0, parked: 0 };
     if (!opts.releaseUnblocked) return result;
     const rows = await db
-      .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId })
+      .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId, stateNote: tickets.stateNote, blockedUntil: tickets.blockedUntil })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
       .where(and(inArray(tickets.systemState, ["backlog", "blocked"]), eq(companies.paused, false), sql`exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`, sql`not exists (select 1 from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id} and b.system_state <> 'done')`,
         // Only if the last blocker finished after the ticket last changed state: a ticket put back in backlog on purpose stays there.
         sql`(select max(b.state_changed_at) from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id}) > ${tickets.stateChangedAt}`));
     const byCompany = new Map<string, string[]>();
-    for (const { id, title, companyId } of rows) {
+    for (const { id, title, companyId, stateNote, blockedUntil } of rows) {
       if (await isBlocked(id)) continue;
+      // The release returns true for a parked ticket it told the assignee about (BOS-742): it counted, but it did not start.
+      const parked = parkedOnPurpose({ stateNote, blockedUntil }, now());
       if (!(await opts.releaseUnblocked(id))) continue;
+      if (parked) {
+        result.parked++;
+        continue;
+      }
       result.released++;
       byCompany.set(companyId, [...(byCompany.get(companyId) ?? []), title]);
     }
@@ -1294,7 +1302,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   // A whole company with work waiting and nothing finishing (BOS-593). Its cause test asks whether a live run waits in the check line.
   const noProgress = noProgressSweep(db, { alert: opts.alert, isConnected: opts.isConnected, inCheckLine: async (runId) => !!(await busyInCommand(runId))?.checkScript });
   // `run` is a property so a test can stand in for one sweep step and watch the pass around it (BOS-611).
-  type Pass = { goalChecks: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>> };
+  type Pass = { goalChecks: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>> };
 
   return {
     limits,
@@ -1319,7 +1327,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // has reset, an agent that has run cleanly since, a ticket that has finished.
       const closedCards = await opts.clearAlerts?.();
       const urgentIdleResult = held ? { woken: 0 } : await urgentIdle(t);
-      const releasedResult = held ? { released: 0 } : await releaseUnblocked();
+      const releasedResult = held ? { released: 0, parked: 0 } : await releaseUnblocked();
       const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
       // After missed work, so its wakes already count against the free slots (BOS-574).
       const idleSlotsResult = held ? { woken: 0 } : await idleSlots(t);

@@ -287,7 +287,15 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const lastProgress = Math.max(new Date(h.since).getTime(), ...Object.values(swapped).map((s) => new Date(s).getTime()));
         if (t.getTime() - lastProgress >= 2 * reconnectMs) {
           h = { ...h, stalledPaged: true };
-          await deps.notify({ companyId: null, level: "page", title: "Runner update is stuck", body: `No runner has been swapped for ${Math.round((t.getTime() - lastProgress) / 60_000)} minutes. Still waiting on: ${waiting.map((r) => r.slug).join(", ")}. New runs are held everywhere. Open Settings > Server and runner: wait for that company to finish, or cancel the update.`, link: "#/settings" });
+          const minutes = Math.round((t.getTime() - lastProgress) / 60_000);
+          // A company with work runs going is waited for on purpose (BOS-497): say so, rather than call the update stuck.
+          const busy = (r: FleetRunner) => !h!.force && !!r.companyId && (active.get(r.companyId) ?? 0) > 0;
+          const idle = waiting.filter((r) => !busy(r));
+          const busyList = waiting.filter(busy).map((r) => r.slug);
+          if (!idle.length)
+            await deps.notify({ companyId: null, level: "page", title: "Runner update is waiting for running work", body: `No runner has been swapped for ${minutes} minutes because ${busyList.join(", ")} still ${busyList.length === 1 ? "has" : "have"} work runs going. This wait is on purpose: each runner is swapped as soon as its runs finish, and at the deadline you are asked whether to stop them. New runs are held everywhere until then. To stop waiting, open Settings > Server and runner and cancel the update.`, link: "#/settings" });
+          else
+            await deps.notify({ companyId: null, level: "page", title: "Runner update is stuck", body: `No runner has been swapped for ${minutes} minutes. Still waiting on: ${idle.map((r) => r.slug).join(", ")}${busyList.length ? ` (and on ${busyList.join(", ")}, which still ${busyList.length === 1 ? "has" : "have"} work runs going)` : ""}. New runs are held everywhere. Open Settings > Server and runner: wait for that company to finish, or cancel the update.`, link: "#/settings" });
         }
       }
       await save(h);
