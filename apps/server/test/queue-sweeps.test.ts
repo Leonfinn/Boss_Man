@@ -400,8 +400,10 @@ describe("stale blockers (R21)", () => {
     expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
-    // The sweep also asked the CEO to hand out work, as the worker had nothing to do (BOS-615).
-    expect(await ctx.db.select().from(wakes).where(ne(wakes.reason, "idle agents"))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+    // The sweep also asked the CEO to hand out work, as the worker had nothing to do (BOS-615). That wake
+    // then waits 25 hours with no run finishing, so the no-progress alert (BOS-593) rightly wakes the CEO
+    // with a "decision" card too; neither is what this test is about.
+    expect(await ctx.db.select().from(wakes).where(and(ne(wakes.reason, "idle agents"), ne(wakes.reason, "decision")))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
   });
 
   it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {
@@ -562,7 +564,9 @@ describe("stale blockers (R21)", () => {
       await ctx.req("PATCH", `/api/tickets/${waiting.id}`, { state: "done" });
       loose = waiting;
     }
-    const at = ctx.clock();
+    // Ended over an hour ago: a run that ended cleanly within the hour is the company making progress,
+    // which rightly changes what the no-progress sweep (BOS-593) reads; these are only meant to be unrelated.
+    const at = new Date(ctx.clock().getTime() - 2 * HOUR);
     for (let i = 0; i < 6; i++) await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: loose.id, status: "succeeded", startedAt: at, lastEventAt: at, endedAt: at } as never);
     expect(await measure()).toEqual(two);
 

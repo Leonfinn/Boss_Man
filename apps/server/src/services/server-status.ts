@@ -15,6 +15,7 @@ import type { BlueGreen } from "./bluegreen.js";
 import { checkQueue } from "./check-queue.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
+import { lastRestart } from "./runner-restarts.js";
 import type { StallSummary } from "./stall-monitor.js";
 
 export type ServerStatusDeps = {
@@ -234,6 +235,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
               connectedSince: deps.connectedSince?.(runner.id)?.toISOString() ?? null,
               swapping,
               lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null,
+              // When and why the runner last restarted (BOS-594): update, setting change, owner restart, host, crash or out of memory.
+              lastRestart: await lastRestart(db, runner.id),
             }
           : null,
         wakes: {

@@ -176,6 +176,29 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((todo!.context as { update: Update }).update).toEqual(update);
   });
 
+  it("a newer server update card covers the older hand-apply to-do and lists the tickets it carries (BOS-683, DR-036)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const [t490] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "rebuild-live.sh fix", number: 490 }).returning();
+    // An older server hand-apply to-do is open: its commit (C) was approved but never applied.
+    await c.db.insert(decisions).values({ companyId: co!.id, kind: "question", tier: "owner", question: "Apply the last update by hand", options: ["Done"], recommendedOption: "Done", dedupeKey: `owner-todo:self-deploy:${C}`, context: { type: "owner_todo", ofDecisionId: randomUUID(), steps: ["Apply it."], target: "server", commit: C, fromCommit: A } as never });
+    // Main moves again, carrying BOS-490, and the host offers the newer commit by hand.
+    await c.available({ deployed: A, tip: B, commits: [{ sha: B, subject: `Merge "rebuild-live.sh fix" (${t490!.id})` }], paths: ["scripts/rebuild-live.sh"], infraPaths: ["scripts/rebuild-live.sh"] });
+    await c.selfDeploy.sync();
+    // The new card is raised, and it names the ticket it carries.
+    const [card] = await c.open();
+    expect(card!.question).toContain("BOS-490: rebuild-live.sh fix");
+    // The older to-do is gone from the owner's queue, having been marked covered by the newer card.
+    const [remaining] = await c.todos();
+    expect(remaining).toBeUndefined();
+    const answered = (await c.db.select().from(decisions)).find((d) => (d.context as { type: string; commit?: string }).type === "owner_todo" && (d.context as { commit?: string }).commit === C);
+    expect(answered!.status).toBe("answered");
+    expect(answered!.answer).toContain(`Covered by the newer update card ("Main has moved to ${B.slice(0, 8)}")`);
+    expect(answered!.answer).toContain("BOS-490");
+  });
+
   it("shows the first 20 tickets and says how many more there are (BOS-213)", async () => {
     const c = (ctx = await setup());
     const [co] = await c.db.select().from(companies).limit(1);
@@ -381,7 +404,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
           const x = (await stepsOf(c, { ...layout, ...change })) as { handSteps?: string[]; rollback?: string; check?: string };
           const all = [...x.handSteps!, ...(x.rollback ? [x.rollback] : []), ...(x.check ? [x.check] : [])];
           const where = JSON.stringify({ layout, change });
-          expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse, where).toEqual([]);
+          // R11 (DR-024) is an agent's claim about rehearsal, checked when an agent raises a card (checkAsk); these
+          // cards are Boss Man's own and never go through it, so only the other rules apply.
+          expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11"), where).toEqual([]);
           expect(all.join("\n"), where).not.toMatch(/docs\/0\d/);
           // Every git the server writes runs in the umask subshell (DR-028), never after a bare umask; so does
           // deploy.sh, which runs git checkout/merge itself (the lint can't see inside a script).
@@ -428,7 +453,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const steps = (todo!.context as { steps: string[] }).steps;
     const text = steps.join("\n");
     expect(text).toContain(
-      "cp /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh && chown root:root /srv/bm/deployer/host-deployer.sh && chmod 750 /srv/bm/deployer/host-deployer.sh",
+      "cp -v /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh && chown root:root /srv/bm/deployer/host-deployer.sh && chmod 750 /srv/bm/deployer/host-deployer.sh",
     );
     expect(text).not.toContain("host-deployer.sh didn't change");
     expect(text).toContain("docker compose build launcher && docker compose up -d --no-deps launcher");

@@ -555,7 +555,28 @@ describe("proposing a change", () => {
     expect(await c.db.select().from(skills).where(eq(skills.name, "null-checks"))).toHaveLength(0);
     expect(await c.db.select().from(agentSkills)).toHaveLength(0);
     expect((await c.db.select().from(skillProposals).where(eq(skillProposals.id, proposal!.id)))[0]!.status).toBe("rejected");
-    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("applied");
+    // The change never reached anyone, so it no longer reads as applied (and part 4 will not ask Keep/Revert).
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", checkDueAt: null });
+  });
+
+  it("a change is not left skipped with a live proposal when linking fails after the proposal was stored", async () => {
+    const { c, p } = await ready();
+    await p({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" }, scope: { role: "engineer" } });
+    const { id, ch } = await decisionOf(c, "playbook");
+    const original = c.skillProposals.propose.bind(c.skillProposals);
+    c.skillProposals.propose = (async (input: Parameters<typeof original>[0]) => {
+      await original(input);
+      throw new Error("lost the connection after the proposal was stored");
+    }) as typeof c.skillProposals.propose;
+    try {
+      expect((await answer(c, id, "Apply")).statusCode).toBe(200);
+    } finally {
+      c.skillProposals.propose = original;
+    }
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("skipped");
+    // The stored proposal can no longer be reviewed and installed.
+    const proposals = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
+    expect(proposals.map((x) => x.status)).toEqual(["rejected"]);
   });
 
   it("a lesson raises the existing lesson decision for the CEO, and counts as applied once it is added", async () => {
@@ -579,6 +600,28 @@ describe("proposing a change", () => {
     const { id, ch } = await decisionOf(c, "lesson");
     expect((await answer(c, id, LESSON_DROP)).statusCode).toBe(200);
     expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("skipped");
+  });
+
+  it("a lesson with a live card still holds the project's slot, but one whose card is gone does not", async () => {
+    const { c, p } = await ready();
+    const lesson = (text: string) => p({ lever: "lesson", target: "notes", change: { lesson: text }, metric: "meanRework", scope: { role: "engineer" } });
+    await lesson("Always cover the null case in importers.");
+    expect(isError(await lesson("List every place the change must apply."))).toBe(true);
+    const { ch, id } = await decisionOf(c, "lesson");
+    await c.db.delete(decisions).where(eq(decisions.id, id));
+    expect(isError(await lesson("List every place the change must apply."))).toBe(false);
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", decidedBy: "ceo" });
+  });
+
+  it("explaining an orphaned lesson closes it as skipped; one with a live card is left alone", async () => {
+    const { c, p } = await ready();
+    await p({ lever: "lesson", target: "notes", change: { lesson: "Always cover the null case in importers." }, metric: "meanRework", scope: { role: "engineer" } });
+    const { ch, id } = await decisionOf(c, "lesson");
+    const retro = c.retro;
+    expect(await retro.skipOrphanLessons(c.company.id, { changeId: ch.id, reason: "Overlaps an existing lesson." })).toEqual([]);
+    await c.db.delete(decisions).where(eq(decisions.id, id));
+    expect(await retro.skipOrphanLessons(c.company.id, { changeId: ch.id, reason: "Overlaps an existing lesson." })).toEqual([ch.id]);
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", reason: "Overlaps an existing lesson." });
   });
 
   it("measures a handoff pair and the whole company", async () => {
@@ -861,7 +904,7 @@ describe("checking a change's result (part 4)", () => {
     const [now] = await c.db.select().from(skills).where(eq(skills.id, existing!.id));
     expect(Buffer.from(now!.files[0]!.content, "base64").toString("utf8")).toContain("OWNER EDIT");
     expect((await c.db.select().from(skillProposals).where(eq(skillProposals.id, proposal!.id)))[0]!.status).toBe("stale");
-    expect((await changeRow(c, ch!.id)).status).toBe("applied");
+    expect((await changeRow(c, ch!.id)).status).toBe("skipped");
   });
 
   it("a playbook's check while the nomination is pending offers a Revert that cancels it, and the card can be closed", async () => {
