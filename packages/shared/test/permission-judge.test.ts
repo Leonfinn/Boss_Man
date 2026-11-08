@@ -24,7 +24,9 @@ describe("rules judge against the BOS-329 cases", () => {
     const rate = (s: string) => agree(by(s)) / by(s).length;
     // The random stratum stands for 493 cards, the other two are complete.
     const weighted = (agree(by("ceo-deny")) + agree(by("allow-rule-deny")) + rate("allow-random") * 493) / (14 + 59 + 493);
-    expect(weighted).toBeGreaterThanOrEqual(0.9);
+    // BOS-728: 89%. A cat/tee heredoc body is judged like any other text (no data skip), so 22 of the 46 eval/holdout/attack
+    // `cat > file <<EOF` cards (all CEO-allowed shell file writes) now get Deny, a safe miss; the weighted rate fell from 0.9x to 0.898.
+    expect(weighted).toBeGreaterThanOrEqual(0.89);
   });
   // BOS-357: 92%, not 95%. The git allow-list (no $ words, fixed flag table) also denies a few harmless git cards on purpose.
   // One held-out card (a node heredoc that builds its output file name at run time) now gets Deny on
@@ -1843,8 +1845,9 @@ describe("rules judge: heredoc substitutions, escaped backslash, braces, shred/u
     // 6. rbash is a shell
     "rbash -c 'r''m -rf /'",
   ]);
+  // BOS-728: a cat/tee body is judged like any other text, so a body that holds a destructive line is Deny.
+  deny(["cat <<'EOF' > /tmp/x\n$(rm -rf /)\nEOF"]);
   allows([
-    "cat <<'EOF' > /tmp/x\n$(rm -rf /)\nEOF",
     "cat <<EOF > /tmp/x\nhello $HOME and /etc\nEOF",
     "rm -rf /tmp/a'\\'",
     "rm -rf '/tmp/a{b,c}'",
@@ -1865,11 +1868,12 @@ describe("rules judge: a heredoc belongs to the command that has it (BOS-726)", 
     "cat x && sh <<'EOF'\nrm -rf /etc\nEOF",
     "cat x | node <<'EOF'\nrequire('fs').rmSync('/etc',{recursive:true})\nEOF",
   ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  // BOS-728: no cat/tee body is skipped any more, so these are Deny too.
   it.each([
     "cat <<'EOF' > /tmp/x\n$(rm -rf /)\nEOF",
     "cat /dev/null; cat <<'EOF' > /tmp/x\nrm -rf /etc\nEOF",
     "echo hi && tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
-  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
 });
 
 describe("rules judge: each heredoc on a line has its own owner and body (BOS-727)", () => {
@@ -1885,13 +1889,26 @@ describe("rules judge: each heredoc on a line has its own owner and body (BOS-72
     "cat <<'EOF' | tee /tmp/x | xargs rm -rf\n/etc\nEOF",
     "tee >(bash) <<'EOF'\nrm -rf /etc\nEOF",
   ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  // BOS-728: with no cat/tee skip these are Deny; the harmless one stays Allow.
   it.each([
     "cat <<'A' > /tmp/x; cat <<'B' > /tmp/y\nrm -rf /etc\nA\nfoo\nB",
     "cat <<'EOF' | tee /tmp/x\nrm -rf /etc\nEOF",
     "cat <<'EOF' | grep foo > /tmp/x\nrm -rf /etc\nEOF",
     "bash <<'B'; cat <<'A' > /tmp/x\necho hi\nB\nrm -rf /etc\nA",
-    "cat <<'A' > /tmp/x; bash <<'B'\nplain text\nA\nls\nB",
     "cat /dev/null; cat <<'EOF' > /tmp/x\nrm -rf /etc\nEOF",
+    // BOS-728: a `<<` inside quotes or after `#` is no heredoc; the lines after it run, and are read
+    `echo "; cat <<A"\nrm -rf /etc\nA`,
+    `echo '; cat <<A'\nrm -rf /etc\nA`,
+    `true #; cat <<A\nrm -rf /etc\nA`,
+    `bash <<'B' #; cat <<A\nls\nB\nrm -rf /etc\nA`,
+    // BOS-728: source/. run what the cat prints
+    `source <(cat <<'EOF'\nrm -rf /etc\nEOF\n)`,
+    `. <(cat <<'EOF'\nrm -rf /etc\nEOF\n)`,
+    `eval "$(cat <<'EOF'\nrm -rf /etc\nEOF\n)"`,
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "cat <<'A' > /tmp/x; bash <<'B'\nplain text\nA\nls\nB",
+    "cat <<'EOF' > /tmp/x\nplain text\nEOF",
   ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
   it("reads long hostile input in linear time", () => {
     const t = Date.now();
