@@ -1508,3 +1508,73 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     allows(["npm --node-options=--max-old-space-size=4096 run build"]);
   });
 });
+
+// BOS-721 (CEO decision on BOS-720 item 4): a program run by its own path, from a folder outside the checkout, is code the judge
+// hasn't read, so it gets no Allow whatever the file is called. Inside the checkout nothing changes. Before the change every
+// "denies" row here was Allow (runsUnreadFile only looked at scripts given to a named interpreter).
+describe("rules judge: a script run by its own path outside the checkout (BOS-721)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const mine = `${ws}/tickets/${own}`;
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+
+  describe("A. relative path after a cd outside the checkout", () => {
+    deny([
+      "cd /tmp/p && ./foo.js",
+      "cd /tmp/p && .yarn/releases/yarn-1.22.22.cjs install",
+      "cd /tmp/p && ./foo",
+      "cd /tmp/p; ./run.sh",
+      "(cd /tmp/p && ./foo.js)",
+      "pushd /tmp/p && ./foo",
+      "cd /tmp/p && env FOO=1 ./foo",
+      "cd /tmp/p && timeout 5 ./foo",
+      "cd /tmp/p && nice -n 5 ./foo",
+      "cd /tmp/p && env -i ./foo",
+      "cd /tmp/p && env -P /bin ./foo",
+      "cd /tmp/p && sudo -E ./foo",
+      "env -u X /tmp/x/run.sh",
+      "timeout -s KILL 5 /tmp/x/run.sh",
+      "cd /tmp/p && FOO=1 ./foo",
+      "cd /tmp/p && true || ./foo",
+      "cd /tmp/p && ls | ./foo",
+      "cd /tmp/p && \"./foo\"",
+      "cd /tmp/p\n./foo",
+      `cd ${ws}/tickets/11111111-2222-3333-4444-555555555555 && ./foo`,
+    ]);
+  });
+  describe("B. absolute or unknown path", () => {
+    deny([
+      "/tmp/x/run.sh",
+      "/tmp/x/run.sh --flag",
+      "env /tmp/x/run.sh",
+      "FOO=1 /tmp/x/run.sh",
+      "echo hi && /tmp/x/run.sh",
+      "/home/node/other/run.sh",
+      "../sibling/run.sh",
+      "./a/../../run.sh",
+      "$HOME/run.sh",
+      "~/run.sh",
+      `${ws}/tickets/11111111-2222-3333-4444-555555555555/run.sh`,
+      `${mine}/../other/run.sh`,
+    ]);
+  });
+  describe("C. inside the checkout nothing changes", () => {
+    allows([
+      "scripts/check-quick.sh",
+      "./scripts/check-quick.sh",
+      "./node_modules/.bin/vitest run packages/shared/test/permission-judge.test.ts",
+      `${mine}/scripts/check-quick.sh`,
+      `cd ${mine} && ./node_modules/.bin/vitest run x.test.ts`,
+      "cd packages/shared && ./node_modules/.bin/vitest run test/x.test.ts",
+      "env -i ./node_modules/.bin/vitest run x.test.ts",
+      "git status",
+      "/usr/bin/git status",
+      "/bin/ls -la",
+      "ls /tmp/p/run.sh",
+      "cat /tmp/x/run.sh",
+      "grep -r foo packages/shared/src/",
+    ]);
+  });
+});
