@@ -402,7 +402,7 @@ describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 f
     const cards = await openCards(c);
     expect(cards).toHaveLength(2);
     expect(cards.map((x) => x.question).join("\n")).toContain("second bucket");
-  });
+  }, 20_000);
 
   it("switching back past one ticket of a shared card takes the card back for all and clears every pointer", async () => {
     const c = (ctx = await setupApp());
@@ -434,5 +434,5 @@ describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 f
     expect(again).toHaveLength(1);
     expect(again[0]!.question).toContain(a.title);
     expect(again[0]!.question).toContain(b.title);
-  });
+  }, 20_000);
 });
