@@ -168,6 +168,14 @@ main() {
     *) die "Unknown option: $1" ;; esac; shift; done
 
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
+  # BOS-69: this script builds and starts production's images and project. In a staging folder it would start a launcher
+  # that manages production's runners, so it refuses; use scripts/deploy-staging.sh there.
+  local proj stack
+  proj="${COMPOSE_PROJECT_NAME:-$(grep -s '^COMPOSE_PROJECT_NAME=' .env | tail -1 | cut -d= -f2- || true)}"
+  stack="${BOSSMAN_STACK:-$(grep -s '^BOSSMAN_STACK=' .env | tail -1 | cut -d= -f2- || true)}"
+  if [[ -n $stack || ( -n $proj && $proj != boss-man ) ]]; then
+    die "This folder is not the production install (project '${proj:-boss-man}', stack '${stack:-none}'). deploy.sh only handles production; for staging use scripts/deploy-staging.sh."
+  fi
   # With blue/green the server is two colours behind a proxy; this script knows only the single server. Swaps are the host deployer's job.
   local cf="${COMPOSE_FILE:-$(grep -s '^COMPOSE_FILE=' .env | tail -1 | cut -d= -f2- || true)}"
   if [[ $cf == *truenas-bluegreen.yml* ]] && ((! DRY)); then

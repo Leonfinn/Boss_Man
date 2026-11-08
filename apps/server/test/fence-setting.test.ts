@@ -63,6 +63,27 @@ describe("the fence setting (BOS-325)", () => {
     expect((await c.req("GET", "/api/companies")).json()[0]).toMatchObject({ fenceMode: "off" });
   });
 
+  it("refuses watch on a runner that reported it can't fence, and keeps a saved mode (BOS-555)", async () => {
+    const c = (ctx = await setup(["fence"]));
+    const report = (level: "full" | "partial" | "unavailable") => c.runners.recordSandbox(c.runnerRow.id, { landlockAbi: level === "unavailable" ? 1 : level === "partial" ? 4 : 6, errno: null, level, missing: [], userns: false, probe: null }, new Date());
+    // Saved while the host could fence; the host then loses Landlock (a kernel downgrade, a new profile).
+    await report("full");
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "watch" })).statusCode).toBe(200);
+    await report("unavailable");
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { name: "Renamed Co" })).statusCode).toBe(200);
+    expect((await c.req("GET", "/api/companies")).json()[0]).toMatchObject({ fenceMode: "watch" });
+    // Off stays allowed; switching back to watch is refused with the per-host fix.
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "off" })).statusCode).toBe(200);
+    const r = await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "watch" });
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toMatchObject({ error: "fence_unavailable" });
+    expect(r.json().message).toMatch(/Watch would do nothing.*5\.19/);
+    expect((await c.req("GET", "/api/companies")).json()[0]).toMatchObject({ fenceMode: "off" });
+    // A partial host may watch.
+    await report("partial");
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "watch" })).statusCode).toBe(200);
+  });
+
   it("logs a fenced run's kernel refusal and nothing for an ordinary failed call", async () => {
     const c = (ctx = await setup(["fence"]));
     await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "watch" });

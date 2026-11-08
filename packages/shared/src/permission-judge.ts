@@ -50,7 +50,9 @@ const SHELL_ALT = SHELL_NAMES.split(" ").sort((a, b) => b.length - a.length).joi
  * Tools that create, move or delete a file named by their arguments (BOS-715). Given a target the judge can't place, or
  * reading their targets from `xargs` input, they are unread code. `shred` overwrites in place, so it counts as a delete.
  */
-const FILE_TOOLS = new Set("rm rmdir shred unlink cp mv ln install touch truncate tee mkdir mkfifo mknod".split(" "));
+/** Programs that may run under `xargs` / `parallel` and still get Allow: they only read (BOS-730). */
+const XARGS_READONLY = new Set("echo printf cat grep egrep fgrep rg wc ls head tail uniq basename dirname stat file diff cmp md5sum sha256sum".split(" "));
+const FILE_TOOLS =new Set("rm rmdir shred unlink cp mv ln install touch truncate tee mkdir mkfifo mknod".split(" "));
 
 /**
  * One work budget for the whole `-c` scan of a command, shared by every nesting level (BOS-715, Dougal's timing finding): each
@@ -254,13 +256,29 @@ export function judgePermission(question: string, command: string | null, ownFol
     // One greedy, non-overlapping capture per tool keeps the scan linear (BOS-729: re-slicing the rest of the line for every
     // match was O(n²)). `xargs` appends its input to the command, so a file tool under it deletes or overwrites names the judge
     // never sees (`echo /etc | xargs rm -rf`, `find / | xargs shred`): no Allow.
-    for (const m of c.matchAll(/\b(?:rm|rmdir|cp|mv|install|ln|shred|unlink|xargs)\b([^;&|\n]*)/g)) {
+    for (const m of c.matchAll(/\b(?:rm|rmdir|cp|mv|install|ln|shred|unlink)\b([^;&|\n]*)/g)) {
       const rest = m[1]!;
       if (/<\(/.test(rest)) return result("outside"); // a process substitution is a path the judge can't place
       if (hasBraceExpansion(rest)) return result("outside"); // `rm -rf /tmp/a {/etc,/tmp/b}` is several paths (BOS-725)
-      const words = shellWords(rest);
-      if (m[0].startsWith("xargs") && words.some((w) => FILE_TOOLS.has(w.replace(/^.*\//, "")))) return result("outside");
-      for (const tok of words) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
+      for (const tok of shellWords(rest)) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
+    }
+    // `xargs` / `parallel` get their own pass, so an earlier file-tool word can't swallow them (`echo / | env -u rm xargs rm -rf`,
+    // BOS-730). The program they run is the first word that is not an option or an option's value; only a short read-only list
+    // may follow (anything else, `perl`, `find -delete`, `env`, `nice`, `rm`, can delete names the judge never sees). Any file
+    // tool word anywhere after them also counts. Fail closed: a word the scan misreads as the program is not on the list.
+    for (const m of c.matchAll(/\b(?:xargs|parallel)\b([^;&|\n]*)/g)) {
+      const words = shellWords(m[1]!);
+      if (words.some((w) => FILE_TOOLS.has(w.replace(/^.*\//, "")))) return result("outside");
+      let prog: string | undefined;
+      for (let i = 0; i < words.length; i++) {
+        const w = words[i]!;
+        if (w === "" || w === ":::" || w === "::::") continue;
+        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJN]$|^--(?:max-args|replace|delimiter|max-procs|max-lines|eof|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
+        prog = w.replace(/^.*\//, "");
+        break;
+      }
+      // No program found: xargs then runs echo, but a bare `parallel` runs each input line as a command (BOS-731).
+      if (prog === undefined ? m[0].startsWith("parallel") : !XARGS_READONLY.has(prog)) return result("outside");
     }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
@@ -821,6 +839,34 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
  * system binaries one level under /bin, /usr/bin, /usr/local/bin, /sbin, /usr/sbin (the image's own tools, not agent-writable).
  * Linear: one pass over the shell words of each segment.
  */
+/**
+ * Programs `xargs`/`parallel` may start and still get Allow (BOS-744). They read their names as plain data and never run
+ * code or write by themselves, so a value mistaken for one of them cannot hide a different program. A file tool reads its
+ * targets from the runner's input, so it is never listed; neither is an interpreter or any other program.
+ */
+const XARGS_PROGRAM_SAFE = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf test du df cut tr " +
+  "jq md5sum sha256sum sha1sum realpath dirname basename readlink sort uniq od xxd hexdump column nl tree true false sleep date").split(" "));
+// Options of `xargs`/`parallel` the scan fully understands: short letters that are bare vs take a value, and long names the
+// same way. Any other option gives no Allow: it may take the next word as its value, and that value is not the program
+// (`xargs --process-slot-var echo perl` runs perl, not echo; BOS-744). A list of value options always misses some, so an
+// unknown one fails closed instead of guessing.
+const XARGS_OPTS: Record<string, { bare: string; value: string; bareLong: string[]; valueLong: string[] }> = {
+  xargs: {
+    bare: "0rtpxei",
+    value: "EILPdnsa",
+    bareLong: ["--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit", "--show-limits", "--open-tty", "--help", "--version"],
+    valueLong: ["--eof", "--replace", "--max-lines", "--max-procs", "--delimiter", "--max-args", "--max-chars", "--arg-file", "--process-slot-var"],
+  },
+  parallel: {
+    bare: "kqtsX",
+    value: "jS",
+    bareLong: ["--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--serial", "--interactive", "--help", "--version"],
+    valueLong: ["--workdir", "--env", "--tmpdir", "--halt", "--delay", "--timeout", "--basefile", "--transfer-file", "--joblog", "--sshlogin",
+      "--sshloginfile", "--results", "--colsep", "--rpl", "--max-args", "--max-lines", "--max-procs", "--max-chars", "--number-of-cpus", "--load",
+      "--memfree", "--nice", "--tag", "--block", "--recstart", "--recend", "--pipepart", "--unbuffer", "--template"],
+  },
+};
+
 function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk = true): boolean {
   let relOk = startRelOk;
   let relCd = false;
@@ -831,7 +877,7 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
   }
   // BOS-722: a relative `cd` may follow a symlink the same command made (`ln -s /tmp/p l && cd l`), so it is outside.
   if (relCd && /(?:^|[;&|(\n{]\s*|\b(?:then|do|else)\s+)(?:\S*\/)?ln(?=\s)/.test(c)) relOk = false;
-  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
+  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|parallel|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
   // Wrappers whose first plain words are not the command (`flock l ./foo`, `taskset 1 ./foo`, `chroot dir ./foo`).
   const positional: Record<string, number> = { flock: 1, taskset: 1, chrt: 1, chroot: 1 };
   // Wrappers that run the string after `-c` / `--command` (`flock -c ./foo l`, `script -qc ./foo`) as a shell command.
@@ -871,21 +917,50 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
     let cmdNext = false;
     let lead = "";
     let pos = 0;
+    let xargsOptionsDone = false;
+    // Classify one option of `xargs`/`parallel`: "value" takes the next word, "bare" takes none, "unknown" may take either.
+    const classify = (w: string, s: { bare: string; value: string; bareLong: string[]; valueLong: string[] }): "bare" | "value" | "unknown" => {
+      if (w.startsWith("--")) {
+        const name = w.replace(/=.*$/s, "");
+        if (name !== w) return s.valueLong.includes(name) || s.bareLong.includes(name) ? "bare" : "unknown"; // value attached
+        if (s.valueLong.includes(name)) return "value";
+        if (s.bareLong.includes(name)) return "bare";
+        return "unknown";
+      }
+      for (let k = 1; k < w.length; k++) {
+        const ch = w[k]!;
+        if (s.value.includes(ch)) return k === w.length - 1 ? "value" : "bare"; // an attached value ends the word
+        if (!s.bare.includes(ch)) return "unknown";
+      }
+      return "bare";
+    };
     for (const w of words) {
       if (cmdNext) { if (runsByPathOutside(w, inOwn, relOk)) return true; break; }
       if (skipNext) { skipNext = false; continue; }
       // A system binary that runs its argument counts as that wrapper (`/usr/bin/env ./foo`).
       const base = sysBin.test(w) ? w.replace(/^.*\//, "") : w;
       // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
-      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; continue; }
+      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; xargsOptionsDone = false; continue; }
+      const xopts = lead === "xargs" || lead === "parallel" ? XARGS_OPTS[lead] : null;
       if (/^-/.test(w)) {
         if (cmdOpt.test(lead) && /^-[A-Za-z]*c$|^--command$/.test(w)) cmdNext = true;
         else if (cmdOpt.test(lead) && /^--command=/.test(w)) { if (runsByPathOutside(w.slice(10), inOwn, relOk)) return true; }
-        else if (takesValue[lead]?.test(w)) skipNext = true;
+        else if (xopts && !xargsOptionsDone) {
+          // `--` ends options; the next word is the program. Any option the scan doesn't know gives no Allow (BOS-744).
+          if (w === "--") xargsOptionsDone = true;
+          else {
+            const k = classify(w, xopts);
+            if (k === "unknown") return true;
+            if (k === "value") skipNext = true;
+          }
+        } else if (takesValue[lead]?.test(w)) skipNext = true;
         continue;
       }
       if (pos > 0) { pos--; continue; }
       if (/^\w+=/.test(w) || /^\d+[smhd]?$/.test(w)) continue;
+      // Under `xargs`/`parallel` the first plain word is the program, and only a known-safe reader may be it: otherwise the
+      // value of an option was read as the program in an earlier scan, and the real program got Allow (BOS-744).
+      if (xopts && !XARGS_PROGRAM_SAFE.has(base)) return true;
       if (bad(w)) return true;
       break; // the first real command word of the segment
     }
@@ -2020,7 +2095,9 @@ function dropCatHeredocBodies(text: string, original: string): string {
       if (drop && q === "" && /\$\(|\x60/.test(body.join("\n"))) drop = false;
       if (drop) {
         const rest = line.slice(segStart);
-        if (/[<>]\(/.test(rest)) drop = false;
+        // A process substitution is found from the `<<` on, not only as `>(`/`<(` after a space: `tee <<'EOF' >(bash)` and
+        // `> >(bash)` put a separate `>` before the `(`, and `>>(bash)` glues it on, so neither matched (BOS-744).
+        if (/[<>]\(/.test(rest.slice(k - segStart))) drop = false;
         else {
           const stages = rest.split(/(?<!\|)\|(?!\|)&?/).slice(1);
           if (stages.some((s) => !HEREDOC_SINK_SAFE.has(/^[ \t]*([\w.-]+)/.exec(s)?.[1] ?? ""))) drop = false;

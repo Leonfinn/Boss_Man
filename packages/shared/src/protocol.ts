@@ -23,7 +23,7 @@ export const SandboxReport = z.object({
   errno: z.string().max(200).nullable(),
   level: z.enum(["full", "partial", "unavailable"]),
   missing: z.array(z.string().max(100)).max(10),
-  /** Unprivileged user namespaces (what bubblewrap needs); for information only. */
+  /** Unprivileged user namespaces (what bubblewrap needs); for information only: nothing uses them, and runs are kept apart by Landlock, not namespaces (BOS-555). */
   userns: z.boolean(),
   probe: z.boolean().nullable(),
 });

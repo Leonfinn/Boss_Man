@@ -41,6 +41,7 @@ import { serverHealthService, type ServerHealth, type ServerHealthDeps } from ".
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
+import { netguardAllowReport } from "./services/netguard-allow.js";
 import { deviceProfilesService } from "./services/device-profiles.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -298,6 +299,7 @@ export async function buildApp(opts: AppOptions) {
   const releaseLog = releaseLogService(db, {
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     notify: (agentId, input) => scheduler.notify(agentId, input),
+    notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
@@ -437,8 +439,15 @@ export async function buildApp(opts: AppOptions) {
       log: (line) => app.log.warn({ memoryJump: line }, "memory jump"),
     },
   });
+  // BOS-770: the owner's BOSSMAN_NETGUARD_ALLOW entries; null when neither the launcher nor the host has anything to say.
+  const netguardAllow = async () => {
+    const [launcher, env] = await Promise.all([launch.netguardConfig(), hostFacts.netguardEnv().catch(() => null)]);
+    if (!launcher && !env) return null;
+    return netguardAllowReport({ launcher, env, ...(await launch.ownAllows()) });
+  };
   const serverStatus = serverStatusService(db, {
     memory,
+    netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
@@ -1058,6 +1067,10 @@ export async function buildApp(opts: AppOptions) {
       if (b.fenceMode && b.fenceMode !== "off") {
         const [r] = await db.select({ id: runnersTable.id, sandbox: runnersTable.sandbox }).from(runnersTable).where(eq(runnersTable.companyId, id));
         if (b.fenceMode === "enforce" && r?.sandbox?.level !== "full" && r?.sandbox?.level !== "partial") return reply.code(400).send({ error: "fence_unavailable", message: "This company's runner can't fence agents, so enforce can't be switched on." });
+        // Watch on a host that reported it can't fence would be saved and then do nothing (BOS-555 G2):
+        // refuse it, as enforce is. A runner that hasn't reported yet is let through; a saved mode is never changed here.
+        if (b.fenceMode === "watch" && r?.sandbox?.level === "unavailable")
+          return reply.code(400).send({ error: "fence_unavailable", message: "This company's runner can't fence agents (its kernel has no usable Landlock, or the container blocks it), so Watch would do nothing. Update the host's kernel to 5.19 or newer, or let the container use Landlock, then restart the runner." });
       }
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
@@ -1262,6 +1275,8 @@ export async function buildApp(opts: AppOptions) {
     owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
     owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS] }));
+    // BOS-770: Settings → Server and runner. The .env network-guard allow entries and which ones Boss Man already covers. Read only.
+    owner.get("/api/netguard-allow", async () => ({ report: await netguardAllow().catch(() => null) }));
     owner.put("/api/host-facts", async (req, reply) => {
       const body = z.object({ key: z.string(), value: z.string() }).parse(req.body);
       try {
