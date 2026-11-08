@@ -285,6 +285,13 @@ describe("R6: the server's name comes from the host report, never a remembered o
     expect(r.error).toMatch(/host deployer hasn't reported a name yet/);
   });
 
+  it("fills the reported name into a block that names the account but leaves the host out (BOS-774 item 2)", () => {
+    const noLabel = "Look at the install folder:\n\n```sh as=\"root\"\nls -ld /srv/bm\n```";
+    const ok = checkAsk({ triedFirst: TRIED, steps: [noLabel], hosts: HOSTS, serverHost: "Docker01" });
+    expect(ok.error).toBeNull();
+    expect(ok.steps?.[0]).toContain('host="Docker01" as="root"');
+  });
+
   it("lets a CEO-raised card name the one host it is setting up (newHost), saying that host isn't known yet (DR-046)", () => {
     const steps = [step("Look at the new machine: this prints nothing.", sh("df -h", { host: "Proxmox01", as: "root" }))];
     const r = checkAsk({ triedFirst: TRIED, steps, hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01", byCeo: true });
