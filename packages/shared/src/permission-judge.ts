@@ -197,7 +197,7 @@ export function judgePermission(question: string, command: string | null, ownFol
     // An unresolved substitution or variable given to a file tool (`rm -rf $(curl ...)`, `cp $(cat /tmp/l) d`) is a target
     // the judge can't place, so it gets no Allow.
     for (const m of c.matchAll(/\b(?:rm|cp|mv|install|ln)\b([^;&|\n]*)/g)) {
-      for (const tok of shellWords(m[1]!)) if (!tok.startsWith("-") && tok !== "" && /\$\(|\x60|\$\{?[A-Za-z_]/.test(tok)) return result("outside");
+      for (const tok of shellWords(m[1]!)) if (!tok.startsWith("-") && tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
     }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
@@ -294,6 +294,28 @@ function shellWords(s: string): string[] {
 }
 
 /**
+ * The escapes bash decodes inside `$'...'` (ANSI-C quoting): `\xHH`, `\NNN`, `\uHHHH`, `\UHHHHHHHH`, the single-letter
+ * escapes (`\n`, `\t`, ...) and a backslash before anything else, which bash leaves in place. `\cX` follows bash in stopping
+ * the rest of the string; here the two characters are kept so a caller that only wants the word's shape still sees them.
+ */
+function decodeAnsiC(s: string): string {
+  const simple: Record<string, string> = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch !== "\\" || i + 1 >= s.length) { out += ch; continue; }
+    const n = s[i + 1]!;
+    if (n in simple) { out += simple[n]!; i++; continue; }
+    if (/[0-7]/.test(n)) { let m = s.slice(i + 1, i + 4); m = m.slice(0, m.match(/^[0-7]+/)![0].length); out += String.fromCharCode(parseInt(m, 8) & 0xff); i += m.length; continue; }
+    if (n === "x") { const m = (s.slice(i + 2).match(/^[0-9a-fA-F]{1,2}/) ?? [""])[0]; out += m ? String.fromCharCode(parseInt(m, 16)) : "\\x"; i += 1 + m.length; continue; }
+    if (n === "u" || n === "U") { const len = n === "u" ? 4 : 8; const m = (s.slice(i + 2).match(new RegExp(`^[0-9a-fA-F]{1,${len}}`)) ?? [""])[0]; if (m) { out += String.fromCodePoint(parseInt(m, 16)); i += 1 + m.length; } else { out += "\\" + n; i++; } continue; }
+    if (n === "c") { out += s.slice(i + 2); break; }
+    out += "\\" + n; i++;
+  }
+  return out;
+}
+
+/**
  * Bash's quote removal for one word: `"..."`, `'...'`, `$'...'` and backslash escapes all go. Returns null when the word
  * holds a substitution (`$(`, a backtick) or a variable the judge can't resolve, so its value is not a plain literal.
  */
@@ -305,7 +327,7 @@ function dequoteWord(w: string): string | null {
     if (ch === "$" && w[i + 1] === "'") {
       const e = w.indexOf("'", i + 2);
       if (e < 0) return null;
-      out += w.slice(i + 2, e).replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+      out += decodeAnsiC(w.slice(i + 2, e));
       i = e;
       continue;
     }
@@ -327,14 +349,47 @@ function dequoteWord(w: string): string | null {
  * Drops the quoting from a word that a shell reads as a flag (`rm "-rf" /`, `rm -"r"f /`, `rm $'-rf' /`, `rm \-rf /` are
  * all `rm -rf /`). Only a balanced word whose dequoted form starts with `-` is rewritten, and only when it holds no
  * substitution or variable; anything else is left for the other checks. Each flag word keeps its place among the others.
+ *
+ * A word starts at the beginning of the string or after a space, `;`, `&`, `|` or `(`, and ends at the end of the string or
+ * before a space, `;`, `&`, `|` or `)`. The scan is linear (BOS-697): an overlapping regex here backtracked exponentially on
+ * a run of backslash-escaped or `$'...'` atoms that never closes, and the server runs the judge synchronously.
  */
 function unquoteFlags(s: string): string {
-  return s.replace(/(^|[\s;&|(])((?:\$?'[^']*'|"[^"]*"|\\[^\s]|[^\s;&|()"'])+)(?=$|[\s;&|)])/g, (all, pre: string, w: string) => {
-    if (!/["'\\]/.test(w)) return all; // no quoting to remove
-    const d = dequoteWord(w);
+  // A word character is anything but whitespace, a shell word separator (`;`, `&`, `|`, `(`, `)`) or a quote; a quote
+  // opens a quoted piece of the current word, so it is read together with the word.
+  const separator = (ch: string): boolean => /[\s;&|()]/.test(ch);
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i]!;
+    // Copy a separator or whitespace as it is; a quote begins a word.
+    if (ch !== "'" && ch !== '"' && separator(ch)) { out += ch; i++; continue; }
+    // Read one word: a run of plain characters and quoted/escaped pieces, stopping at a separator.
+    const start = i;
+    while (i < s.length) {
+      const c = s[i]!;
+      if (c === "'") { const e = s.indexOf("'", i + 1); i = e < 0 ? s.length : e + 1; continue; }
+      if (c === '"') { let j = i + 1; while (j < s.length && s[j] !== '"') { if (s[j] === "\\" && j + 1 < s.length) j++; j++; } i = j < s.length ? j + 1 : s.length; continue; }
+      if (c === "\\" && i + 1 < s.length) { i += 2; continue; }
+      if (separator(c)) break;
+      i++;
+    }
+    const w = s.slice(start, i);
+    const d = /["'\\]/.test(w) ? dequoteWord(w) : null; // no quoting to remove: keep the word as it is
     // Only a plain option word is rewritten: a value with a space or a shell metacharacter stays quoted.
-    return d !== null && d.startsWith("-") && !/[\s;&|()<>"'\x60$]/.test(d) ? pre + d : all;
-  });
+    out += d !== null && d.startsWith("-") && !/[\s;&|()<>"'\x60$]/.test(d) ? d : w;
+  }
+  return out;
+}
+
+/**
+ * True when a word holds a shell expansion that can carry text the judge can't read: a substitution (`$(`, a backtick), a
+ * named variable (any `$name` or `${...}`), a positional parameter (`$0`-`$9`), or `$@` / `$*`. Plain data and status
+ * expansions are not counted: `$'...'` is a literal after quote removal, and `$?`, `$#`, `$$`, `$!`, `$-` are numbers or
+ * flags that can never hold a command string (BOS-697 round 2).
+ */
+function hasUnresolvedExpansion(w: string): boolean {
+  return w.includes("\x60") || /\$(?!['?#$!-])/.test(w);
 }
 
 /** True when the arguments of one git command (words after `git`) are not on the allow-list. `dirOk` places a folder git is pointed at. */
@@ -895,7 +950,7 @@ function shellDashCOpaque(c: string): boolean {
     const at = words.findIndex((w) => /^[-+][A-Za-z]*c/.test(w));
     if (at < 0) continue;
     const { word, ok } = shellDashCString(words.slice(at + 1));
-    if (ok === false || (word !== "" && /\$\(|\x60|\$\{?[A-Za-z_]/.test(word))) return true;
+    if (ok === false || (word !== "" && hasUnresolvedExpansion(word))) return true;
   }
   return false;
 }
