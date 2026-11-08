@@ -251,6 +251,63 @@ describe("R6: the server's name comes from the host report, never a remembered o
     const two = [{ name: "Docker01", ownership: [] }, { name: "nas01", ownership: [{ path: "/mnt/backups", owner: "root", group: "root", mode: "700" }] }];
     expect(lintOwnerSteps([step("List it:", sh("ls /mnt/backups", { host: "nas01", as: "root" }))], { hosts: two, serverHost: "Docker01" }).refuse.filter((x) => x.rule === "R6")).toEqual([]);
   });
+
+  it("refuses a wrong server name on any step, not only the first (DR-046)", () => {
+    // Brian's card: the old name was step 5 and said nothing. Now a later step is refused like the first.
+    const steps = [
+      step("Look first:", sh("df -h", { host: "Docker01", as: "root" })),
+      step("Then list:", sh("docker ps", { host: "truenas", as: "root" })),
+    ];
+    const f = one(steps, "Docker01").refuse.filter((x) => x.rule === "R6");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.step).toBe(2);
+    expect(f[0]!.problem).toMatch(/runs on "truenas", but Boss Man runs on "Docker01"/);
+  });
+
+  it("checks as=\"login\" the same way as as=\"root\" (DR-046)", () => {
+    const f = one([step("List:", sh("docker ps", { host: "truenas", as: "login" }))], "Docker01").refuse.filter((x) => x.rule === "R6");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.problem).toMatch(/runs on "truenas", but Boss Man runs on "Docker01"/);
+  });
+
+  // `step` refuses a `{{host}}` fence line (it only accepts a plain name), so the token cases are written out.
+  const tokenStep = "Look at the install folder:\n\n```sh host=\"{{host}}\" as=\"root\"\nls -ld /srv/bm\n```";
+
+  it("fills host=\"{{host}}\" with the reported name (DR-046)", () => {
+    // checkAsk fills the token from the report before the lint, so host="{{host}}" is the server's own name.
+    const ok = checkAsk({ triedFirst: TRIED, steps: [tokenStep], hosts: HOSTS, serverHost: "Docker01" });
+    expect(ok.error).toBeNull();
+    expect(ok.steps?.[0]).toContain('host="Docker01"');
+  });
+
+  it("refuses host=\"{{host}}\" with a plain message when Boss Man has no host report (DR-046)", () => {
+    const r = checkAsk({ triedFirst: TRIED, steps: [tokenStep], hosts: HOSTS, serverHost: null });
+    expect(r.error).toMatch(/host deployer hasn't reported a name yet/);
+  });
+
+  it("lets a CEO-raised card name the one host it is setting up (newHost), saying that host isn't known yet (DR-046)", () => {
+    const steps = [step("Look at the new machine: this prints nothing.", sh("df -h", { host: "Proxmox01", as: "root" }))];
+    const r = checkAsk({ triedFirst: TRIED, steps, hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01", byCeo: true });
+    expect(r.error).toBeNull();
+    expect(r.lint?.warn.some((w) => /isn't known to Boss Man yet/.test(w.problem))).toBe(true);
+  });
+
+  it("refuses newHost from anyone but the CEO (DR-046)", () => {
+    const steps = [step("Look at the new machine: this prints nothing.", sh("df -h", { host: "Proxmox01", as: "root" }))];
+    const r = checkAsk({ triedFirst: TRIED, steps, hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01", byCeo: false });
+    expect(r.error).toMatch(/Only the CEO can pass newHost/);
+  });
+
+  it("refuses a name other than newHost on a new-host card (DR-046)", () => {
+    // newHost may excuse exactly one unrecorded name; a different wrong name on the same card is still refused.
+    const steps = [
+      step("Look at the new machine: this prints nothing.", sh("df -h", { host: "Proxmox01", as: "root" })),
+      step("Then on the old one:", sh("docker ps", { host: "truenas", as: "root" })),
+    ];
+    const f = lintOwnerSteps(steps, { hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01" }).refuse.filter((x) => x.rule === "R6");
+    expect(f.map((x) => x.step)).toEqual([2]);
+    expect(f[0]!.problem).toMatch(/runs on "truenas", but Boss Man runs on "Docker01"/);
+  });
 });
 
 describe("R14: git that writes the checkout runs in a (umask 022 && …) subshell (DR-028, the 6 Nov outage)", () => {
