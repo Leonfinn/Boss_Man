@@ -231,7 +231,7 @@ export function judgePermission(question: string, command: string | null, ownFol
     for (const m of c.matchAll(/\bcd\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/g)) if (own && m[1] !== own) return result("outside");
     // Every target a delete tool names must be in /tmp or the checkout, not only the first: `rm -rf /tmp/a /etc` is as bad
     // as `rm -rf /etc` (BOS-715). The text is already dequoted, so `$'/etc'`, `\/etc` and `/e"tc"` read as `/etc`.
-    for (const m of c.matchAll(/(?:\brm\b|rmSync\(|rmtree\(|unlinkSync\()([^;&|\n]*)/g)) {
+    for (const m of c.matchAll(/(?:\b(?:rm|shred)\b|rmSync\(|rmtree\(|unlinkSync\()([^;&|\n]*)/g)) {
       for (const tok of shellWords(m[1]!)) {
         if (tok === "" || tok.startsWith("-")) continue;
         const p = tok.replace(/^['"]|['"]$/g, "");
@@ -245,10 +245,15 @@ export function judgePermission(question: string, command: string | null, ownFol
     // An unresolved substitution or variable given to a file tool (`rm -rf $(curl ...)`, `cp $(cat /tmp/l) d`) is a target
     // the judge can't place, so it gets no Allow. `shred` and any file tool under `xargs` read their targets the same way, and a
     // substitution glued to a dash (`rm -$(cat /tmp/x)`) is unseen unless the dash word is tested too (BOS-715).
-    for (const m of c.matchAll(/\b(?:rm|cp|mv|install|ln|shred)\b|\bxargs\b([^;&|\n]*)/g)) {
-      const rest = m[1] ?? c.slice(m.index! + m[0].length).split(/[;&|\n]/)[0]!;
+    // One greedy, non-overlapping capture per tool keeps the scan linear (BOS-729: re-slicing the rest of the line for every
+    // match was O(n²)). `xargs` appends its input to the command, so a file tool under it deletes or overwrites names the judge
+    // never sees (`echo /etc | xargs rm -rf`, `find / | xargs shred`): no Allow.
+    for (const m of c.matchAll(/\b(?:rm|cp|mv|install|ln|shred|xargs)\b([^;&|\n]*)/g)) {
+      const rest = m[1]!;
       if (/<\(/.test(rest)) return result("outside"); // a process substitution is a path the judge can't place
-      for (const tok of shellWords(rest)) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
+      const words = shellWords(rest);
+      if (m[0].startsWith("xargs") && words.some((w) => FILE_TOOLS.has(w.replace(/^.*\//, "")))) return result("outside");
+      for (const tok of words) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
     }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.

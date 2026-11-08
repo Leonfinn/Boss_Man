@@ -1824,3 +1824,24 @@ describe("rules judge: a lone + inside find -exec (BOS-724)", () => {
     expect(judge("cd /tmp/p && find . -exec ls {} + ./foo").verdict).toBe("allow");
   });
 });
+
+// BOS-729 (Jane's round-2 review of BOS-715): the file-tool scan is linear, `shred` is a delete for the target-scope check,
+// and a file tool under `xargs` reads names the judge can't place. Every Deny row got Allow before this fix.
+describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-729)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    "shred -u /etc/passwd",
+    "shred /etc/hosts",
+    "echo /etc | xargs rm -rf",
+    "find / -name '*.conf' | xargs rm -f",
+    "ls ~ | xargs rm -rf",
+    "echo / | xargs shred",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each(["shred -u /tmp/a", "rm -rf /tmp/a /tmp/b"])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  it.each(["rm ".repeat(3333), "cp a ".repeat(2000), "shred ".repeat(1666)])("stays fast on a 10,000-char line", (cmd) => {
+    const t = performance.now();
+    judge(cmd);
+    expect(performance.now() - t).toBeLessThan(150);
+  });
+});
