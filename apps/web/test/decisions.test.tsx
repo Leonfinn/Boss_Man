@@ -244,9 +244,19 @@ describe("decision queue", () => {
 
   it("says how long ago a card was raised, not 'just now', once it is minutes old (BOS-804)", () => {
     const eightMin = new Date(Date.now() - 8 * 60_000).toISOString();
-    render(<Decisions decisions={[decision({ createdAt: eightMin })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    // The server sends the age as a rank reason too ("Raised just now" under an hour): the card must not
+    // repeat it beside the "8 min ago" label, or it contradicts itself.
+    render(<Decisions decisions={[decision({ createdAt: eightMin, reasons: ["Raised just now"] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByText("8 min ago")).toBeTruthy();
     expect(screen.queryByText("just now")).toBeNull();
+  });
+
+  it("drops the rank's age reason but keeps the others (BOS-804)", () => {
+    const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    render(<Decisions decisions={[decision({ createdAt: hours, reasons: ["Waiting 3 h", "Blocks 1 ticket"] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("3h ago")).toBeTruthy();
+    expect(screen.queryByText("Waiting 3 h")).toBeNull();
+    expect(screen.getByText("Blocks 1 ticket")).toBeTruthy();
   });
 
   it("shows the age in hours and days as the card gets older (BOS-804)", () => {

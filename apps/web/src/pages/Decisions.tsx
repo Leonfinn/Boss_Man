@@ -334,6 +334,12 @@ function raisedAgo(iso: string, now = Date.now()) {
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
 }
 
+/** The rank's age reason ("Raised just now", "Waiting 3 h", "Waiting 2 days"). The "Raised" line shows
+ * the age in the Plan page's words now, so repeating it here contradicts it ("Raised 8 min ago · Raised
+ * just now") and tells the owner nothing new (BOS-804). */
+const AGE_REASON = /^(Raised just now|Waiting \d+ (h|days?))$/;
+const otherReasons = (reasons: string[]) => reasons.filter((r) => !AGE_REASON.test(r));
+
 /** Current vs proposed harness, provider, model and paid from on a model-change card (BOS-128). */
 function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Decision; editing: boolean; onEdit: () => void; onCancel: () => void; onSubmit: (config: ModelConfigView) => void; busy: boolean }) {
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 60_000, `model-change-sources-${d.id}`);
@@ -963,7 +969,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       )}
                       <span>Raised <time dateTime={d.createdAt} title={when(d.createdAt)}>{raisedAgo(d.createdAt)}</time></span>
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
-                      {d.reasons.map((r) => (
+                      {otherReasons(d.reasons).map((r) => (
                         <span key={r}>{r}</span>
                       ))}
                     </div>
