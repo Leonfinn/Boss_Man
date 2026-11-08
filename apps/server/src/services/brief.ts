@@ -38,8 +38,10 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     return ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}${stale ? " (may be out of date: the owner acted after it, so check before repeating it)" : ""}`;
   };
   /** The owner's recorded screens (BOS-641): a layout ticket that names one is checked at its
-   * measured figures, in a rendering test, not by reading the CSS. Just the facts, one line each. */
-  const deviceLines = async () => {
+   * measured figures, in a rendering test, not by reading the CSS. Just the facts, one line each.
+   * Skipped when the agent has no open ticket, since only a ticket can be a layout ticket. */
+  const deviceLines = async (hasTicket: boolean) => {
+    if (!hasTicket) return [];
     const rows = await db.select().from(deviceProfiles).orderBy(desc(deviceProfiles.reportedAt));
     return rows
       .map((r) => ({ label: r.label, browser: r.browser, readings: r.readings }))
@@ -151,7 +153,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const relevant = [...new Set([...ids, ...deps.flatMap((d) => [d.blocked, d.blocker])])].filter((x): x is string => !!x);
     body = [
       ...section("My open tickets", capped(myLines, 5)),
-      ...section("Your devices (layout tickets: check at these, not a guessed size)", capped(await deviceLines(), 3)),
+      ...section("Your devices (layout tickets: check at these, not a guessed size)", capped(await deviceLines(mine.length > 0), 3)),
       ...section("Open decisions on my tickets", capped(asked.map((d) => `- "${one(d.question, 120)}" (recommended: ${one(d.recommendedOption, 80)})`), 3)),
       ...section("Changed since my last run", capped((await changes(relevant)).map(changeLine), 10)),
       ...section("In flight elsewhere", capped(await flightLines(), 8)),

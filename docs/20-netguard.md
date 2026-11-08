@@ -14,11 +14,11 @@ A runner container can no longer reach private networks. Agents run shell comman
 - **Git hosts stay reachable.** Each project's repo address (`projects.repoUrl`) gives a host:port (http 80, https 443, ssh 22 or the port in the address) that goes in the same allow file, so a company's runner can clone from its own LAN git server. Only that host and port open, only for that company; changing the repo address or archiving the project updates the list within 15 s, no restart. Nothing is hardcoded. Only the owner can set a repo address, and whatever host:port it names (even an internal service) opens to that company's runner, so set it only to the real git server. Entries the launcher would refuse (an underscore in the host, port 0, IPv6 literals) are left out so one odd address can't break the company's list. When the server starts it sends every runner its list once, so a deploy needs no reconnect.
 - **No guard, no runner (by default).** The launcher waits until the guard's rules are loaded (its healthcheck) before it counts a runner as guarded. If the guard can't start, the launcher removes the runner it just made and reports the error.
 - **Hosts that can't run it.** If this host can't load nftables rules (some Proxmox LXC containers, kernels without nf_tables), a probe table can't be created and the guard stops with exit code 3 (only then) and says so in `docker logs boss-man-netguard-<slug>`. `BOSSMAN_NETGUARD` then decides: `auto` (default) means **no guard on hosts without nftables**: it keeps the runner running unprotected and shows `guard: "unavailable"` in the launcher's runner list and a log line; `enforce` refuses to start runners; `off` never starts a guard (`guard: "off"`). Every other failure (missing image, rules not loading in time, a ruleset nft refuses, which exits 4) means no runner, on create, restart and the background reconcile alike: no guard, no runner.
-- A runner that restarts by itself gets a new network namespace. The launcher checks every 5 s and starts the guard again. **There can be up to 5 s between such a restart and the guard being back** for new connections. Follow-up ticket: "Netguard follow-up: close the gap after a runner restarts itself, and show the guard status in Settings" (c6601a3e-9969-43ff-8573-a68d8719ee97).
+- A runner that restarts by itself gets a new network namespace. The launcher watches Docker's container events, so it starts the guard again at once (well under a second) rather than waiting for its 5 s check; the 5 s check stays as the backstop for anything the event stream misses (a reconnect, a Docker restart). Between such a restart and the guard being back, new connections to private addresses are possible for that moment, and a connection opened in the gap is cut when the rules load (BOS-335). Settings → Server and runner shows a warning when a runner's guard is `off` or `unavailable`.
 - Guard work for one company is done one step at a time (start, restart, recreate, remove and the 5 s check never overlap).
 
 ## Build and update
-`docker compose build` (profile `launcher`) builds `boss-man-netguard:current`; `scripts/update-runner.sh` rebuilds it on every runner update, and a change under `apps/netguard/` counts as a runner change in `deploy.sh` and the host deployer. CI builds it and `scripts/ci-launcher.sh` proves the behaviour against real Docker: the server answers; the database (IPv4 and IPv6), the network gateway, 192.168.1.1, 169.254.169.254 and `fd00::1` are refused; and the guard returns after the runner restarts.
+`docker compose build` (profile `launcher`) builds `boss-man-netguard:current`; `scripts/update-runner.sh` rebuilds it on every runner update, and a change under `apps/netguard/` counts as a runner change in `deploy.sh` and the host deployer. Since BOS-335 that script also rebuilds and recreates the launcher when one is running, so Settings → Server and runner → Updates → **Build and update runners** puts a launcher change live too; it restarts only the launcher, never the runners. CI builds it and `scripts/ci-launcher.sh` proves the behaviour against real Docker: the server answers; the database (IPv4 and IPv6), the network gateway, 192.168.1.1, 169.254.169.254 and `fd00::1` are refused; and the guard returns after the runner restarts.
 
 ## Check it by hand
 ```sh
@@ -38,3 +38,20 @@ docker run --rm --cap-add NET_ADMIN --net container:boss-man-runner-<slug> -e NE
 - Tool servers from an imported company package are allowed through the guard as they are; the import preview shows only their number (follow-up).
 - Published host ports reached through a public address of the host are not blocked (only private ranges are).
 - Not covered: a runner using `network_mode: host` (the launcher refuses it).
+
+## When a runner is removed because its guard failed (BOS-467)
+
+"No guard, no runner": if the guard doesn't load its rules (for example 20 s is not enough while a deploy has the host busy), the launcher removes that runner. Before BOS-467 it stayed gone until the owner started it by hand.
+
+- **Self-heal.** A company with a `runner.token` file but no runner container is one the launcher removed and the owner did not stop (Stop deletes the token). Every 5 s the launcher makes it again, waiting 10 s, 20 s, 40 s … up to 5 min between failed tries. Look for `runner made again after it was removed` and `could not make runner again; will retry` in the launcher log.
+- **Never retried:** a company whose guard exits with code 3 in `enforce` mode (this host can't load the rules; retrying cannot help), and any runner the owner stopped.
+- **Telling people.** The server's runner watch (`services/runner-watch.ts`) pages the owner and raises a card in that company when a runner is offline for 3 minutes, and withdraws both when it reconnects. After a server restart it says once whether every runner came back within 5 minutes.
+- **Roll back:** revert the commits for BOS-467; the launcher goes back to remove-and-stay-down. No data or migration is involved.
+
+### Per host
+
+The mechanism is the same on every host: the launcher, Docker and the token files. Only whether the guard exists differs.
+
+- **TrueNAS (Docker/Apps), plain Linux, Proxmox VM:** the guard loads (nftables in the kernel), so self-heal applies.
+- **Proxmox LXC:** usually has no nftables inside the container. In `auto` mode the guard is "unavailable", the runner starts unguarded and is never removed for a guard failure, so there is nothing to heal. A runner that is offline there is a stopped container: use Settings → Server and runner → that company's runner → Start / Reconnect, or have the container set to restart on boot (`docker update --restart unless-stopped <container>`, name from `docker ps`).
+- After a host or VM reboot, runners come back with Docker's restart policy and the guard is added again by the launcher within 5 s.

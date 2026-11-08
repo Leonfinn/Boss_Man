@@ -762,7 +762,7 @@ export function schedulerService(
     if (w.reason === REVIEW_REASON) {
       lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):");
       const copy = await reviewCopy(w);
-      if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included. Read the code around the change and run its checks there before you give your verdict; nothing you change there reaches the ticket. For any other ticket listed, use the review tool's diff and tickets read.`);
+      if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included, with its packages installed from the shared store. Read the code around the change and run one related test with \`pnpm vitest run <path/to/that.test.ts>\` there (no permission card) before you give your verdict; nothing you change there reaches the ticket. If the install didn't happen (node_modules is missing or the test command can't find vitest), run \`pnpm install --frozen-lockfile --prefer-offline --store-dir "$(pnpm store path)"\` in that folder first, then run the test. For any other ticket listed, use the review tool's diff and tickets read.`);
     }
     if (w.reason === CEO_REPLY_REASON)
       lines.push(

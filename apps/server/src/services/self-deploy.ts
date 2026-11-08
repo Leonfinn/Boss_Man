@@ -13,6 +13,7 @@ import { companies, decisions, owners, settings, tickets } from "../db/schema.js
 import { record } from "./activity.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
+import { leaveClosedNotice, liveNotice, newerNotice, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 
@@ -33,6 +34,14 @@ const Available = z.object({
   liveColour: z.string().optional(),
   // The host's own standby window (SOAK_SECONDS in its host.conf), published since BOS-384. Absent from an older host script.
   soakSeconds: z.number().int().nonnegative().nullish(),
+  // Which services the update changes, read from their rendered settings (BOS-487, DR-020 B and C). All absent from an older
+  // host script: the cards then say nothing about the database or proxy. `servicesChecked: false` = the host couldn't compare.
+  changedServices: z.array(z.string()).default([]),
+  servicesChecked: z.boolean().optional(),
+  // db/proxy still running with older settings than the live checkout asks for (the container hasn't been recreated since).
+  pendingServices: z.array(z.string()).default([]),
+  dbStartedAt: z.string().optional(),
+  dbContainerId: z.string().optional(),
 });
 export type Available = z.infer<typeof Available>;
 
@@ -51,6 +60,15 @@ const Status = z.object({
 });
 export type DeployStatus = z.infer<typeof Status>;
 
+/** The services only the owner's own step applies: a server update never restarts them (BOS-458, BOS-487). */
+const OWNER_SERVICES = ["db", "proxy"] as const;
+type OwnerService = (typeof OWNER_SERVICES)[number];
+const SERVICE_WORDS: Record<OwnerService, string> = { db: "database", proxy: "proxy" };
+const SERVICE_KEY = "self-deploy:services:";
+// Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
+const NO_SRC = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
+const NO_HOST = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
+
 const short = (sha: string) => sha.slice(0, 8);
 /** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213): the ticket id, or null for any other commit. */
 const mergedTicket = (subject: string) => subject.match(/^Merge ".*" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i)?.[1]!.toLowerCase() ?? null;
@@ -62,7 +80,7 @@ const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed:
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -226,6 +244,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const src = folder(a?.srcDir ?? rec["paths.src"]);
     const deployer = folder(a?.deployerDir ?? rec["paths.deployer"]);
     const shaOk = isSha(commit) && isSha(fromCommit);
+    const ownerChanged = target === "server" ? OWNER_SERVICES.filter((s) => a?.changedServices.includes(s)) : [];
     const bg = a?.bluegreen ?? (rec["compose.bluegreen"] === "true" ? true : rec["compose.bluegreen"] === "false" ? false : undefined);
     const liveColour = a?.liveColour ?? rec["compose.liveColour"];
     const colour = liveColour === "blue" || liveColour === "green" ? liveColour : null;
@@ -242,8 +261,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // the same subshell. (BOS-562 makes deploy.sh run its own git under 022 too; the subshell still covers an older
     // deploy.sh on the host, which is the copy that runs the apply.)
     // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
-    const noSrc = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
-    const noHost = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
+    const noSrc = NO_SRC;
+    const noHost = NO_HOST;
     const handSteps: string[] = [];
     if (infra) {
       handSteps.push(
@@ -279,18 +298,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
             : "host-deployer.sh changed and has to be copied into the deployer folder, but Boss Man can't tell where the install or deployer folder is, so no command is shown. Ask us on this ticket."
           : "host-deployer.sh didn't change; no copy needed.",
       );
-      // A server apply never restarts the database (BOS-458). Changed database settings need their own step, with a backup first.
-      if (a!.infraPaths.some((p) => /^docker-compose[^/]*\.ya?ml$|^deploy\//.test(p)))
-        handSteps.push(
-          src && host
-            ? step(
-                "This update changes a compose file. The steps above never restart the database, so changed database settings (memory, limits) are not applied by them. Only if the database settings changed: take a backup, then restart just the database (the server is unreachable for a few seconds). Run the backup first:",
-                cmd(`(set -o pipefail && umask 077 && cd ${src} && docker compose exec -T db pg_dump -U bossman bossman | gzip > db-backup-before-restart.sql.gz) && gzip -t "${src}/db-backup-before-restart.sql.gz" && ls -l "${src}/db-backup-before-restart.sql.gz"`),
-                "Then restart only the database:",
-                cmd(`cd ${src} && docker compose up -d --no-deps db`),
-              )
-            : `If database settings changed they need a separate restart, but ${src ? noHost : noSrc}`,
-        );
+      // A server apply never restarts the database or the proxy (BOS-458). The host works out which services this update
+      // changes (BOS-487): a changed one gets its own card with a backup, so this card says so plainly or says nothing.
+      if (ownerChanged.length) handSteps.push(`The steps above do not apply the ${ownerChanged.map((s) => `${SERVICE_WORDS[s]}'s`).join(" or ")} new settings, and never restart ${ownerChanged.length === 2 ? "them" : "it"}. A separate card follows, with a backup first.`);
+      else if (a!.servicesChecked === false && a!.infraPaths.some((p) => /^docker-compose[^/]*\.ya?ml$|^deploy\//.test(p)))
+        handSteps.push("Boss Man could not compare this host's service settings, so it can't say whether the database or proxy change. The steps above never restart them.");
       if (launcherChanged)
         handSteps.push(
           src
@@ -334,6 +346,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // What changes the risk of the update, in plain words (BOS-213). The deploy itself is unchanged.
     const risks: string[] = [];
     if (migrations) risks.push(`${migrations} database migration${migrations === 1 ? "" : "s"} ${migrations === 1 ? "is" : "are"} included. Boss Man backs the database up first.`);
+    for (const s of ownerChanged) risks.push(`This update changes the ${SERVICE_WORDS[s]}'s settings. Applying the update does not restart it; a separate card follows${s === "db" ? ", with a backup first" : ""}.`);
     if (hostDeployerChanged) risks.push("It changes host-deployer.sh, the script that runs deploys on your server. The hand steps include copying it into place.");
     if (launcherChanged) risks.push("It changes the launcher. The hand steps include rebuilding it.");
     if (a?.runnerChanged) risks.push("It changes the runner, the containers agents work in. You'll be asked separately about building the new runners.");
@@ -409,7 +422,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (row && target === "server") {
       // An older, still-open question about an earlier commit can no longer be answered: the host only deploys the tip.
       // Free each one's dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped (Freddy).
-      for (const d of await openFor("server")) if (d.id !== row.id) await withdrawOpen(d.id);
+      // BOS-739: each leaves a notice where it was, naming this card to follow instead.
+      const label = infra ? `Main has moved to ${short(commit)}` : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}`;
+      for (const d of await openFor("server")) if (d.id !== row.id) await withdrawOpen(d.id, (steps) => newerNotice({ newerId: row.id, label, steps, now: new Date() }));
       // BOS-683 (DR-036): an older server hand-apply to-do, still open or waiting in the owner's queue, is now
       // covered by this newer card — applying the newer commit brings the older one's changes in too. So it is
       // cleared with a note naming the new card, instead of sitting beside it. A to-do for the same commit is left
@@ -419,20 +434,36 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         .from(decisions)
         .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'owner_todo'`, sql`${decisions.context}->>'target' = 'server'`));
       const includes = carried.length ? ` It includes ${carried.join("; ")}.` : "";
+      const newerLabel = `Main has moved to ${short(commit)}`;
       for (const t of todos) {
         const c = t.context as Extract<DecisionContext, { type: "owner_todo" }>;
         if (!c.commit || c.commit === commit) continue;
-        const r = await clearOwnerTodo(db, `owner-todo:self-deploy:${c.commit}`, `Covered by the newer update card ("Main has moved to ${short(commit)}"): applying ${short(commit)} brings this in too.${includes} Marked done.`);
-        if (r) deps.log?.(`self-deploy: older hand-apply to-do for ${short(c.commit)} covered by ${short(commit)} (BOS-683)`);
+        const r = await clearOwnerTodo(db, `owner-todo:self-deploy:${c.commit}`, `Covered by the newer update card ("${newerLabel}"): applying ${short(commit)} brings this in too.${includes} Marked done.`);
+        if (r) {
+          // BOS-739: leave a notice where the card was, so an owner part-way through its steps knows why
+          // it closed and is pointed at the newer card. The card's steps stay readable with it.
+          await leaveClosedNotice(db, r.id, newerNotice({ newerId: row.id, label: newerLabel, steps: c.steps, now: new Date() }), { notify: deps.notify });
+          deps.log?.(`self-deploy: older hand-apply to-do for ${short(c.commit)} covered by ${short(commit)} (BOS-683)`);
+        }
       }
     }
     return row ?? null;
   }
 
   /** A card closed by the product, not answered: its notification is marked read here (BOS-413). */
-  async function withdrawOpen(id: string) {
+  async function withdrawOpen(id: string, notice?: ClosedNotice | ((steps?: string[]) => ClosedNotice)) {
+    const [row] = await db.select({ context: decisions.context }).from(decisions).where(eq(decisions.id, id));
     await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, id));
     await markDecisionNotificationRead(db, id);
+    // BOS-739: a card the system closed leaves a notice where it was, so an owner part-way through its
+    // hand steps knows why it closed (and where to carry on). Its steps stay readable with the notice.
+    const ctx = row?.context as SelfDeployContext | undefined;
+    const steps = ctx?.type === "self_deploy" ? ctx.handSteps : undefined;
+    // Only a hand-apply card has steps the owner might be part-way through; a one-click deploy card
+    // leaves nothing to explain, so it is just removed as before.
+    const handApply = !!steps?.length || !!ctx?.ownerOpenedAt;
+    const n = handApply ? (typeof notice === "function" ? notice(steps) : notice) : undefined;
+    if (n) await leaveClosedNotice(db, id, n, { notify: deps.notify });
   }
 
   async function saveSeen(key: string) {
@@ -540,6 +571,84 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     await saveSeen(key);
   }
 
+  /**
+   * The steps of the owner's own card for a changed database or proxy (BOS-487, DR-020 B and C): every command on the
+   * recorded host and install folder, never a guessed one. The database gets a backup first.
+   */
+  function serviceSteps(svc: OwnerService, commit: string, a: Available, host: string | null) {
+    const src = folder(a.srcDir);
+    const colour = a.liveColour === "blue" || a.liveColour === "green" ? a.liveColour : null;
+    const live = a.bluegreen === true ? (colour ? `server-${colour}` : null) : a.bluegreen === false ? "server" : null;
+    const cmd = (c: string) => sh(c, { host: host!, as: "root" });
+    const word = SERVICE_WORDS[svc];
+    const down = `Boss Man is unreachable for a few seconds while the ${word} restarts. Pick a moment when nobody needs it.`;
+    const steps: string[] = [down];
+    const missing = !src ? NO_SRC : !host ? NO_HOST : null;
+    const backupFile = src ? `${src}/db-backup-before-${short(commit)}.sql.gz` : "";
+    if (svc === "db")
+      steps.push(missing ?? step("Take a backup first. Run this on the machine that runs Boss Man. It prints the size of the new backup file; if it prints an error instead, stop and tell us:", cmd(`(set -o pipefail && umask 077 && cd ${src} && docker compose exec -T db pg_dump -U bossman bossman | gzip > ${backupFile}) && gzip -t "${backupFile}" && ls -l "${backupFile}"`)));
+    steps.push(missing ?? step(`Restart just the ${word} with its new settings. Run this on the same machine:`, cmd(`cd ${src} && docker compose up -d --no-deps ${svc}`)));
+    steps.push(
+      missing ?? step(`Check it came back once. Run this on the same machine; it should say the ${word} was started a few seconds or minutes ago, not days:`, cmd(`cd ${src} && docker compose ps ${svc}`)),
+    );
+    steps.push(
+      missing ??
+        (live
+          ? step(`Check Boss Man reconnected. Run this on the same machine; it asks the running server (${live}) whether it is ready. The answer should say ok is true and the role is leader:`, cmd(`cd ${src} && docker compose exec -T ${live} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`))
+          : "Check Boss Man reconnected: open Settings → Server and runner → Server. Role should read leader. (Boss Man can't tell which server copy is live, so no command is shown.)"),
+    );
+    return steps;
+  }
+  /** What the hand-apply of a changed database or proxy undoes: no command, because only settings change and the data is never touched. */
+  const serviceRollback = (svc: OwnerService) =>
+    svc === "db"
+      ? "This step only changes how the database runs; your data is not altered. The backup from the backup step is kept. If Boss Man does not come back, ask us on this ticket before doing anything else."
+      : "This step only changes how the proxy runs. If Boss Man does not come back, ask us on this ticket before doing anything else.";
+
+  /** Clears each service card whose service is no longer pending (the container was recreated), without the owner doing anything. */
+  async function clearServiceCards(a: Available | null) {
+    if (a?.servicesChecked !== true) return; // an older host script or a failed compare says nothing about pending: keep the card
+    const open = await db
+      .select({ key: decisions.dedupeKey })
+      .from(decisions)
+      .where(and(eq(decisions.status, "open"), sql`${decisions.dedupeKey} like ${`${SERVICE_KEY}%`}`));
+    for (const { key } of open) {
+      const svc = key?.slice(SERVICE_KEY.length).split(":")[0];
+      if (key && svc && !a.pendingServices.includes(svc)) await clearOwnerTodo(db, key, `The host reports the ${svc === "db" ? "database" : svc} running with its new settings. Marked done.`);
+    }
+  }
+
+  /**
+   * Raises the separate card for a changed database or proxy (BOS-487). Only when the host says it is still running the old
+   * settings, the server update that brought them has ended well and its standby window is over, and the host is quiet.
+   * Never part of a server update. Quiet is retried on the next pass; one card per service and commit.
+   */
+  async function raiseServiceCards(a: Available | null) {
+    if (!a?.deployed || a.servicesChecked !== true) return;
+    const wanted = OWNER_SERVICES.filter((s) => a.pendingServices.includes(s));
+    if (!wanted.length) return;
+    const last = await getSetting<LastServer>(LAST_SERVER);
+    if (last?.result !== "deployed" || last.to !== a.deployed) return;
+    const ended = Date.parse(last.ended);
+    if (!Number.isFinite(ended) || Date.now() < ended + trialMs(a)) return;
+    if (deps.hostQuiet && !(await deps.hostQuiet().catch(() => false))) return;
+    const companyId = await homeCompany();
+    if (!companyId) return;
+    const host = (await deps.hosts?.())?.[0]?.name ?? null;
+    for (const svc of wanted) {
+      const word = SERVICE_WORDS[svc];
+      await raiseOwnerTodo(db, {
+        companyId,
+        question: `This update changes the ${word}'s settings, and they are not applied yet. Apply them when you are ready: Boss Man is unreachable for a few seconds.`,
+        key: `${SERVICE_KEY}${svc}:${a.deployed}`,
+        steps: serviceSteps(svc, a.deployed, a, host),
+        check: `Settings → Server and runner → Server: Role reads leader, and this card clears by itself once the host sees the ${word} running with its new settings.`,
+        rollback: serviceRollback(svc),
+        ofDecisionId: "system",
+      });
+    }
+  }
+
   return {
     enabled: !!dir,
 
@@ -549,8 +658,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
      * the owner doing anything. (It may land on a later commit than the approved one, per BOS-124.)
      * Rows from before `fromCommit` existed fall back to an exact match on the approved commit.
      */
-    async clearDoneOwnerTodos(a: Available | null) {
+    async clearDoneOwnerTodos(a: Available | null, s?: DeployStatus | null) {
       if (!a?.deployed) return 0;
+      // When the host says it deployed the live commit, its own end time is when it went live; otherwise
+      // the poll's time is the best we have. Either way it is a real reading, never guessed.
+      const deployed = s?.result === "deployed" && s.to_commit === a.deployed ? Date.parse(s.ended) : NaN;
+      const liveAt = Number.isFinite(deployed) ? new Date(deployed) : new Date(a.checkedAt);
       const todos = await db
         .select({ id: decisions.id, context: decisions.context })
         .from(decisions)
@@ -561,7 +674,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         const caughtUp = ctx.fromCommit ? a.deployed !== ctx.fromCommit : ctx.commit === a.deployed;
         if (!caughtUp) continue;
         const r = await clearOwnerTodo(db, `owner-todo:self-deploy:${ctx.commit}`, `The approved change to ${short(a.deployed)} is applied: the host reports it running. Marked done.`);
-        if (r) cleared++;
+        if (r) {
+          // BOS-739: leave a notice where the card was, so an owner part-way through its steps knows why
+          // it closed (the update went live by itself), and its steps stay readable with it.
+          await leaveClosedNotice(db, r.id, liveNotice({ commit: a.deployed, liveAt, steps: ctx.steps, now: new Date() }), { notify: deps.notify });
+          cleared++;
+        }
       }
       return cleared;
     },
@@ -574,15 +692,20 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const a = await available();
       if (s && s.result !== "running") await finished(s, a);
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
-      if (a) await this.clearDoneOwnerTodos(a);
+      if (a) await this.clearDoneOwnerTodos(a, s);
       if (s?.result !== "running") await releaseRunnerDue(a);
+      // The database/proxy step is its own card, never part of a server update (BOS-487).
+      await clearServiceCards(a);
+      if (s?.result !== "running") await raiseServiceCards(a);
       const woken = await this.noteLive(a, s);
       if (!a || !a.tip || s?.result === "running" || (await pending())) return woken;
       // The host just refused or deployed this very commit: the offer is stale until the host rewrites it.
       if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return woken;
       if (a.tip === a.deployed) {
         // Free the dedupe key, as every other withdraw does, so a later offer for that commit is not silently dropped (Freddy).
-        for (const d of await openFor("server")) await withdrawOpen(d.id);
+        // BOS-739 (8 Nov 13:47): the owner may be part-way through this card's hand steps; the notice says it is live and they can stop.
+        const liveAt = s?.result === "deployed" && s.to_commit === a.deployed && Number.isFinite(Date.parse(s.ended)) ? new Date(s.ended) : new Date(a.checkedAt);
+        for (const d of await openFor("server")) await withdrawOpen(d.id, (steps) => liveNotice({ commit: a.deployed, liveAt, steps, now: new Date() }));
         return woken;
       }
       await raise("server", a.tip, a.deployed, a);

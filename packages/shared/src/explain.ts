@@ -27,7 +27,16 @@ export type PermissionExplanation = {
 };
 
 /** A standing rule the owner can pick instead of "Allow once". */
-export type AlwaysChoice = { label: string; name: string; match: PolicyMatch };
+export type AlwaysChoice = {
+  label: string;
+  name: string;
+  match: PolicyMatch;
+  /** What the rule allows, finishing "Always allow <who> to …"; the card shows the whole sentence before saving. */
+  what: string;
+};
+
+/** Who a saved "always" rule covers: only the agent that asked (the default) or every agent in the company. */
+export type AlwaysScope = "agent" | "company";
 
 /** Shell grammar, not programs: skipped to find the program that follows. */
 const KEYWORDS = new Set("if then else elif fi for do done while until case esac function { } ! [[ ]] (( ))".split(" "));
@@ -752,8 +761,10 @@ export function explainPermission(info: PermissionInfo, agent: string): Permissi
   return { title: `${agent} wants to ${t.what}`, summary: `${t.verb}${target ? `${noun} ${target}` : ` (no name given)`}.`, effect: t.effect, reason };
 }
 
+/** Paths and words that point at secrets; a command naming one never gets an Always choice. */
+const SECRET_HINT = /(?:^|[\/\s=~])(?:\.ssh|\.aws|\.gnupg|\.netrc|\.npmrc|\.pgpass|\.docker\/config|\.env(?:\.\S*)?|id_(?:rsa|ed25519|ecdsa|dsa))(?:\W|$)|secret|passw(?:or)?d|credential|token|api[_-]?key|private[_-]?key|\.pem\b|\.p12\b|\.key\b|environ\b/i;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const KIND_RULE: Record<string, string> = { read: "read files", edit: "change files", fetch: "fetch web pages" };
+// File reads and edits get no Always choice: a kind-wide rule can't name a safe path, so it would cover secrets and files outside the checkout (BOS-294 security review).
 
 /**
  * The standing rules offered for a request, narrowest first. Shell commands only when they
@@ -765,17 +776,14 @@ export function alwaysChoices(info: PermissionInfo, e: PermissionExplanation): A
   if (mcp) {
     const [, server, tool] = mcp as unknown as [string, string, string];
     if (server === "bossman") return [];
-    return [
-      { label: `Always allow ${server}'s ${tool} tool`, name: `Allow ${server}'s ${tool} tool`, match: { titlePattern: `^${escapeRe(info.title!)}$`, safeOnly: true } },
-      { label: `Always allow every ${server} tool`, name: `Allow every ${server} tool`, match: { titlePattern: `^mcp__${escapeRe(server)}__`, safeOnly: true } },
-    ];
+    // One exact tool only: a server-wide rule would cover destructive tools and ones added later (safeOnly checks shell commands only).
+    return [{ label: `Always allow ${server}'s ${tool} tool`, name: `Allow ${server}'s ${tool} tool`, what: `use ${server}'s ${tool} tool`, match: { titlePattern: `^${escapeRe(info.title!)}$`, safeOnly: true } }];
   }
   if (e.command) {
-    return e.effect === "reads" && !e.summary.includes("secrets") && e.command.length < 250
-      ? [{ label: "Always allow this exact command", name: `Allow the command ${e.command.slice(0, 60)}`, match: { kinds: ["execute"], commandPattern: `^${escapeRe(e.command)}$`, safeOnly: true } }]
+    return e.effect === "reads" && !e.summary.includes("secrets") && !SECRET_HINT.test(e.command) && e.command.length < 250
+      ? [{ label: "Always allow this exact command", name: `Allow the command ${e.command.slice(0, 60)}`, what: `run exactly this command: ${e.command.slice(0, 120)}`, match: { kinds: ["execute"], commandPattern: `^${escapeRe(e.command)}$`, safeOnly: true } }]
       : [];
   }
-  const what = KIND_RULE[info.kind ?? ""];
-  // shortcut: rules have no agent condition, so this is company-wide.
-  return what ? [{ label: `Always allow every agent in this company to ${what}`, name: `Allow agents to ${what}`, match: { kinds: [info.kind!], safeOnly: true } }] : [];
+  // No kind-wide choices: a fetch rule has no address limit, so it would be a standing way to send data out in a URL.
+  return [];
 }

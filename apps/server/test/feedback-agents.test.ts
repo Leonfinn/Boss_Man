@@ -195,4 +195,36 @@ describe("placing features on the roadmap", () => {
     expect(listed.features.find((x: { id: string }) => x.id === f.id)).toMatchObject({ rank: null, horizon: null, status: "released" });
     await ceo3.close();
   });
+
+  it("sets a feature's public summary and show-publicly flag through the same path as the owner, and the roadmap read returns them", async () => {
+    const c = await setup();
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Public feature" })).json();
+    const row = async () => (await c.db.select().from(features).where(eq(features.id, f.id)))[0]!;
+    const roadmap = async () => ((await c.req("GET", `/api/roadmap/features`)).json() as Array<{ features: Array<{ id: string; publicSummary: string | null; showPublicly: boolean }> }>).flatMap((x) => x.features);
+
+    const ceo = await c.mcp(c.ceo.id);
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, showPublicly: true, reason: "Show it on the public roadmap." } }))).toMatch(/Write a public summary before showing the feature publicly/);
+    expect((await row()).showPublicly).toBe(false);
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: `  ${"x".repeat(2001)}  `, reason: "Too long." } }))).toMatch(/2000|Too big|too big|String must contain at most/i);
+    expect((await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: 42, reason: "Not a string." } })).isError).toBe(true);
+    expect((await row()).publicSummary).toBeNull();
+
+    expect(
+      textOf(
+        await ceo.callTool({
+          name: "feedback",
+          arguments: { action: "update_feature", featureId: f.id, publicSummary: "  A simple way to see what the team plans next.  ", showPublicly: true, reason: "Soo's public copy (BOS-207)." },
+        }),
+      ),
+    ).toBe('Updated "Public feature": wrote its public summary, shows it publicly.');
+    expect(await row()).toMatchObject({ publicSummary: "A simple way to see what the team plans next.", showPublicly: true });
+    expect((await roadmap()).find((x) => x.id === f.id)).toMatchObject({ publicSummary: "A simple way to see what the team plans next.", showPublicly: true });
+    await ceo.close();
+
+    // Null clears the summary, and showing publicly then falls back to false.
+    const ceo2 = await c.mcp(c.ceo.id);
+    expect(textOf(await ceo2.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: null, showPublicly: false, reason: "Take it off the public roadmap." } }))).toContain("cleared its public summary, hides it from the public roadmap");
+    await ceo2.close();
+    expect(await row()).toMatchObject({ publicSummary: null, showPublicly: false });
+  });
 });

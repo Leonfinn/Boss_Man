@@ -60,6 +60,10 @@ function fakeDocker() {
       calls.push(`remove ${id}`);
       for (const [name, c] of containers) if (c.id === id) containers.delete(name);
     },
+    // BOS-335: the launcher watches Docker events; this fake's stream stays open until aborted (tested in guard-events.test.ts).
+    events(_filter, _since, _onEvent, _onError, signal: AbortSignal) {
+      return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
   };
   return { docker, containers, calls, image, fail };
 }
@@ -278,6 +282,56 @@ describe("the runner launcher (R55)", () => {
     expect(fake.containers.size).toBe(0);
   });
 
+  it("lists as wanted a runner that runs or has a token left, and not one the owner stopped", async () => {
+    const cfg = config();
+    const fake = fakeDocker();
+    const api = launcher(cfg, fake.docker);
+    expect(await api.wanted()).toEqual([]);
+    await api.put("app-co", TOKEN);
+    expect(await api.wanted()).toEqual(["app-co"]);
+    // Its container is gone but the token stays (guard failure): still wanted, the self-heal will make it again.
+    fake.containers.clear();
+    expect(await api.wanted()).toEqual(["app-co"]);
+    await api.remove("app-co");
+    expect(await api.wanted()).toEqual([]);
+  });
+
+  it("makes a runner again after its guard failed, waiting longer after each failure, and not after an owner Stop", async () => {
+    const cfg = config();
+    const fake = fakeDocker();
+    const api = launcher(cfg, fake.docker);
+    fake.fail.guard = true;
+    await expect(api.put("app-co", TOKEN)).rejects.toThrow("no such image");
+    expect(fake.containers.size).toBe(0);
+    // Still failing: tried now, then not again until the wait is over (10 s, then 20 s).
+    await expect(api.healMissing(1_000)).rejects.toThrow("app-co");
+    expect(await api.healMissing(5_000)).toEqual([]);
+    await expect(api.healMissing(12_000)).rejects.toThrow("app-co");
+    expect(await api.healMissing(20_000)).toEqual([]);
+    // The cause is gone: the next try after the wait brings it back.
+    fake.fail.guard = false;
+    expect(await api.healMissing(40_000)).toEqual(["app-co"]);
+    expect(fake.containers.has("boss-man-runner-app-co")).toBe(true);
+    expect(fake.containers.has("boss-man-netguard-app-co")).toBe(true);
+    // Nothing missing now.
+    expect(await api.healMissing(50_000)).toEqual([]);
+    // An owner Stop removes the token, so it stays stopped.
+    await api.remove("app-co");
+    expect(await api.healMissing(60_000)).toEqual([]);
+    expect(fake.containers.size).toBe(0);
+  });
+
+  it("does not keep trying when the host can't load the guard rules (enforce mode)", async () => {
+    const cfg = { ...config(), guardMode: "enforce" as const };
+    const fake = fakeDocker();
+    const api = launcher(cfg, fake.docker);
+    fake.fail.nft = true;
+    await expect(api.put("app-co", TOKEN)).rejects.toThrow();
+    fake.fail.nft = false;
+    expect(await api.healMissing(1_000_000)).toEqual([]);
+    expect(fake.containers.has("boss-man-runner-app-co")).toBe(false);
+  });
+
   it("restarts the guard after the runner restarts, and removes it with the runner", async () => {
     const cfg = config();
     const fake = fakeDocker();
@@ -305,6 +359,39 @@ describe("the runner launcher (R55)", () => {
     fake.containers.delete("boss-man-netguard-app-co");
     expect(await api.reconcileGuards()).toEqual(["app-co"]);
     expect(fake.containers.has("boss-man-netguard-app-co")).toBe(true);
+  });
+
+  it("reports the guard's real state: a dead, missing or older guard is 'down', also after a launcher restart (BOS-436)", async () => {
+    const fake = fakeDocker();
+    await launcher(config(), fake.docker).put("app-co", TOKEN);
+    const guardOf = () => fake.containers.get("boss-man-netguard-app-co")!;
+    // A new launcher process has no memory of the first one's work.
+    const api = launcher(config(), fake.docker);
+    expect((await api.list())[0]!.guard).toBe("on");
+    guardOf().state = "exited"; // the guard died after start
+    expect((await api.list())[0]!.guard).toBe("down");
+    guardOf().state = "running";
+    guardOf().health = "unhealthy";
+    expect((await api.list())[0]!.guard).toBe("down");
+    guardOf().health = "healthy";
+    fake.containers.delete("boss-man-netguard-app-co"); // e.g. the host rebooted and it never came back
+    expect((await api.list())[0]!.guard).toBe("down");
+    // The runner comes back by itself (unless-stopped) and the guard hasn't: reconcile repairs it.
+    expect(await api.reconcileGuards()).toEqual(["app-co"]);
+    expect((await api.list())[0]!.guard).toBe("on");
+    // Runner restarted after the guard started: the guard is in an old namespace.
+    await fake.docker.restart(fake.containers.get("boss-man-runner-app-co")!.id);
+    expect((await api.list())[0]!.guard).toBe("down");
+    expect(await api.reconcileGuards()).toEqual(["app-co"]);
+    expect((await api.list())[0]!.guard).toBe("on");
+  });
+
+  it("a host that can't load nftables stays 'unavailable' after a launcher restart; enforce mode says 'down'", async () => {
+    const fake = fakeDocker();
+    fake.fail.nft = true;
+    await launcher(config(), fake.docker).put("app-co", TOKEN);
+    expect((await launcher(config(), fake.docker).list())[0]!.guard).toBe("unavailable");
+    expect((await launcher({ ...config(), guardMode: "enforce" }, fake.docker).list())[0]!.guard).toBe("down");
   });
 
   it("recreates one company's runner and says which runners are on the current image", async () => {

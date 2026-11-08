@@ -19,6 +19,7 @@ import { promisify } from "node:util";
 import { CHECK_TOOLS, DEPLOY_REF, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { checkQueueEnv, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
+import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
 const run = promisify(execFile);
 const VERIFY_KILL_GRACE_MS = 2000;
@@ -1020,6 +1021,25 @@ export class Workspaces {
   }
 
   /**
+   * Whether the owner's sign-off on `signed` still covers the ticket's branch head (BOS-734, DR-038): only
+   * clean automatic merges of the target came in since. Fails closed: any git doubt says "does not cover".
+   */
+  async signoffCovers(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, signed: string, secrets: Record<string, string | undefined> = {}, expectHead?: string): Promise<SignoffCover> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      const head = await this.git(["rev-parse", "--verify", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
+      // The caller checked this head; if the branch ref says otherwise, the answer would be about different code (BOS-734).
+      if (expectHead && !head.startsWith(expectHead) && !expectHead.startsWith(head)) {
+        return { covers: false, reason: "the branch moved while this was being checked", newCommits: 0, handMerges: 0 };
+      }
+      return checkSignoffCovers((args) => this.gitCode(args, { cwd: repo }), signed, head, `refs/remotes/origin/${target}`);
+    });
+  }
+
+  /**
    * Where a ticket's branch really started (BOS-687). The recorded base is where the runner created
    * the branch, normally a main commit. A branch the agent then moved onto another ticket's work
    * before committing anything of its own (`git reset --hard <sha>`, `git switch -C`) started
@@ -1040,6 +1060,14 @@ export class Workspaces {
     for (const line of log.stdout.split("\n").filter(Boolean).reverse()) {
       const [sha, ...msg] = line.split(" ");
       const text = msg.join(" ");
+      // A fast-forward merge before the branch's first commit moves it just as a reset does (BOS-733: BOS-726
+      // was made from main, then `git merge` fast-forwarded it onto BOS-725's tip). It has no commit of its own
+      // yet, so everything it moved onto came from elsewhere; the guards below still apply. git writes this
+      // reflog text untranslated.
+      if (/^merge [^:]+: Fast-forward$/.test(text) && sha) {
+        start = sha;
+        continue;
+      }
       if (/^commit|^merge|^rebase|^cherry-pick/.test(text)) break;
       if (/^reset: moving to|^branch: Reset to|^checkout: moving/.test(text) && sha) start = sha;
     }
@@ -1096,7 +1124,8 @@ export class Workspaces {
         const bLine = await refs(b.branch, true);
         if (bLine.some((sha) => mine.has(sha))) {
           // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
-          // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
+          // server may allow when B is approved (BOS-372). From the graph alone a fast-forward can't be told from a hole; B's
+          // reflog can, when the fast-forward was B's first move (realBase, BOS-733).
           const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
           // B stacked on this ticket (BOS-629): B was created from a commit this branch holds. The graph alone can't say who
           // wrote a shared commit, but the base the runner recorded when it created B's branch can: a shared commit that is

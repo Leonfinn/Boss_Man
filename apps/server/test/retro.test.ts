@@ -602,6 +602,28 @@ describe("proposing a change", () => {
     expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("skipped");
   });
 
+  it("a lesson with a live card still holds the project's slot, but one whose card is gone does not", async () => {
+    const { c, p } = await ready();
+    const lesson = (text: string) => p({ lever: "lesson", target: "notes", change: { lesson: text }, metric: "meanRework", scope: { role: "engineer" } });
+    await lesson("Always cover the null case in importers.");
+    expect(isError(await lesson("List every place the change must apply."))).toBe(true);
+    const { ch, id } = await decisionOf(c, "lesson");
+    await c.db.delete(decisions).where(eq(decisions.id, id));
+    expect(isError(await lesson("List every place the change must apply."))).toBe(false);
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", decidedBy: "ceo" });
+  });
+
+  it("explaining an orphaned lesson closes it as skipped; one with a live card is left alone", async () => {
+    const { c, p } = await ready();
+    await p({ lever: "lesson", target: "notes", change: { lesson: "Always cover the null case in importers." }, metric: "meanRework", scope: { role: "engineer" } });
+    const { ch, id } = await decisionOf(c, "lesson");
+    const retro = c.retro;
+    expect(await retro.skipOrphanLessons(c.company.id, { changeId: ch.id, reason: "Overlaps an existing lesson." })).toEqual([]);
+    await c.db.delete(decisions).where(eq(decisions.id, id));
+    expect(await retro.skipOrphanLessons(c.company.id, { changeId: ch.id, reason: "Overlaps an existing lesson." })).toEqual([ch.id]);
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", reason: "Overlaps an existing lesson." });
+  });
+
   it("measures a handoff pair and the whole company", async () => {
     const { c, p } = await ready();
     expect(isError(await p({ metric: "bounceRate", scope: undefined }))).toBe(true);
