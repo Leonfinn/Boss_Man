@@ -12,7 +12,7 @@ import { StarButton } from "./Agents";
 import { toBase64 } from "./Skills";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
-type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
+type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" } | null; error?: string } | null;
 type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
 type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; report?: CompanyReport | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
@@ -101,6 +101,22 @@ function Since({ connected, at }: { connected: boolean; at: string | null }) {
   return <span className="muted">{connected ? `since ${when(at)}` : `last connected ${when(at)}`}</span>;
 }
 
+/**
+ * The network guard keeps the runner off private addresses (BOS-324). It is only "on" when its rules are loaded
+ * (or the host is known to be able to load them); "off" and "unavailable" mean the runner can reach the home
+ * network, so say so plainly and how to fix it (BOS-335).
+ */
+function GuardWarning({ guard }: { guard: "off" | "unavailable" }) {
+  return (
+    <p className="error" role="alert" data-testid="guard-warning">
+      {guard === "off"
+        ? "The network guard is turned off, so this runner can reach private addresses (your home network and the database)."
+        : "The network guard is unavailable on this host, which can't load firewall rules, so this runner can reach private addresses (your home network and the database)."}{" "}
+      {guard === "off" ? "Set BOSSMAN_NETGUARD=auto or enforce on the launcher to turn it back on, then restart the runner." : "Set BOSSMAN_NETGUARD=enforce on the launcher to refuse runners here instead."}
+    </p>
+  );
+}
+
 export function Runner({ company, onChanged }: { company: Company; onChanged?: () => void }) {
   const status = usePoll((signal) => api<RunnerStatus>(`/api/companies/${company.id}/runner`, { signal }), 10_000, company.id);
   const [token, setToken] = useState<string | null>(null);
@@ -165,6 +181,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </dl>
+        {c && (c.guard === "off" || c.guard === "unavailable") && <GuardWarning guard={c.guard} />}
         {s?.report?.last && (
           <div data-testid="company-update-history">
             <UpdateHistory r={s.report.last} />

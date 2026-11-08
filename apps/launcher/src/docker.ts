@@ -13,6 +13,8 @@ export class DockerError extends Error {
 
 export type ContainerSummary = { Id: string; Names: string[]; Image: string; ImageID?: string; State: string; Status: string; Labels: Record<string, string>; Created: number };
 export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null }; State: { Status: string; StartedAt?: string; ExitCode?: number; Health?: { Status: string } } };
+/** One Docker event, as far as the launcher reads it: a container start, a restart or a die (a crash). */
+export type DockerEvent = { Type?: string; Action?: string; Actor?: { ID?: string; Attributes?: Record<string, string> } };
 
 export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs?: number; maxMs?: number } = {}) {
   const pollMs = wait.pollMs ?? 500;
@@ -100,6 +102,62 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
         }
       }
       fail(r, "Removing the runner failed");
+    },
+    /**
+     * Watches the container events the launcher cares about (BOS-335): a runner starting or restarting by itself
+     * needs its guard back at once, not up to 5 s later. `/events` is a streaming endpoint; this reads newline-
+     * delimited JSON until `signal` aborts. `since` is a Unix second so a reconnect doesn't lose what came between.
+     * Resolves when the stream ends; `onError` is told why, so the caller can reconnect after a pause.
+     */
+    events(
+      filter: { type?: string; action?: string[]; label?: string },
+      since: number,
+      onEvent: (e: DockerEvent) => void,
+      onError: (err: Error) => void,
+      signal: AbortSignal,
+    ): Promise<void> {
+      return new Promise((resolve) => {
+        const filters: Record<string, string[]> = {};
+        if (filter.type) filters.type = [filter.type];
+        if (filter.action) filters.event = filter.action;
+        if (filter.label) filters.label = [filter.label];
+        const qs = `since=${Math.floor(since)}&filters=${encodeURIComponent(JSON.stringify(filters))}`;
+        const req = http.request({ socketPath, method: "GET", path: `/events?${qs}`, headers: { host: "docker" } }, (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            onError(new DockerError(res.statusCode ?? 0, `Watching Docker events failed: HTTP ${res.statusCode}`));
+            resolve();
+            return;
+          }
+          let buf = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            buf += chunk;
+            let nl: number;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              try {
+                onEvent(JSON.parse(line) as DockerEvent);
+              } catch {
+                /* a half line or something that isn't an event: skip it */
+              }
+            }
+          });
+          res.on("end", resolve);
+          res.on("error", (err) => {
+            onError(err);
+            resolve();
+          });
+        });
+        req.on("error", (err) => {
+          onError(err);
+          resolve();
+        });
+        signal.addEventListener("abort", () => req.destroy(), { once: true });
+        req.end();
+      });
     },
   };
 }
