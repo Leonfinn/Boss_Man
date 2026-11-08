@@ -1985,7 +1985,7 @@ type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: st
  * How many agents may run at once, in total and per company, plus the separate background slots for
  * Infinite-mode agents (BOS-279); the per-agent limit is fixed at one.
  */
-function RunLimits() {
+export function RunLimits() {
   const view = usePoll((signal) => api<{ instance: number; company: number; background: number; defaults: { instance: number; company: number; background: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
   const act = useAction();
   const [edit, setEdit] = useState<{ instance: string; company: string; background: string } | null>(null);

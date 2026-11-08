@@ -1080,7 +1080,9 @@ export function schedulerService(
       if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
       const { maxTotal, maxCompany } = await limitsNow();
       const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
-      const live = await db.select({ companyId: runs.companyId, agentId: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
+      const live = await db.select({ companyId: runs.companyId, agentId: runs.agentId, model: runs.model }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
+      // Infinite-mode runs (BOS-279) take no normal slot, so they don't fill one here either.
+      const work = live.filter((r) => !isInfiniteModel(r.model));
       // Only wakes that would take a slot of their own (BOS-667). A wake held until later (quiet hours, a
       // retry time) or by the quota can't start now, and a wake whose agent already has its runs going
       // starts only in the slot that run frees, so neither stands in for a slot that is in use. Counting
@@ -1106,8 +1108,8 @@ export function schedulerService(
         room.set(w.agentId, left - 1);
         waiting.push(w);
       }
-      const total = live.length + waiting.length;
-      const mine = live.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
+      const total = work.length + waiting.length;
+      const mine = work.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
       // A company with nothing running or waiting still gets one, however full other companies'
       // queues are: the scheduler gives an idle company's wake the next free slot (BOS-582, DR-032).
       const allCompanies = mine === 0 ? Math.max(1, maxTotal - reserved - total) : maxTotal - reserved - total;
@@ -1121,8 +1123,10 @@ export function schedulerService(
      */
     async runLimits(companyId: string) {
       const { maxTotal, maxCompany } = await limitsNow();
-      const live = await db.select({ companyId: runs.companyId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`));
-      return { allCompanies: { limit: maxTotal, running: live.length }, company: { limit: maxCompany, running: live.filter((r) => r.companyId === companyId).length } };
+      const live = await db.select({ companyId: runs.companyId, purpose: runs.purpose, model: runs.model }).from(runs).where(isNull(runs.endedAt));
+      // Infinite-mode runs (BOS-279) sit in the background slots, so they don't count against the normal limits.
+      const work = live.filter((r) => r.purpose !== "chat" && r.purpose !== REPLY_PURPOSE && !isInfiniteModel(r.model));
+      return { allCompanies: { limit: maxTotal, running: work.length }, company: { limit: maxCompany, running: work.filter((r) => r.companyId === companyId).length } };
     },
 
     /**
