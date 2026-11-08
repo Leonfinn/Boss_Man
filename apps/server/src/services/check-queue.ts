@@ -13,6 +13,11 @@ import { checkJobs, projects, settings } from "../db/schema.js";
 export const CHECK_SLOTS_KEY = "check_slots";
 export const CHECK_QUEUE_MODE_KEY = "check_queue_mode";
 export const DEFAULT_CHECK_SLOTS = 1;
+/**
+ * Upper bound for check_slots. The runner enforces its own slot count (BOSSMAN_CHECK_SLOTS) on every job too (BOS-805), so a
+ * check_slots above it only means jobs wait in the runner's line: the effective limit is the smaller of the two. The server
+ * doesn't know the runner's count, so the Settings → Checks line must say so rather than clamp.
+ */
 export const MAX_CHECK_SLOTS = 8;
 /** A running job that prints nothing for this long is marked stuck. Waiting in the queue has no limit. */
 export const DEFAULT_NO_OUTPUT_MINUTES = 20;
