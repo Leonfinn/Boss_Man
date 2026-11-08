@@ -59,7 +59,7 @@ function world() {
     },
     requestWaiting: async (id) => w.inbox?.id === id,
     status: async () => w.status,
-    available: async () => ({ checkedAt: "", deployed: w.deployed, tip: w.tip, commits: [], paths: [], infraPaths: [], runnerChanged: false }),
+    available: async () => ({ checkedAt: "", deployed: w.deployed, tip: w.tip, commits: [], paths: [], infraPaths: [], runnerChanged: false, changedServices: [], pendingServices: [] }),
     trialUntil: async () => w.trialUntil,
     runnerCardOpen: async () => w.runnerCard,
     drainOn: async () => w.drain,
