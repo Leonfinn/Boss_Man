@@ -136,6 +136,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>RunLimits": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
   "pages/Settings.tsx>RunnerUpdate": "Server and runner",
+  "pages/Settings.tsx>Devices": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
   "pages/Settings.tsx>ToolServers": "Access and funding",

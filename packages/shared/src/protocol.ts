@@ -242,6 +242,10 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     features: z.array(z.string().max(40)).max(50).optional(),
     /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
     bootId: z.string().max(100).optional(),
+    /** How the previous runner process ended (BOS-594): told to stop (SIGTERM) or not (a crash or out of memory); absent on a first start or from an older runner. */
+    previousExit: z.enum(["stopped", "crashed"]).optional(),
+    /** When the host machine booted (ISO time), so the server can tell a host restart (BOS-594); absent from an older runner. */
+    hostBootAt: z.string().max(40).optional(),
     /** The ids of every run this runner really has (BOS-583); the server closes any other open run of this runner. Absent from an older runner: the server then closes nothing. */
     liveRuns: z.array(Uuid).max(2000).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),

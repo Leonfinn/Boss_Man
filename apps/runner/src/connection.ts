@@ -19,6 +19,8 @@ export type ConnectionOptions = {
   log?: (msg: string) => void;
   /** Permission requests still waiting for a verdict, re-asked on every (re)connect. */
   pendingPermissions?: () => Array<{ runId: string; requestId: string }>;
+  /** Why this process started, told to the server in every hello so it can record the restart's reason (BOS-594). */
+  restart?: { previousExit?: "stopped" | "crashed" | null; hostBootAt?: string | null };
   /** Check jobs running now (BOS-316), listed in hello. */
   runningChecks?: () => string[];
   /** Called after the server’s welcome: resend check results it may not have. */
@@ -93,7 +95,7 @@ export class RunnerConnection {
       this.attempt = 0;
       const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
       const liveRuns = this.opts.liveRuns?.();
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");

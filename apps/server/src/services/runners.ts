@@ -6,6 +6,7 @@ import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerComman
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { recordRestart, type HelloRestart, type LastRestart } from "./runner-restarts.js";
 import { redact } from "./error-buffer.js";
 import { costEvents, decisions, engagements, notifications, runnerEventAttempts, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
@@ -47,6 +48,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   // Runs before listeners and is awaited, for cheap bookkeeping a reader must see straight after the event (BOS-217).
   const syncHooks: Array<(runner: Runner, event: RunnerEvent) => Promise<unknown>> = [];
   const connectListeners: Array<(runnerId: string) => unknown> = [];
+  const restartListeners: Array<(runner: Runner, last: LastRestart) => unknown> = [];
   const lostListeners: Array<(runId: string) => unknown> = [];
   let liveRunsDelayMs = LIVE_RUNS_GRACE_MS;
   const resumeListeners: Array<(runner: Runner, pending: Array<{ runId: string; requestId: string }>) => unknown> = [];
@@ -459,13 +461,20 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
      * are pulled forward to now, each with a note. Capped, and skipped when a restart pulled some
      * minutes ago, so a restart loop can't flood wakes. A reconnect (same id) changes nothing.
      */
-    async bootSeen(runner: Runner, bootId: string | undefined): Promise<number> {
+    async bootSeen(runner: Runner, bootId: string | undefined, hello: Omit<HelloRestart, "bootId"> = {}): Promise<number> {
       if (!bootId || bootId === runner.bootId) return 0;
       failPending(runner.id, "The runner restarted while this was running.");
       const at = new Date();
       // A runner with no boot id on record (new, or older than BOS-352) can't be told apart from a reconnect.
       if (runner.bootId) restartedAt.set(runner.id, at.getTime());
       await db.update(runners).set({ bootId }).where(eq(runners.id, runner.id));
+      // Why it restarted, for the feed and server_status (BOS-594). A failure here must not stop the wakes below.
+      try {
+        const last = await recordRestart(db, runner, { bootId, ...hello }, { firstBoot: !runner.bootId, at });
+        if (runner.bootId) for (const l of [...restartListeners]) void Promise.resolve(l(runner, last)).catch(() => {});
+      } catch {
+        /* the restart still happened; only its reason is lost */
+      }
       if (runner.bootPulledAt && at.getTime() - runner.bootPulledAt.getTime() < RESTART_PULL_COOLDOWN_MS) return 0;
       const pending = await db
         .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
@@ -590,6 +599,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     /** Called whenever a runner (re)connects, e.g. to re-send verdicts it missed. */
     onConnect(listener: (runnerId: string) => unknown) {
       connectListeners.push(listener);
+    },
+
+    /** Called once per runner restart (a new boot id after a known one), with its recorded reason (BOS-594). */
+    onRestart(listener: (runner: Runner, last: LastRestart) => unknown) {
+      restartListeners.push(listener);
     },
 
     /** Called when a reconnecting runner lists the permission requests it's still waiting on. */

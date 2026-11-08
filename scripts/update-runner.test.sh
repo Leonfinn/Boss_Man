@@ -72,6 +72,28 @@ logged "recreate-all" && fail "rollback recreated at once"
 run --rollback --now
 logged "recreate-all" || fail "rollback --now did not recreate"
 
+# --settings (BOS-594): no build, the launcher re-reads .env, and a drain marked "setting change"; no runner touched.
+run --settings
+logged "docker build" && fail "--settings built an image"
+logged "compose up -d --no-deps launcher" || fail "--settings did not recreate the launcher"
+logged "recreate-all" && fail "--settings recreated the runners at once"
+node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (j.reason !== "setting change") process.exit(1)' "$T/deployer/inbox/drain.json" || fail "--settings drain request does not say setting change"
+# ...the image drain's request carries no reason, so the server treats it as an update as before.
+run
+node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if ("reason" in j) process.exit(1)' "$T/deployer/inbox/drain.json" || fail "an image update's drain request carries a reason"
+# ...without a deployer folder it refuses and changes nothing (the Settings button would only drain onto a new image).
+saved="$BOSSMAN_DEPLOYER"; unset BOSSMAN_DEPLOYER
+if run --settings; then fail "--settings without a deployer folder succeeded"; fi
+logged "compose up" && fail "--settings without a deployer folder touched the launcher"
+export BOSSMAN_DEPLOYER="$saved"
+# ...without a launcher there is nothing to drain onto: refuse unless --now.
+if HAVE_LAUNCHER=0 run --settings; then fail "--settings without a launcher succeeded"; fi
+logged "compose up" && fail "--settings without a launcher restarted something"
+run --settings --now
+logged "compose up -d --no-deps launcher" || fail "--settings --now did not recreate the launcher first"
+logged "recreate-all" || fail "--settings --now did not recreate the runners"
+[[ ! -e $T/deployer/inbox/drain.json ]] || fail "--settings --now asked for a drain"
+
 # A failed canary promotes nothing and asks for nothing.
 if CANARY_RC=1 run; then fail "a failed canary succeeded"; fi
 logged "docker tag boss-man-runner:candidate" && fail "a failed canary was promoted"
