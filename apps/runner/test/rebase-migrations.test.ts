@@ -252,6 +252,8 @@ describe("scripts/rebase-migrations.mjs", () => {
     const one = await ticket(ws, o, 1, (d) => addMigration(d, 3, "alpha", 3000, addColumn("alpha")));
     const two = await ticket(ws, o, 2, (d) => addMigration(d, 3, "beta", 3100, addColumn("beta")));
     await ws.merge(one, "main", "m1");
+    // A clone's branch reaches the shared repo only on a sync (BOS-343): the script is given the branch as the gate sees it.
+    await ws.checkpoint(two, "after a turn");
     const clone = mkdtempSync(path.join(tmpdir(), "bm-rb-script-"));
     git(clone, "clone", "-q", o.url, ".");
     git(clone, "fetch", "-q", ws.repoDir(PROJECT), `refs/heads/bossman/${two.ticketId}:refs/heads/work`);
