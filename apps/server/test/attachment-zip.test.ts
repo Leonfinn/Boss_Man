@@ -2,6 +2,7 @@
 // files, without trusting it: ../ paths, a zip bomb's declared size and too many entries are refused, and a
 // binary entry is listed by name and size only.
 import { randomBytes, randomUUID } from "node:crypto";
+import { deflateRawSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -9,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { issueRunToken } from "../src/mcp.js";
-import { readZip, ZIP_LIMITS } from "../src/services/attachment-zip.js";
+import { readZip, ZIP_LIMITS, ZipReadError } from "../src/services/attachment-zip.js";
 
 let done: () => Promise<void> = async () => {};
 afterEach(() => done());
@@ -32,30 +33,37 @@ async function setup() {
 }
 
 /** A zip whose central directory can declare any name, size and method, whatever the data says. */
-function crafted(entries: Array<{ name: string; data?: Uint8Array; declaredSize?: number }>): Buffer {
+function crafted(entries: Array<{ name: string; data?: Uint8Array; declaredSize?: number; sameOffset?: boolean }>): Buffer {
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];
   let offset = 0;
+  let firstLocal = -1;
   for (const e of entries) {
     const name = Buffer.from(e.name, "utf8");
     const data = e.data ? Buffer.from(e.data) : Buffer.alloc(0);
     const size = e.declaredSize ?? data.length;
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(8, 8); // deflate
-    local.writeUInt32LE(size, 22); // uncompressed size, as declared (can lie)
-    local.writeUInt32LE(data.length, 18);
-    local.writeUInt16LE(name.length, 26);
+    // sameOffset: this entry points back at the first entry's local header and packs no data of its own.
+    const reuse = e.sameOffset && firstLocal >= 0;
+    const entryOffset = reuse ? firstLocal : offset;
+    if (!reuse) {
+      if (firstLocal < 0) firstLocal = offset;
+      const local = Buffer.alloc(30);
+      local.writeUInt32LE(0x04034b50, 0);
+      local.writeUInt16LE(8, 8); // deflate
+      local.writeUInt32LE(size, 22); // uncompressed size, as declared (can lie)
+      local.writeUInt32LE(data.length, 18);
+      local.writeUInt16LE(name.length, 26);
+      locals.push(local, name, data);
+      offset += 30 + name.length + data.length;
+    }
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(8, 10);
     central.writeUInt32LE(size, 24);
     central.writeUInt32LE(data.length, 20);
     central.writeUInt16LE(name.length, 28);
-    central.writeUInt32LE(offset, 42);
-    locals.push(local, name, data);
+    central.writeUInt32LE(entryOffset, 42);
     centrals.push(central, name);
-    offset += 30 + name.length + data.length;
   }
   const cd = Buffer.concat(centrals);
   const cdOffset = offset;
@@ -112,17 +120,24 @@ describe("a zip the owner attaches (BOS-228)", () => {
     await c.client.close();
   });
 
-  it("caps an entry whose header lies about its size instead of growing with it", () => {
-    // The header says 10 bytes; the deflate stream inflates to more than the per-entry cap. An archive that
-    // understates its size must not make the reader hold a huge file: the entry is listed, never dumped.
-    const zip = Buffer.from(zipSync({ "lie.txt": strToU8("a".repeat(ZIP_LIMITS.entryBytes + 1024 * 1024)) }, { level: 1 }));
-    // Rewrite the declared size in both headers to something small, as a malicious archive would.
-    zip.writeUInt32LE(10, 22);
-    zip.writeUInt32LE(10, zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 24);
-    const out = readZip(zip);
-    // It is named in the listing, but the inflated megabyte is not returned.
-    expect(out).toContain("lie.txt");
-    expect(out).not.toContain("a".repeat(1000));
+  it("refuses fast a lying header that hides a gigabyte of unpacked data", () => {
+    // A deflate stream of 1 GB of zeros (a few KB packed) whose header claims 10 bytes. The reader must not
+    // inflate it into memory: zlib's maxOutputLength stops it at the declared ceiling and it is refused.
+    const packed = deflateRawSync(Buffer.alloc(1024 * 1024 * 1024));
+    const zip = crafted([{ name: "lie.txt", data: packed, declaredSize: 10 }]);
+    const started = Date.now();
+    expect(() => readZip(zip)).toThrow(ZipReadError);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("refuses a zip whose entries share their packed data", () => {
+    // The non-recursive bomb: many central entries pointing at one local entry, each claiming a small size so
+    // the declared total passes. Refused from the index, before anything is inflated.
+    const data = deflateRawSync(strToU8("a".repeat(4 * 1024 * 1024)));
+    const zip = crafted(Array.from({ length: 500 }, (_, i) => ({ name: `f${i}.txt`, data, declaredSize: 1, sameOffset: true })));
+    const started = Date.now();
+    expect(() => readZip(zip)).toThrow(/share or overlap/);
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 
   it("still opens pictures, PDFs and plain text as before", async () => {
