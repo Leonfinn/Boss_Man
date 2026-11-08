@@ -28,6 +28,7 @@ import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/sch
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
+import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
@@ -1304,6 +1305,7 @@ export async function buildApp(opts: AppOptions) {
       titlePattern: z.string().min(1).max(500).optional(),
       safeOnly: z.boolean().optional(),
       scratchOnly: z.boolean().optional(),
+      agentIds: z.array(z.string().min(1).max(64)).min(1).max(50).optional(),
     });
     const Outcome = z.enum(["allow", "ceo", "owner", "deny"]);
     const ruleErrors = (reply: FastifyReply) => (err: unknown) => {
@@ -2664,16 +2666,25 @@ export async function buildApp(opts: AppOptions) {
       }
     });
     owner.get("/api/decisions/advised", async () => decisionsSvc.recentlyAdvised());
+    // Cards Boss Man closed by itself in the last couple of hours, with the notice and steps they showed
+    // (BOS-739): Decisions puts them where the card was, so an owner part-way through the steps knows why.
+    owner.get("/api/decisions/closed-notices", async () => recentClosedNotices(db));
+    // The owner opened a card's steps (BOS-739): a later system close then also tells their feed.
+    owner.post("/api/decisions/:id/opened", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      return { ok: await markOwnerOpened(db, id) };
+    });
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig } = z
+      const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope } = z
         .object({
           answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
           note: z.string().trim().max(2000).optional(),
           reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
+          alwaysScope: z.enum(["agent", "company"]).optional(),
           picks: z.array(z.number().int().min(0)).max(20).optional(),
           modelConfig: z
             .object({ harness: z.string().trim().min(1).max(40), provider: z.string().trim().min(1).max(40), model: z.string().trim().min(1).max(200), fundingSourceId: Uuid })
@@ -2681,7 +2692,7 @@ export async function buildApp(opts: AppOptions) {
         })
         .parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, reasonLink, custom, picks, modelConfig, by: await ownerName(req) });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
