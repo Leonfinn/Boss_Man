@@ -102,7 +102,11 @@ function init(): Promise<void> {
   return ready;
 }
 
-/** Encodes in the picture's own format, since the stored type has to keep matching the bytes. */
+/**
+ * Encodes in the picture's own format, since the stored type has to keep matching the bytes. There is no
+ * PNG-to-WebP fallback: a PNG that won't fit at any size is refused, not quietly re-typed (BOS-374 notes
+ * that an early BOS-320 commit message described a fallback the final code never did).
+ */
 async function encode(type: PictureType, image: Pixels, quality: number): Promise<Buffer> {
   const bytes =
     type === "image/png" ? await pngEncode(image as Parameters<typeof pngEncode>[0])
