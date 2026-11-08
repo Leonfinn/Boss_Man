@@ -139,7 +139,7 @@ describe("ranked decision queue (R20)", () => {
     // new card showed "Score 0: 0 for waiting". The reason itself is still "Raised just now" under an hour, so
     // the card needed its own age label (BOS-804).
     ctx.advance(8 * 60 * 1000);
-    const [after] = await ctx.queue();
+    const [after] = (await ctx.queue()) as unknown as Array<Row & { parts: { age: number } }>;
     expect(after!.id).toBe(fresh.id);
     expect(after!.parts.age).toBe(0);
     expect(Math.round(after!.score)).toBe(0);
