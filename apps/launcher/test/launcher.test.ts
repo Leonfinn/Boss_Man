@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DockerError } from "../src/docker.js";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, serverAddress, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, serverAddress, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
@@ -268,6 +268,29 @@ describe("the runner launcher (R55)", () => {
     expect(serverAddress("ws://10.0.0.5/x")).toBe("10.0.0.5:80");
     // The runner keeps no capability.
     expect(containerSpec(config(), "app-co").HostConfig.CapAdd).toEqual([]);
+  });
+
+  it("BOS-69: a named stack uses its own names, images and labels, and never lists or touches the other stack's runners", async () => {
+    const fake = fakeDocker();
+    const prod = launcher(config(), fake.docker);
+    const staging = launcher({ ...config(), stack: "staging" }, fake.docker);
+    await prod.put("app-co", TOKEN);
+    await staging.put("app-co", TOKEN);
+    expect([...fake.containers.keys()].sort()).toEqual(["boss-man-netguard-app-co", "boss-man-runner-app-co", "boss-man-staging-netguard-app-co", "boss-man-staging-runner-app-co"]);
+    const spec = containerSpec({ ...config(), stack: "staging" }, "app-co");
+    expect(spec.Image).toBe("boss-man-staging-runner:current");
+    expect(spec.Labels).toEqual({ "boss-man.launcher": "1", "boss-man.company": "app-co", "boss-man.stack": "staging" });
+    expect(netguardSpec({ ...config(), stack: "staging" }, "app-co", "abc").Image).toBe("boss-man-staging-netguard:current");
+    // Each sees only its own, and removing staging's runner leaves production's.
+    expect((await prod.list()).map((r) => r.slug)).toEqual(["app-co"]);
+    expect(await staging.list()).toHaveLength(1);
+    await staging.remove("app-co");
+    expect([...fake.containers.keys()].sort()).toEqual(["boss-man-netguard-app-co", "boss-man-runner-app-co"]);
+    // The default stack's output is unchanged.
+    expect(containerSpec(config(), "app-co").Image).toBe("boss-man-runner:current");
+    expect(containerSpec(config(), "app-co").Labels).toEqual({ "boss-man.launcher": "1", "boss-man.company": "app-co" });
+    expect([parseStack(undefined), parseStack(" "), parseStack("staging")]).toEqual([undefined, undefined, "staging"]);
+    for (const bad of ["Staging", "a-b", "runner", "netguard", "x".repeat(17)]) expect(() => parseStack(bad)).toThrow();
   });
 
   it("removes the runner if its guard can't start, so no runner is left unguarded", async () => {
