@@ -1932,6 +1932,54 @@ describe("rules judge: each heredoc on a line has its own owner and body (BOS-72
   });
 });
 
+describe("rules judge: rules-judge rolling follow-ups (BOS-744)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    // Kind: cat/tee heredoc body run by a command. 1. the rest of the head line feeds the body to an interpreter.
+    // `>` and `> >` before `(` are not `>(`, so the strip's own `[<>]\(` check missed them and the body was dropped.
+    "tee <<'EOF' >(bash)\nrm -rf /etc\nEOF",
+    "tee <<'EOF' > >(bash)\nrm -rf /etc\nEOF",
+    "tee <<'EOF' >(python3)\nrm -rf /etc\nEOF",
+    "cat <<'EOF' >>(bash)\nrm -rf /etc\nEOF",
+    "cat <<'EOF' | tee >(bash) > /tmp/x\nrm -rf /etc\nEOF",
+    "cat <<'EOF' >(bash) >(sh)\nrm -rf /etc\nEOF",
+    // The reader is on the cat line but the `<<` is on a later part of it.
+    "cat x; tee <<'EOF' >(bash)\nrm -rf /etc\nEOF",
+    // `<(` reads the body as data, not code: kept too, so nothing is dropped unseen.
+    "tee <<'EOF' <(cat)\nrm -rf /etc\nEOF",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "cat <<'EOF' > /tmp/x\nrm -rf /etc\nEOF",
+    "tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
+    "cat <<'EOF' > /tmp/x\nhello\nEOF",
+    "echo `date`\n",
+    "cat `date` > /tmp/x\n",
+  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  // Item 2 (a backtick substitution on a cat line): already Deny on main from other rules, checked once here so a
+  // regression shows. The true gaps found while checking it closed with BOS-727 and BOS-728, not here.
+  it.each([
+    "cat `bash <<'EOF'`\nrm -rf /etc\nEOF",
+    "cat `bash <<EOF`\nrm -rf /etc\nEOF",
+    "cat x `sh <<'B'; bash`\nrm -rf /etc\nB",
+    "`bash <<'E'`\nrm -rf /etc\nE\n",
+    "echo `bash -c 'rm -rf /etc'`\n",
+  ])("deny, backtick substitution (item 2): %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it("reads long hostile input in linear time", () => {
+    const t = Date.now();
+    const inputs = [
+      "cat `bash <<'E'` " + "x ".repeat(2000) + "\nrm -rf /etc\nE",
+      "cat <<'A' " + "((".repeat(1500) + "\n" + "> >(".repeat(800) + "A",
+      "cat x " + "`".repeat(3000) + " <<'A'\n" + "| tee ".repeat(500) + "\nA",
+    ];
+    for (const cmd of inputs) {
+      expect(cmd.length).toBeLessThan(10_000);
+      judge(cmd);
+    }
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+});
+
 // BOS-729 (Jane's round-2 review of BOS-715): the file-tool scan is linear, `shred` is a delete for the target-scope check,
 // and a file tool under `xargs` reads names the judge can't place. Every Deny row got Allow before this fix.
 describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-729)", () => {

@@ -2020,7 +2020,9 @@ function dropCatHeredocBodies(text: string, original: string): string {
       if (drop && q === "" && /\$\(|\x60/.test(body.join("\n"))) drop = false;
       if (drop) {
         const rest = line.slice(segStart);
-        if (/[<>]\(/.test(rest)) drop = false;
+        // A process substitution is found from the `<<` on, not only as `>(`/`<(` after a space: `tee <<'EOF' >(bash)` and
+        // `> >(bash)` put a separate `>` before the `(`, and `>>(bash)` glues it on, so neither matched (BOS-744).
+        if (/[<>]\(/.test(rest.slice(k - segStart))) drop = false;
         else {
           const stages = rest.split(/(?<!\|)\|(?!\|)&?/).slice(1);
           if (stages.some((s) => !HEREDOC_SINK_SAFE.has(/^[ \t]*([\w.-]+)/.exec(s)?.[1] ?? ""))) drop = false;
