@@ -71,7 +71,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
   // A quoted word reads as the word it is: quote removal (`"..."`, `'...'`, `$'...'`, `$"..."`, `\-`, backslash-newline)
   // is applied to every plain word before every check below, not only to flags (BOS-715).
-  const base = dequoteWords(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (m: string, head: string, q: string, end: string, body: string) => {
+  const base = dequoteWords(withoutOwnMemory(command, ownProject)).replace(/((?:^|[;&|(\n])[ \t]*(?:cat|tee)\b[^\n;&|()]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (m: string, head: string, q: string, end: string, body: string) => {
     // With an unquoted delimiter bash expands the body: `$(…)` and backticks in it run (BOS-725). Keep such a body so the
     // checks below read it; a body with no substitution is data and is dropped as before.
     if (q === "" && /\$\(|\x60/.test(body)) return m;
