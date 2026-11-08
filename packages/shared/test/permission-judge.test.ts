@@ -1890,5 +1890,21 @@ describe("rules judge: each heredoc on a line has its own owner and body (BOS-72
     "cat <<'EOF' | tee /tmp/x\nrm -rf /etc\nEOF",
     "cat <<'EOF' | grep foo > /tmp/x\nrm -rf /etc\nEOF",
     "bash <<'B'; cat <<'A' > /tmp/x\necho hi\nB\nrm -rf /etc\nA",
+    "cat <<'A' > /tmp/x; bash <<'B'\nplain text\nA\nls\nB",
+    "cat /dev/null; cat <<'EOF' > /tmp/x\nrm -rf /etc\nEOF",
   ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  it("reads long hostile input in linear time", () => {
+    const t = Date.now();
+    // Each stays under MAX_JUDGED_COMMAND (10 000), or the judge would answer "too long" before reading it.
+    const inputs = [
+      "cat <<'A' " + "<<'B' ".repeat(800) + "> /tmp/x\n" + "x\n".repeat(2000),
+      "cat <<A; ".repeat(800) + "\n" + "|&;(\n".repeat(400),
+      "cat <<'EOF' " + "| tee ".repeat(800) + "\n" + "y\n".repeat(2000) + "EOF",
+    ];
+    for (const cmd of inputs) {
+      expect(cmd.length).toBeLessThan(10_000);
+      judge(cmd);
+    }
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
 });
