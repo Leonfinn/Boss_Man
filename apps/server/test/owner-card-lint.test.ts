@@ -10,7 +10,7 @@ import { openPglite } from "../src/db/client.js";
 import { decisions } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { checkAsk } from "../src/services/decisions.js";
-import { lintOwnerSteps, sh, step, type CardLint } from "../src/services/steps.js";
+import { lintOwnerSteps, sh, step, type CardLint, type SelfDeployFacts } from "../src/services/steps.js";
 
 // The owner-step lint (BOS-417, DR-008 Q1): cards with steps for the owner are checked when they are raised.
 
@@ -29,17 +29,17 @@ describe("lintOwnerSteps", () => {
   });
 
   it("refuses a variable no step up to there sets (the $BOSSMAN_HOME card)", () => {
-    expect(rules([step("Go to the install folder:", sh("cd $BOSSMAN_HOME", H))])).toEqual(["1:R2"]);
-    expect(rules([step("Go there:", sh("cd ${BOSSMAN_HOME}/src", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go to the install folder. This prints nothing:", sh("cd $BOSSMAN_HOME", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go there. This prints nothing:", sh("cd ${BOSSMAN_HOME}/src", H))])).toEqual(["1:R2"]);
     // Unfenced, in a sentence, it is still a command the owner will paste.
     expect(rules(["Run sudo ls $BOSSMAN_HOME on the new host."])).toEqual(["1:R2"]);
     // Set later is set too late.
-    expect(rules([step("Go:", sh("cd $DIR", H)), step("Set it:", sh("DIR=/srv/bm", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go: this prints nothing.", sh("cd $DIR", H)), step("Set it: this prints nothing.", sh("DIR=/srv/bm", H))])).toEqual(["1:R2"]);
   });
 
   it("accepts variables the card sets, inline assignments, and shell text that isn't a variable", () => {
     const ok = [
-      step("Set the folder:", sh("export DIR=/srv/bm", H)),
+      step("Set the folder. This prints nothing:", sh("export DIR=/srv/bm", H)),
       step("Go there:", sh("cd $DIR/src && ls", H)),
       step("Build with a flag set just for this command:", sh("DOCKER_BUILDKIT=1 docker compose build", H)),
       step("Same command, inline:", sh("COMPOSE_FILE=a.yml docker compose ps && echo $COMPOSE_FILE", H)),
@@ -59,7 +59,7 @@ describe("lintOwnerSteps", () => {
     expect(rules([`Run this:\n\n${F}ssh root@<host-ip>\n\`\`\``])).toEqual(["1:R3"]);
     expect(rules(["Run `scp YOUR_KEY root@nas:/x` on the old host."])).toEqual(["1:R3"]);
     expect(rules([`Run this:\n\n${F}$ ls\n\`\`\``])).toEqual(["1:R3"]);
-    expect(rules([`Go there:\n\n${F}cd {{host.srcDir}}\n\`\`\``])).toEqual(["1:R4"]);
+    expect(rules([`Go there (this prints nothing):\n\n${F}cd {{host.srcDir}}\n\`\`\``])).toEqual(["1:R4"]);
   });
 
   it("only warns about links, several commands in one step, hedging and long cards", () => {
@@ -265,6 +265,60 @@ describe("R14: git that writes the checkout runs in a (umask 022 && …) subshel
   it("can't be overridden by the CEO: the fix is always the same subshell", () => {
     const r = checkAsk({ triedFirst: TRIED, steps: [step("Pin it:", sh("cd /srv/bm/src && git checkout main", H))], lintOverride: "The owner's umask is 022 on this host.", byCeo: true });
     expect(r.error).toMatch(/runs git checkout outside a \(umask 022 && …\) subshell/);
+  });
+});
+
+describe("R15: an agent card can't update the machine itself (DR-036, the 7 Nov duplicate cards)", () => {
+  const r15 = (steps: string[], selfDeploy: SelfDeployFacts = { enabled: true, installDir: "/srv/bm/src", openCommit: "6d679f9a12" }) => lintOwnerSteps(steps, { selfDeploy }).refuse.filter((x) => x.rule === "R15");
+  const card = (command: string) => [step("Run this:", sh(command, H))];
+
+  it("refuses an update script, however it is called", () => {
+    for (const c of [
+      "cd /srv/bm/src && scripts/rebuild-live.sh",
+      "/srv/bm/src/scripts/deploy.sh --commit 6d679f9a",
+      "update-runner.sh",
+      "sh scripts/deploy.sh --rollback",
+      "bash -eu scripts/update-runner.sh",
+    ])
+      expect(r15(card(c)), c).toHaveLength(1);
+    // The refusal points the agent at Boss Man's own card, not just saying no.
+    expect(r15(card("scripts/rebuild-live.sh"))[0]!.problem).toMatch(/open "Main has moved to 6d679f9a" card/);
+  });
+
+  it("refuses a git write on the install folder, by -C, by cd, or from the host's reported folder", () => {
+    for (const c of [
+      "git -C /srv/bm/src checkout 6d679f9a",
+      "cd /srv/bm/src && git merge --ff-only 6d679f9a",
+      "(cd /srv/bm/src && git reset --hard 6d679f9a)",
+      "git checkout main", // no cd: falls back to the reported install folder
+    ])
+      expect(r15(card(c)), c).toHaveLength(1);
+    // Without a reported install folder a bare git is an agent's own checkout: left alone.
+    expect(r15(card("git checkout main"), { enabled: true })).toEqual([]);
+  });
+
+  it("passes one-off setup cards, an agent's own checkout, and the read-only git the release notes use", () => {
+    for (const c of ["cd /home/me/work && git checkout feature-x", "git -C /home/me/repo status", "git -C /srv/bm/src status", "git -C /srv/bm/src log --oneline -5", "git -C /srv/bm/src stash list"])
+      expect(r15(card(c)), c).toEqual([]);
+    expect(r15(["Add the secret in Settings → Secrets, then press Save."])).toEqual([]);
+    // A config file the owner writes inside the install folder isn't a git write.
+    expect(r15(card("cd /srv/bm/src && docker compose up -d db"))).toEqual([]);
+  });
+
+  it("is not checked at all when Boss Man doesn't raise its own card (an install without the deployer)", () => {
+    expect(r15(card("cd /srv/bm/src && scripts/rebuild-live.sh"), { enabled: false })).toEqual([]);
+  });
+
+  it("can't be overridden by the CEO: the fix is to leave the update to Boss Man's card", () => {
+    const r = checkAsk({ triedFirst: TRIED, steps: [step("Update it:", sh("cd /srv/bm/src && scripts/rebuild-live.sh", H))], lintOverride: "The server card has no steps this time.", byCeo: true, selfDeploy: { enabled: true, installDir: "/srv/bm/src" } });
+    expect(r.error).toMatch(/runs the machine's own update script/);
+  });
+
+  it("checkAsk passes the facts through, and the refusal names the open card", () => {
+    const r = checkAsk({ triedFirst: TRIED, steps: [step("Update it:", sh("cd /srv/bm/src && scripts/rebuild-live.sh", H))], selfDeploy: { enabled: true, openCommit: "6d679f9a" } });
+    expect(r.error).toMatch(/Main has moved to 6d679f9a/);
+    // No self-deploy facts at all: R15 is not checked, so the same card is only refused by the other rules (none here).
+    expect(checkAsk({ triedFirst: TRIED, steps: [step("Pin it:", sh("git -C /srv/bm/src status", H))] }).error).toBeNull();
   });
 });
 

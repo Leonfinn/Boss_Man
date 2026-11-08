@@ -1,6 +1,6 @@
 {
-  "id": "6e437258-ed16-48df-aeeb-051bbc26feb9",
-  "prevId": "6329e75f-2042-43a6-b2ea-7c8652098373",
+  "id": "171ad421-61d4-4b6e-8e0c-7e0c19ebc782",
+  "prevId": "f2e118f9-2078-4945-981b-b99ee1630047",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2769,6 +2769,27 @@
             },
             {
               "expression": "signature",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "failure_signatures_company_recent": {
+          "name": "failure_signatures_company_recent",
+          "columns": [
+            {
+              "expression": "company_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

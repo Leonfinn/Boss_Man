@@ -13,7 +13,8 @@
 //   BOSSMAN_NETGUARD       auto (default), enforce or off: the network guard that keeps runners off private networks
 //   BOSSMAN_NETGUARD_ALLOW extra host:port entries (space separated) every runner may reach on the private networks
 //   BOSSMAN_LAUNCHER_KEY_FILE  the key the server sends; made on first start if missing
-// `node dist/main.js recreate-all` puts every runner on the current image (scripts/update-runner.sh).
+// `node dist/main.js recreate-all` puts every runner on the current image at once, cutting runs off (scripts/update-runner.sh --now).
+// For a setting change use scripts/update-runner.sh --settings, which drains first (BOS-594).
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
