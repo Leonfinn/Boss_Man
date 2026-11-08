@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
+import { BUILT_IN_RULES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, ceoChapters, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
@@ -110,6 +110,8 @@ describe("owner chat", () => {
     // The chat's tool description names the tools it now shares with its runs (BOS-224).
     expect(start.prompt).toContain("server_status");
     expect(start.prompt).toContain("decisions (");
+    // The built-in safety rules, in a company that set no standing rules (BOS-754).
+    expect(start.prompt).toContain(BUILT_IN_RULES.join("\n"));
     expect((await c.db.select().from(runs).where(eq(runs.id, start.runId)))[0]).toMatchObject({ purpose: "chat", chapterId: null });
     // Only the CEO's own run made a chapter.
     expect((await c.db.select().from(ceoChapters)).length).toBe(1);

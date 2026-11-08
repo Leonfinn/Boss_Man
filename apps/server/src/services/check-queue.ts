@@ -53,6 +53,21 @@ export function checkQueue(db: Db) {
     return Number.isInteger(n) && n >= 1 ? Math.min(n, MAX_CHECK_SLOTS) : DEFAULT_CHECK_SLOTS;
   }
 
+  /** The owner's switch (Settings → Server and runner → Checks, BOS-798). Owner-only routes call these; no agent tool does. */
+  async function setMode(value: CheckQueueMode): Promise<void> {
+    await db.insert(settings).values({ key: CHECK_QUEUE_MODE_KEY, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+  }
+
+  async function setSlots(n: number): Promise<void> {
+    if (!Number.isInteger(n) || n < 1 || n > MAX_CHECK_SLOTS) throw new Error(`Check slots must be a whole number from 1 to ${MAX_CHECK_SLOTS}.`);
+    await db.insert(settings).values({ key: CHECK_SLOTS_KEY, value: n }).onConflictDoUpdate({ target: settings.key, set: { value: n } });
+  }
+
+  /** Jobs still waiting to start, in every company: switching back to legacy cancels them, since nothing would start them. */
+  async function queuedIds(): Promise<string[]> {
+    return (await db.select({ id: checkJobs.id }).from(checkJobs).where(eq(checkJobs.state, "queued"))).map((r) => r.id);
+  }
+
   /** Queue a check, or hand back the job that already answers the request. */
   async function enqueue(input: EnqueueInput): Promise<EnqueueResult> {
     // One enqueue at a time (the lock is held to the end of the transaction), so a pre-review and a merge request for the same
@@ -237,5 +252,5 @@ export function checkQueue(db: Db) {
     return { mode: await mode(), slots: await slots(), running, queued, held, recent, main: mains.map((m) => ({ projectId: m.id, project: m.name, state: m.state, since: m.since, commit: m.commit })) };
   }
 
-  return { mode, slots, enqueue, claimNext, progress, complete, cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
+  return { mode, slots, setMode, setSlots, queuedIds, enqueue, claimNext, progress, complete, cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
 }

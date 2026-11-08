@@ -7,6 +7,7 @@ export * from "./board.js";
 export * from "./acceptance.js";
 export * from "./rank.js";
 export * from "./review.js";
+export * from "./built-in-rules.js";
 export * from "./loops.js";
 export * from "./risk.js";
 export * from "./notify.js";
