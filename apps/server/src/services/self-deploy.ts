@@ -245,20 +245,6 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const noSrc = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
     const noHost = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
     const handSteps: string[] = [];
-    // A launcher change needs a hand step whether or not the update touches an infra file (BOS-335): a plain
-    // server update never rebuilds the launcher, so without this the owner's card would say the launcher changed
-    // and then ask them to do nothing about it, and the old launcher would keep running.
-    if (launcherChanged)
-      handSteps.push(
-        src && host
-          ? step(
-              "Rebuild the launcher so a runner that restarts itself is guarded again at once. Run this on the machine that runs Boss Man. It restarts only the launcher; your runners and running agents are not touched.",
-              cmd(`cd ${src} && docker compose build launcher && docker compose up -d --no-deps launcher`),
-              "Then check the launcher's log shows this line (it means the fast guard path is on):",
-              cmd(`cd ${src} && docker compose logs launcher 2>&1 | grep "watching Docker events for runner restarts"`),
-            )
-          : `The launcher changed and has to be rebuilt, but ${src ? noHost : noSrc}`,
-      );
     if (infra) {
       handSteps.push(
         bg === true
@@ -304,6 +290,14 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
                 cmd(`cd ${src} && docker compose up -d --no-deps db`),
               )
             : `If database settings changed they need a separate restart, but ${src ? noHost : noSrc}`,
+        );
+      if (launcherChanged)
+        handSteps.push(
+          src
+            ? host
+              ? step("Rebuild the launcher with this command, on the same machine. Runners keep their old limits until the next runner update.", cmd(`cd ${src} && docker compose build launcher && docker compose up -d --no-deps launcher`))
+              : `The launcher changed and has to be rebuilt, but ${noHost}`
+            : `The launcher changed and has to be rebuilt, but ${noSrc}`,
         );
       if (bg === true)
         handSteps.push(
@@ -381,7 +375,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
           .slice(0, 10)
           .map((r) => ({ decisionId: r.id, label: r.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80) }))
       : [];
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(handSteps.length ? { handSteps } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}), ...(urgent ? { urgent } : {}) };
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}), ...(urgent ? { urgent } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     // The heading is the card's first paragraph, so the card, its phone push and the CEO's view all lead with it.
     const lead = urgent ? `${urgent.heading}.\n\n` : "";

@@ -18,7 +18,7 @@ A runner container can no longer reach private networks. Agents run shell comman
 - Guard work for one company is done one step at a time (start, restart, recreate, remove and the 5 s check never overlap).
 
 ## Build and update
-`docker compose build` (profile `launcher`) builds `boss-man-netguard:current`; `scripts/update-runner.sh` rebuilds it on every runner update, and a change under `apps/netguard/` counts as a runner change in `deploy.sh` and the host deployer. CI builds it and `scripts/ci-launcher.sh` proves the behaviour against real Docker: the server answers; the database (IPv4 and IPv6), the network gateway, 192.168.1.1, 169.254.169.254 and `fd00::1` are refused; and the guard returns after the runner restarts.
+`docker compose build` (profile `launcher`) builds `boss-man-netguard:current`; `scripts/update-runner.sh` rebuilds it on every runner update, and a change under `apps/netguard/` counts as a runner change in `deploy.sh` and the host deployer. Since BOS-335 that script also rebuilds and recreates the launcher when one is running, so Settings → Server and runner → Updates → **Build and update runners** puts a launcher change live too; it restarts only the launcher, never the runners. CI builds it and `scripts/ci-launcher.sh` proves the behaviour against real Docker: the server answers; the database (IPv4 and IPv6), the network gateway, 192.168.1.1, 169.254.169.254 and `fd00::1` are refused; and the guard returns after the runner restarts.
 
 ## Check it by hand
 ```sh
