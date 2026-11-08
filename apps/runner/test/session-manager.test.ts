@@ -1,7 +1,7 @@
 // Drives the real claude-agent-acp adapter (and its bundled Claude Code) against the
 // scripted stub model, so no credentials are used. Same scenario as spike S2.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -237,6 +237,27 @@ describe("runs in a git workspace (R38)", () => {
     // The turn's changes were checkpointed (R39), leaving the branch alone.
     expect(h.events).toContainEqual(expect.objectContaining({ type: "run.update", update: { kind: "checkpoint", turn: 1, files: 1 } }));
     expect((await workspaces.lastTurnDiff({ projectId, ticketId })).files.map((f) => f.path)).toEqual(["spike.txt"]);
+  }, 90_000);
+
+  it("keeps a ticket's own clone on the project's shared Claude memory (BOS-323)", async () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "bm-remote-"));
+    const g = (...args: string[]) => execFileSync("git", args, { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+    g("init", "-q", "-b", "main");
+    writeFileSync(path.join(repo, "README.md"), "app\n");
+    g("add", ".");
+    g("commit", "-qm", "init");
+    const workspaces = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")), { ...process.env, BOSSMAN_TICKET_COPIES: "clone" });
+    const ticketId = randomUUID();
+    const projectId = randomUUID();
+    const h = harness(null, { workspaces, workspace: { projectId, ticketId, repoUrl: repo, baseRef: "main" } });
+    await h.ended;
+    const slug = (p: string) => p.replace(/[^a-zA-Z0-9]/g, "-");
+    const shared = path.join(h.home, ".claude", "projects", slug(workspaces.repoDir(projectId)), "memory");
+    const mine = path.join(h.home, ".claude", "projects", slug(workspaces.ticketDir(ticketId)), "memory");
+    // Claude Code keys a clone's memory by the clone, and is told that folder; it leads to the shared one.
+    expect(stubLog.some((l) => l.raw?.includes(mine))).toBe(true);
+    expect(readlinkSync(mine)).toBe(shared);
+    expect(existsSync(shared)).toBe(true);
   }, 90_000);
 
   it("tries again when only the repo lock timed out, and ends the run on any other failure (BOS-331)", async () => {
