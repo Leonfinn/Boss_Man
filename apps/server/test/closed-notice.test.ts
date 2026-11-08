@@ -8,7 +8,7 @@ import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, decisions } from "../src/db/schema.js";
-import { ENGAGED_MS, leftBehind, liveNotice, markOwnerOpened, newerNotice, NOTICE_MS, recentClosedNotices } from "../src/services/closed-notice.js";
+import { ENGAGED_MS, leftBehind, liveNotice, markOwnerOpened, newerNotice, NOTICE_MS, recentClosedNotices, switchedBackNotice } from "../src/services/closed-notice.js";
 
 // BOS-739: an owner hand-apply card Boss Man closes by itself leaves a notice where it was.
 const A = "a".repeat(40);
@@ -78,6 +78,17 @@ describe("closed notice text (BOS-739)", () => {
   it("reads no path when the card's steps never show one", () => {
     expect(leftBehind(["Apply it."])).toBe("Nothing you ran needs undoing.");
     expect(leftBehind(undefined)).toBe("Nothing you ran needs undoing.");
+  });
+
+  it("says a switched-back card's setup steps no longer apply, and nothing is left to press (BOS-740)", () => {
+    const n = switchedBackNotice({ steps: ["Settings → Funding → Add account"], now: new Date("2026-11-08T14:00:00Z") });
+    expect(n.why).toBe("switched-back");
+    expect(n.text).toContain("switched back to an older version");
+    expect(n.text).toContain("its setup steps no longer apply");
+    expect(n.text).toContain("You can stop: there is nothing to finish.");
+    expect(n.text).toContain("Nothing you ran needs undoing.");
+    expect(n.text).toContain("nothing left to press");
+    expect(Date.parse(n.until) - Date.parse(n.at)).toBe(NOTICE_MS);
   });
 });
 

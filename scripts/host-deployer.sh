@@ -121,6 +121,8 @@ else flock -n 9 || exit 0; fi # a run is already going; the next minute tries ag
 REQ_ID="" TARGET="" COMMIT="" STARTED="" FROM=""
 RESTART=0 # 1 while a "restart" request runs the blue/green swap: same commit, different messages, no rollback record
 HEALTH_KV=() # the latest whole-stack checklist as key=value pairs (stack, check_*), merged into the status file
+REQ_KV=()    # what the request asked for when it differs from what runs (BOS-753): requested_commit, runner_changed
+PICK_NOTE="" # why the commit that runs is not the one the owner approved (BOS-753), added to every message after the pick
 
 write_status() { # result message [backup]
   ((DRY)) && { log "[dry-run] status: $1: $2"; return 0; }
@@ -128,7 +130,7 @@ write_status() { # result message [backup]
   [[ $1 == running ]] || ended="$(now)"
   local soak=0 # the standby window this host really uses (BOS-401): the server holds the runner update for it
   if bluegreen_enabled; then soak="$SOAK_SECONDS"; fi
-  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/status.json.tmp"
+  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${REQ_KV[@]+"${REQ_KV[@]}"} ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/status.json.tmp"
   chmod 644 "$OUTBOX/status.json.tmp"
   mv "$OUTBOX/status.json.tmp" "$OUTBOX/status.json"
   [[ $1 == running ]] || cat "$OUTBOX/status.json" >>"$OUTBOX/history.jsonl"
@@ -143,14 +145,61 @@ post_webhook() { # result message
 }
 
 finish() { # result message [backup]: record the outcome, tell the owner, stop
-  log "$1: $2"
-  write_status "$@"
-  post_webhook "$1" "$2"
+  local msg="$2${PICK_NOTE:+ $PICK_NOTE}"
+  log "$1: $msg"
+  write_status "$1" "$msg" "${3:-}"
+  post_webhook "$1" "$msg"
   exit 0
 }
 
 # The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an SSH remote with a read-only deploy key for a private one; docs/00 step 2). Empty if unreachable.
 remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }' || true; }
+
+# The merge commits Boss Man's merge gate checked (BOS-753), one full hash per line, written by the server into
+# inbox/checked beside each request. Untrusted like the request: only a plain file under 256 KB is read, and only
+# lines that are exactly a 40-character hash are kept. It can only narrow the choice below: every commit picked
+# from it must still be on main, a fast-forward of what runs, and free of deployment files.
+checked_list() {
+  local f="$INBOX/checked"
+  [[ -f $f && ! -L $f && $(stat -c %s "$f") -le 262144 ]] || return 0
+  LC_ALL=C grep -xE '[0-9a-f]{40}' "$f" 2>/dev/null || true
+}
+
+# BOS-753: the owner approved COMMIT, but main has moved on to tip since the offer was written. An approval means
+# "deploy the newest checked version", so walk main's own history (first parents: the merges themselves, never a
+# branch's commits) from the tip back to the approved commit, and take the newest one that the merge gate checked
+# and that needs no hand-apply. None: the approved commit itself, which is still on main and is what was approved.
+# Sets COMMIT and PICK_NOTE. Every later check (fast-forward, deployment files, rate limit) still runs on the result.
+pick_newest_checked() { # head approved tip
+  local head=$1 approved=$2 tip=$3 c checked unchecked=0 hand=0 why="" infra
+  checked="$(checked_list)"
+  # Newest first; never a commit the running version already contains, so whatever is picked is a fast-forward of it.
+  while IFS= read -r c; do
+    [[ -n $c ]] || continue
+    if ! grep -qxF "$c" <<<"$checked"; then unchecked=$((unchecked + 1)); continue; fi
+    infra="$(g diff --name-only "$head" "$c" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } || true)"
+    if [[ -n $infra ]]; then hand=$((hand + 1)); continue; fi
+    COMMIT=$c
+    break
+  done < <(g rev-list --first-parent "$tip" "^$approved" "^$head" 2>/dev/null || true)
+  if [[ $COMMIT != "$approved" ]]; then
+    if [[ $COMMIT == "$tip" ]]; then
+      why="main had moved on to ${tip:0:8} by the time the deployer ran, so the deployer took that newest checked version instead."
+    elif ((unchecked)); then
+      why="main had moved on to ${tip:0:8} by the time the deployer ran, but the newest $unchecked commit(s) have not passed their merge check yet. ${COMMIT:0:8} is the newest one that has, so the deployer took it instead; the rest come in the next update."
+    else
+      why="main had moved on to ${tip:0:8} by the time the deployer ran, but the newer commits change deployment files and have to be applied by hand. ${COMMIT:0:8} is the newest checked one without them, so the deployer took it instead; the rest come in the next update."
+    fi
+    PICK_NOTE="You approved ${approved:0:8}; $why It includes everything you approved."
+    return 0
+  fi
+  if [[ -z $checked ]]; then why="Boss Man did not say which newer commits passed their merge check"
+  elif ((hand && !unchecked)); then why="the newer commits change deployment files and have to be applied by hand"
+  else why="none of the newer commits has passed its merge check yet"; fi
+  # The approved commit is already in what runs (a newer version went live since the card was raised): nothing to add.
+  if g merge-base --is-ancestor "$approved" "$head" 2>/dev/null; then COMMIT=$head; fi
+  PICK_NOTE="Main has moved on to ${tip:0:8} since you approved ${approved:0:8}, but $why, so the deployer kept to ${COMMIT:0:8}; the newer commits come in the next update."
+}
 
 # ---------------------------------------------------------------------------------------------------
 # Which services an update changes (BOS-487, DR-020 B and C). Read from the rendered compose settings of each service,
@@ -446,6 +495,21 @@ host_extra_facts() {
     ports+="$psep$(jstr "$k"): $(jstr "$v")"; psep=", "
   done
   out+="$sep\"network\": {\"addresses\": [$addrs], \"ports\": {$ports}}"
+  # --- BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries only. Compose uses
+  # only the last line, so two or more means an earlier list is silently ignored. Nothing else on the line is kept
+  # (any token that isn't host:port is dropped), and no other key is read.
+  local nlines="" nlsep="" nl tok toks tsep nc=0 envfound=false
+  local -a ntoks
+  [[ -r $REPO/.env ]] && envfound=true
+  while IFS= read -r nl; do
+    ((nc < 16)) || break
+    nl="${nl#*=}"; nl="${nl%%[[:space:]]#*}"; nl="${nl//[\"\']/}"
+    IFS=$', \t' read -r -a ntoks <<<"$nl" || true
+    toks="" tsep=""
+    for tok in "${ntoks[@]}"; do [[ $tok =~ ^[A-Za-z0-9.-]{1,253}:[0-9]{1,5}$ ]] && { toks+="$tsep$(jstr "$tok")"; tsep=", "; }; done
+    nlines+="${nlsep}[$toks]"; nlsep=", "; nc=$((nc + 1))
+  done < <(grep -sE '^[[:space:]]*(export[[:space:]]+)?BOSSMAN_NETGUARD_ALLOW[[:space:]]*=' "$REPO/.env" || true)
+  out+="$sep\"netguardEnv\": {\"envFound\": $envfound, \"lines\": [$nlines]}"
   # --- memory, in kB, from /proc/meminfo
   local mt ma
   mt="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null)" || mt=""
@@ -1108,8 +1172,21 @@ main() {
   if [[ $TARGET == server ]]; then
     tip="$(remote_tip)"
     [[ -n $tip ]] || finish rejected "Rejected: could not read main from GitHub. Try again in a few minutes."
-    # The offer the owner approved was stale: drop it, so the next minute writes one for the real tip.
-    [[ $COMMIT == "$tip" ]] || { rm -f "$OUTBOX/available.json"; finish rejected "Rejected: ${COMMIT:0:8} is not the tip of main (${tip:0:8}). Approve the latest deploy instead."; }
+    # BOS-753: main moved on after the offer was written (a merge between the card and the press, or before this
+    # tick). The approval still stands: it deploys the newest checked commit on main, never one off main.
+    if [[ $COMMIT != "$tip" ]]; then
+      local approved=$COMMIT
+      g fetch --quiet origin main || finish rejected "Rejected: git fetch from GitHub failed."
+      if ! g cat-file -e "$COMMIT^{commit}" 2>/dev/null || ! g merge-base --is-ancestor "$COMMIT" "$tip"; then
+        # Main was rewritten under the offer: drop it, so the next minute writes one for the real tip.
+        rm -f "$OUTBOX/available.json"
+        finish rejected "Rejected: ${COMMIT:0:8} is not on main any more (main is at ${tip:0:8}), so it can't be deployed. A new update question for main follows within a few minutes."
+      fi
+      pick_newest_checked "$head" "$COMMIT" "$tip"
+      REQ_KV=(requested_commit="$approved")
+      # The offer no longer says what goes out: the next minute writes a fresh one.
+      rm -f "$OUTBOX/available.json"
+    fi
   elif [[ $TARGET == restart ]]; then
     # A restart only ever runs what is checked out: never a fetch, a merge or a move of the checkout (BOS-647).
     [[ $COMMIT == "$head" ]] || finish rejected "Rejected: nothing was restarted. The version running changed since you asked (it is ${head:0:8} now, the request named ${COMMIT:0:8}), so an update probably ran in between. If the server still needs it, press Restart the server again."
@@ -1140,6 +1217,12 @@ main() {
     local infra
     infra="$(g diff --name-only "$head" "$COMMIT" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } | head -5 | paste -sd, - || true)"
     [[ -z $infra ]] || finish rejected "Rejected: this change touches deployment files ($infra). Deploy it by hand on the host: scripts/deploy.sh"
+    # Whether the runners need rebuilding for what really goes out (BOS-753): the card only knew its own range.
+    if ((${#REQ_KV[@]})); then
+      local rp
+      rp="$(g diff --name-only "$head" "$COMMIT" | grep -E "$RUNNER_PATHS" || true)"
+      if [[ -n $rp ]]; then REQ_KV+=(runner_changed=true); else REQ_KV+=(runner_changed=false); fi
+    fi
   fi
 
   if ((DRY)); then

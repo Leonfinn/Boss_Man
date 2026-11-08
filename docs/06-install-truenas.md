@@ -875,10 +875,9 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    docker exec boss-man-ntfy-ntfy-1 ntfy token add bossman-publish
    ```
    The last command prints the **publish token** (it starts with `tk_`). Copy it now.
-5. In Boss Man, open **Settings > Secrets** and save the publish token as a new secret.
-6. Open **Notifications** in the side menu. In the **How you're told** box below the feed, tick **Send to my phone through my own ntfy server**, fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (paste the publish token from step 4), and choose **Save**. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If **Send a test to my phone** (it only appears after you Save) fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
-7. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
-8. On the **Notifications** page, choose **Send a test to my phone**. It should arrive within seconds.
+5. Open **Notifications** in the side menu. In the **How you're told** box below the feed, tick **Send to my phone through my own ntfy server**, fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (paste the publish token from step 4), and choose **Save**. Boss Man stores the token encrypted in its secrets as "ntfy access token", so you do not add it under **Settings > Secrets** yourself. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If **Send a test to my phone** (it only appears after you Save) fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
+6. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
+7. On the **Notifications** page, choose **Send a test to my phone**. It should arrive within seconds.
 
 Check that it is locked down. Both commands must print `401` or `403` (the first tries to read, the second to publish, with no login):
 ```
@@ -901,7 +900,7 @@ Run both for a day. During that time the webhook keeps getting plain alerts only
 
 ### Blue/green installs
 
-With blue/green the two Boss Man colours are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command (and in the rollback command). It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings in step 6 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
+With blue/green the two Boss Man colours are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command (and in the rollback command). It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings in step 5 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
 
 ### Any Docker host
 
