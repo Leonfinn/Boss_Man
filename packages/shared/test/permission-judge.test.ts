@@ -588,6 +588,8 @@ describe("rules judge: round 3 (BOS-377)", () => {
     "zip -T -TT 'node /tmp/x.js' /tmp/a.zip f",
     // F3
     "echo /tmp/x.sh | xargs sh",
+    // A file tool under xargs reads its targets from stdin, so the judge can't place them (BOS-715).
+    "find /tmp/out -name '*.log' | xargs rm -f",
     "pnpm tsx /tmp/x.ts",
     "pnpm vitest --config /tmp/v.config.ts",
     "pnpm -C /tmp/p t",
@@ -672,7 +674,6 @@ describe("rules judge: round 3 (BOS-377)", () => {
     "pnpm test 2>&1 | tee /tmp/t.log",
     "pnpm run build --outDir /tmp/out",
     "git status",
-    "find /tmp/out -name '*.log' | xargs rm -f",
   ]);
 });
 
@@ -1103,6 +1104,104 @@ describe("rules judge: unquoteFlags stays linear on hostile input (BOS-697 round
     const t = Date.now();
     judge(cmd);
     expect(Date.now() - t).toBeLessThan(100);
+  });
+});
+
+// BOS-715 (Jane's security review of BOS-697, plus her three newest forms from the BOS-697 close-out): the variant forms that
+// still got Allow on main (0b72f67f) and on BOS-697's head (6315d544). Fixed by kind, not by listing cases: bash's quote
+// removal is applied to every word before the target and opaque checks (not only flags), the `-c` command string is dequoted
+// before it is scanned, one shell-name list is shared with the interpreter checks, and `shred` / `xargs <file tool>` read
+// their targets like the other file tools. Every Deny row here got Allow before this fix.
+describe("rules judge: quoted targets, obfuscated -c strings, more shells, shred/xargs (BOS-715)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+
+  // 1. Quote removal on a file-tool target: bash reads each of these as a plain path outside /tmp.
+  denies([
+    "rm -rf $'/'",
+    "rm -rf /tmp/a $'/etc'",
+    "rm -rf /tmp/a \\/etc",
+    "rm -rf /tmp/a /e\"tc\"",
+    "rm -rf /tmp/a /e\\tc",
+    // Jane's newest form: `$"..."` is bash's locale quoting, the same as `"..."` after quote removal.
+    "rm $\"-rf\" /",
+  ]);
+  allows([
+    "rm -rf $'/tmp/a'",
+    "rm -rf /tmp/a /tmp/b",
+  ]);
+
+  // 2. The command text inside a `-c` string is dequoted before the rm/opaque checks.
+  denies([
+    "bash -c 'r''m -rf /'",
+    "bash -c $'\\x72m -rf /'",
+    "sh -c 'echo '$'\\x24(cat /tmp/x)'",
+    // Jane's newest forms: a backslash-newline joins the line, and a substitution glued to a dash hides the flag.
+    "rm -\\\nrf /",
+    "sh -c 'rm -$(cat /tmp/x) /'",
+  ]);
+  allows([
+    "bash -c 'rm -rf /tmp/x'",
+    "bash -c 'ls -la'",
+    "sh -c 'echo hi'",
+  ]);
+
+  // 3. Shells beyond ba/z/da/k sh `-c`: the same command string is read for each.
+  denies([
+    "ash -c \"$(cat /tmp/x)\"",
+    "mksh -c \"$(cat /tmp/x)\"",
+    "fish -c \"$(cat /tmp/x)\"",
+    "tcsh -c \"$(cat /tmp/x)\"",
+    "csh -c \"$(cat /tmp/x)\"",
+  ]);
+  allows([
+    "ash -c 'ls -la'",
+    "fish -c 'echo hi'",
+  ]);
+
+  // 4. Other file tools / indirect targets: `shred` and any file tool under `xargs` read names the judge can't place, and a
+  // process substitution is a path the judge can't place.
+  denies([
+    "shred $(cat /tmp/x)",
+    "cat /tmp/x | xargs rm -rf",
+    "cat /tmp/x | xargs shred",
+    "rm -rf <(cat /tmp/x)",
+  ]);
+  allows([
+    "shred /tmp/x",
+    "find /tmp/out -name '*.log' | xargs ls",
+  ]);
+
+  it("stays fast on hostile input built for the new quote-removal scan", () => {
+    // Dougal's BOS-697 ReDoS lesson (lesson 17) applies to any new regex: the dequote scan and the target scan must stay
+    // linear on a long run of escapes and quoted pieces that never closes.
+    for (const cmd of [
+      "rm " + "$'".repeat(400) + "(",
+      "rm " + "\\/".repeat(4_000) + "(",
+      "sh -c " + "'\"".repeat(1_000) + "(",
+    ]) {
+      const t = Date.now();
+      judge(cmd);
+      expect(Date.now() - t).toBeLessThan(100);
+    }
+  });
+
+  it("stays fast on nested -c shells: the work is capped across every level (Dougal's three shapes)", () => {
+    const shapes = [
+      ('bash -c "' + "sh -c ".repeat(1600) + '"').slice(0, 10000),
+      ("bash -c '" + "sh -c ls; ".repeat(900) + "'").slice(0, 10000),
+      ('bash -c "'.repeat(9) + "sh -c sh -c ".repeat(500) + "ls" + '"'.repeat(9)).slice(0, 10000),
+    ];
+    for (const cmd of shapes) {
+      const t = performance.now();
+      const r = judge(cmd);
+      const ms = performance.now() - t;
+      expect(ms).toBeLessThan(250);
+      expect(r.verdict).not.toBe("allow"); // out of budget or unplaceable: never Allow
+    }
   });
 });
 

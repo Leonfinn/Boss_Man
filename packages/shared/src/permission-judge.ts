@@ -37,6 +37,33 @@ const LEADING_CD = /^\s*(?:cd|git\s+-C)\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:ticke
 export const MAX_JUDGED_COMMAND = 10_000;
 export const isJudgeable = (command: string | null): boolean => !command || command.length <= MAX_JUDGED_COMMAND;
 
+/**
+ * The shells whose `-c` runs a command string and whose script file runs as code (BOS-715). One list, used by the `-c` scan,
+ * the interpreter checks and the `xargs <shell> -c` check, so a shell is never caught in one place and missed in another.
+ * `busybox sh` reaches the same list through the `busybox` launcher (`busybox sh -c ...`).
+ */
+export const SHELL_NAMES = "sh bash zsh dash ksh ash mksh fish tcsh csh";
+/** A regex alternation of the shell names, longest-first so `ash`/`mksh` are not partly read as `sh`/`ksh`. */
+const SHELL_ALT = SHELL_NAMES.split(" ").sort((a, b) => b.length - a.length).join("|");
+
+/**
+ * Tools that create, move or delete a file named by their arguments (BOS-715). Given a target the judge can't place, or
+ * reading their targets from `xargs` input, they are unread code. `shred` overwrites in place, so it counts as a delete.
+ */
+const FILE_TOOLS = new Set("rm rmdir shred unlink cp mv ln install touch truncate tee mkdir mkfifo mknod".split(" "));
+
+/**
+ * One work budget for the whole `-c` scan of a command, shared by every nesting level (BOS-715, Dougal's timing finding): each
+ * shell word found costs the characters from it to the end of the string, so nested or repeated `sh -c` can't multiply the
+ * work per level. When it runs out the line can't be placed and gets no Allow (opaque).
+ */
+type ScanBudget = { left: number };
+const SCAN_BUDGET = 250_000;
+function chargeScan(budget: ScanBudget, cost: number): boolean {
+  budget.left -= cost;
+  return budget.left >= 0;
+}
+
 const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allow" : "deny", row, reasonLabel: JUDGE_LABELS[row] });
 
 /**
@@ -49,16 +76,28 @@ const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allo
  * @param workspaceRoot the folder that holds `tickets/` and `reviews/`; the own folder is `<root>/(tickets|reviews)/<id>`
  *   and nothing else counts as it. Without it any `.../workspaces/(tickets|reviews)/<id>` path counts.
  */
-export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string, workspaceRoot?: string): JudgeReading {
+export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string, workspaceRoot?: string, depth = 0, budget: ScanBudget = { left: SCAN_BUDGET }): JudgeReading {
   if (!command) return judgeWithoutCommand(question, ownFolder, ownProject);
   // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
-  // A quoted flag is the same flag: quote removal (`"..."`, `'...'`, `$'...'`, `\-`) is applied before every check below.
-  const c = unquoteFlags(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  // A quoted word reads as the word it is: quote removal (`"..."`, `'...'`, `$'...'`, `$"..."`, `\-`, backslash-newline)
+  // is applied to every plain word before every check below, not only to flags (BOS-715).
+  const base = dequoteWords(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  // The command string of each shell `-c` runs too, so `bash -c 'r''m -rf /'`, `bash -c $'\x72m -rf /'` and
+  // `sh -c 'echo '$'\x24(cat /tmp/x)'` are all read (BOS-715). It is judged as its own command rather than glued onto the
+  // outer line, so its redirects do not change how the outer line is read. A shell nested inside a shell is bounded by
+  // `depth`; an unresolved inner string is already caught as opaque, so it is skipped here.
+  if (depth < 8) {
+    for (const innerCmd of shellDashCInner(base, budget)) {
+      const r = judgePermission(question, innerCmd, ownFolder, ownProject, workspaceRoot, depth + 1, budget);
+      if (r.verdict === "deny") return r;
+    }
+  }
+  const c = base;
   // Opaque: the command string a shell runs for `-c` (in any combined flag, with all of its joined quoted pieces) is
   // unknown when it holds a substitution or a variable the judge can't resolve.
-  if (shellDashCOpaque(c)) return result("opaque");
+  if (shellDashCOpaque(c, budget)) return result("opaque");
   const ids = [...c.matchAll(WORKSPACE)].map((m) => m[1]!);
   const own = ownFolder ?? LEADING_CD.exec(c)?.[1] ?? [...ids].sort((a, b) => ids.filter((x) => x === b).length - ids.filter((x) => x === a).length)[0];
 
@@ -190,14 +229,26 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (writes) {
     for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
     for (const m of c.matchAll(/\bcd\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/g)) if (own && m[1] !== own) return result("outside");
-    const targets = [...c.matchAll(/(?:\brm\b|rmSync\(|rmtree\(|unlinkSync\()\s*(?:-\S+\s+)*['"]?((?:~|\$HOME|\/)[^\s'";|&)]*)/g)].map((m) => m[1]!);
-    for (const t of targets) if (!/^\/tmp\//.test(t) && !inOwn(t) && t !== "/dev/null") return result("outside");
+    // Every target a delete tool names must be in /tmp or the checkout, not only the first: `rm -rf /tmp/a /etc` is as bad
+    // as `rm -rf /etc` (BOS-715). The text is already dequoted, so `$'/etc'`, `\/etc` and `/e"tc"` read as `/etc`.
+    for (const m of c.matchAll(/(?:\brm\b|rmSync\(|rmtree\(|unlinkSync\()([^;&|\n]*)/g)) {
+      for (const tok of shellWords(m[1]!)) {
+        if (tok === "" || tok.startsWith("-")) continue;
+        const p = tok.replace(/^['"]|['"]$/g, "");
+        if (p.startsWith("~") || p.startsWith("$HOME") || p.startsWith("/")) {
+          if (!/^\/tmp\//.test(p) && !inOwn(p) && p !== "/dev/null") return result("outside");
+        }
+      }
+    }
     // A relative target can climb out of the folder (`rm -rf ..`), and a `cd` somewhere else makes every relative target land there.
     for (const m of c.matchAll(/\brm\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
     // An unresolved substitution or variable given to a file tool (`rm -rf $(curl ...)`, `cp $(cat /tmp/l) d`) is a target
-    // the judge can't place, so it gets no Allow.
-    for (const m of c.matchAll(/\b(?:rm|cp|mv|install|ln)\b([^;&|\n]*)/g)) {
-      for (const tok of shellWords(m[1]!)) if (!tok.startsWith("-") && tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
+    // the judge can't place, so it gets no Allow. `shred` and any file tool under `xargs` read their targets the same way, and a
+    // substitution glued to a dash (`rm -$(cat /tmp/x)`) is unseen unless the dash word is tested too (BOS-715).
+    for (const m of c.matchAll(/\b(?:rm|cp|mv|install|ln|shred)\b|\bxargs\b([^;&|\n]*)/g)) {
+      const rest = m[1] ?? c.slice(m.index! + m[0].length).split(/[;&|\n]/)[0]!;
+      if (/<\(/.test(rest)) return result("outside"); // a process substitution is a path the judge can't place
+      for (const tok of shellWords(rest)) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
     }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
@@ -323,6 +374,8 @@ function dequoteWord(w: string): string | null {
   let out = "";
   for (let i = 0; i < w.length; i++) {
     const ch = w[i]!;
+    // A backslash before a newline is a line continuation: bash drops both, joining the text either side (BOS-715).
+    if (ch === "\\" && w[i + 1] === "\n") { i++; continue; }
     if (ch === "\\" && i + 1 < w.length) { out += w[++i]!; continue; }
     if (ch === "$" && w[i + 1] === "'") {
       const e = w.indexOf("'", i + 2);
@@ -332,6 +385,15 @@ function dequoteWord(w: string): string | null {
       continue;
     }
     if (ch === "'") { const e = w.indexOf("'", i + 1); if (e < 0) return null; out += w.slice(i + 1, e); i = e; continue; }
+    // `$"..."` is bash's locale quoting: after quote removal it is the same as `"..."` (BOS-715, Jane). Read it as a
+    // double-quoted piece from its opening quote, so the closing quote pairs with it.
+    if (ch === "$" && w[i + 1] === '"') {
+      let j = i + 2;
+      for (; j < w.length && w[j] !== '"'; j++) { if (w[j] === "\\" && j + 1 < w.length) out += w[++j]!; else out += w[j]!; }
+      if (j >= w.length) return null;
+      i = j;
+      continue;
+    }
     if (ch === '"') {
       let j = i + 1;
       for (; j < w.length && w[j] !== '"'; j++) { if (w[j] === "\\" && j + 1 < w.length) out += w[++j]!; else out += w[j]!; }
@@ -346,15 +408,16 @@ function dequoteWord(w: string): string | null {
 }
 
 /**
- * Drops the quoting from a word that a shell reads as a flag (`rm "-rf" /`, `rm -"r"f /`, `rm $'-rf' /`, `rm \-rf /` are
- * all `rm -rf /`). Only a balanced word whose dequoted form starts with `-` is rewritten, and only when it holds no
- * substitution or variable; anything else is left for the other checks. Each flag word keeps its place among the others.
+ * Drops the quoting from every word the shell reads as a plain literal, so an option or a target reads as it really is
+ * (`rm "-rf" /`, `rm $'-rf' /`, `rm \-rf /` are all `rm -rf /`; `rm /e"tc"`, `rm \/etc` and `rm $'/'` are `rm /etc` and
+ * `rm /`). A word is rewritten only when quote removal leaves a plain literal with no space or shell metacharacter, so data
+ * such as `echo 'a b'` is left alone. Each word keeps its place among the others.
  *
  * A word starts at the beginning of the string or after a space, `;`, `&`, `|` or `(`, and ends at the end of the string or
  * before a space, `;`, `&`, `|` or `)`. The scan is linear (BOS-697): an overlapping regex here backtracked exponentially on
  * a run of backslash-escaped or `$'...'` atoms that never closes, and the server runs the judge synchronously.
  */
-function unquoteFlags(s: string): string {
+function dequoteWords(s: string): string {
   // A word character is anything but whitespace, a shell word separator (`;`, `&`, `|`, `(`, `)`) or a quote; a quote
   // opens a quoted piece of the current word, so it is read together with the word.
   const separator = (ch: string): boolean => /[\s;&|()]/.test(ch);
@@ -376,8 +439,11 @@ function unquoteFlags(s: string): string {
     }
     const w = s.slice(start, i);
     const d = /["'\\]/.test(w) ? dequoteWord(w) : null; // no quoting to remove: keep the word as it is
-    // Only a plain option word is rewritten: a value with a space or a shell metacharacter stays quoted.
-    out += d !== null && d.startsWith("-") && !/[\s;&|()<>"'\x60$]/.test(d) ? d : w;
+    // A word that quote removal turns into a plain literal (no space, no shell metacharacter, no variable) is rewritten to
+    // what the shell reads: an option is the same option, and a target (`\/etc`, `/e"tc"`, `$'/'`) is the same path
+    // (BOS-715). A word with a space or a metacharacter stays quoted, so data is not split or joined, and a `#` stays
+    // quoted so `echo '#!...'` does not turn into a mid-line shell comment that hides the commands after it.
+    out += d !== null && !/[\s;&|()<>"'\x60$*?[{#]/.test(d) ? d : w;
   }
   return out;
 }
@@ -1044,8 +1110,9 @@ function setsUnknownEnvironment(assigns: string[], sh: string, args: string[]): 
  * can't resolve. The string is assembled the way bash joins adjacent quoted pieces (`bash -c 'echo '"$(cat /tmp/x)"`),
  * and only the word the shell actually runs (after any option words, BOS-695) is read.
  */
-function shellDashCOpaque(c: string): boolean {
-  for (const m of c.matchAll(/\b(?:ba|z|da|k)?sh\b/g)) {
+function shellDashCOpaque(c: string, budget: ScanBudget): boolean {
+  for (const m of c.matchAll(new RegExp(`\\b(?:${SHELL_ALT})\\b`, "g"))) {
+    if (!chargeScan(budget, c.length - m.index!)) return true; // out of work: can't place it, so no Allow
     const words = shellWords(c.slice(m.index! + m[0].length).split(/\n/)[0]!);
     const at = words.findIndex((w) => /^[-+][A-Za-z]*c/.test(w));
     if (at < 0) continue;
@@ -1053,6 +1120,27 @@ function shellDashCOpaque(c: string): boolean {
     if (ok === false || (word !== "" && hasUnresolvedExpansion(word))) return true;
   }
   return false;
+}
+
+/**
+ * The command strings every shell `-c` runs, with quote removal applied so `bash -c 'r''m -rf /'` and
+ * `bash -c $'\x72m -rf /'` both read as `rm -rf /` (BOS-715). A string the judge can't resolve is left out; it is already
+ * caught as opaque. The inner command genuinely runs, so the judge reads each one as an extra command in the same line.
+ */
+function shellDashCInner(c: string, budget: ScanBudget): string[] {
+  const out: string[] = [];
+  for (const m of c.matchAll(new RegExp(`\\b(?:${SHELL_ALT})\\b`, "g"))) {
+    if (!chargeScan(budget, c.length - m.index!)) break; // shellDashCOpaque then reports the line as opaque
+    const words = shellWords(c.slice(m.index! + m[0].length).split(/\n/)[0]!);
+    const at = words.findIndex((w) => /^[-+][A-Za-z]*c/.test(w));
+    if (at < 0) continue;
+    const { word, ok } = shellDashCString(words.slice(at + 1));
+    if (ok === false || word === "" || hasUnresolvedExpansion(word)) continue;
+    // shellWords already dropped `'...'` / `"..."`; decode a `$'...'` string and any backslash by the same quote removal.
+    const d = dequoteWord(word);
+    if (d !== null && d.trim() !== "") out.push(d);
+  }
+  return out;
 }
 
 /**
@@ -1433,7 +1521,7 @@ function usesScratchUnsafely(c: string): boolean {
   const bad = { v: false };
   const segs = shellSegments(c, bad);
   if (bad.v) return true; // the parser can't tell where a heredoc or arithmetic ends: fail closed
-  const safe = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf rm rmdir mkdir cp mv ln tee touch cd pushd popd " +
+  const safe = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf rm rmdir shred mkdir cp mv ln tee touch cd pushd popd " +
     "test [ [[ realpath dirname basename readlink du df sort uniq cut tr jq md5sum sha256sum sha1sum mktemp export local unset set read for " +
     "true false sleep chmod date tar unzip gzip gunzip zip curl wget sed less more tree nl od xxd hexdump column").split(" "));
   const tooling = new Set(["pnpm", "npm", "yarn", "yarnpkg", "git"]);
@@ -1646,10 +1734,12 @@ function usesScratchUnsafely(c: string): boolean {
     if (extractsFiles(sh, args, written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) extracted = true;
     // F2: options that make an otherwise harmless tool run a program.
     if (runsProgramOption(sh, args)) return true;
-    // F3: xargs builds a command from its input; with a scratch or written path anywhere it is unread code.
+    // F3: xargs builds a command from its input; with a scratch or written path anywhere it is unread code. A file tool under
+    // xargs (`cat /tmp/x | xargs rm -rf`, `... | xargs shred`) acts on names the judge never sees, so it is not exempt
+    // (BOS-715).
     if (sh === "xargs") {
       const cmdWord = args.find((a, i) => !a.startsWith("-") && !/^-[IiLnPsdE]$/.test(args[i - 1] ?? ""));
-      if ((written.size || scratchWord.test(c) || scratchVars.size) && !(cmdWord !== undefined && safe.has(cmdWord) && cmdWord !== "tar")) return true;
+      if ((written.size || scratchWord.test(c) || scratchVars.size) && !(cmdWord !== undefined && safe.has(cmdWord) && cmdWord !== "tar" && !FILE_TOOLS.has(cmdWord))) return true;
     }
     // git's own config, hooks and -C are BOS-378 (Kit); only pnpm/npm/yarn are handled here.
     if (tooling.has(sh) && sh !== "git" && toolingRunsScratch(sh, args, isScratch, isWritten)) return true;
