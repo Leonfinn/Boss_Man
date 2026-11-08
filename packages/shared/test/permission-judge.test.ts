@@ -928,6 +928,7 @@ describe("rules judge: shell options after -c (BOS-695)", () => {
     "bash -c -e -- 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
     "echo x > c.sh; bash -c -e './c.sh'",
     "echo x > c.sh; bash -c -o pipefail './c.sh'",
+    "echo x > c.sh; bash -c -eo pipefail './c.sh'",
     "bash -c -e 'node /tmp/x.js'",
     // An option form the judge can't place: no Allow.
     "bash -c --posix 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
