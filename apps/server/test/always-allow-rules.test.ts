@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, policyRules, runners } from "../src/db/schema.js";
@@ -33,7 +33,7 @@ async function setup() {
   };
   const answer = (id: string, a: string, payload: object = {}) => built.app.inject({ method: "POST", url: `/api/decisions/${id}/answer`, headers: { cookie }, payload: { answer: a, ...payload } });
   const rules = () => db.select().from(policyRules).where(and(eq(policyRules.companyId, co.company.id), eq(policyRules.trigger, "permission")));
-  return { ...built, db, close, cookie, co, dev, ask, answer, rules };
+  return { ...built, db, close, cookie, co, dev, ask, answer, rules, runner: runner!, ingest };
 }
 
 beforeEach(async () => {
@@ -138,6 +138,36 @@ describe("Always allow on a permission card (BOS-294)", () => {
     expect(res.statusCode).toBe(200);
     const [after] = await ctx.rules();
     expect(after!.condition).toMatchObject({ agentIds: [ctx.dev.id] });
+  });
+  it("leaves the card open and saves no rule when the rule insert fails (BOS-598)", async () => {
+    const card = await ctx.ask(ctx.dev.id, MD);
+    await ctx.db.execute(sql`create function bm_fail_rule() returns trigger language plpgsql as $$ begin raise exception 'rule insert failed'; end $$`);
+    await ctx.db.execute(sql`create trigger bm_fail_rule before insert on policy_rules for each row execute function bm_fail_rule()`);
+    const res = await ctx.answer(card!.id, ALWAYS);
+    await ctx.db.execute(sql`drop trigger bm_fail_rule on policy_rules`);
+    await ctx.db.execute(sql`drop function bm_fail_rule()`);
+    expect(res.statusCode).toBeGreaterThanOrEqual(500);
+    expect(await ctx.rules()).toHaveLength(0);
+    const [still] = await ctx.db.select().from(decisions).where(eq(decisions.id, card!.id));
+    expect(still).toMatchObject({ status: "open", answer: null });
+  });
+  it("applies a one-agent deny rule when a replayed request is checked again (BOS-598)", async () => {
+    const sent: Array<{ type: string; requestId?: string; verdict?: string }> = [];
+    ctx.runners.connect(ctx.runner.id, (cmd: never) => { sent.push(cmd); return true; });
+    const runId = randomUUID();
+    const ev = (requestId: string) => ctx.ingest({ type: "run.permission_request", runId, requestId, title: MD, kind: "other", rawInput: { url: "https://x.dev" }, optionKinds: ["allow_once", "reject_once"] });
+    await ctx.ingest({ type: "run.started", runId, agentId: ctx.dev.id, acpSessionId: "s", model: null });
+    await ev(randomUUID());
+    const [card] = await ctx.db.select().from(decisions).where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open")));
+    expect((await ctx.answer(card!.id, "Allow once")).statusCode).toBe(200);
+    // Now a deny rule for this one agent: a repeat of the same ask must be refused, not settled by the earlier Allow once.
+    await ctx.db.insert(policyRules).values({ companyId: ctx.co.company.id, name: "Deny md for Dev", trigger: "permission", condition: { titlePattern: `^${MD}$`, agentIds: [ctx.dev.id] }, outcome: "deny", position: 0 });
+    const again = randomUUID();
+    await ev(again);
+    sent.length = 0;
+    await ctx.decisions.resume(ctx.runner, [{ runId, requestId: again }]);
+    const verdicts = sent.filter((c) => c.requestId === again).map((c) => c.verdict);
+    expect(verdicts).toEqual(["deny"]);
   });
   it("never lets the CEO save a standing rule", async () => {
     const card = await ctx.ask(ctx.dev.id, MD);
