@@ -584,11 +584,14 @@ export async function nameRunnerSetupTickets(db: Db, companyId: string, commit: 
 }
 
 /**
- * Takes back a ticket's setup card when the live commit moves back to before its merge (DR-011): a
- * rollback or a switch-back. Frees the key so the next go-live raises it again with its steps.
+ * Takes back an owner setup card when the live commit moves back to before its merge (DR-011): a
+ * rollback or a switch-back. `cardId` is the card itself (`tickets.ownerSetupDecisionId`), not a key,
+ * because one card can cover several tickets (BOS-741): every ticket in `ticketIds` that points at it has
+ * its pointer cleared, so none keeps a stale card for a card that is gone. Frees the key so the next
+ * go-live raises it again with its steps. Returns null when the card is already answered or withdrawn.
  */
-export async function withdrawOwnerSetup(db: Db, ticketId: string, note: string) {
-  const [open] = await db.select().from(decisions).where(and(eq(decisions.dedupeKey, ownerSetupKey(ticketId)), eq(decisions.status, "open")));
+export async function withdrawOwnerSetup(db: Db, cardId: string, ticketIds: string[], note: string) {
+  const [open] = await db.select().from(decisions).where(and(eq(decisions.id, cardId), eq(decisions.status, "open")));
   if (!open) return null;
   const withdrawal: Withdrawal = { by: "system", note, at: new Date().toISOString() };
   const [row] = await db
@@ -597,8 +600,8 @@ export async function withdrawOwnerSetup(db: Db, ticketId: string, note: string)
     .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")))
     .returning({ id: decisions.id, companyId: decisions.companyId });
   if (row) {
-    await db.update(tickets).set({ ownerSetupDecisionId: null }).where(eq(tickets.id, ticketId));
-    await record(db, { companyId: row.companyId, ticketId, kind: "decision_withdrawn", summary: note, at: new Date() });
+    if (ticketIds.length) await db.update(tickets).set({ ownerSetupDecisionId: null }).where(inArray(tickets.id, ticketIds));
+    await record(db, { companyId: row.companyId, ticketId: ticketIds[0] ?? (open.context as { ticketId?: string }).ticketId ?? null, kind: "decision_withdrawn", summary: note, at: new Date() });
   }
   return row ?? null;
 }

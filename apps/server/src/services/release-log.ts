@@ -215,19 +215,35 @@ export const releaseLogService = (
     // The tickets still live here and what the owner has to do for each, after the runner-update-only steps
     // are taken out: those are covered by the runner-update card for the release, not one card each.
     const live: SetupTicket[] = [];
+    // Cards to take back, by their id: a card can cover several tickets (BOS-741), so it is withdrawn
+    // once and every ticket that pointed at it is cleared, even when only one of them went back.
+    const withdrawing = new Set<string>();
     for (const t of withSetup) {
       const at = order.indexOf(t.mergeCommit);
       // Not live any more: a step-back to before its merge (the live commit is an earlier merge, or not a
       // merge at all, so a rollback went back past it). A ticket whose own merge commit Boss Man can't
       // place is left alone rather than guessed at.
       if (at >= 0 && (steppedBack || (liveAt >= 0 && at > liveAt))) {
-        if (t.ownerSetupDecisionId && (await withdrawOwnerSetup(db, t.id, `Switched back: "${t.title}" isn't running any more. You'll get this card again if it goes live once more.`))) withdrew++;
+        if (t.ownerSetupDecisionId) withdrawing.add(t.ownerSetupDecisionId);
         continue;
       }
       // A ticket whose every step is the runner update comes through with no steps: it is named on the
       // runner-update card instead of getting one of its own (BOS-741).
       const steps = setupStepsOf(t.steps);
       live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId });
+    }
+    // Take back each affected card once, clearing every ticket that pointed at it (BOS-741). A ticket
+    // still live here that shared a withdrawn card now has no card, so the grouping below raises one for
+    // it again rather than leaving it looking covered by a card that is gone.
+    for (const cardId of withdrawing) {
+      const covered = await db.select({ id: tickets.id, title: tickets.title }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.ownerSetupDecisionId, cardId)));
+      const stillLive = covered.filter((x) => live.some((l) => l.id === x.id));
+      const whose = stillLive[0] ?? covered[0];
+      if (!whose) continue;
+      const gone = await withdrawOwnerSetup(db, cardId, covered.map((x) => x.id), `Switched back: "${whose.title}" isn't running any more. You'll get this card again if it goes live once more.`);
+      if (!gone) continue;
+      withdrew++;
+      for (const t of live) if (covered.some((x) => x.id === t.id)) t.decisionId = null;
     }
     for (const group of setupGroups(live)) {
       const card = await raiseOwnerSetup(db, { companyId, tickets: group.tickets.map((t) => ({ ticketId: t.id, title: t.title })), steps: group.steps, commit: to });
@@ -261,12 +277,13 @@ export const releaseLogService = (
       if (covering) covering.tickets.push(...bySignature.get(sig)!);
       else cards.push({ steps, tickets: [...bySignature.get(sig)!] });
     }
-    return cards
-      .map((c) => {
-        const fresh = c.tickets.filter((t) => !t.decisionId);
-        return { tickets: fresh, steps: [...fresh[0]!.steps.values()] };
-      })
-      .filter((g) => g.tickets.length);
+    // Only tickets with no card yet get a card now; a group whose tickets all have one is done, and is
+    // dropped before its steps are read (a later go-live with earlier tickets still live would otherwise
+    // read an empty group and throw, aborting the whole pass so new tickets raised nothing).
+    return cards.flatMap((c) => {
+      const fresh = c.tickets.filter((t) => !t.decisionId);
+      return fresh.length ? [{ tickets: fresh, steps: [...c.steps.values()] }] : [];
+    });
   }
 
   /**

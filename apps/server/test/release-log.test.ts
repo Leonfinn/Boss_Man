@@ -380,4 +380,59 @@ describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 f
     // The runner-only step is taken out of that card (the runner card covers it).
     expect(cards[0]!.question).not.toContain("Build and update runners");
   });
+
+  it("a later deploy with the earlier grouped tickets still live still raises a card for a new differing ticket", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    const steps = "Settings → Funding → Add account";
+    await doneTicket(c, projectId, { title: "Add the second account", mergeCommit: B, ownerSetup: steps, at: new Date("2026-11-03T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Add the third account", mergeCommit: C, ownerSetup: steps, at: new Date("2026-11-03T12:05:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await openCards(c)).toHaveLength(1);
+
+    // A further deploy brings a ticket with different steps live while both grouped tickets are still
+    // live: its card is raised, and the grouped card isn't stacked on. The old code read an empty group
+    // here and threw, aborting the whole pass so this new card never went up.
+    const D = "4".repeat(40);
+    await doneTicket(c, projectId, { title: "Turn on the second bucket", mergeCommit: D, ownerSetup: "Settings → Storage → Turn on the second bucket", at: new Date("2026-11-03T12:10:00Z") });
+    await c.releaseLog.note(companyId, D);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const cards = await openCards(c);
+    expect(cards).toHaveLength(2);
+    expect(cards.map((x) => x.question).join("\n")).toContain("second bucket");
+  });
+
+  it("switching back past one ticket of a shared card takes the card back for all and clears every pointer", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    const steps = "Settings → Funding → Add account";
+    const a = await doneTicket(c, projectId, { title: "Add the second account", mergeCommit: B, ownerSetup: steps, at: new Date("2026-11-03T12:00:00Z") });
+    const b = await doneTicket(c, projectId, { title: "Add the third account", mergeCommit: C, ownerSetup: steps, at: new Date("2026-11-03T12:05:00Z") });
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const [shared] = await openCards(c);
+    expect(shared).toBeDefined();
+
+    // Switched back to before the newer (non-first) ticket's merge: the shared card covers both, so it is
+    // taken back, and BOTH tickets stop pointing at it. The old code found no card on the non-first key,
+    // so the newer ticket kept a stale pointer and never got a card again.
+    const before = await c.releaseLog.releaseManagerWakes("restarted");
+    expect(before).toBeGreaterThanOrEqual(0);
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("switched-back");
+    for (const t of [a, b]) expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.ownerSetupDecisionId).toBeNull();
+    const gone = await setupCards(c);
+    expect(gone.filter((x) => x.status === "open")).toHaveLength(0);
+
+    // C goes live again: both get a card again, as a shared pair.
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const again = await openCards(c);
+    expect(again).toHaveLength(1);
+    expect(again[0]!.question).toContain(a.title);
+    expect(again[0]!.question).toContain(b.title);
+  });
 });
