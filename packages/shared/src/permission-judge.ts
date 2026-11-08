@@ -846,8 +846,9 @@ function shellDashCString(words: string[]): { word: string; ok: boolean } {
     const w = words[i]!;
     if (w === "--") continue;
     if (!/^[-+]/.test(w)) return { word: w, ok: true };
-    // `-o pipefail` / `+o errexit` / bash's `-O extglob` / `+O nullglob`: the option name is the next word.
-    if (/^[-+]o$/i.test(w)) { i++; continue; }
+    // `-o pipefail` / `+o errexit` / bash's `-O extglob` / `+O nullglob`, and a cluster ending in o/O (`-eo pipefail`,
+    // `-euo pipefail`, `-eO extglob`): the option name is the next word.
+    if (/^[-+][A-Za-z]*[oO]$/.test(w)) { i++; continue; }
     // A bare `-` is a word, not an option.
     if (w === "-") return { word: w, ok: true };
     // Only plain short-option words (`-e`, `-ex`, `+e`, `-x`) are recognised, along with an `-o<name>`/`-O<name>` without a
@@ -1164,11 +1165,15 @@ function usesScratchUnsafely(c: string): boolean {
       if (mentionsWritten(code) || named(flag.replace(/^-[A-Za-z]*?[mMr]/, ""))) return true;
       if (/^-[A-Za-z]*[mMr]$|^--(?:require|import)$/.test(flag) && named(args[codeAt + 1] ?? "")) return true; // `-m c`, `-r ./c.js`
     }
-    const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
+    const dashC = args.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
       // `bash -c -ex -- 'cmd'`: the shell still reads options after -c, so the command string is the first word after -c
       // that is not `--` and not an option (BOS-695). An option word we can't place gives no Allow.
-      const at = shellDashCString(args.slice(dashC + 1));
+      // `bash -ce 'cmd'` / `bash -co pipefail 'cmd'` (BOS-700): `c` may sit inside a cluster, so the letters after it are
+      // still options to place (`-ce` -> `-e`, `-co` -> `-o pipefail`) before the command string.
+      const tail = args[dashC]!.replace(/^-[A-Za-z]*?c(?=[A-Za-z]*$)/, "-");
+      const rest = tail.length > 1 ? [tail, ...args.slice(dashC + 1)] : args.slice(dashC + 1);
+      const at = shellDashCString(rest);
       if (at.ok === false) return true;
       const inner = at.word;
       // `bash -c -e`: no command string to read, but with a written or scratch path anywhere in the command, give no Allow.

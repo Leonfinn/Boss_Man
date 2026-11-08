@@ -862,6 +862,13 @@ describe("rules judge: shell options after -c (BOS-695)", () => {
     "sh -c -e 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
     "bash -c -o pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
     "bash -c +o errexit 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    // BOS-700 part 1 (Jane): an option cluster ending in o/O takes the option name as the next word (`-eo pipefail`).
+    "bash -c -eo pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -eO extglob 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -euo pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    // BOS-700 part 2 (Jane): `-c` in an option group that does not end in c (`-ce`, `-co pipefail`).
+    "bash -ce 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -co pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
     "bash -c -O extglob 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
     "bash -c -ex 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
     "bash -c -e -- 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
@@ -880,6 +887,11 @@ describe("rules judge: shell options after -c (BOS-695)", () => {
     "bash -c -e 'pnpm test'",
     "bash -c -o pipefail 'pnpm test'",
     "bash -c -e -- 'pnpm test'",
+    // BOS-700: the option clusters and joined -c forms still allow an ordinary command.
+    "bash -c -eo pipefail 'pnpm test'",
+    "bash -c -euo pipefail 'pnpm test'",
+    "bash -ce 'pnpm test'",
+    "bash -co pipefail 'pnpm test'",
     "sh -c 'ls -la'",
     // Options before `-c` don't hide an ordinary command either.
     "bash -e -c 'pnpm test'",
