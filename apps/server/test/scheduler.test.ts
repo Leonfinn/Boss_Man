@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import type { RunnerCommand } from "@boss-man/shared";
+import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { appCache, sharedDatabase } from "./helpers/shared-server.js";
@@ -72,6 +72,10 @@ describe("scheduler", () => {
     expect(cmd.prompt).toContain("expected_version");
     expect(cmd.prompt).toContain("Every ticket_reply starts with 1 to 3 plain sentences");
     expect(cmd.prompt).toContain("Details:");
+    // The built-in safety rules, though the company set no standing rules, and outside the untrusted brief (BOS-754).
+    const rules = BUILT_IN_RULES.join("\n");
+    expect(cmd.prompt).toContain(rules);
+    expect(cmd.prompt.indexOf(rules)).toBeLessThan(cmd.prompt.indexOf("<untrusted"));
     const [tok] = await ctx.db.select().from(runTokens).where(eq(runTokens.tokenHash, hashToken(cmd.mcpToken)));
     expect(tok).toMatchObject({ runId: cmd.runId, agentId: ctx.ceo.id });
     // The ticket being worked on leaves the backlog; the one still waiting stays put.

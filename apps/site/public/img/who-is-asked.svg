@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 670" width="1160" height="670" role="img" aria-labelledby="wa-title wa-desc">
+  <title id="wa-title">Who is asked when an agent wants to run a command</title>
+  <desc id="wa-desc">Boss Man checks each request in five steps and the first step that decides it wins. 1: the network guard refuses addresses agents must not reach. 2: the built-in guards ask you about pushing, publishing and destructive commands; deleting temp files or files in the agent's own folder goes to the CEO first. 3: your own rules decide: deny refuses, allow lets it run, and ask rules pick the CEO or you. 4: built-in allows, such as Boss Man's own tools and reading, searching and editing the workspace, run without a card. 5: if nothing matched, a command or unknown tool goes to the CEO first, who has five minutes; if the CEO has not settled it, the card moves to you. A delete, a move or a request that names a path goes straight to you. A request from the CEO itself, or from a company with no CEO or a paused CEO, goes straight to you.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+    <marker id="aa" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#8a5a00"/></marker>
+  </defs>
+  <rect width="1160" height="670" fill="#ffffff"/>
+
+  <text x="0" y="22" class="bb" font-size="16" fill="#3d4757">Every request is checked in this order. The first step that decides it wins.</text>
+
+  <!-- main route arrows -->
+  <g stroke="#17202c" stroke-width="3" fill="none" marker-end="url(#ar)">
+    <path d="M196 110 H239"/><path d="M437 110 H480"/><path d="M678 110 H721"/><path d="M919 110 H962"/>
+  </g>
+  <!-- down arrows to outcomes -->
+  <g stroke="#17202c" stroke-width="3" fill="none" marker-end="url(#ar)">
+    <path d="M98 160 V216"/><path d="M339 160 V216"/><path d="M580 160 V216"/><path d="M821 160 V216"/>
+  </g>
+  <path d="M1062 160 V374" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#ar)"/>
+
+  <!-- step boxes -->
+  <g fill="#17202c">
+    <rect x="0" y="60" width="196" height="100" rx="10"/>
+    <rect x="241" y="60" width="196" height="100" rx="10"/>
+    <rect x="482" y="60" width="196" height="100" rx="10"/>
+    <rect x="723" y="60" width="196" height="100" rx="10"/>
+    <rect x="964" y="60" width="196" height="100" rx="10"/>
+  </g>
+  <g class="d" font-size="20" fill="#eef2f6">
+    <text x="20" y="102">Network guard</text>
+    <text x="261" y="102">Built-in guards</text>
+    <text x="502" y="102">Your rules</text>
+    <text x="743" y="102">Built-in allows</text>
+    <text x="984" y="102">No match</text>
+  </g>
+  <g class="b" font-size="15" fill="#c3cbd6">
+    <text x="20" y="128">Is it an address agents</text><text x="20" y="147">must not reach?</text>
+    <text x="261" y="128">A push, a publish or a</text><text x="261" y="147">destructive command?</text>
+    <text x="502" y="128">Your deny rules first,</text><text x="502" y="147">then your allow rules</text>
+    <text x="743" y="128">Boss Man's own tools,</text><text x="743" y="147">read, search and edit</text>
+    <text x="984" y="128">No rule covered it and</text><text x="984" y="147">no built-in allow did</text>
+  </g>
+  <g class="bb" font-size="15" text-anchor="middle" fill="#ffffff">
+    <circle cx="20" cy="60" r="14" fill="#c8282f"/><text x="20" y="65.5">1</text>
+    <circle cx="261" cy="60" r="14" fill="#c8282f"/><text x="261" y="65.5">2</text>
+    <circle cx="502" cy="60" r="14" fill="#c8282f"/><text x="502" y="65.5">3</text>
+    <circle cx="743" cy="60" r="14" fill="#c8282f"/><text x="743" y="65.5">4</text>
+    <circle cx="984" cy="60" r="14" fill="#c8282f"/><text x="984" y="65.5">5</text>
+  </g>
+
+  <!-- outcomes -->
+  <rect x="0" y="220" width="196" height="126" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="241" y="220" width="196" height="126" rx="10" fill="#f0b75c"/>
+  <rect x="482" y="220" width="196" height="126" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="723" y="220" width="196" height="126" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <g class="d" font-size="20" fill="#17202c">
+    <text x="16" y="250">Refused</text>
+    <text x="257" y="250">You are asked</text>
+    <text x="498" y="250">Your rule decides</text>
+    <text x="739" y="250">Runs at once</text>
+  </g>
+  <g class="b" font-size="14" fill="#17202c">
+    <text x="16" y="276">The agent is told no.</text>
+    <text x="257" y="276">A card in Decisions.</text>
+    <text x="257" y="298">Deleting temp files or</text><text x="257" y="316">files in its own folder</text><text x="257" y="334">goes to the CEO first.</text>
+    <text x="498" y="276">Deny: refused.</text>
+    <text x="498" y="296">Allow: it runs.</text>
+    <text x="498" y="316">Ask rules: the CEO or you.</text>
+    <text x="739" y="276">No card is raised.</text>
+  </g>
+
+  <!-- step 5 in detail -->
+  <line x1="0" y1="380" x2="1160" y2="380" stroke="#c3cbd6" stroke-width="1.5"/>
+  <circle cx="14" cy="412" r="14" fill="#c8282f"/><text x="14" y="417.5" class="bb" font-size="15" text-anchor="middle" fill="#ffffff">5</text>
+  <text x="38" y="418" class="d" font-size="18" fill="#17202c" style="font-weight:650">When nothing matched</text>
+
+  <!-- row A: a command or an unknown tool -->
+  <g stroke="#17202c" stroke-width="3" fill="none" marker-end="url(#ar)">
+    <path d="M330 480 H377"/><path d="M710 480 H757" stroke="#8a5a00" stroke-dasharray="9 6" marker-end="url(#aa)"/>
+  </g>
+  <rect x="0" y="440" width="330" height="80" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="20" y="475" class="bb" font-size="17" fill="#17202c">A command, or a tool</text>
+  <text x="20" y="497" class="bb" font-size="17" fill="#17202c">Boss Man does not recognise</text>
+  <rect x="380" y="440" width="330" height="80" rx="10" fill="#17202c"/>
+  <text x="400" y="475" class="d" font-size="22" fill="#eef2f6">The CEO decides first</text>
+  <text x="400" y="497" class="b" font-size="15" fill="#c3cbd6">It has 5 minutes to settle it</text>
+  <rect x="760" y="440" width="330" height="80" rx="10" fill="#f0b75c"/>
+  <text x="780" y="475" class="d" font-size="22" fill="#17202c">Then you are asked</text>
+  <text x="780" y="497" class="b" font-size="15" fill="#17202c">If the CEO has not settled it,</text>
+  <text x="780" y="515" class="b" font-size="15" fill="#17202c">the card moves to you</text>
+
+  <!-- row B: delete, move, path -->
+  <path d="M330 570 H377" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#ar)"/>
+  <rect x="0" y="530" width="330" height="80" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="20" y="565" class="bb" font-size="17" fill="#17202c">A delete, a move, or a</text>
+  <text x="20" y="587" class="bb" font-size="17" fill="#17202c">request that names a path</text>
+  <rect x="380" y="530" width="330" height="80" rx="10" fill="#f0b75c"/>
+  <text x="400" y="565" class="d" font-size="22" fill="#17202c">You are asked at once</text>
+  <text x="400" y="587" class="b" font-size="15" fill="#17202c">The CEO is not asked first</text>
+
+  <g class="b" font-size="16" fill="#3d4757">
+    <text x="0" y="646">A request from the CEO itself comes straight to you. So does every request when</text>
+    <text x="0" y="666">the company has no CEO, or its CEO is paused.</text>
+  </g>
+</svg>
