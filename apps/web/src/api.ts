@@ -1,9 +1,9 @@
 // The browser talks to the server's JSON API on the same origin, with the session cookie.
 import { reportAnswered, reportFailure, reportSlow } from "./server-watch";
 import { sharedGet } from "./shared-get";
-import type { Criterion } from "@boss-man/shared";
+import type { Criterion, DeviceMeasures, DeviceProfile, DeviceReport } from "@boss-man/shared";
 
-export type { Criterion };
+export type { Criterion, DeviceMeasures, DeviceProfile, DeviceReport };
 
 export class ApiError extends Error {
   constructor(

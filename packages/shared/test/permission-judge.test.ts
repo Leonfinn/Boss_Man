@@ -766,6 +766,60 @@ describe("BOS-631: a file the command wrote (or a /tmp path) must not be loaded 
     "echo 'import os' > c.py; echo \"import c\" | python3 -E",
     "cat /tmp/x.py | python3 -E",
     "echo x > c.js; echo 'require(\"./c.js\")' | node -p",
+    // BOS-698: a wrapper or subshell in front of the interpreter, script arguments after the stdin marker, flags that carry no code
+    "echo 'import os' > c.py; echo \"import c\" | command python3",
+    "echo 'import os' > c.py; echo \"import c\" | timeout 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | nice python3",
+    "echo 'import os' > c.py; echo \"import c\" | nice -n 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | timeout -k 2 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | setsid nohup env A=1 python3",
+    "echo 'import os' > c.py; echo \"import c\" | (python3)",
+    "echo 'import os' > c.py; echo \"import c\" | ( python3 )",
+    "echo 'import os' > c.py; echo \"import c\" | (timeout 5 python3)",
+    "echo 'import os' > c.py; echo \"import c\" | python3 - x.txt",
+    "echo 'import os' > c.sh; cat c.sh | bash -s -- arg.txt",
+    "echo 'import os' > c.sh; cat c.sh | bash -s arg.txt",
+    "cat /tmp/x.sh | bash -s -- a/b",
+    "cat /tmp/x.py | python3 -E -",
+    "cat /tmp/x.py | python3 -E -u",
+    "cat /tmp/x.py | python3 -u -E -",
+    "echo 'import os' > c.py; echo \"import c\" | python3 -E -",
+    "cat /tmp/x.js | node -p -",
+    // BOS-703: a wrapper option with a separate value, wrappers the pipe parser did not peel, a dotted flag value, a group
+    "echo 'import os' > c.py; echo \"import c\" | timeout --signal KILL 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | timeout --kill-after 2 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | nice --adjustment 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | env --unset X python3",
+    "echo 'import os' > c.py; echo \"import c\" | env --chdir /tmp python3",
+    "echo 'import os' > c.py; echo \"import c\" | flock /tmp/l python3",
+    "echo 'import os' > c.py; echo \"import c\" | flock -w 5 /tmp/l python3",
+    "echo 'import os' > c.py; echo \"import c\" | stdbuf -oL python3",
+    "echo 'import os' > c.py; echo \"import c\" | stdbuf --output L python3",
+    "echo 'import os' > c.py; echo \"import c\" | exec -a name python3",
+    "echo 'import os' > c.py; echo \"import c\" | /usr/bin/time -f %e python3",
+    "echo 'import os' > c.py; echo \"import c\" | time --format %e python3",
+    "echo 'import os' > c.py; echo \"import c\" | python3 -W ignore::x.Warning -",
+    "echo 'import os' > c.py; echo \"import c\" | python3 -Wignore::x.Warning -",
+    "echo 'import os' > c.py; echo \"import c\" | python3 -X a.b -",
+    "echo 'import os' > c.py; echo \"import c\" | (cd x && python3)",
+    "echo 'import os' > c.py; echo \"import c\" | { cd x; python3; }",
+    "echo 'import os' > c.py; echo \"import c\" | (cd x && timeout --signal KILL 5 python3)",
+    // the main command path peels the same wrappers (shared helper)
+    "echo 'import os' > c.py; timeout --signal KILL 5 python3 -c \"import c\"",
+    "echo 'import os' > c.py; nice --adjustment 5 python3 -c \"import c\"",
+    "echo 'import os' > c.py; stdbuf -oL python3 -c \"import c\"",
+    "echo 'import os' > c.py; /usr/bin/time -f %e python3 -c \"import c\"",
+    "echo 'import os' > c.py; exec -a name python3 -c \"import c\"",
+    // abbreviated long options (GNU getopt_long takes any unambiguous prefix) and a duration that starts with a dot
+    "echo 'import os' > c.py; nice --adj 5 python3 -c \"import c\"",
+    "echo 'import os' > c.py; timeout --sig KILL 5 python3 -c \"import c\"",
+    "echo 'import os' > c.py; echo \"import c\" | timeout --sig KILL 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | timeout --s KILL 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | nice --adj 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | env --unse X python3",
+    "echo 'import os' > c.py; echo \"import c\" | stdbuf --out L python3",
+    "echo 'import os' > c.py; env --sp 'python3 c.py'",
+    "echo 'import os' > c.py; echo \"import c\" | timeout .5 python3",
   ]);
   allows([
     "ls /tmp; python3 -c \"import json\"",
@@ -861,4 +915,83 @@ describe("rules judge: quoted flags and $(...) inside bash -c (BOS-696)", () => 
   allows([
     'rm "-rf" /tmp/x', 'ls "-la"', 'grep "-n" foo a.txt', 'bash -c "echo hi"', "bash -c 'ls -la'", 'echo "-n"',
   ]);
+});
+
+// BOS-638 (split from BOS-378 by the CEO): Jane's round-5 security review of BOS-378 found four commands that got an automatic
+// Allow at 189a7ba7 (and were already Allow at round 14, b8df6ae2). Each block below is one finding. Every command failed on
+// 189a7ba7. Main has since moved past the BOS-378 allow-list (BOS-377/BOS-631 rounds), so after this branch was rebased onto
+// main some rows were already closed there and some were not; each block says which. A row that main already closed stays here
+// as a regression test, and the fix is only where a row still failed on main (e448aa05). The judge is only in "watch", so none
+// affects anyone today, but all four must be closed before any company switches it to "advise".
+describe("rules judge: Jane's round-5 BOS-378 findings (BOS-638)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+
+  // Finding 1: the folder flag was only checked when it was the first flag after the program, so a folder flag placed
+  // after another flag (`--silent`) slipped through. Closed on main already (toolingRunsScratch scans every flag); kept as
+  // a regression test.
+  describe("1. a folder flag after another flag", () => {
+    deny([
+      "pnpm --silent -C /tmp/p run evil",
+      "npm --silent --prefix /tmp/p run evil",
+      "pnpm --silent --dir /tmp/p run evil",
+      "pnpm -C=/tmp/p run evil",
+      "npm --prefix=/tmp/p run evil",
+      "pnpm --silent --filter x -C /tmp/p run evil",
+    ]);
+    // A folder flag naming a sub-folder of the checkout is still Allow.
+    allows(["pnpm -C ./scripts run evil", "npm --silent run build", "pnpm --silent run build"]);
+  });
+
+  // Finding 2: an npm setting that names a file can pick the shell that runs a script or the rc file it reads. The rc/config
+  // forms were closed on main; `--script-shell` was still Allow on main and the fix closes it.
+  describe("2. npm settings that choose the program that runs scripts", () => {
+    deny([
+      "npm run build --script-shell=/tmp/x.sh",
+      "npm --script-shell=/tmp/x.sh run build",
+      "pnpm run build --script-shell=/tmp/x.sh",
+      "pnpm --script-shell=/tmp/x.sh run build",
+      "npm --userconfig=/tmp/rc run build",
+      "npm run build --userconfig /tmp/rc",
+      "npm --globalconfig=/tmp/rc run build",
+    ]);
+    // A script-shell or rc file inside the checkout is still Allow.
+    allows(["npm run build --script-shell=./scripts/sh.sh", "npm --script-shell=./scripts/sh.sh run build", "npm --silent run build"]);
+  });
+
+  // Finding 3 (the widest): a tool run through a package manager reads files named in its arguments as code or config.
+  // The absolute /tmp forms were closed on main; a relative argument that climbs out of the checkout (`../../x.test.ts`)
+  // was still Allow and the fix closes it. The general rule is: any argument that leaves the checkout gets no Allow.
+  describe("3. tools that load a file from /tmp as code, run through pnpm or npx", () => {
+    deny([
+      "pnpm vitest run --config /tmp/x.config.ts",
+      "npx vitest run /tmp/x.test.ts",
+      "pnpm dlx vitest run --config /tmp/x.config.ts",
+      "pnpm exec vitest run --config /tmp/x.config.ts",
+      "npx jest --config=/tmp/x.json",
+      "pnpm dlx tsx /tmp/x.ts",
+      "npx --yes vitest run ../../x.test.ts",
+      "npx vitest run ../x.test.ts",
+      "pnpm dlx tsx ../x.ts",
+    ]);
+    // Plain in-checkout arguments are still Allow, and a scratch build output path is still Allow.
+    allows(["pnpm vitest run test/policy.test.ts", "npx vitest run test/policy.test.ts", "pnpm exec tsc --noEmit", "pnpm run build --outDir /tmp/out"]);
+  });
+
+  // Finding 4: a path given after `-exec` was not checked when it was a script file rather than an interpreter name (the
+  // absolute /tmp forms were closed on main; the relative climb was still Allow and the fix closes it).
+  describe("4. find -exec with a script outside the checkout", () => {
+    deny([
+      "find . -exec /tmp/x.sh {} ;",
+      "find . -type f -exec /tmp/x.sh {} \\;",
+      "find . -exec ../../x.sh {} +",
+      "find . -exec ../x.sh {} \\;",
+      "find . -execdir /tmp/x.sh {} \\;",
+      "find . -execdir ../../x.sh {} \\;",
+    ]);
+    allows(["find . -exec grep -l x {} +", "find . -exec ./scripts/x.sh {} +"]);
+  });
 });
