@@ -148,7 +148,9 @@ services:
     profiles: ["launcher"]
     environment:
       BOSSMAN_DATA: ${BOSSMAN_DATA:-/srv/boss-man/data}
-      BOSSMAN_RUNNER_NETWORK: boss-man_default
+      # A second stack on the same host (deploy/staging.yml, docs/22-staging.md) sets these two; empty/default = today's names.
+      BOSSMAN_RUNNER_NETWORK: ${BOSSMAN_RUNNER_NETWORK:-boss-man_default}
+      BOSSMAN_STACK: ${BOSSMAN_STACK:-}
       BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
       BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-4g}
       BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
