@@ -2,6 +2,30 @@ import { describe, expect, it } from "vitest";
 import { evaluatePermission } from "../src/policy.js";
 import { alwaysChoices, explainCommand, explainPermission, readPush } from "../src/explain.js";
 
+describe("agent-browser test commands (BOS-752)", () => {
+  const S = "/home/node/workspaces/scratch/abc";
+  const shapes = [
+    `cd ${S} && A=t1 && agent-browser --session $A open http://web:3000`,
+    `agent-browser --session "$A" eval "document.querySelector('h1').innerText"`,
+    `agent-browser \\\n  --session $A \\\n  get text "heading Hello world"`,
+    `agent-browser --session $A snapshot -i\nagent-browser --session $A click "heading Sign in"`,
+    `agent-browser --session $A eval "JSON.stringify(document.querySelector(\\"h1\\").textContent) // heading"`,
+    `A=t1; agent-browser --session=$A screenshot ${S}/shot.png`,
+  ];
+  it("never reads a flag, a variable or quoted text as a program, and knows agent-browser", () => {
+    for (const c of shapes) {
+      const e = explainCommand(c);
+      expect(e.summary, c).not.toMatch(/doesn't recognise/);
+      expect(e.effect, c).toBe("network");
+    }
+  });
+  it("a continuation fragment that starts with a flag or variable is not a program name", () => {
+    for (const c of ["--session $A", "$A open x", 'heading"']) {
+      expect(explainCommand(c).summary, c).not.toMatch(/\((?:[^)]*[$"-])/);
+    }
+  });
+});
+
 describe("readPush", () => {
   const ticket = "11111111-2222-4333-8444-555555555555";
 

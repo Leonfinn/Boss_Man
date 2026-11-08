@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, looksLikeBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, UNKNOWN_TOOL_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, looksLikeBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, UNKNOWN_TOOL_RULE, UNMATCHED_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -123,8 +123,13 @@ describe("evaluatePermission defaults", () => {
     expect(evaluatePermission({ title: "mcp__frobnicator__run", kind: "other", rawInput: {} }, [rule])).toMatchObject({ outcome: "allow", rule: "Allow frobnicator" });
   });
 
-  it("falls through to the owner for unknown kinds", () => {
-    expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toMatchObject({ outcome: "owner", rule: "No rule matched" });
+  it("falls through to the CEO first for unmatched kinds, with no company rule (BOS-752)", () => {
+    expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toMatchObject({ outcome: "ceo", rule: UNMATCHED_RULE });
+    // The card's shape: a shell command whose tool kind the adapter didn't mark as execute.
+    const cmd = `agent-browser --session $A get text "heading Hello"`;
+    for (const kind of [undefined, "other"]) {
+      expect(decidePermission({ title: "bash", kind, rawInput: { command: cmd } }, []), String(kind)).toMatchObject({ outcome: "ceo", rule: UNMATCHED_RULE, row: 8 });
+    }
   });
 
   it("company rules win over defaults, first match first", () => {
