@@ -207,6 +207,8 @@ export function deploysService(
   // ---------- The tag job (DR-033) ----------
 
   /** One tag job at a time per target, in the order the reports came in. */
+  // shortcut: the queue lives in this process; lost on restart, harmless because the deploy row stays
+  // tag_result "pending" and resumeTags re-queues it at startup (the job re-checks the row first).
   const chains = new Map<string, Promise<unknown>>();
   const inFlight = new Set<string>();
 
