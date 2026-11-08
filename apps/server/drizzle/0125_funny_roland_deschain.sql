@@ -5,7 +5,8 @@ ALTER TABLE "mcp_servers" ADD COLUMN "allow_private" boolean DEFAULT false NOT N
 -- name). A public name added before this deploy stays untrusted, so re-pointing it later can't open the stack network.
 UPDATE "mcp_servers" SET "allow_private" = true
 FROM (
-  SELECT "id", lower(split_part(substring("url" from '://(.*)$'), '/', 1)) AS raw
+  -- The userinfo before the host (user@10.0.0.1:8080) is not part of the address, so drop it before reading the host.
+  SELECT "id", lower(regexp_replace(split_part(substring("url" from '://(.*)$'), '/', 1), '^.*@', '')) AS raw
   FROM "mcp_servers"
 ) AS u
 WHERE "mcp_servers"."id" = u."id"

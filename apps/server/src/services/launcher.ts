@@ -233,11 +233,12 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
   async function allowFor(companyId: string): Promise<AllowEntry[]> {
     const rows = await db.select({ url: mcpServers.url, allowPrivate: mcpServers.allowPrivate }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
     // The company's own git remotes: each project's host and port only, so its runner can clone and fetch from a LAN git server.
-    const repos = await db.select({ url: projects.repoUrl }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+    // Only a project the owner (or a ticked import) let reach private addresses is trusted, so a git address that arrives in
+    // a package can't open the stack network by resolving private (BOS-708).
+    const repos = await db.select({ url: projects.repoUrl, allowPrivate: projects.allowPrivate }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
     const entries = [
       ...rows.map((r) => ({ addr: sendable(toolServerAddress(r.url)), private: r.allowPrivate })),
-      // A git host is the owner's own setting, so its private address is meant (a LAN git server).
-      ...repos.map((r) => ({ addr: gitHostAddress(r.url!), private: true })),
+      ...repos.map((r) => ({ addr: gitHostAddress(r.url!), private: r.allowPrivate })),
     ];
     // Same host:port twice: keep it trusted if either source trusts it.
     const byAddr = new Map<string, boolean>();
@@ -332,7 +333,12 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       await call("GET", "/runners");
       await expectRestart(db, companyId, "owner restart");
       const { token } = await deps.runners.register(companyId);
-      await call("PUT", `/runners/${slug}`, { token, ...(await allowBody(companyId)) });
+      const body = await allowBody(companyId);
+      // Keep the token body to { token, allow }: an older launcher refuses the unknown `private` key with a 400, and the
+      // token was already rotated, which would cut the runner off until the launcher is rebuilt (BOS-708). The private list
+      // goes in a second call that an older launcher accepts, so a refusal there does no harm.
+      await call("PUT", `/runners/${slug}`, { token, allow: body.allow });
+      await call("PUT", `/runners/${slug}/allow`, body);
       return { slug };
     },
 

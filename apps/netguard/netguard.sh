@@ -47,7 +47,15 @@ is_private() {
   awk -v a="$1" 'BEGIN {
     # CIDR list as "a.b.c.d/bits"; IPv4-mapped IPv6 is cut down to plain IPv4 first.
     cidr = "0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15"
-    if (a ~ /^::ffff:/) a = substr(a, 8)
+    a = tolower(a)
+    if (a ~ /^::ffff:/) {
+      # IPv4-mapped IPv6 as dotted IPv4 ("::ffff:10.0.0.1"), or in hex ("::ffff:a00:1"), or fully expanded ("0:0:0:0:0:ffff:..."). The
+      # dotted form is cut down to plain IPv4; any other mapped form cannot be read as an IPv4 address here, so treat it as
+      # private (fail closed) rather than let a re-pointed name reach the stack network in hex (BOS-708).
+      rest = substr(a, 8)
+      if (rest ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) a = rest
+      else { print 1; exit }
+    }
     if (a ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
       n = split(a, o, "."); if (n != 4) { print 0; exit }
       for (i = 1; i <= 4; i++) if (o[i] !~ /^[0-9]+$/ || o[i] + 0 > 255) { print 0; exit }

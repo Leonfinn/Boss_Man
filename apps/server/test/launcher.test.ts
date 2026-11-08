@@ -62,7 +62,8 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
     const put = c.fake.calls.find((x) => x.method === "PUT")!;
     expect(put).toMatchObject({ path: "/runners/app-co", auth: `Bearer ${KEY}` });
-    expect(Object.keys(put.body as object)).toEqual(["token", "allow", "private"]);
+    // The token body stays { token, allow }: an older launcher refuses any other key (BOS-708).
+    expect(Object.keys(put.body as object)).toEqual(["token", "allow"]);
     // The token the launcher got is the runner's real one.
     expect(await c.runners.authenticate((put.body as { token: string }).token)).toMatchObject({ companyId: company.id });
 
@@ -71,15 +72,54 @@ describe("runners through the launcher (R55)", () => {
     expect(status).toMatchObject({ registered: true, connected: false, launcher: { slug: "app-co", container: { state: "running", guard: "on" } } });
   });
 
+  it("starts a runner against an old launcher that refuses extra fields, and its token still works (BOS-708, Dougal's blocker)", async () => {
+    // An older launcher accepts only { token, allow } on PUT /runners/<slug> and 400s anything else, and its /allow route
+    // ignores the private field. The server must not lose the rotated token to that 400.
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const running = new Set<string>();
+    const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ method, path: url.pathname, body });
+      const json = (status: number, b: unknown) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+      const slug = url.pathname.split("/")[2];
+      if (method === "GET" && url.pathname === "/runners") return json(200, []);
+      if (method === "PUT" && url.pathname.endsWith("/allow")) return json(200, { slug, allow: (body as { allow: string[] }).allow });
+      if (method === "PUT") {
+        const keys = Object.keys(body as object);
+        if (keys.some((k) => k !== "token" && k !== "allow")) return json(400, { error: "Only { token, allow } is accepted." });
+        running.add(slug!);
+        return json(200, { slug, id: "abc" });
+      }
+      if (method === "DELETE") return json(200, { slug, removed: running.delete(slug!) });
+      return json(404, { error: "unknown" });
+    }) as typeof globalThis.fetch;
+    const keyFile = path.join(mkdtempSync(path.join(tmpdir(), "bm-key-")), "key");
+    writeFileSync(keyFile, `${KEY}\n`);
+    const { db, close } = await openPglite();
+    const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, fetch, launcher: { url: "http://launcher:3105", keyFile } });
+    ctx = { ...built, db, close, req: undefined as never, fake: undefined as never };
+    const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
+    const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+    const { company } = (await built.app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "Old Co" } })).json() as { company: { id: string } };
+    await vi.waitFor(() => expect(calls.some((x) => x.method === "PUT" && x.path === "/runners/old-co")).toBe(true));
+    const put = calls.find((x) => x.method === "PUT" && x.path === "/runners/old-co")!;
+    // The token went in a body the old launcher accepts.
+    expect(Object.keys(put.body as object)).toEqual(["token", "allow"]);
+    // No 400 was ever seen for that runner, and the token that was handed over still authenticates.
+    expect(await built.runners.authenticate((put.body as { token: string }).token)).toMatchObject({ companyId: company.id });
+  });
+
   it("reconnects with a new token, restarts and stops, keeping the slug after a rename", async () => {
     const c = (ctx = await setup());
     const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
-    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.method === "PUT")).toHaveLength(1));
-    const first = (c.fake.calls.find((x) => x.method === "PUT")!.body as { token: string }).token;
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.method === "PUT" && x.path === "/runners/app-co")).toHaveLength(1));
+    const first = (c.fake.calls.find((x) => x.method === "PUT" && x.path === "/runners/app-co")!.body as { token: string }).token;
     await c.req("PATCH", `/api/companies/${company.id}`, { name: "Apps Ltd" });
 
     expect((await c.req("POST", `/api/companies/${company.id}/runner/launch`)).json()).toEqual({ slug: "app-co" });
-    const second = (c.fake.calls.filter((x) => x.method === "PUT")[1]!.body as { token: string }).token;
+    const second = (c.fake.calls.filter((x) => x.method === "PUT" && x.path === "/runners/app-co")[1]!.body as { token: string }).token;
     expect(second).not.toBe(first);
     expect(await c.runners.authenticate(first)).toBeNull();
     expect((await c.req("POST", `/api/companies/${company.id}/runner/restart`)).statusCode).toBe(200);
@@ -111,7 +151,7 @@ describe("runners through the launcher (R55)", () => {
     const added = await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "crawl", url: "http://192.168.68.20:11235/mcp", transport: "http" });
     expect(added.statusCode).toBe(201);
     // A private literal the owner typed in is trusted for private, so the guard keeps it (BOS-708).
-    await vi.waitFor(() => expect(c.fake.calls.find((x) => x.path === "/runners/app-co/allow")?.body).toEqual({ allow: ["192.168.68.20:11235"], private: ["192.168.68.20:11235"] }));
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.68.20:11235"], private: ["192.168.68.20:11235"] }));
     await c.req("DELETE", `/api/mcp-servers/${(added.json() as { id: string }).id}`);
     await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [], private: [] }));
     expect(toolServerAddress("https://tools.lan/mcp")).toBe("tools.lan:443");
@@ -166,7 +206,9 @@ describe("runners through the launcher (R55)", () => {
     const q = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Odd" })).json() as { id: string };
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
     await c.req("PATCH", `/api/projects/${q.id}`, { repoUrl: "https://my_git.lan/o/r" });
-    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").length).toBeGreaterThan(0));
+    // Wait for both patches' own syncs to land, so clearing the log doesn't race one of them into the syncAll assertions.
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] }));
+    await new Promise((r) => setTimeout(r, 20));
     c.fake.calls.length = 0;
     await c.launcher.syncAll(1);
     expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow")).toEqual([expect.objectContaining({ method: "PUT", body: { allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] } })]);

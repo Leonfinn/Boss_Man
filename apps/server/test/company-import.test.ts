@@ -176,6 +176,55 @@ describe("company import (docs/11, step 2)", () => {
     expect(names).not.toContain("Bad");
   });
 
+  // Jane's finding (BOS-708, round 2): a package's project git address is treated like a tool server. The preview shows it
+  // and the owner must tick before it reaches a private address; otherwise a package could point a LAN-looking git server at
+  // the stack and the runner would be trusted to reach it.
+  it("flags a packaged project git address that reaches the stack, and trusts it only when ticked", async () => {
+    const { req } = await setup();
+    const pack = (repoUrl: string) =>
+      Buffer.from(
+        zipSync({
+          "manifest.json": strToU8('{"format":"bossman-company/1"}'),
+          "company.json": strToU8('{"name":"Git Co"}'),
+          "projects/site/project.json": strToU8(
+            JSON.stringify({
+              name: "Site",
+              repoUrl,
+              columns: [
+                { name: "To do", systemState: "backlog" },
+                { name: "Ready", systemState: "ready" },
+                { name: "Doing", systemState: "in_progress" },
+                { name: "Blocked", systemState: "blocked" },
+                { name: "Review", systemState: "review" },
+                { name: "Done", systemState: "done" },
+              ],
+            }),
+          ),
+        }),
+      ).toString("base64");
+
+    // A public git host (one that resolves to a public address) is not flagged, and the imported project is not trusted for private.
+    const fine = await req("POST", "/api/companies/import/preview", { zip: pack("https://tools.example.org/o/r.git") });
+    expect(fine.json().gitHosts, JSON.stringify(fine.json())).toEqual([{ project: "Site", url: "https://tools.example.org/o/r.git", opens: "tools.example.org:443", stackService: false }]);
+    const pub = await req("POST", "/api/companies/import", { zip: pack("https://tools.example.org/o/r.git"), name: "Git Pub" });
+    expect(pub.statusCode).toBe(201);
+    expect((await req("GET", `/api/companies/${pub.json().companyId}/projects`)).json()[0].allowPrivate).toBe(false);
+
+    // A git address on the stack (a container name, or a name that resolves to a private address) is flagged and refused.
+    for (const repoUrl of ["http://db/o/r.git", "http://rebind.example.org/o/r.git"]) {
+      const pre = (await req("POST", "/api/companies/import/preview", { zip: pack(repoUrl) })).json() as { gitHosts: Array<{ stackService: boolean }> };
+      expect(pre.gitHosts[0]!.stackService, repoUrl).toBe(true);
+      const refused = await req("POST", "/api/companies/import", { zip: pack(repoUrl), name: "Git Bad" });
+      expect(refused.statusCode, repoUrl).toBe(400);
+      expect(refused.json().message).toContain("git address");
+    }
+
+    // Ticked: the project is trusted for private, so the guard keeps its address.
+    const ticked = await req("POST", "/api/companies/import", { zip: pack("http://rebind.example.org/o/r.git"), name: "Git Ticked", allowStackServices: true });
+    expect(ticked.statusCode).toBe(201);
+    expect((await req("GET", `/api/companies/${ticked.json().companyId}/projects`)).json()[0].allowPrivate).toBe(true);
+  });
+
   it("refuses files that aren't a safe Boss Man package", async () => {
     const { req } = await setup();
     const send = (files: Record<string, string>) => req("POST", "/api/companies/import/preview", { zip: Buffer.from(zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])))).toString("base64") });

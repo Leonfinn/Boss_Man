@@ -66,6 +66,19 @@ for ip in 8.8.8.8 93.184.216.34 1.1.1.1; do
   grep -qF "ip daddr $ip tcp dport 1 accept" <<<"$cr" || fail "$ip is public and should open"
 done
 
+# IPv4-mapped IPv6 in hex form (::ffff:a00:1 is 10.0.0.1) is treated as private, so a re-pointed name can't sneak it in (BOS-708, Rod's note).
+for ip in "::ffff:a00:1" "::ffff:a9fe:a9fe" "::FFFF:C0A8:1"; do
+  printf 'x.example.org:1\n' >"$tmp/cls-allow"
+  printf '#!/bin/sh\n[ "$2" = x.example.org ] && echo "%s"\n' "$ip" >"$tmp/bin/getent"; chmod +x "$tmp/bin/getent"
+  cr="$(PATH="$tmp/bin:$PATH" NETGUARD_ALLOW=9.9.9.9:3100 NETGUARD_ALLOW_FILE="$tmp/cls-allow" NETGUARD_DNS="" sh netguard.sh --print 2>"$tmp/hex-err")"
+  if grep -qF "daddr $ip " <<<"$cr"; then fail "$ip is a mapped private address and should be dropped"; fi
+done
+# A dotted mapped public address (::ffff:8.8.8.8) still opens: it is read as the public IPv4 it is.
+printf 'x.example.org:1\n' >"$tmp/cls-allow"
+printf '#!/bin/sh\n[ "$2" = x.example.org ] && echo "::ffff:8.8.8.8"\n' >"$tmp/bin/getent"; chmod +x "$tmp/bin/getent"
+cr="$(PATH="$tmp/bin:$PATH" NETGUARD_ALLOW=9.9.9.9:3100 NETGUARD_ALLOW_FILE="$tmp/cls-allow" NETGUARD_DNS="" sh netguard.sh --print 2>/dev/null)"
+grep -qF "daddr ::ffff:8.8.8.8 tcp dport 1 accept" <<<"$cr" || fail "a dotted mapped public address should open"
+
 # Exit codes: probe fails -> 3 (host can't); probe works but the rules are refused -> 4 (no runner).
 printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/nft"; chmod +x "$tmp/bin/nft"
 rc=0; PATH="$tmp/bin:$PATH" NETGUARD_ALLOW=10.1.2.3:3100 NETGUARD_ALLOW_FILE=/nonexistent NETGUARD_DNS="" NETGUARD_PROBE_CMD=false sh netguard.sh >/dev/null 2>&1 || rc=$?

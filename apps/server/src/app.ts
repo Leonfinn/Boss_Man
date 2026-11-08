@@ -1692,6 +1692,8 @@ export async function buildApp(opts: AppOptions) {
         const found = fields.repoUrl ? await gitHosts.detect(fields.repoUrl) : null;
         Object.assign(fields, { gitHost: found?.gitHost ?? null, gitApiBase: found?.gitApiBase ?? null });
       }
+      // The owner set this git address themselves, so its private address is meant (a LAN git server); the guard keeps it (BOS-708).
+      if (fields.repoUrl !== undefined) Object.assign(fields, { allowPrivate: !!fields.repoUrl });
       const [p] = await db
         .update(projects)
         .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
