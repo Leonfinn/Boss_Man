@@ -393,7 +393,8 @@ describe("review policy API", () => {
   it("gives a new company a security review on high and critical work, and leaves existing companies alone (BOS-824)", async () => {
     const c = await setup();
     // The column default, not just the constant: a company row made without a policy gets it.
-    const [row] = await c.db.execute<{ p: ReviewPolicy }>(sql`insert into companies (name) values ('Bare Co') returning review_policy as p`).then((r) => r.rows);
+    const res = (await c.db.execute(sql`insert into companies (name) values ('Bare Co') returning review_policy as p`)) as unknown as { rows: { p: ReviewPolicy }[] };
+    const [row] = res.rows;
     expect(row!.p.high.kinds).toEqual({ security: "ceo" });
     expect(row!.p.critical.kinds).toEqual({ security: "ceo" });
     expect(row!.p.medium.kinds).toBeUndefined();
