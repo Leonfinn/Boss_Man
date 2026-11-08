@@ -201,6 +201,22 @@ export const runnerEvents = pgTable(
   ],
 );
 
+/**
+ * How many times applying one event of a runner has failed transiently (BOS-606), kept apart from the
+ * event row because a retry rolls that row back and the count must survive it. An event that keeps
+ * failing with no code is stored, marked and acked after a few tries so it can't stall the stream.
+ * The row is removed once the event lands or is skipped.
+ */
+export const runnerEventAttempts = pgTable(
+  "runner_event_attempts",
+  {
+    runnerId: uuid("runner_id").notNull().references(() => runners.id, { onDelete: "cascade" }),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    tries: integer("tries").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.runnerId, t.seq] })],
+);
+
 // ---------- Work structure ----------
 
 export const systemState = pgEnum("system_state", ["backlog", "ready", "in_progress", "blocked", "review", "done"]);
@@ -1022,7 +1038,10 @@ export const failureSignatures = pgTable(
     sample: text("sample").notNull(),
     createdAt: createdAt(),
   },
-  (t) => [index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt)],
+  (t) => [
+    index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt),
+    index("failure_signatures_company_recent").on(t.companyId, t.createdAt),
+  ],
 );
 
 /** Agent-to-agent nudges (R86), kept for the pair rate limit and ping-pong detection. */
