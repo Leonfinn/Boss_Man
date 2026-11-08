@@ -1793,7 +1793,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // runner again, and the ask gets no second card. Only when the rules would instead raise a card: a
         // replayed request the rules deny (a home-network fetch) must still be denied, never allowed by an
         // earlier Allow for a different request (security review).
-        const info: PermissionInfo = { title: payload.title, kind: payload.kind, rawInput: payload.rawInput };
+        // The asking agent counts too: a rule limited to one agent must apply here as it did at the first ask (BOS-598).
+        const [asker] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, p.runId));
+        const info: PermissionInfo = { title: payload.title, kind: payload.kind, rawInput: payload.rawInput, agentId: asker?.agentId ?? null };
         const { outcome } = evaluatePermission(info, await rulesFor(runner.companyId));
         const mayRepeat = outcome !== "allow" && outcome !== "deny";
         const allowed = mayRepeat ? await allowedCommandOnRun(p.runId, payload, fingerprint) : null;
@@ -2647,7 +2649,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (ctx.type === "model_change" && answer === MODEL_EDIT && !extra.modelConfig) throw new AnswerError("Edit needs the harness, provider, model and paid-from you want.");
       if (ctx.type === "team_plan" && extra.picks?.some((i) => !Number.isInteger(i) || i < 0 || i >= ctx.hires.length)) throw new AnswerError("That hire isn't in the plan.");
       // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
-      let saveRule: (() => Promise<void>) | undefined;
+      let saveRule: ((h: typeof db) => Promise<void>) | undefined;
       const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
       if (always) {
         // Standing rules are the owner's call, never an agent's, whatever the answer path (BOS-294).
@@ -2664,14 +2666,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const condition: PolicyMatch = { ...always.match, safeOnly: true, ...(scope === "agent" ? { agentIds: [asker!.id] } : {}) };
         const problems = ruleProblems(condition);
         if (problems.length) throw new AnswerError(`That rule can't be saved: ${problems.join(" ")}`);
-        saveRule = async () => {
-        const [last] = await db.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
+        saveRule = async (h) => {
+        const [last] = await h.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
         const on = formatDate("en-GB", now(), { day: "numeric", month: "short" });
-        await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name}${scope === "agent" ? ` for ${asker!.name}` : ""} (from a request on ${on})`, trigger: "permission", condition, outcome: "allow", position: (last?.position ?? -1) + 1, createdAt: now(), createdBy: extra.by ?? "the owner", sourceDecisionId: d.id });
+        await h.insert(policyRules).values({ companyId: d.companyId, name: `${always.name}${scope === "agent" ? ` for ${asker!.name}` : ""} (from a request on ${on})`, trigger: "permission", condition, outcome: "allow", position: (last?.position ?? -1) + 1, createdAt: now(), createdBy: extra.by ?? "the owner", sourceDecisionId: d.id });
         };
         answer = ALLOW;
       }
-      if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) saveRule = async () => { await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule, createdBy: extra.by ?? "the owner", sourceDecisionId: d.id }); };
+      if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) saveRule = async (h) => { await policyRulesService(h).create({ companyId: d.companyId, ...ctx.rule, createdBy: extra.by ?? "the owner", sourceDecisionId: d.id }); };
       // Kept on the decision so the owner can see who settled it and why (BOS-111). Written on a copy, not
       // on ctx itself, so reopening a card later restores the pre-answer context without this record.
       let settled: Settled | undefined;
@@ -2685,7 +2687,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // was read on, so whoever closes it first wins and the loser changes nothing. The tier clause
       // closes the race where the ladder hands the open card to the owner between the CEO reading it
       // and answering: the answer then matches nothing instead of closing the owner's card (BOS-159).
-      const [closed] = await db
+      // The rule is saved in the same transaction as the close, so a failed save leaves the card open and
+      // no rule behind, and a crash between the two cannot allow once with no rule (BOS-598).
+      const close = async (h: typeof db) => {
+      const [row] = await h
         .update(decisions)
         // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again; so does a
         // loop alert (alert-ladder.ts), whose key only stops a repeat while it is open.
@@ -2698,6 +2703,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), eq(decisions.tier, d.tier), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
+      // Only the request that closed the card saves the rule, so a double tap or retry cannot save it twice.
+      if (row) await saveRule?.(h);
+      return row;
+      };
+      const closed = saveRule ? await db.transaction((tx) => close(tx)) : await close(db);
       // A repeat of this command waited on this card (BOS-376): an Allow once settles it too, and a Deny
       // never turns into one. The card keeps what settled, so the audit shows the repeat.
       if (closed && ctx.type === "permission" && repeatsNow?.length) {
@@ -2709,8 +2719,6 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.update(decisions).set({ context: { ...ctx, repeats: repeatsNow } as DecisionContext }).where(eq(decisions.id, id));
       }
       if (!closed) return null;
-      // The rule is saved only by the request that closed the card, so a double tap or retry cannot save it twice.
-      await saveRule?.();
       // The card is settled, so its notification is read now rather than on the next feed poll (BOS-413).
       await markDecisionNotificationRead(db, id, now());
 

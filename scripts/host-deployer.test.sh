@@ -120,6 +120,20 @@ hasnt "$D/outbox/host.json" 'abc123'
 hasnt "$D/outbox/host.json" 'SECRET_TOKEN'
 hasnt "$D/outbox/host.json" 'PENPOT_BIND'
 rm -f "$T/src/.env"
+# BOS-770: every BOSSMAN_NETGUARD_ALLOW line in .env is reported in order, host:port entries only, so a duplicate
+# (Compose uses only the last) shows; a comment, a commented-out line and anything that isn't host:port are left out.
+printf 'BOSSMAN_NETGUARD_ALLOW=git.example.lan:3000\n# BOSSMAN_NETGUARD_ALLOW=old.example.lan:1\nSECRET_TOKEN=abc123\nexport BOSSMAN_NETGUARD_ALLOW="penpot.example.lan:9001, 10.0.0.9:22 bad;entry" # the design tool\n' >"$T/src/.env"
+host
+node -e '
+const h=require(process.argv[1]);const g=h.netguardEnv;
+if(!g||g.envFound!==true||JSON.stringify(g.lines)!==JSON.stringify([["git.example.lan:3000"],["penpot.example.lan:9001","10.0.0.9:22"]])){console.error(JSON.stringify(g));process.exit(1)}
+' "$D/outbox/host.json" || fail "netguardEnv is wrong: $(cat "$D/outbox/host.json")"
+hasnt "$D/outbox/host.json" 'old.example.lan'
+hasnt "$D/outbox/host.json" 'abc123'
+hasnt "$D/outbox/host.json" 'design tool'
+rm -f "$T/src/.env"
+host
+has "$D/outbox/host.json" '"netguardEnv": {"envFound": false, "lines": []}'
 # The repo probe is cached for an hour: a second run does not repeat it.
 cp "$D/state/repo-probe" "$T/probe1"; sleep 1.1; host; cmp -s "$D/state/repo-probe" "$T/probe1" || fail "repo probe was repeated within the hour"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
@@ -408,7 +422,8 @@ case "$a" in
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
   "kill -s USR1 server-"*) c=${a##*server-}; echo "signal USR1 $c" >>"$DL"; [[ -n ${FAKE_NO_DEMOTE:-} ]] || echo standby >"$W/role.$c" ;;
   "kill -s USR2 server-"*) c=${a##*server-}; echo "signal USR2 $c" >>"$DL"; echo leader >"$W/role.$c" ;;
-  "stop server-"*) c=${a##*server-}; rm -f "$W/running.$c"; touch "$W/exists.$c"; echo "stopped $c" >>"$DL" ;;
+  "stop server-"*) echo "plain stop without a grace: $a" >>"$DL"; exit 98 ;; # BOS-794: every planned stop names its grace
+  "stop -t "*" server-"*) c=${a##*server-}; echo "stop grace ${a#stop -t }" >>"$DL"; rm -f "$W/running.$c"; touch "$W/exists.$c"; echo "stopped $c" >>"$DL" ;;
   "exec -T server-"*)
     c=${a#exec -T server-}; c=${c%% *}
     case "$a" in
@@ -832,9 +847,27 @@ swap; echo true >"$W/oom.green"; bg; [[ $(hget check_restarts) == fail ]] || fai
 swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
 [[ $(hget phase) == end ]] || fail "no end-of-window check"; all_pass
 grep -qx blue "$D/state/stopped-by-plan" || fail "planned stop not recorded"
-# ...but stopped with a non-zero exit code, or running when the plan says stopped, is not.
-swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; bg
-[[ $(hget phase) == end && $(hget check_other) == fail ]] || fail "exit 137 after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exit code 137"
+has "$DL" "stop grace 60 server-blue"; has "$D/deployer.log" "Stopped server-blue in"
+# 31h2 (BOS-794). A planned stop that outlived its grace and needed SIGKILL (137), or ended on SIGTERM (143), is still planned:
+# healthy, not paged, and the detail says it needed SIGKILL.
+for x in 137 143; do
+  swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo "$x" >"$W/exit.blue"; bg
+  [[ $(hget phase) == end ]] || fail "no end check for a planned stop with exit $x"; all_pass
+  [[ $(status result) != partial ]] || fail "a planned stop with exit $x paged: $(cat "$D/outbox/status.json")"
+  [[ $x != 137 ]] || has "$D/outbox/health.json" "needed SIGKILL after"
+done
+# The same grace on a stop by hand or a recreate: the compose file sets it for both colours.
+grep -qE '^  stop_grace_period: [0-9]+s$' "$here/../deploy/truenas-bluegreen.yml" || fail "x-server has no stop_grace_period"
+# ...but OOM-killed after the plan stop, a planned stop with another exit code, an unplanned 137, or running when the plan says stopped, is not.
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; echo true >"$W/oom.blue"; bg
+[[ $(hget phase) == end && $(hget check_other) == fail ]] || fail "OOM kill after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "server-blue was killed for running out of memory"
+rm -f "$W/oom.blue"
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 1 >"$W/exit.blue"; bg
+[[ $(hget check_other) == fail ]] || fail "exit 1 after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exited with code 1"
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; bg; all_pass
+grep -vx blue "$D/state/stopped-by-plan" >"$T/sbp" || true; cp "$T/sbp" "$D/state/stopped-by-plan"
+! BG_POLL_SECONDS=0 SOAK_CHECK_SECONDS=1 "$T/hd.sh" --ack-health >"$T/out" 2>&1 || fail "ack passed with an unplanned exit 137: $(cat "$T/out")"
+[[ $(hget check_other) == fail ]] || fail "unplanned exit 137: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exit code 137, so it crashed or was killed"
 # 31j. A failed item other than the live colour does not keep the window open: the old colour is still stopped at the deadline,
 # the stop is recorded, the end check says degraded, and there is one page that names the way to accept the new state.
 swap; echo 1 >"$W/restarts.proxy"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
@@ -846,6 +879,11 @@ has "$D/outbox/status.json" "--ack-health"
 live_is green
 # ...and --ack-health accepts the current state: baseline renewed, checklist healthy.
 bg --ack-health; all_pass; [[ $(hget phase) == ack ]] || fail "ack did not re-run the checklist: $(cat "$D/outbox/health.json")"
+# BOS-794: the passing ack replaces the page in the status file, so the server stops saying "degraded"; nothing_new, not deployed.
+[[ $(status result) == nothing_new && $(status target) == server ]] || fail "ack did not clear the partial status: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "Health accepted"; has "$D/outbox/status.json" '"stack": "healthy"'
+# A second ack has no page to replace and leaves the status file alone.
+cp "$D/outbox/status.json" "$T/st.before"; bg --ack-health; cmp -s "$T/st.before" "$D/outbox/status.json" || fail "a second ack rewrote the status file"
 # 31k. The same for the database, and an unreadable database start time (a hung or unreachable psql) is a failed db item.
 swap; echo 2026-11-07T09:00:00Z >"$W/start.db"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
 [[ ! -e $D/state/soak ]] || fail "a db failure kept the window open"; [[ $(hget check_db) == fail ]] || fail "db at window end"

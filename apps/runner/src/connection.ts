@@ -13,6 +13,8 @@ export type ConnectionOptions = {
   onCommand: (command: RunnerCommand) => void;
   runnerVersion: string;
   imageVersion?: string | null;
+  /** The git commit the image was built from (BOS-764), told to the server in hello. */
+  imageCommit?: string;
   /** Versions of the harnesses in the image, told to the server in hello (BOS-305). */
   harnessVersions?: HarnessVersions;
   heartbeatMs?: number;
@@ -95,7 +97,7 @@ export class RunnerConnection {
       this.attempt = 0;
       const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
       const liveRuns = this.opts.liveRuns?.();
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");

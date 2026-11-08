@@ -141,6 +141,36 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     renameSync(tmp, path.join(dir, "allow"));
   }
 
+  /**
+   * Network hold (BOS-576): the runner is off its network while its guard loads, so it never has a moment in which
+   * it can reach the private networks unguarded. Docker starts a container that is on no network with loopback only.
+   * Not with BOSSMAN_NETGUARD=off, where there is no guard to wait for.
+   */
+  const hold = mode !== "off";
+  async function holdNetwork(id: string) {
+    if (hold) await docker.disconnect(cfg.network, id);
+  }
+  /** Puts the guarded runner on its network, then wakes the guard to look its allowed names up now (they only resolve once the runner is on the network). */
+  async function releaseNetwork(slug: string, id: string) {
+    if (!hold) return;
+    await docker.connect(cfg.network, id);
+    const g = await guardOf(slug).catch(() => null);
+    // An older guard image ignores USR1 (it is PID 1 with no handler) and looks again within 15 s instead.
+    if (g?.State.Status === "running") await docker.signal(g.Id, "USR1").catch(() => undefined);
+  }
+  const onNetwork = (c: { NetworkSettings?: { Networks?: Record<string, unknown> | null } }) => !hold || !!c.NetworkSettings?.Networks?.[cfg.network];
+
+  /** Guard, then network; on any failure the runner is removed (no guard, no runner), and it never had a network. */
+  async function guardThenRelease(slug: string, id: string) {
+    try {
+      await guard(slug, id);
+      await releaseNetwork(slug, id);
+    } catch (err) {
+      await docker.remove(id).catch(() => undefined);
+      throw err;
+    }
+  }
+
   async function create(slug: string) {
     // Every bind source must exist first: Docker would make a missing one owned by root, which the runner can't write.
     for (const [sub] of MOUNTS) mkdirSync(path.join(companyDir(cfg, slug), sub), { recursive: true, mode: 0o700 });
@@ -148,20 +178,22 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     const old = await ours(slug);
     if (old) await removeSettled(docker, old.Id);
     const id = await docker.create(containerName(slug, cfg.stack), containerSpec(cfg, slug));
-    await docker.start(id);
     try {
-      await guard(slug, id);
+      await holdNetwork(id);
+      await docker.start(id);
     } catch (err) {
-      // No guard, no runner: a runner that can reach the private networks must not be left running.
       await docker.remove(id).catch(() => undefined);
       throw err;
     }
+    await guardThenRelease(slug, id);
     return id;
   }
 
   return {
     /** What the CPU reserve decided at start (cpu-layout.ts): on or off, which threads, and why. */
     cpu: () => cfg.cpuPlan ?? { on: false, reserved: [] as number[], runnerThreads: [] as number[], hostThreads: 0, reason: "Not worked out." },
+    /** The guard mode and the BOSSMAN_NETGUARD_ALLOW entries this launcher started with (host:port only), so the owner can see them (BOS-770). */
+    netguard: () => ({ mode, allow: [...(cfg.guardAllow ?? [])] }),
     /** Writes the token, then creates (or recreates) and starts the runner. Data folders are kept. */
     put: (slug: string, token: string, allow?: string[]) => locked(slug, async () => {
       mkdirSync(companyDir(cfg, slug), { recursive: true, mode: 0o700 });
@@ -186,14 +218,10 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     restart: (slug: string) => locked(slug, async () => {
       const c = await ours(slug);
       if (!c) throw new LauncherError(404, "There's no runner for that company.");
+      // Off the network first (BOS-576), so the restarted runner comes back with loopback only until its guard is in.
+      await holdNetwork(c.Id);
       await docker.restart(c.Id);
-      try {
-        await guard(slug, c.Id);
-      } catch (err) {
-        // No guard, no runner (same as create).
-        await docker.remove(c.Id).catch(() => undefined);
-        throw err;
-      }
+      await guardThenRelease(slug, c.Id);
       return { slug, id: c.Id };
     }),
 
@@ -252,21 +280,24 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
         // "down" (missing, stopped, unhealthy or older than the runner) is what this repairs; the
         // re-check inside the lock decides again. After a reboot the runner (unless-stopped) is back
         // before the guard (no restart policy), so this runs at once at start and every 5 s.
-        if (r.state !== "running" || r.guard === "off" || r.guard === "unavailable") continue;
+        if (r.state !== "running" || r.guard === "off") continue;
         await locked(r.slug, async () => {
           // Looked at again inside the lock: a create or restart may have just made a guard.
           const c = await ours(r.slug);
           if (!c || c.State.Status !== "running") return;
           const g = await guardOf(r.slug);
           const fresh = g && g.State.Status === "running" && new Date(g.State.StartedAt ?? 0).getTime() >= new Date(c.State.StartedAt ?? 0).getTime();
-          if (fresh) return;
-          try {
-            await guard(r.slug, c.Id);
-          } catch (err) {
-            // No guard, no runner: don't leave it running in a namespace with no rules.
-            await docker.remove(c.Id).catch(() => undefined);
-            throw err;
+          // A runner left off its network (the launcher stopped between hold and release, BOS-576) is put back once guarded.
+          if (r.guard === "unavailable" || fresh) {
+            if (onNetwork(c)) return;
+            await releaseNetwork(r.slug, c.Id);
+            fixed.push(r.slug);
+            return;
           }
+          // Restarted by itself (a crash, Docker or the host coming back): off the network while the guard loads,
+          // which cuts the gap to the moment the launcher noticed. No guard, no runner.
+          await holdNetwork(c.Id).catch(() => undefined);
+          await guardThenRelease(r.slug, c.Id);
           fixed.push(r.slug);
         }).catch((err: unknown) => errors.push(`${r.slug}: ${String((err as Error)?.message ?? err)}`));
       }
@@ -383,6 +414,10 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
       if (url.pathname === "/cpu") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, api.cpu());
+      }
+      if (url.pathname === "/netguard") {
+        if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
+        return send(200, api.netguard());
       }
       if (url.pathname === "/runners") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
