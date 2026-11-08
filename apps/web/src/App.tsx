@@ -229,9 +229,10 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
   // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
-  // the badge and the page share one request. A failure just leaves the badge off.
+  // the badge and the page share one request. A failure just leaves the badge off. Its stuck count (BOS-767)
+  // turns the badge to the warning colour when a jam is there to see.
   const mergeQueue = usePoll(
-    (signal) => (current ? api<{ waitingCount: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
+    (signal) => (current ? api<{ waitingCount: number; stuckCount?: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
     20_000,
     `merge-badge-${current?.id}`,
   );
@@ -278,6 +279,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
         mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
+        mergeStuck={mergeQueue.data?.stuckCount ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}

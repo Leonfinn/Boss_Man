@@ -6,8 +6,9 @@
 import { and, asc, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, decisions, projects, settings, tickets, wakes } from "../db/schema.js";
-import { nameRunnerSetupTickets, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
+import { raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
+import { isRunnerOnlyStep, mergeCommitOrder, splitSteps, stepKey } from "./runner-image.js";
 
 /** The Release Manager's wake reason. */
 export const RELEASE_REASON = "live release";
@@ -25,19 +26,6 @@ const HOW_WORDS: Record<ReleaseHow, string> = {
   restarted: "a restart after a hand-apply",
 };
 
-/** A ticket's setup steps as lines: one per step, blank lines and a leading "1." left off. */
-const splitSteps = (text: string) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-
-/** Spaces, tabs and newlines alike, so the same step written differently reads the same (BOS-741). */
-const stepKey = (step: string) => step.replace(/\s+/g, " ").trim();
-
-/**
- * A step that only asks for the runner update (BOS-741): Boss Man's own runner-update card for the release
- * covers it, so it doesn't get a card of its own. Exact after normalising whitespace, never a guess: a step
- * that asks for the runner update and something else is not just about the runners and keeps its card.
- */
-const RUNNER_ONLY_STEPS = new Set(["Build and update runners", "Rebuild the runners: Settings → Server and runner → Updates → Build and update runners"]);
-const isRunnerOnlyStep = (step: string) => RUNNER_ONLY_STEPS.has(stepKey(step));
 
 /**
  * What a ticket's setup steps ask the owner to do, minus the runner-update-only ones (BOS-741), each keyed by
@@ -51,7 +39,7 @@ function setupStepsOf(steps: string[]) {
 }
 
 /** A live ticket and the owner steps it still needs after the runner-update-only ones are taken out (BOS-741). */
-type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null };
+type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null; mergeCommit: string };
 
 const short = (sha: string) => sha.slice(0, 8);
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
@@ -233,7 +221,7 @@ export const releaseLogService = (
       // A ticket whose every step is the runner update comes through with no steps: it is named on the
       // runner-update card instead of getting one of its own (BOS-741).
       const steps = setupStepsOf(t.steps);
-      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId });
+      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId, mergeCommit: t.mergeCommit });
     }
     // Take back each affected card once, clearing every ticket that pointed at it (BOS-741). A ticket
     // still live here that shared a withdrawn card now has no card, so the grouping below raises one for
@@ -255,7 +243,6 @@ export const releaseLogService = (
       const ids = group.tickets.filter((t) => t.decisionId !== card.id).map((t) => t.id);
       if (ids.length) await db.update(tickets).set({ ownerSetupDecisionId: card.id }).where(inArray(tickets.id, ids));
     }
-    withdrew += await nameOnRunnerCard(companyId, to, live);
     if (raised || withdrew) log(`owner setup for company ${companyId}: raised ${raised}, withdrew ${withdrew} (live ${short(to)})`);
     return { raised, withdrew };
   }
@@ -290,32 +277,12 @@ export const releaseLogService = (
   }
 
   /**
-   * Names, on Boss Man's own runner-update card, every ticket going live with it that has no step of its own
-   * but asks for the runner update (BOS-741, DR-039 follow-up 2). The runner card is raised by the deployer
-   * with its own condition (`nameRunnerSetupTickets` in decisions.ts); this fills it in once the tickets are
-   * known, on the live-commit pass, and keeps the list current when a card for the same commit is still open.
-   * Returns 1 when it changed a card, so the pass's count still says what it did.
-   */
-  async function nameOnRunnerCard(companyId: string, to: string, live: SetupTicket[]) {
-    const names = live.filter((t) => !t.steps.size && !t.decisionId).map((t) => ({ ticketId: t.id, title: t.title }));
-    if (!names.length) return 0;
-    return (await nameRunnerSetupTickets(db, companyId, to, names)) ? 1 : 0;
-  }
-
-  /**
    * This company's merge commits, oldest merge first, from its done tickets. The merge gate sets a
    * ticket's merge commit when it merges it and merges one at a time, so the order of merges is the
    * order of merge times. It includes tickets whose setup card is already raised, so a switch-back can
    * still place them.
    */
-  async function mergeOrder(companyId: string) {
-    const rows = await db
-      .select({ mergeCommit: tickets.mergeCommit, mergedAt: tickets.lastActivityAt })
-      .from(tickets)
-      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")))
-      .orderBy(asc(tickets.lastActivityAt));
-    return [...new Set(rows.map((r) => r.mergeCommit).filter((c): c is string => !!c))];
-  }
+  const mergeOrder = (companyId: string) => mergeCommitOrder(db, companyId);
 
   /** Done tickets in this company that carry setup steps and a merge commit, with their card if raised. */
   async function ticketsWithSetup(companyId: string) {
