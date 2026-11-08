@@ -104,6 +104,15 @@ describe("merge queue screen (BOS-587)", () => {
     await approve(c, fresh.id);
     const again = await queue(c);
     expect(again.waiting.find((r: { ticketId: string }) => r.ticketId === fresh.id)).toMatchObject({ state: "waiting_for_slot", stuck: false });
+    // QA, BOS-800: the side menu badge counts only the stuck one (1 stuck), while waitingCount still counts both.
+    expect(again.stuckCount).toBe(1);
+    expect(again.waitingCount).toBe(2);
+    // With two healthy ones besides it, the badge still reads 1 stuck.
+    const third = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Also fine" })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, third.id));
+    await approve(c, third.id);
+    const three = await queue(c);
+    expect(three).toMatchObject({ waitingCount: 3, stuckCount: 1 });
   });
 
   it("leaves out a ticket still with its reviewers, and keeps an approved one", async () => {

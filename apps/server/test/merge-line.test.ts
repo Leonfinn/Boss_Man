@@ -195,4 +195,17 @@ describe("the merge line's timeline (BOS-769)", () => {
     const brief = await buildBrief(c.db, { companyId: c.company.id, agentId: c.worker.id, role: "worker", since: null, now: new Date() });
     expect(brief).not.toContain("Merge line:");
   });
+
+  // The worker brief above only lists open tickets, so it would pass even with no filter. The CEO brief lists every
+  // company change, so this one fails if the merge_line filter in the brief is removed (checked in a scratch copy).
+  it("keeps the rows out of the CEO's 'Changes since the last brief' list, while ordinary changes still show", async () => {
+    const c = await setup();
+    await approveAndWait(c.req, c.ticket.id);
+    expect((await c.line()).length).toBeGreaterThan(0);
+    await lineEvent(c.db, { id: c.ticket.id, companyId: c.company.id }, { event: "left", to: "in_progress" }, new Date());
+    await c.db.insert(activity).values({ companyId: c.company.id, ticketId: c.ticket.id, kind: "state", summary: "Moved to in_progress by the owner", at: new Date() });
+    const brief = await buildBrief(c.db, { companyId: c.company.id, agentId: c.worker.id, role: "ceo", since: null, now: new Date() });
+    expect(brief).toContain("Moved to in_progress by the owner");
+    expect(brief).not.toContain("Merge line:");
+  });
 });

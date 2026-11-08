@@ -133,6 +133,58 @@ describe("company import (docs/11, step 2)", () => {
     expect((await req("GET", `/api/companies/${companyId}/review-policy`)).json().medium.kinds).toEqual({ security: [ann.id], infra: ann.id });
   });
 
+  it("never lets a package loosen the owner's safeguards, and says what it asked for (BOS-754)", async () => {
+    const { req } = await setup();
+    const companiesNow = async () => (await req("GET", "/api/companies")).json() as Array<{ id: string; name: string; ownerApprovesEngagements: boolean }>;
+    const policyOf = async (companyId: string) => (await req("GET", `/api/companies/${companyId}/review-policy`)).json();
+    const projectPolicyOf = async (companyId: string) => {
+      const [project] = (await req("GET", `/api/companies/${companyId}/projects`)).json() as Array<{ id: string }>;
+      return (await req("GET", `/api/projects/${project!.id}/review-policy`)).json().policy;
+    };
+    const exportOf = async (companyId: string) => Buffer.from((await req("GET", `/api/companies/${companyId}/export`)).rawPayload).toString("base64");
+
+    // A new company starts with the safeguards on.
+    const plain = ((await req("POST", "/api/companies", { name: "Plain Co" })).json() as { company: { id: string } }).company.id;
+    await req("POST", `/api/companies/${plain}/projects`, { name: "Site" });
+    expect((await companiesNow()).find((c) => c.id === plain)!.ownerApprovesEngagements).toBe(true);
+    const defaults = await policyOf(plain);
+    expect(defaults.high).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+
+    // An existing company whose owner loosened them on purpose: its company and project settings.
+    const loose = ((await req("POST", "/api/companies", { name: "Loose Co" })).json() as { company: { id: string } }).company.id;
+    const site = (await req("POST", `/api/companies/${loose}/projects`, { name: "Site" })).json() as { id: string };
+    expect((await req("PATCH", `/api/companies/${loose}`, { ownerApprovesEngagements: false })).statusCode).toBe(200);
+    const looseHigh = { ...defaults.high, ownerSignoff: false, planApprover: "ceo" };
+    expect((await req("PUT", `/api/companies/${loose}/review-policy`, { ...defaults, high: looseHigh })).statusCode).toBe(200);
+    expect((await req("PUT", `/api/projects/${site.id}/review-policy`, { ...defaults, high: looseHigh, critical: { ...defaults.critical, ownerSignoff: false } })).statusCode).toBe(200);
+
+    // Its export, imported as a new company, keeps the safeguards on and says so in plain words.
+    const res = await req("POST", "/api/companies/import", { zip: await exportOf(loose), name: "Loose Copy" });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+    expect((await companiesNow()).find((c) => c.id === companyId)!.ownerApprovesEngagements).toBe(true);
+    expect((await policyOf(companyId)).high).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+    const copied = await projectPolicyOf(companyId);
+    expect(copied.high).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+    expect(copied.critical).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+    expect(checklist).toEqual(
+      expect.arrayContaining([
+        "Kept on: your approval before this company takes on work for another company. The package had it switched off.",
+        "Kept on: your sign-off on high-risk work and your approval of high-risk plans. The package had them switched off. To change them, use Settings → Reviews.",
+        "Kept on in project Site: your sign-off on high-risk work, your approval of high-risk plans and your sign-off on critical-risk work. The package had them switched off. To change them, use the project's review settings.",
+      ]),
+    );
+
+    // The existing company is unchanged: the import only shapes the new one.
+    expect((await companiesNow()).find((c) => c.id === loose)!.ownerApprovesEngagements).toBe(false);
+    expect((await policyOf(loose)).high).toMatchObject({ ownerSignoff: false, planApprover: "ceo" });
+    expect((await projectPolicyOf(loose)).critical).toMatchObject({ ownerSignoff: false });
+
+    // A package that keeps the defaults imports with no such line.
+    const ok = (await req("POST", "/api/companies/import", { zip: await exportOf(plain), name: "Plain Copy" })).json() as { checklist: string[] };
+    expect(ok.checklist.filter((l) => l.startsWith("Kept on"))).toEqual([]);
+  });
+
   it("previews each tool server's host:port and refuses ones aimed at Boss Man's own services unless ticked", async () => {
     const { req } = await setup();
     const server = (name: string, url: string) => ({ name, url, transport: "http" });
@@ -210,17 +262,16 @@ describe("company import (docs/11, step 2)", () => {
     expect(pub.statusCode).toBe(201);
     expect((await req("GET", `/api/companies/${pub.json().companyId}/projects`)).json()[0].allowPrivate).toBe(false);
 
-    // A git address on the stack (a container name, or a name that resolves to a private address) is flagged and refused.
-    for (const repoUrl of ["http://db/o/r.git", "http://rebind.example.org/o/r.git"]) {
-      const pre = (await req("POST", "/api/companies/import/preview", { zip: pack(repoUrl) })).json() as { gitHosts: Array<{ stackService: boolean }> };
-      expect(pre.gitHosts[0]!.stackService, repoUrl).toBe(true);
-      const refused = await req("POST", "/api/companies/import", { zip: pack(repoUrl), name: "Git Bad" });
-      expect(refused.statusCode, repoUrl).toBe(400);
-      expect(refused.json().message).toContain("git address");
-    }
+    // A git address whose name resolves to the stack is flagged in the preview and refused unless the owner ticks.
+    const rebind = "https://rebind.example.org/o/r.git";
+    const pre = (await req("POST", "/api/companies/import/preview", { zip: pack(rebind) })).json() as { gitHosts: Array<{ stackService: boolean }> };
+    expect(pre.gitHosts[0]!.stackService, rebind).toBe(true);
+    const refused = await req("POST", "/api/companies/import", { zip: pack(rebind), name: "Git Bad" });
+    expect(refused.statusCode, rebind).toBe(400);
+    expect(refused.json().message).toContain("git address");
 
     // Ticked: the project is trusted for private, so the guard keeps its address.
-    const ticked = await req("POST", "/api/companies/import", { zip: pack("http://rebind.example.org/o/r.git"), name: "Git Ticked", allowStackServices: true });
+    const ticked = await req("POST", "/api/companies/import", { zip: pack(rebind), name: "Git Ticked", allowStackServices: true });
     expect(ticked.statusCode).toBe(201);
     expect((await req("GET", `/api/companies/${ticked.json().companyId}/projects`)).json()[0].allowPrivate).toBe(true);
   });

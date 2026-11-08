@@ -600,6 +600,10 @@ describe("more attempts the CEO must fail (BOS-149 adversarial round 6)", () => 
     expect(ids).not.toContain(await c.db.select({ id: decisions.id }).from(decisions).where(eq(decisions.question, "Long gone")).then((r) => r[0]!.id));
     expect(advised.find((a) => a.id === switchedBack!.id)!.withdrawn).toMatchObject({ by: "Boss Man", note: "Switched back: not running any more." });
     expect(advised.find((a) => a.id === live!.id)!.withdrawn).toMatchObject({ by: "Boss Man", note: "The update is live already." });
+    // The closed-card notice rides along, so the owner reads why it closed and what is left (QA, BOS-800); a CEO withdrawal has none.
+    expect(advised.find((a) => a.id === switchedBack!.id)!.withdrawn).toMatchObject({ notice: "Switched back." });
+    expect(advised.find((a) => a.id === live!.id)!.withdrawn).toMatchObject({ notice: "It's live." });
+    expect(advised.find((a) => a.id === byCeo!.id)!.withdrawn).not.toHaveProperty("notice");
   });
 
   it("does not merge a ticket whose owner sign-off is still open", async () => {

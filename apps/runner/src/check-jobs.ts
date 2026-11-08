@@ -1,7 +1,8 @@
 // Server-queued check jobs (DR-003, BOS-316), run by the runner itself. A job belongs to this process, not to any agent
 // session: it keeps going when a run ends and an agent has no command that can stop it (only the server's check.cancel).
-// The server holds the slots, so nothing here takes a lock file.
-import { VERIFY_TIMEOUT_MS, type RunnerMessage } from "@boss-man/shared";
+// The server's slots order the jobs; each job also takes a slot in the runner's own check line (BOS-805), so jobs, agents'
+// hand-run checks and the vitest guard share the machine's real limit. The runner's count caps the server's check_slots.
+import { CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_TIMEOUT_MS, type RunnerMessage } from "@boss-man/shared";
 import type { Workspaces } from "./workspace.js";
 
 type Done = Extract<RunnerMessage, { type: "check.done" }>;
@@ -53,7 +54,9 @@ export class CheckJobs {
           const now = Date.now();
           if (now - lastSent < PROGRESS_EVERY_MS) return;
           lastSent = now;
-          this.send({ type: "check.progress", jobId: cmd.jobId, tail });
+          // BOS-805: waiting in the runner's own check line (the output prints its place every 30 s, which is also the heartbeat).
+          const waiting = tail.lastIndexOf(CHECK_QUEUED_MARKER) > tail.lastIndexOf(CHECK_STARTED_MARKER);
+          this.send({ type: "check.progress", jobId: cmd.jobId, tail: waiting ? `waiting for a runner check slot\n${tail}`.slice(-8192) : tail });
         },
       })
       .then(
