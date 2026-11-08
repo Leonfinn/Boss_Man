@@ -68,6 +68,10 @@ Object.assign(env, storeEnv(storeDir));
 const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, gateStore, { level: sandbox.level, pnpmStore: storeDir });
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
+// The runner's own git in a ticket's clone runs fenced wherever the fence works (BOS-323).
+workspaces.fenceCloneGit = sandbox.level !== "unavailable";
+// A merge check asked to run fenced gets a home of its own beside the agents', and the shared pnpm store.
+if (sandbox.level !== "unavailable") workspaces.checkFence = { home: path.join(dataDir, "agents", "merge-check"), pnpmStore: storeDir };
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
 
 let connection: RunnerConnection;
