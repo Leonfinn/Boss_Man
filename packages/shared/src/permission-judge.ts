@@ -916,12 +916,14 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
   // BOS-710: which options take no value differs per package manager (npm `-w` is `--workspace <name>`, pnpm `-w` is the workspace
   // root; bun `-r` is `--preload <file>` and `-d` is `--define <k:v>`), so the allow-list is per program. An option missing from
   // a program's list gets "runs a script" (over-deny, never Allow).
-  const PM_FLAGS_COMMON = "-s|--silent|-q|--quiet|--no-color|--ignore-scripts|-D|-g|--global|--save-dev|--offline|--prefer-offline|--no-progress|--production|--force|-f|--verbose";
+  const PM_FLAGS_COMMON = "-s|--silent|-q|--quiet|--no-color|--ignore-scripts|-D|-g|--global|--save-dev|--offline|--prefer-offline|--no-progress|--force|-f|--verbose";
+  // BOS-712: yarn 1 declares `--prod, --production [prod]` (an optional value), so `yarn --production install` reads production=install;
+  // the flag is value-less only for the others, and so is not in the common list. Every other yarn entry was run against yarn 1.22.22.
   const PM_FLAGS: Record<string, RegExp> = {
-    npm: new RegExp(`^(?:${PM_FLAGS_COMMON}|--if-present|-ws|--workspaces|-y|--yes|--prod|--legacy-peer-deps|--no-audit|--no-fund|-d)$`),
-    pnpm: new RegExp(`^(?:${PM_FLAGS_COMMON}|--if-present|-w|--workspace-root|-r|--recursive|--frozen-lockfile|--no-frozen-lockfile|--prod|--no-audit)$`),
+    npm: new RegExp(`^(?:${PM_FLAGS_COMMON}|--production|--if-present|-ws|--workspaces|-y|--yes|--prod|--legacy-peer-deps|--no-audit|--no-fund|-d)$`),
+    pnpm: new RegExp(`^(?:${PM_FLAGS_COMMON}|--production|--if-present|-w|--workspace-root|-r|--recursive|--frozen-lockfile|--no-frozen-lockfile|--prod|--no-audit)$`),
     yarn: new RegExp(`^(?:${PM_FLAGS_COMMON}|--frozen-lockfile|--no-audit|-W|--ignore-workspace-root-check)$`),
-    bun: new RegExp(`^(?:${PM_FLAGS_COMMON}|--frozen-lockfile|--no-frozen-lockfile|--prod|--dry-run)$`),
+    bun: new RegExp(`^(?:${PM_FLAGS_COMMON}|--production|--frozen-lockfile|--no-frozen-lockfile|--prod|--dry-run)$`),
     npx: /^(?:-y|--yes|-q|--quiet|-s|--silent|--no)$/,
   };
   const pmRunsScript = (head: string, args: string[]): boolean => {

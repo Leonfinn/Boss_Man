@@ -1190,6 +1190,19 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     ]);
   });
 
+  // BOS-712: yarn 1 reads `--production [prod]` with an optional value, so the next word is taken and `run evil` is the real verb.
+  describe("A4. yarn --production/--prod take the next word (BOS-712)", () => {
+    deny([
+      "cd /tmp/p && yarn --production install --ignore-scripts run evil",
+      "cd /tmp/p && yarn --prod install --ignore-scripts run evil",
+    ]);
+    allows([
+      "cd /tmp/p && npm --production install --ignore-scripts",
+      "cd /tmp/p && pnpm --prod install --ignore-scripts",
+      "cd /tmp/p && yarn install --production --ignore-scripts",
+    ]);
+  });
+
   describe("B. node-options by flag", () => {
     deny([
       "npm --node-options=--require=../x.js run build",
