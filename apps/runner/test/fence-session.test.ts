@@ -93,7 +93,7 @@ async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel; works
   const endedEvent = events.find((e) => e.type === "run.ended") as { error?: string | null } | undefined;
   if (!existsSync(path.join(work, "reach.json"))) throw new Error(`the probe wrote nothing in ${work}: ${endedEvent?.error ?? "no error"}`);
   const reach = JSON.parse(readFileSync(path.join(work, "reach.json"), "utf8")) as Reach;
-  return { reach, events, outside, sharedHome, home: path.join(agentsRoot, agentId), runId, coordDir, ticketId, sharedStore, gateStore };
+  return { reach, events, outside, sharedHome, home: path.join(agentsRoot, agentId), runTmp: path.join(root, "runner-data", "run-tmp", runId), runId, coordDir, ticketId, sharedStore, gateStore };
 }
 
 describe.skipIf(!live)("a fenced run", () => {
@@ -111,7 +111,8 @@ describe.skipIf(!live)("a fenced run", () => {
     const r = await reachRun({ fence: true, runnerLevel: level });
     expect(r.reach.env).toMatchObject({
       HOME: r.home,
-      TMPDIR: path.join(r.home, "tmp", r.runId),
+      // Outside the agent's home, which every run of the agent shares (BOS-555).
+      TMPDIR: r.runTmp,
       CLAUDE_CONFIG_DIR: path.join(r.home, ".claude"),
       CODEX_HOME: path.join(r.home, ".codex"),
       XDG_CACHE_HOME: path.join(r.home, ".cache"),
@@ -126,7 +127,9 @@ describe.skipIf(!live)("a fenced run", () => {
     expect(r.sharedStore).not.toBe(r.gateStore);
     expect(existsSync(path.join(r.gateStore, "planted"))).toBe(false);
     expect(readFileSync(path.join(r.gateStore, "gate-only"), "utf8")).toBe("must stay");
-    expect(existsSync(path.join(r.home, "tmp", r.runId))).toBe(false);
+    expect(r.reach.wroteTmp).toBe(true);
+    expect(existsSync(r.runTmp)).toBe(false);
+    expect(existsSync(path.join(r.home, "tmp"))).toBe(false);
   });
 
   it("can join check-all's queue but can't forge its stored results or pair proof (BOS-321 review)", async () => {
@@ -233,14 +236,14 @@ describe.skipIf(!live)("the shared memory link", () => {
     expect(readdirSync(elsewhere)).toEqual([]);
   });
 
-  it("refuses to start when the agent turned its temp folder into a link", async () => {
+  it("refuses to start when the agent turned a harness folder into a link", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "bm-fence-link-"));
     const agentsRoot = path.join(root, "agents");
     const agentId = randomUUID();
     const elsewhere = path.join(root, "runner-data");
     mkdirSync(elsewhere);
     mkdirSync(path.join(agentsRoot, agentId), { recursive: true });
-    symlinkSync(elsewhere, path.join(agentsRoot, agentId, "tmp"));
+    symlinkSync(elsewhere, path.join(agentsRoot, agentId, ".cache"));
     const events: RunnerEvent[] = [];
     let done!: () => void;
     const ended = new Promise<void>((r) => (done = r));
@@ -254,8 +257,39 @@ describe.skipIf(!live)("the shared memory link", () => {
     });
     manager.handle({ type: "run.start", runId: randomUUID(), agentId, agentKind: "claude", model: null, fundingSourceId: null, cwd: path.join(root, "work"), prompt: "probe", mcpToken: "t", fence: true });
     await ended;
-    expect((events.find((e) => e.type === "run.ended") as { error: string }).error).toMatch(/^Couldn't set up the agent's fence: tmp\//);
+    expect((events.find((e) => e.type === "run.ended") as { error: string }).error).toMatch(/^Couldn't set up the agent's fence: \.cache /);
     expect(readdirSync(elsewhere)).toEqual([]);
+  });
+
+  it("starts in a fresh temp folder outside the home, even when one with its id was left behind as a link", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-fence-link-"));
+    const agentsRoot = path.join(root, "agents");
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const elsewhere = path.join(root, "elsewhere");
+    mkdirSync(elsewhere);
+    writeFileSync(path.join(elsewhere, "keep.txt"), "keep");
+    mkdirSync(path.join(root, "run-tmp"), { recursive: true });
+    symlinkSync(elsewhere, path.join(root, "run-tmp", runId));
+    const events: RunnerEvent[] = [];
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const manager = new SessionManager({
+      mcpUrl: "http://127.0.0.1:1/mcp",
+      baseEnv: { PATH: process.env.PATH, HOME: root },
+      resolveEnv: async () => ({}),
+      adapterBins: { claude: FAKE_REACH },
+      fence: { level, agentsRoot },
+      emit: (e) => (events.push(e), e.type === "run.ended" && done()),
+    });
+    const cwd = path.join(root, "work");
+    manager.handle({ type: "run.start", runId, agentId, agentKind: "claude", model: null, fundingSourceId: null, cwd, prompt: "probe", mcpToken: "t", fence: true });
+    await ended;
+    expect(events.find((e) => e.type === "run.ended")).toMatchObject({ error: null });
+    const reach = JSON.parse(readFileSync(path.join(cwd, "reach.json"), "utf8")) as Reach;
+    expect(reach.env.TMPDIR).toBe(path.join(root, "run-tmp", runId));
+    expect(reach.wroteTmp).toBe(true);
+    expect(readdirSync(elsewhere)).toEqual(["keep.txt"]);
   });
 });
 

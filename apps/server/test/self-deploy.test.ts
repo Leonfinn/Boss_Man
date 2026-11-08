@@ -100,7 +100,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
 
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
     const files = await readdir(path.join(c.dir, "inbox"));
-    expect(files).toEqual(["request.json"]);
+    // BOS-753: the checked merges go beside the request (an empty list here: nothing has merged in this test).
+    expect(files.sort()).toEqual(["checked", "request.json"]);
     const body = JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"));
     expect(body).toMatchObject({ id: d!.id, target: "server", commit: B });
     expect(Object.keys(body).sort()).toEqual(["approvedBy", "commit", "id", "requestedAt", "target"]);
@@ -1197,5 +1198,111 @@ describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
     await c.notes.syncDecisions();
     expect((await c.db.select().from(notifications)).find((n) => n.decisionId === d!.id)).toMatchObject({ requested: "ask", level: "ask", title: "App Co needs a decision" });
     expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((q) => q.id)).toEqual([newer.id, d!.id]);
+  });
+});
+
+describe("an approval when main moves on before the host runs it (BOS-753)", () => {
+  const D = "d".repeat(40);
+  const E = "e".repeat(40);
+  async function merged(c: Awaited<ReturnType<typeof setup>>) {
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const add = (title: string, mergeCommit: string, checkedCommit: string | null) =>
+      c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title, mergeCommit, checkedCommit });
+    return { add };
+  }
+  const checkedFile = (c: Awaited<ReturnType<typeof setup>>) => readFile(path.join(c.dir, "inbox", "checked"), "utf8");
+
+  it("writes the merges that passed the merge gate beside the request, and keeps the list current while it waits", async () => {
+    const c = (ctx = await setup());
+    const m = await merged(c);
+    await m.add("Checked merge", C, C);
+    await m.add("Merged with no check", D, null); // e.g. a project with no merge check: never offered as checked
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
+    // The request still names the commit the owner approved; the list only lets the host go further along main.
+    expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ commit: B });
+    expect(await checkedFile(c)).toBe(`${C}\n`);
+    // A merge lands in the minute before the host's tick: the next pass adds it, so it can be the one that goes out.
+    await m.add("Merged just after the press", E, E);
+    await c.selfDeploy.sync();
+    expect((await checkedFile(c)).split("\n").filter(Boolean).sort()).toEqual([C, E].sort());
+  });
+
+  it("tells the owner which commit went out and why, and takes the runner offer from what really went out", async () => {
+    const c = (ctx = await setup());
+    await c.available({ runnerChanged: false, commits: [{ sha: B, subject: "Add rate limiting" }] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.question).toContain("If more work merges before the host runs it, the newest version that has passed its checks goes out instead.");
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    const message = `Deployed aaaaaaaa to cccccccc. You approved bbbbbbbb; main had moved on to cccccccc by the time the deployer ran, so the deployer took that newest checked version instead. It includes everything you approved.`;
+    await c.status({ id: d!.id, result: "deployed", message, to_commit: C, requested_commit: B, runner_changed: "true" });
+    await c.available({ deployed: C, tip: C });
+    await c.selfDeploy.sync();
+    const [told] = await c.db.select().from(notifications);
+    expect(told).toMatchObject({ title: `Boss Man updated to ${C.slice(0, 8)}` });
+    expect(told!.body).toContain(`You approved ${B.slice(0, 8)}`);
+    expect(told!.body).toContain(`What changed, up to the approved ${B.slice(0, 8)} (the newer merges up to ${C.slice(0, 8)} went out too):`);
+    // The Updates panel shows the host's message as the last deploy.
+    expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ status: { result: "deployed", to_commit: C, requested_commit: B, message } });
+    // The card's range had no runner change, but what went out did: the runner update is offered for it.
+    const [runner] = await c.open();
+    expect(runner).toMatchObject({ context: { type: "self_deploy", target: "runner", commit: C } });
+  });
+
+  it("offers no runner update when the card's range changed the runner but the host says what went out did not", async () => {
+    const c = (ctx = await setup());
+    await c.available({ runnerChanged: true });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "deployed", to_commit: C, requested_commit: B, runner_changed: "false" });
+    await c.available({ deployed: C, tip: C });
+    await c.selfDeploy.sync();
+    expect(await c.open()).toHaveLength(0);
+  });
+
+  describe("the host deployer's report line", () => {
+    const host = (c: Awaited<ReturnType<typeof setup>>, writtenAt: string) =>
+      writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt, ownership: [] }));
+
+    it("does not say it has not reported when it reported a minute ago, and asks it to look at main again", async () => {
+      const c = (ctx = await setup());
+      // Just after a deploy the host removes its offer; host.json is rewritten every tick.
+      const fresh = new Date(Date.now() - 60_000).toISOString();
+      await host(c, fresh);
+      expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ available: null, deployer: { reportedAt: fresh, late: false } });
+      const r = await c.selfDeploy.deployLatest();
+      expect(r).toMatchObject({ error: expect.stringContaining("The host deployer is running (last report at") });
+      expect((r as { error: string }).error).not.toContain("cron");
+      expect(await readdir(path.join(c.dir, "inbox"))).toContain("check");
+      expect(await c.selfDeploy.updateRunners()).toMatchObject({ error: expect.not.stringContaining("cron") });
+    });
+
+    it("says it is overdue, with when it last reported, once nothing has come for ten minutes", async () => {
+      const c = (ctx = await setup());
+      const stale = new Date(Date.now() - 11 * 60_000).toISOString();
+      await host(c, stale);
+      expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ deployer: { reportedAt: stale, late: true }, lateAfterMinutes: 10 });
+      const r = await c.selfDeploy.deployLatest();
+      expect((r as { error: string }).error).toContain(`The host deployer last reported at ${stale.slice(0, 10)} ${stale.slice(11, 16)} UTC, more than 10 minutes ago`);
+      expect((r as { error: string }).error).toContain("Check that its cron job is running.");
+    });
+
+    it("is not overdue while a deploy holds the deployer's lock, and says it never reported when nothing ever came", async () => {
+      const c = (ctx = await setup());
+      await host(c, new Date(Date.now() - 30 * 60_000).toISOString());
+      await c.status({ result: "running", started: new Date(Date.now() - 20 * 60_000).toISOString(), ended: "" });
+      expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ deployer: { late: false } });
+      await rm(path.join(c.dir, "outbox", "host.json"));
+      await rm(path.join(c.dir, "outbox", "status.json"));
+      expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ deployer: { reportedAt: null, late: true } });
+      expect(await c.selfDeploy.deployLatest()).toEqual({ error: "The host deployer has not reported yet. Check that its cron job is running." });
+    });
   });
 });

@@ -55,6 +55,49 @@ describe("docker remove", () => {
   });
 });
 
+/** A Docker socket that answers every call with one status and message, and records the calls and bodies. */
+function fixedSocket(status: number, message?: string) {
+  const dir = mkdtempSync(path.join(tmpdir(), "bm-dock-net-"));
+  const sock = path.join(dir, "d.sock");
+  const seen: string[] = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c: Buffer) => (body += c.toString()));
+    req.on("end", () => {
+      seen.push(`${req.method} ${req.url} ${body}`);
+      res.statusCode = status;
+      res.end(message ? JSON.stringify({ message }) : "");
+    });
+  });
+  server.listen(sock);
+  cleanup.push(() => {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return { sock, seen };
+}
+
+describe("docker network hold calls (BOS-576)", () => {
+  it("connects, disconnects and signals with the right calls", async () => {
+    const ok = fixedSocket(200);
+    const d = dockerClient(ok.sock);
+    await d.disconnect("boss-man_default", "ab23");
+    await d.connect("boss-man_default", "ab23");
+    expect(ok.seen).toEqual(['POST /networks/boss-man_default/disconnect {"Container":"ab23","Force":false}', 'POST /networks/boss-man_default/connect {"Container":"ab23"}']);
+    const killed = fixedSocket(204);
+    await dockerClient(killed.sock).signal("g1", "USR1");
+    expect(killed.seen).toEqual(["POST /containers/g1/kill?signal=USR1 "]);
+  });
+
+  it("treats 'already on it' and 'not on it' as done, and fails on anything else", async () => {
+    await dockerClient(fixedSocket(403, "endpoint with name boss-man-runner-a already exists in network boss-man_default").sock).connect("boss-man_default", "a");
+    await dockerClient(fixedSocket(500, "container a is not connected to network boss-man_default").sock).disconnect("boss-man_default", "a");
+    await expect(dockerClient(fixedSocket(404, "network boss-man_default not found").sock).connect("boss-man_default", "a")).rejects.toThrow("Connecting the runner to its network failed: network boss-man_default not found");
+    await expect(dockerClient(fixedSocket(500, "boom").sock).disconnect("boss-man_default", "a")).rejects.toThrow("Taking the runner off its network failed: boom");
+    await expect(dockerClient(fixedSocket(409, "container g1 is not running").sock).signal("g1", "USR1")).rejects.toThrow("Signalling");
+  });
+});
+
 /** A Docker socket whose /events answers the given lines, then holds the stream open until told to end it. */
 function fakeEvents(lines: string[], status = 200) {
   const dir = mkdtempSync(path.join(tmpdir(), "bm-dock-ev-"));

@@ -487,6 +487,17 @@ describe("fetches and pushes go to the address the runner recorded (BOS-332)", (
     expect(other.main()).toBe(otherMain);
   });
 
+  it("the migration-number check fetches from the recorded address, not a repointed origin", async () => {
+    const f = await fixture();
+    const other = origin("other\n");
+    agent(f.w.path, "config", "remote.origin.url", other.url);
+    f.o.push("app.txt", "moved\n");
+    expect(await f.ws.migrations(f.spec, "main", [])).toBeTruthy();
+    const repo = f.ws.repoDir(ids.project);
+    expect(agent(repo, "rev-parse", "refs/remotes/origin/main")).toBe(f.o.main());
+    expect(agent(repo, "for-each-ref", "--format=%(objectname)")).not.toContain(other.main());
+  });
+
   it("a repo cloned before the address was recorded uses its config's single URL, and says so", async () => {
     const f = await fixture();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

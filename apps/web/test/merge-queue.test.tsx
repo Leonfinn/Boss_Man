@@ -61,11 +61,29 @@ describe("merge queue screen (BOS-587)", () => {
     expect(waitingLabel(4)).toBe("4 waiting to merge");
     expect(waitingLabel(0)).toBeNull();
     const noop = () => {};
-    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
+    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} mergeStuck={0} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
     const link = screen.getByRole("link", { name: /Merge queue/ });
     expect(link.getAttribute("href")).toBe("#/merge-queue");
     expect(link.getAttribute("aria-current")).toBe("page");
     expect(within(link).getByLabelText("4 waiting to merge").textContent).toBe("4");
+    expect(within(link).getByLabelText("4 waiting to merge").className).not.toContain("warn");
+  });
+
+  it("turns the badge into the stuck count in the warning colour when items are stuck (BOS-767)", () => {
+    const noop = () => {};
+    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={5} mergeStuck={2} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
+    const link = screen.getByRole("link", { name: /Merge queue/ });
+    const badge = within(link).getByLabelText("2 stuck");
+    expect(badge.textContent).toBe("2");
+    expect(badge.className).toContain("warn");
+    expect(link.querySelector(".count-dot")?.className).toContain("warn");
+  });
+
+  it("colors the collapsed strip dot amber when items are stuck (BOS-767)", () => {
+    const noop = () => {};
+    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={5} mergeStuck={2} notifications="unsupported" collapsed narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
+    const dot = screen.getByRole("link", { name: /Merge queue/ }).querySelector(".count-dot");
+    expect(dot?.className).toContain("warn");
   });
 });
 
