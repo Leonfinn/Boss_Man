@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, costEvents, fundingSources, quotaSamples, runnerEvents, runners, runs, runTokens } from "../src/db/schema.js";
+import { activity, costEvents, fundingSources, quotaSamples, runnerEventAttempts, runnerEvents, runners, runs, runTokens } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -38,7 +38,8 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     // Make the quota reading markEnded records fail once.
     const real = c.funding.recordQuota.bind(c.funding);
     const failOnce = vi.spyOn(c.funding, "recordQuota").mockImplementationOnce(async () => {
-      throw new Error("database hiccup");
+      // A transient database failure carries a SQLSTATE code, so the resend is retried (BOS-606).
+      throw Object.assign(new Error("database hiccup"), { code: "08006" });
     });
 
     const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.ended" as const, runId: c.runId, stopReason: null, error: "You've hit your weekly limit · resets later" } };
@@ -71,6 +72,32 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     // A resend of the same seq is a duplicate: not applied again, not stored twice.
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
+    // A resent event the server already has must not leave a try-count row behind (BOS-606, Rod).
+    expect(await c.db.select().from(runnerEventAttempts)).toHaveLength(0);
+  });
+
+  it("leaves no try-count row behind when the same event is ingested twice (BOS-606, Rod)", async () => {
+    const c = (ctx = await setup());
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.ended" as const, runId: c.runId, stopReason: "end_turn", error: null } };
+    // The runner replays already-stored events after every reconnect, so a duplicate is the normal case.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
+    expect(await c.db.select().from(runnerEventAttempts)).toHaveLength(0);
+  });
+
+  it("clears a failed event's try count once it is kept and acked (BOS-606, Rod)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    // A plain Error with no code: retried to the cap, then kept, marked and acked.
+    vi.spyOn(c.funding, "recordCost").mockImplementation(async () => {
+      throw new Error("something went wrong applying this");
+    });
+    await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("something went wrong");
+    await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("something went wrong");
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(runnerEventAttempts)).toHaveLength(0);
   });
 
   // BOS-623: markEnded deleted the token on the outer handle, which on PGlite's one connection waits
@@ -88,7 +115,8 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
     const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
     vi.spyOn(c.funding, "recordCost").mockImplementationOnce(async () => {
-      throw new Error("cost insert failed");
+      // A transient database failure carries a SQLSTATE code, so the resend is retried (BOS-606).
+      throw Object.assign(new Error("cost insert failed"), { code: "08006" });
     });
     await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("cost insert failed");
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(0);
@@ -100,7 +128,8 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
   });
 
-  it("records a quota reading and the event in one go", async () => {    const c = (ctx = await setup());
+  it("records a quota reading and the event in one go", async () => {
+    const c = (ctx = await setup());
     const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
     const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.quota" as const, fundingSourceId: fs!.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 40, resetsAt: "2026-11-07T14:00:00Z" } } } } } as never };
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
@@ -128,6 +157,32 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     expect(run!.endedAt).not.toBeNull();
   });
 
+  it("marks a failed apply with only the error code and constraint, never the SQL or its values (BOS-605)", async () => {
+    const c = (ctx = await setup());
+    // A cost for a funding source that doesn't exist: a foreign-key violation (SQLSTATE 23503) on every resend.
+    const missing = crypto.randomUUID();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: missing, model: "opus", costMicrosDelta: 5_000 } as never };
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+
+    const [failed] = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")));
+    expect(failed).toBeDefined();
+    // The code and the constraint name are kept, so the cause is still legible.
+    expect(failed!.summary).toContain("23503");
+    expect(failed!.summary).toMatch(/constraint \w+/);
+    expect(failed!.summary).toContain("run.cost");
+    expect((failed!.detail as { seq?: number }).seq).toBe(2);
+    expect((failed!.detail as { type?: string }).type).toBe("run.cost");
+    expect((failed!.detail as { error?: string }).error).toContain("23503");
+    expect((failed!.detail as { error?: string }).error).toMatch(/constraint \w+/);
+    // The SQL, its table and the missing parameter value are never stored.
+    expect(failed!.summary).not.toMatch(/insert into/i);
+    expect(failed!.summary).not.toMatch(/Failed query/i);
+    expect(failed!.summary).not.toContain(missing);
+    expect((failed!.detail as { error?: string }).error).not.toContain(missing);
+    // The short message stays within the ~200-character cap.
+    expect(failed!.summary.length).toBeLessThanOrEqual(240);
+  });
+
   it("still retries a connection-style failure on the resend (not marked as failed)", async () => {
     const c = (ctx = await setup());
     const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
@@ -138,6 +193,115 @@ describe("runner event ingest is one transaction (BOS-584)", () => {
     });
     await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("connection reset");
     expect(await c.db.select().from(runnerEvents).where(eq(runnerEvents.runnerId, c.runnerRow.id))).toHaveLength(1); // only run.started
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(costEvents)).toHaveLength(1);
+  });
+
+  it("still retries a serialization failure on the resend (not marked as failed) (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    // A serialization failure (40001) is transient: the event is not stored, so the resend applies it.
+    vi.spyOn(c.funding, "recordCost").mockImplementationOnce(async () => {
+      throw Object.assign(new Error("could not serialize access"), { code: "40001" });
+    });
+    await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("could not serialize access");
+    expect(await c.db.select().from(runnerEvents).where(eq(runnerEvents.runnerId, c.runnerRow.id))).toHaveLength(1); // only run.started
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(costEvents)).toHaveLength(1);
+  });
+
+  it("keeps and acks an event whose apply throws a TypeError, a clear code bug, on the first try (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    // A code bug: a TypeError fails the same way on every resend, so it is not retried at all.
+    const always = vi.spyOn(c.funding, "recordCost").mockImplementation(async () => {
+      throw new TypeError("cannot read properties of undefined");
+    });
+
+    // It is stored and acked (true) on the first try, not retried for ever.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(always).toHaveBeenCalledTimes(1);
+    expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
+    expect(await c.db.select().from(costEvents)).toHaveLength(0);
+    const [failed] = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")));
+    expect(failed?.summary).toMatch(/Runner event 2 \(run\.cost\)/);
+
+    // A resend of the same seq is a duplicate, and it never stalls the events behind it.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(false);
+    expect(always).toHaveBeenCalledTimes(1);
+    const ended = { seq: 3, at: new Date().toISOString(), event: { type: "run.ended" as const, runId: c.runId, stopReason: "end_turn", error: null } };
+    expect(await c.runners.ingest(c.runnerRow, ended)).toBe(true);
+    const [run] = await c.db.select().from(runs).where(eq(runs.id, c.runId));
+    expect(run!.endedAt).not.toBeNull();
+  });
+
+  it("retries a plain Error with no code a few times, then keeps, marks and acks it (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    // A plain Error with no code and no connection wording: it could be a payload bug, so it is not
+    // trusted to be permanent straight away. It is retried up to the cap, then stored, marked and acked.
+    const always = vi.spyOn(c.funding, "recordCost").mockImplementation(async () => {
+      throw new Error("something went wrong applying this");
+    });
+
+    // The tries before the cap roll back and reject, so the runner resends; nothing is stored yet.
+    for (let i = 1; i <= 2; i++) {
+      await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("something went wrong");
+      expect(always).toHaveBeenCalledTimes(i);
+      expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(0);
+    }
+
+    // The third try is at the cap: it is stored and acked rather than retried for ever.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(always).toHaveBeenCalledTimes(3);
+    expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(1);
+    expect(await c.db.select().from(costEvents)).toHaveLength(0);
+    const [failed] = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")));
+    expect(failed?.summary).toMatch(/Runner event 2 \(run\.cost\)/);
+  });
+
+  it("still retries an ECONNRESET connection error on the resend, however often it repeats (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    const realRecordCost = c.funding.recordCost.bind(c.funding);
+    // A Node network error carries a code that is not a SQLSTATE; it is a database blip, so always retried.
+    let calls = 0;
+    vi.spyOn(c.funding, "recordCost").mockImplementation(async (...args) => {
+      if (++calls <= 4) throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+      return realRecordCost(...args);
+    });
+    // Even past the ordinary retry cap, a connection error is never treated as permanent.
+    for (let i = 1; i <= 4; i++) {
+      await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("ECONNRESET");
+      expect(calls).toBe(i);
+      expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(0);
+    }
+    // The database is back: the resend applies the event.
+    expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
+    expect(await c.db.select().from(costEvents)).toHaveLength(1);
+    expect(await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "runner_event_failed")))).toHaveLength(0);
+  });
+
+  it("still retries a codeless 'Connection terminated unexpectedly' on the resend (BOS-606)", async () => {
+    const c = (ctx = await setup());
+    const [fs] = await c.db.insert(fundingSources).values({ name: "Claude", kind: "subscription", provider: "anthropic" }).returning();
+    const entry = { seq: 2, at: new Date().toISOString(), event: { type: "run.cost" as const, runId: c.runId, fundingSourceId: fs!.id, model: "opus", costMicrosDelta: 5_000 } as never };
+    const realRecordCost = c.funding.recordCost.bind(c.funding);
+    // pg's own dropped-connection error has no code at all; it is a blip, so it is retried, not dropped.
+    let calls = 0;
+    vi.spyOn(c.funding, "recordCost").mockImplementation(async (...args) => {
+      if (++calls <= 4) throw new Error("Connection terminated unexpectedly");
+      return realRecordCost(...args);
+    });
+    for (let i = 1; i <= 4; i++) {
+      await expect(c.runners.ingest(c.runnerRow, entry)).rejects.toThrow("Connection terminated unexpectedly");
+      expect(calls).toBe(i);
+      expect(await c.db.select().from(runnerEvents).where(and(eq(runnerEvents.runnerId, c.runnerRow.id), eq(runnerEvents.seq, 2)))).toHaveLength(0);
+    }
     expect(await c.runners.ingest(c.runnerRow, entry)).toBe(true);
     expect(await c.db.select().from(costEvents)).toHaveLength(1);
   });

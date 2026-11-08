@@ -32,6 +32,26 @@ export function unknownAddons(why: string): AddonFacts {
   return Object.fromEntries(ADDONS.map((a) => [a, { state: "unknown", since: null, source: why }])) as AddonFacts;
 }
 
+/** How bad each state is; "unknown" knows nothing, so it never beats a known state. */
+const SEVERITY: Record<AddonState, number> = { running: 0, needs_login: 1, stopped: 2, not_set_up: 3, unknown: -1 };
+
+/**
+ * Merge what the host deployer reported (BOS-419, DR-023 ticket 2) into the server's own signals. When both know
+ * and disagree, the worse state wins, so a card never relies on an add-on one side says isn't working. A host
+ * state outside the four it may report is ignored.
+ */
+export function mergeHostAddons(own: AddonFacts, reported: Record<string, string>, at: string): AddonFacts {
+  const out = { ...own };
+  for (const a of ADDONS) {
+    const s = reported[a] as AddonState | undefined;
+    if (!s || s === "unknown" || !(s in SEVERITY)) continue;
+    const mine = own[a];
+    const hostFact: AddonFact = { state: s, since: at, source: "the host deployer's report (host.json)" };
+    if (SEVERITY[s] > SEVERITY[mine.state]) out[a] = hostFact;
+  }
+  return out;
+}
+
 export function addonsService(db: Db, deps: { trustedProxies: string[]; notifySettings: ReturnType<typeof notificationsService>["getSettings"]; now?: () => Date }) {
   const now = deps.now ?? (() => new Date());
   // Exact addresses only. A CIDR range in BOSSMAN_TRUSTED_PROXIES never matches here, so Tailscale stays
@@ -56,7 +76,7 @@ export function addonsService(db: Db, deps: { trustedProxies: string[]; notifySe
 
       const s = await deps.notifySettings();
       let ntfy: AddonFact;
-      if (!s.ntfy) ntfy = { state: "not_set_up", since: null, source: "Settings → Notifications has no ntfy server" };
+      if (!s.ntfy) ntfy = { state: "not_set_up", since: null, source: "The Notifications page has no ntfy server" };
       else {
         const [last] = await db
           .select({ createdAt: notifications.createdAt, pushedAt: notifications.pushedAt, pushError: notifications.pushError })

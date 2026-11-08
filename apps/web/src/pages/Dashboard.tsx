@@ -2,6 +2,7 @@
 // 14 days at a glance, and what happened recently.
 import { api, type Company, type RunRow } from "../api";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
 import { RunLabelLink } from "./Runs";
 
@@ -17,7 +18,7 @@ type AgentCard = {
 type Day = { day: string } & Record<string, number | string>;
 type DashboardData = {
   agents: AgentCard[];
-  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
+  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; /** inReview split (BOS-667); missing from an older server. */ awaitingReview?: number; approvedToMerge?: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
   runsByDay: Day[];
   ticketsByDay: Day[];
   recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
@@ -110,7 +111,7 @@ function SuccessChart({ days }: { days: Day[] }) {
 export function Dashboard({ company }: { company: Company | undefined }) {
   const data = usePoll((signal) => (company ? api<DashboardData>(`/api/companies/${company.id}/dashboard`, { signal }) : Promise.resolve(null)), 10_000, company?.id ?? "none");
   if (!company) return <p>Create a company on the Kanban first.</p>;
-  if (data.error) return <p className="error" role="alert">{data.error.message}</p>;
+  if (data.error && !away(data.error)) return <p className="error" role="alert">{data.error.message}</p>;
   const d = data.data;
   if (!d) return null;
   const s = d.stats;
@@ -174,7 +175,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
           <strong>{s.inProgress}</strong>
           <span>Tasks in progress</span>
           <small className="muted">
-            {s.inReview} in review, {s.open} open, {s.blocked} blocked
+            {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved, waiting to merge` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked
           </small>
         </a>
         <a className="card stat" href="#/funding">

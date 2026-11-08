@@ -87,8 +87,17 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     usedBytes: z.number().nonnegative(),
     tickets: z.array(z.object({ ticketId: Uuid, projectId: Uuid, bytes: z.number().nonnegative() })),
     repos: z.array(z.object({ projectId: z.string(), bytes: z.number().nonnegative() })),
-    /** Ticket folders git no longer knew about, removed in this pass. */
+    /** Each ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592); absent from an older runner. */
+    scratch: z.array(z.object({ ticketId: Uuid, bytes: z.number().nonnegative() })).optional(),
+    /** Ticket folders git no longer knew about (or scratch folders past their keep), removed in this pass. */
     removed: z.array(z.string()),
+  }),
+  // The OpenCode prune's one-off VACUUM ran past its cap and was killed, letting held OpenCode runs go (BOS-622).
+  z.object({
+    type: z.literal("runner.opencode_vacuum_cut"),
+    heldSeconds: z.number().int().nonnegative().max(86_400),
+    bytes: z.number().nonnegative(),
+    agentHome: z.boolean(),
   }),
   // The runner's start-up self-test of the agent fence (BOS-321).
   z.object({ type: z.literal("runner.sandbox"), report: SandboxReport }),
@@ -151,8 +160,14 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   }),
   /** The ticket is finished with its worktree: save any uncommitted work and free it (R38). */
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
-  /** Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. */
-  z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, range: z.enum(["base", "last_turn"]).optional() }),
+  /**
+   * Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. With
+   * `baseRef` (the project's default branch) the runner measures them from the merge-base of its
+   * recorded base and a freshly fetched origin/<baseRef>, so a branch that has merged main since it
+   * started shows only its own changes (BOS-694). Without it, or when origin can't be reached, the
+   * recorded base stands.
+   */
+  z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, range: z.enum(["base", "last_turn"]).optional(), baseRef: z.string().min(1).max(200).optional() }),
   /** Reads one file of a ticket's work: its worktree if it has one here, else its branch (R77). */
   z.object({ type: z.literal("workspace.file"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, path: z.string().min(1).max(500) }),
   /** An image (a screenshot) from the ticket's working folder, to attach to the ticket; the reply carries it as base64. */
@@ -161,8 +176,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
+  /** Whether the ticket's branch still merges into the target, without merging it (BOS-426). */
+  z.object({ type: z.literal("workspace.clash"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1) }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional() }),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -185,6 +202,15 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("models.probe"), requestId: z.string(), agentKind: z.enum(["claude", "codex", "opencode"]) }),
   /** Check the runner's add-ons (docs/12); answered with AddonReport[]. Sent only to runners with the "addons" feature. */
   z.object({ type: z.literal("addons.check"), requestId: z.string() }),
+  /**
+   * Run a queued check job (DR-003, BOS-316) in a process the runner owns, in its own detached worktree of this exact commit.
+   * It is not tied to any agent session. Answered with check.progress and check.done messages, not a reply.
+   */
+  z.object({ type: z.literal("check.run"), jobId: Uuid, projectId: Uuid, ticketId: Uuid, commit: z.string().min(7).max(64), command: z.string().min(1), timeoutMs: z.number().int().positive().optional() }),
+  /** Stop a check job. Only the server sends this; agents have no way to. */
+  z.object({ type: z.literal("check.cancel"), jobId: Uuid }),
+  /** The server has recorded this job’s result; the runner can stop re-sending it. */
+  z.object({ type: z.literal("check.ack"), jobId: Uuid }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /**
    * Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current
@@ -216,20 +242,31 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     features: z.array(z.string().max(40)).max(50).optional(),
     /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
     bootId: z.string().max(100).optional(),
+    /** How the previous runner process ended (BOS-594): told to stop (SIGTERM) or not (a crash or out of memory); absent on a first start or from an older runner. */
+    previousExit: z.enum(["stopped", "crashed"]).optional(),
+    /** When the host machine booted (ISO time), so the server can tell a host restart (BOS-594); absent from an older runner. */
+    hostBootAt: z.string().max(40).optional(),
     /** The ids of every run this runner really has (BOS-583); the server closes any other open run of this runner. Absent from an older runner: the server then closes nothing. */
     liveRuns: z.array(Uuid).max(2000).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
+    /** Check jobs this runner is running now (BOS-316): the server puts back in line any it thinks run here but are not listed. */
+    checkJobs: z.array(Uuid).max(100).optional(),
   }),
+
   z.object({ type: z.literal("event"), entry: JournalEntry }),
   z.object({ type: z.literal("ping") }),
   z.object({ type: z.literal("pong") }),
+  /** A running check job printed something: the log tail so far (BOS-316). */
+  z.object({ type: z.literal("check.progress"), jobId: Uuid, tail: z.string().max(20_000) }),
+  /** A check job ended (BOS-316). commit is the commit that was checked; the server ignores an answer for any other. */
+  z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000) }),
   /** An answer to a request command. Not journalled: it can always be asked for again. */
   z.object({ type: z.literal("reply"), requestId: z.string(), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() }),
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "clash-check": answers workspace.clash (BOS-426). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -248,6 +285,8 @@ export type ServerMessage = z.infer<typeof ServerMessage>;
 export type WorkspaceDiff = {
   baseCommit: string;
   head: string;
+  /** The tree of head: two commits with one tree are the same code (check results are reused by it). */
+  tree?: string;
   /** Commits on the ticket's branch since the base, newest first. */
   commits: Array<{ sha: string; subject: string }>;
   /** Files changed, with line counts, including uncommitted and untracked work. */
@@ -260,6 +299,12 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
+/**
+ * A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): one folder per ticket on the workspaces disk, so a proof
+ * or a check log outlives the runner and the temp sweep. Kept a week, or a few hours once the ticket's work is gone.
+ */
+export const SCRATCH_KEEP_MS = 7 * 24 * 60 * 60_000;
+export const RELEASED_SCRATCH_KEEP_MS = 6 * 60 * 60_000;
 /**
  * How long the runner lets a ticket's check run (R47), counted from when it actually starts. A check that is waiting
  * in scripts/check-all.sh's queue is given up to VERIFY_QUEUE_MAX_MS to reach the front first; the server waits for
@@ -289,6 +334,8 @@ export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools:
 
 /** The outcome of merging a ticket's branch (R46). */
 export type MergeResult =
+  /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
+  | { status: "prepared"; commit: string; tree: string; targetSha: string }
   | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number } }
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
@@ -319,3 +366,14 @@ export type MigrationsResult =
   | { needed: false; reason: string }
   | { needed: true; number: number; next: number; why: string[]; others: string[] }
   | { needed: null; reason: string };
+
+/**
+ * The company's agent fence setting (BOS-325): off (default), watch (agents run fenced and refusals are logged) or
+ * enforce. "enforce" is not selectable yet: it waits for BOS-323's git fix, so the server refuses it.
+ */
+export const FENCE_MODES = ["off", "watch", "enforce"] as const;
+export type FenceMode = (typeof FENCE_MODES)[number];
+/** Flip once BOS-323 is merged and its test shows the git gap closed. */
+export const FENCE_ENFORCE_AVAILABLE = false;
+/** Tool output a fenced agent gets when the kernel refuses it (Landlock gives EACCES or EPERM, nothing else). */
+export const FENCE_DENIED_PATTERN = /Permission denied|Operation not permitted|\bEACCES\b|\bEPERM\b/i;

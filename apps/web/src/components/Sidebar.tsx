@@ -1,8 +1,8 @@
 // The sidebar (R72, R75): the company switcher at the top, then the screens in groups. Every
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { Company, Decision } from "../api";
-import { Activity, BookOpen, FolderGit2, Bell, Gavel, Handshake, LayoutDashboard, ListChecks, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
+import { Activity, BookOpen, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 
 type Item = { id: string; label: string; icon: LucideIcon };
@@ -21,6 +21,7 @@ const GROUPS: Array<{ title: string; items: Item[] }> = [
     items: [
       { id: "projects", label: "Projects", icon: FolderGit2 },
       { id: "roadmap", label: "Roadmap", icon: Map },
+      { id: "merge-queue", label: "Merge queue", icon: GitMerge },
       { id: "plan", label: "Plan", icon: ListChecks },
       { id: "wiki", label: "Wiki", icon: BookOpen },
       { id: "features", label: "Features", icon: Sparkles },
@@ -111,6 +112,11 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
   );
 }
 
+/**
+ * The side menu is an icon-only strip when `collapsed` (BOS-290). The choice is kept on the
+ * device by App. On a narrow screen (phone, foldable, tablet) expanding opens it over the page
+ * and it closes again after choosing a page or tapping outside, so the page keeps its width.
+ */
 export function Sidebar(props: {
   active: string;
   activeAgent?: string;
@@ -120,20 +126,48 @@ export function Sidebar(props: {
   decisions: Decision[];
   unread: number;
   feedback: number;
+  mergeWaiting: number;
   notifications: NotificationPermission | "unsupported";
+  collapsed: boolean;
+  narrow: boolean;
+  onToggleCollapsed: () => void;
   onPickCompany: (id: string) => void;
   onCreateCompany: (name: string) => Promise<void>;
   onEnableNotifications: () => void;
   onLogout: () => void;
 }) {
   const [menu, setMenu] = useState(false);
+  const nav = useRef<HTMLElement>(null);
+  // On a narrow screen an expanded menu covers the page, so it folds away once a page is chosen.
+  const closeIfNarrow = () => {
+    setMenu(false);
+    if (props.narrow && !props.collapsed) props.onToggleCollapsed();
+  };
+  useEffect(() => {
+    if (!props.narrow || props.collapsed || !nav.current) return;
+    const onDown = (e: MouseEvent) => {
+      if (!nav.current!.contains(e.target as Node)) props.onToggleCollapsed();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onToggleCollapsed();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [props.narrow, props.collapsed, props.onToggleCollapsed]);
   const starred = props.current?.agents.filter((a) => a.starred) ?? [];
   const starredProjects = props.current?.projects?.filter((p) => p.starred) ?? [];
   const waiting = (companyId: string) => props.decisions.filter((d) => d.companyId === companyId).length;
   const decisionsHere = props.current ? waiting(props.current.id) : props.decisions.length;
   const label = GROUPS.flatMap((g) => g.items).find((i) => i.id === props.active || ((props.active === "tickets" || props.active === "board") && i.id === "projects"))?.label ?? "Menu";
+  const isCurrent = (id: string) => props.active === id || ((props.active === "tickets" || props.active === "board") && id === "projects");
+  const badge = (n: Item) =>
+    n.id === "decisions" && decisionsHere > 0 ? { value: decisionsHere, label: `${decisionsHere} waiting` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: `${props.feedback} to process` } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: `${props.mergeWaiting} waiting to merge` } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: `${props.unread} unread` } : null;
   return (
-    <nav className="side" aria-label="Main">
+    <nav ref={nav} className={`side${props.collapsed ? " collapsed" : ""}`} aria-label="Main">
       <div className="brand">
         <img src={art.mark64} alt="" />
         <span>Boss Man</span>
@@ -144,60 +178,67 @@ export function Sidebar(props: {
           <MenuIcon size={20} strokeWidth={1.75} aria-hidden="true" />
           <span className="sr-only">{menu ? "Close menu" : `Menu, ${label}`}</span>
         </button>
+        {/* The strip/expanded switch. Hidden on a phone, which keeps its Menu button above. */}
+        <button type="button" className="side-collapse" aria-expanded={!props.collapsed} aria-controls="nav-groups" aria-label={props.collapsed ? "Expand menu" : "Collapse menu"} title={props.collapsed ? "Expand menu" : "Collapse menu"} onClick={props.onToggleCollapsed}>
+          {props.collapsed ? <ChevronsRight size={18} strokeWidth={1.75} aria-hidden="true" /> : <ChevronsLeft size={18} strokeWidth={1.75} aria-hidden="true" />}
+        </button>
       </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         {GROUPS.map((g) => (
           <section key={g.title} aria-label={g.title}>
             <h2>{g.title}</h2>
             <ul>
-              {g.items.map((n) => (
-                <li key={n.id}>
-                  <a className="nav" href={`#/${n.id}`} onClick={() => setMenu(false)} aria-current={props.active === n.id || ((props.active === "tickets" || props.active === "board") && n.id === "projects") ? "page" : undefined}>
-                    <n.icon size={18} strokeWidth={1.75} aria-hidden="true" />
-                    <span className="nav-label">{n.label}</span>
-                    {n.id === "decisions" && decisionsHere > 0 && <span className="count" aria-label={`${decisionsHere} waiting`}>{decisionsHere}</span>}
-                    {n.id === "feedback" && props.feedback > 0 && <span className="count" aria-label={`${props.feedback} to process`}>{props.feedback}</span>}
-                    {n.id === "notifications" && props.unread > 0 && <span className="count" aria-label={`${props.unread} unread`}>{props.unread}</span>}
-                  </a>
-                  {n.id === "chat" && starred.length > 0 && (
-                    <ul className="sub-nav" aria-label="Starred agents">
-                      {starred.map((a) => (
-                        <li key={a.id}>
-                          <a className="nav" href={`#/chat/${a.companyId}/${a.id}`} onClick={() => setMenu(false)} aria-current={props.active === "chat" && props.activeAgent === a.id ? "page" : undefined}>
-                            <Star size={14} strokeWidth={1.75} aria-hidden="true" />
-                            <span className="nav-label">{a.name}</span>
-                          </a>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {n.id === "projects" && starredProjects.length > 0 && (
-                    <ul className="sub-nav" aria-label="Starred projects">
-                      {starredProjects.map((p) => (
-                        <li key={p.id}>
-                          <a className="nav" href={`#/board/${p.id}`} onClick={() => setMenu(false)} aria-current={props.active === "board" && props.activeProject === p.id ? "page" : undefined}>
-                            <Star size={14} strokeWidth={1.75} aria-hidden="true" />
-                            <span className="nav-label">{p.name}</span>
-                          </a>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </li>
-              ))}
+              {g.items.map((n) => {
+                const b = badge(n);
+                return (
+                  <li key={n.id}>
+                    <a className="nav" href={`#/${n.id}`} onClick={closeIfNarrow} title={n.label} aria-current={isCurrent(n.id) ? "page" : undefined}>
+                      <n.icon size={18} strokeWidth={1.75} aria-hidden="true" />
+                      <span className="nav-label">{n.label}</span>
+                      {b && <span className="count" aria-label={b.label}>{b.value}</span>}
+                      {b && <span className="count-dot" aria-hidden="true" />}
+                    </a>
+                    {n.id === "chat" && starred.length > 0 && (
+                      <ul className="sub-nav" aria-label="Starred agents">
+                        {starred.map((a) => (
+                          <li key={a.id}>
+                            <a className="nav" href={`#/chat/${a.companyId}/${a.id}`} onClick={closeIfNarrow} aria-current={props.active === "chat" && props.activeAgent === a.id ? "page" : undefined}>
+                              <Star size={14} strokeWidth={1.75} aria-hidden="true" />
+                              <span className="nav-label">{a.name}</span>
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {n.id === "projects" && starredProjects.length > 0 && (
+                      <ul className="sub-nav" aria-label="Starred projects">
+                        {starredProjects.map((p) => (
+                          <li key={p.id}>
+                            <a className="nav" href={`#/board/${p.id}`} onClick={closeIfNarrow} aria-current={props.active === "board" && props.activeProject === p.id ? "page" : undefined}>
+                              <Star size={14} strokeWidth={1.75} aria-hidden="true" />
+                              <span className="nav-label">{p.name}</span>
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </section>
         ))}
         {/* On a phone these sit inside the folded menu, so the header stays one row. */}
         <div className="foot">
           {props.notifications === "default" && (
-            <button type="button" onClick={props.onEnableNotifications}>
-              Turn on browser notifications
+            <button type="button" onClick={props.onEnableNotifications} title="Turn on browser notifications">
+              <span className="label-full">Turn on browser notifications</span>
             </button>
           )}
           {props.notifications === "denied" && <small style={{ color: "var(--side-muted)" }}>Notifications are blocked in this browser.</small>}
-          <button type="button" onClick={props.onLogout}>
-            Log out
+          <button type="button" className="logout" onClick={props.onLogout} title="Log out" aria-label="Log out">
+            <LogOut size={18} strokeWidth={1.75} aria-hidden="true" className="logout-icon" />
+            <span className="label-full">Log out</span>
           </button>
         </div>
       </div>

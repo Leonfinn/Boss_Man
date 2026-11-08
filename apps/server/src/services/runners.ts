@@ -6,12 +6,17 @@ import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerComman
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { costEvents, decisions, engagements, notifications, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
+import { recordRestart, type HelloRestart, type LastRestart } from "./runner-restarts.js";
+import { redact } from "./error-buffer.js";
+import { costEvents, decisions, engagements, notifications, runnerEventAttempts, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
 /** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
 const RESTART_PULL_MAX = 20;
 const RESTART_PULL_COOLDOWN_MS = 10 * 60_000;
+
+/** How many times one event may fail with an unexplained (uncoded) error before it is stored, marked and acked (BOS-606). */
+const MAX_APPLY_ATTEMPTS = 3;
 
 /** A run started this recently may not be on the runner's list yet; and the wait before the list is acted on lets the runner replay what it finished while offline (BOS-583). */
 export const LIVE_RUNS_GRACE_MS = 60_000;
@@ -43,6 +48,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   // Runs before listeners and is awaited, for cheap bookkeeping a reader must see straight after the event (BOS-217).
   const syncHooks: Array<(runner: Runner, event: RunnerEvent) => Promise<unknown>> = [];
   const connectListeners: Array<(runnerId: string) => unknown> = [];
+  const restartListeners: Array<(runner: Runner, last: LastRestart) => unknown> = [];
   const lostListeners: Array<(runId: string) => unknown> = [];
   let liveRunsDelayMs = LIVE_RUNS_GRACE_MS;
   const resumeListeners: Array<(runner: Runner, pending: Array<{ runId: string; requestId: string }>) => unknown> = [];
@@ -110,16 +116,85 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     return ended;
   }
 
-  /**
-   * Whether an error is a data or constraint error (SQLSTATE class 22 or 23), which the same event
-   * will hit on every resend: the payload or the row it points at is wrong, not the connection. Those
-   * must not be retried for ever (BOS-584), unlike a dropped connection or a serialization failure.
-   */
-  function isPermanentApplyError(err: unknown): boolean {
+  /** The first SQLSTATE five-character code found on the error or the errors it wraps, if any. */
+  function sqlStateOf(err: unknown): string | null {
     for (let e = err as { code?: unknown; cause?: unknown } | null, i = 0; e && i < 3; e = e.cause as { code?: unknown; cause?: unknown } | null, i++) {
-      if (typeof e.code === "string" && /^2[23]/.test(e.code)) return true;
+      if (typeof e.code === "string" && /^[0-9A-Z]{5}$/.test(e.code)) return e.code;
+    }
+    return null;
+  }
+
+  /**
+   * Whether an error came from the database failing to reach or answer us: Node system codes, or pg's
+   * own connection and pool-timeout messages, which carry no code at all. These must always be retried
+   * (BOS-584, BOS-606): losing a run.ended leaves a stuck run and losing a run.cost loses spend.
+   */
+  const TRANSIENT_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "ETIMEDOUT", "EPIPE", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
+  const TRANSIENT_MESSAGE = /^(?:timeout exceeded when trying to connect|connection terminated unexpectedly|connection terminated due to connection timeout|client has encountered a connection error and is not queryable|cannot use a pool after calling end on the pool|the database system is (?:starting up|shutting down))/i;
+  function isTransientConnectionError(err: unknown): boolean {
+    for (let e = err as { code?: unknown; message?: unknown; cause?: unknown } | null, i = 0; e && i < 3; e = e.cause as { code?: unknown; message?: unknown; cause?: unknown } | null, i++) {
+      if (typeof e.code === "string" && TRANSIENT_CODES.has(e.code)) return true;
+      if (typeof e.message === "string" && TRANSIENT_MESSAGE.test(e.message.trim())) return true;
     }
     return false;
+  }
+
+  /** A thrown value that isn't an Error at all (a string, null) can't be debugged from a stack, so it is retried a few times then acks. */
+  function isClearCodeError(err: unknown): boolean {
+    return err instanceof TypeError || err instanceof RangeError || err instanceof SyntaxError;
+  }
+
+  /**
+   * Whether a database problem is temporary: a connection failure, SQLSTATE 08xxx/40xxx, or any
+   * other coded Postgres error. These always roll back and let the runner resend, and are never
+   * counted toward the retry cap (BOS-584, BOS-606).
+   */
+  function isTransientApplyError(err: unknown): boolean {
+    const code = sqlStateOf(err);
+    if (code !== null) return !/^2[23]/.test(code);
+    return isTransientConnectionError(err);
+  }
+
+  /** A clear code bug: it fails the same way on every resend, so it is kept, marked and acked at once. */
+  function isPermanentApplyError(err: unknown): boolean {
+    const code = sqlStateOf(err);
+    return code !== null ? /^2[23]/.test(code) : isClearCodeError(err);
+  }
+
+  /**
+   * Counts one more try at applying this seq and returns the new count, in its own committed
+   * transaction so a rolled-back ingest can't lose it (BOS-606).
+   */
+  async function bumpAttempt(runnerId: string, seq: number): Promise<number> {
+    const [row] = await db
+      .insert(runnerEventAttempts)
+      .values({ runnerId, seq, tries: 1 })
+      .onConflictDoUpdate({ target: [runnerEventAttempts.runnerId, runnerEventAttempts.seq], set: { tries: sql`${runnerEventAttempts.tries} + 1` } })
+      .returning({ tries: runnerEventAttempts.tries });
+    return row?.tries ?? 1;
+  }
+
+  /** Forgets a seq's tries once it has landed (applied or skipped for good). */
+  async function clearAttempts(runnerId: string, seq: number): Promise<void> {
+    await db.delete(runnerEventAttempts).where(and(eq(runnerEventAttempts.runnerId, runnerId), eq(runnerEventAttempts.seq, seq)));
+  }
+
+  /**
+   * A short, safe description of a failed apply for the activity log (BOS-605): only the SQLSTATE
+   * code and the constraint name, never the SQL or its parameter values, which can carry another
+   * company's data. Walked through drizzle's wrapped cause, like isPermanentApplyError. Kept to
+   * about 200 characters.
+   */
+  function safeApplyError(err: unknown): string {
+    let code: string | undefined;
+    let constraint: string | undefined;
+    for (let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | null, i = 0; e && i < 3; e = e.cause as { code?: unknown; constraint?: unknown; cause?: unknown } | null, i++) {
+      if (code === undefined && typeof e.code === "string") code = e.code;
+      if (constraint === undefined && typeof e.constraint === "string") constraint = e.constraint;
+    }
+    const parts = [code ? `code ${code}` : null, constraint ? `constraint ${constraint}` : null].filter(Boolean);
+    const text = redact(parts.length ? parts.join(", ") : "error of unknown type").replace(/\s+/g, " ").trim();
+    return text.slice(0, 200);
   }
 
   /**
@@ -201,6 +276,14 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         // Kept out of the transaction: it may send a verdict over the socket and wake the CEO. Its
         // rows are dedupe-keyed by request id, so re-running it on the resend is harmless.
         return [async () => (await onPermission?.(runner, event)) ?? null];
+      case "runner.log":
+        // A failed tool-connection preflight is worth a line in the server log (BOS-403). Logged
+        // after commit, so a resent (already stored) event doesn't log twice.
+        if (event.message.startsWith("mcp-preflight:")) {
+          const line = `[runner ${runner.id}] ${event.message}`;
+          return [async () => console.warn(line)];
+        }
+        return [];
       default:
         // run.update and runner.log are stored; later phases act on them.
         return [];
@@ -235,42 +318,67 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       const at = new Date(entry.at);
       // The event and everything it changes are one transaction (BOS-584): if applying throws, the
       // insert rolls back too, so the runner's resend is a new event and gets applied, not skipped.
-      // A data or constraint error is the exception: it repeats on every resend, and retrying it
-      // would stall every later event for this company (acks are cumulative). Then the effect is
-      // rolled back and the event is kept, marked and logged, so the stream moves on.
-      let skipped: string | null = null;
-      const { inserted, afterCommit } = await db.transaction(async (tx) => {
-        const rows = await tx
-          .insert(runnerEvents)
-          .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
-          .onConflictDoNothing()
-          .returning({ id: runnerEvents.id });
-        if (rows.length === 0) return { inserted: false, afterCommit: [] as Array<() => Promise<unknown>> };
-        // The savepoint separates applying from storing, so a data error can undo only the effects
-        // while the event row stays and the stream moves on.
-        try {
+      // A data or constraint error (SQLSTATE 22/23) is the exception: it repeats on every resend, and
+      // retrying it would stall every later event for this company (acks are cumulative). Then the
+      // effect is rolled back and the event is kept, marked and logged, so the stream moves on.
+      // An unexplained error is retried MAX_APPLY_ATTEMPTS times before that (BOS-606), so a database
+      // blip is never dropped, while a payload bug still can't hold the stream for ever.
+      // Tries are counted only when applying fails, in a small transaction of their own that commits
+      // on its own. A failed ingest rolls back the whole event transaction, so the count can't live
+      // on the event row: a rollback there would take it too, and an event that never applies would
+      // be retried for ever. Counting only on failure also means the normal path costs no extra write
+      // and a resent event that has already landed leaves nothing behind (BOS-606).
+      try {
+        const { inserted, afterCommit } = await db.transaction(async (tx) => {
+          const rows = await tx
+            .insert(runnerEvents)
+            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
+            .onConflictDoNothing()
+            .returning({ id: runnerEvents.id });
+          if (rows.length === 0) return { inserted: false, afterCommit: [] as Array<() => Promise<unknown>> };
+          // The savepoint separates applying from storing, so a data error can undo only the effects
+          // while the event row stays and the stream moves on.
           const work = await tx.transaction((sp) => apply(sp, runner, entry.event, at));
           return { inserted: true, afterCommit: work };
-        } catch (err) {
-          if (!isPermanentApplyError(err)) throw err;
-          skipped = (err as Error).message;
+        });
+        // Landed (applied): the event and its effects are committed, so any tries are history.
+        if (inserted) await clearAttempts(runner.id, entry.seq);
+        if (inserted) {
+          // Only outward-facing work (the permission hook) runs after the commit, and it is repeatable.
+          for (const step of afterCommit) await step();
+          for (const h of syncHooks) await h(runner, entry.event);
+          for (const l of listeners) l(runner, entry.event);
+        }
+        return inserted;
+      } catch (err) {
+        // A temporary database problem: roll back and let the runner resend. It is never counted
+        // toward the cap, so an outage can't burn an event's tries.
+        if (isTransientApplyError(err)) throw err;
+        // A clear code bug is permanent on the first try. Any other unexplained error might be a
+        // payload bug, so it is retried up to MAX_APPLY_ATTEMPTS before being kept and acked. The
+        // count is bumped outside the (now rolled-back) event transaction, on its own connection.
+        const permanent = isPermanentApplyError(err);
+        const tried = permanent ? 1 : await bumpAttempt(runner.id, entry.seq);
+        if (!permanent && tried < MAX_APPLY_ATTEMPTS) throw err;
+        const skipped = safeApplyError(err);
+        // Keep the event without its effects, mark it and ack it so the stream moves on: the insert
+        // and the activity row commit together, and the tries are cleared once it has landed.
+        await db.transaction(async (tx) => {
+          await tx
+            .insert(runnerEvents)
+            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
+            .onConflictDoNothing();
           await record(tx, {
             companyId: runner.companyId,
             kind: "runner_event_failed",
             summary: `Runner event ${entry.seq} (${entry.event.type}) could not be applied and was skipped: ${skipped}`,
-            detail: { seq: entry.seq, type: entry.event.type, error: skipped },
+            detail: { seq: entry.seq, type: entry.event.type, error: skipped, attempts: tried },
             at,
           });
-          return { inserted: true, afterCommit: [] as Array<() => Promise<unknown>> };
-        }
-      });
-      if (inserted) {
-        // Only outward-facing work (the permission hook) runs after the commit, and it is repeatable.
-        for (const step of afterCommit) await step();
-        for (const h of syncHooks) await h(runner, entry.event);
-        for (const l of listeners) l(runner, entry.event);
+        });
+        await clearAttempts(runner.id, entry.seq);
+        return true;
       }
-      return inserted;
     },
 
     /**
@@ -353,13 +461,20 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
      * are pulled forward to now, each with a note. Capped, and skipped when a restart pulled some
      * minutes ago, so a restart loop can't flood wakes. A reconnect (same id) changes nothing.
      */
-    async bootSeen(runner: Runner, bootId: string | undefined): Promise<number> {
+    async bootSeen(runner: Runner, bootId: string | undefined, hello: Omit<HelloRestart, "bootId"> = {}): Promise<number> {
       if (!bootId || bootId === runner.bootId) return 0;
       failPending(runner.id, "The runner restarted while this was running.");
       const at = new Date();
       // A runner with no boot id on record (new, or older than BOS-352) can't be told apart from a reconnect.
       if (runner.bootId) restartedAt.set(runner.id, at.getTime());
       await db.update(runners).set({ bootId }).where(eq(runners.id, runner.id));
+      // Why it restarted, for the feed and server_status (BOS-594). A failure here must not stop the wakes below.
+      try {
+        const last = await recordRestart(db, runner, { bootId, ...hello }, { firstBoot: !runner.bootId, at });
+        if (runner.bootId) for (const l of [...restartListeners]) void Promise.resolve(l(runner, last)).catch(() => {});
+      } catch {
+        /* the restart still happened; only its reason is lost */
+      }
       if (runner.bootPulledAt && at.getTime() - runner.bootPulledAt.getTime() < RESTART_PULL_COOLDOWN_MS) return 0;
       const pending = await db
         .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
@@ -484,6 +599,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     /** Called whenever a runner (re)connects, e.g. to re-send verdicts it missed. */
     onConnect(listener: (runnerId: string) => unknown) {
       connectListeners.push(listener);
+    },
+
+    /** Called once per runner restart (a new boot id after a known one), with its recorded reason (BOS-594). */
+    onRestart(listener: (runner: Runner, last: LastRestart) => unknown) {
+      restartListeners.push(listener);
     },
 
     /** Called when a reconnecting runner lists the permission requests it's still waiting on. */

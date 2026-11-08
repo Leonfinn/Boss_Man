@@ -11,12 +11,12 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
-import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { FENCE_DENIED_PATTERN, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { RepoLockTimeout, type Workspaces } from "./workspace.js";
+import { gitAuthorEnv, RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -31,6 +31,12 @@ export type SessionManagerOptions = {
   resolveEnv: (runId: string) => Promise<Record<string, string>>;
   /** Boss Man's MCP endpoint as agents reach it. */
   mcpUrl: string;
+  /** Wait up to this long for the MCP endpoint to answer before a turn starts, retrying once more after telling the owner (0 or unset: no preflight). */
+  mcpPreflightMs?: number;
+  /** Test tuning for that preflight. */
+  mcpPreflightTuning?: { attemptTimeoutMs?: number; delayMs?: number };
+  /** Test tuning for the preflight an mcpRequired run does when mcpPreflightMs is unset (BOS-664): shorter budget, attempt timeout and delay than the production 30 s / 10 s / 2 s. */
+  mcpRequiredPreflight?: { budgetMs?: number; attemptTimeoutMs?: number; delayMs?: number };
   /**
    * Confirms the Boss Man tools are reachable before an mcpRequired run starts (BOS-552). The default
    * asks the live server for its tool list; tests override it to drive the success and failure paths.
@@ -66,6 +72,8 @@ export type SessionManagerOptions = {
   fence?: { level: FenceLevel; agentsRoot: string; pnpmStore?: string };
   /** The folder check-all.sh's queue and results share across sessions and the merge check (checkQueueEnv). */
   coordDir?: string;
+  /** Runs and stops server-queued check jobs (BOS-316). */
+  checkJobs?: import("./check-jobs.js").CheckJobs;
   log?: (msg: string) => void;
 };
 
@@ -164,9 +172,11 @@ export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP
 /**
  * Secrets only the daemon may hold: git authentication, in any of the ways git reads it from the
  * environment (a token or credentials, an askpass helper, an ssh command, or the config variables
- * that build a header), plus the forge tokens Claude Code and other tools push with on their own.
+ * that build a header), plus the forge and package-manager tokens git, Claude Code and other tools push
+ * with on their own. The forge/package families match a suffix too (GITHUB_TOKEN_WORK, NPM_TOKEN_LEGACY):
+ * the suffix says which repo or registry, so the whole family is withheld (BOS-396).
  */
-const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|GH_TOKEN|GITHUB_TOKEN|GITEA_TOKEN)$/;
+const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|(GH_TOKEN|GH_PAT|GITHUB_TOKEN|GITHUB_PAT|GITLAB_TOKEN|GL_TOKEN|GITEA_TOKEN|CI_JOB_TOKEN|BITBUCKET_TOKEN|ATLASSIAN_API_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|YARN_NPM_AUTH_TOKEN|VERCEL_TOKEN)(_[A-Z0-9_]+)?)$/;
 
 /** A run's granted secrets without the git credential, for the agent's own environment. */
 export function withoutGitCredentials(secrets: Record<string, string>): Record<string, string> {
@@ -199,6 +209,7 @@ function realDirsUnder(base: string, rel: string): boolean {
 
 type RunState = {
   child: ChildProcess;
+  agentKind: string;
   sessionId: string | null;
   cancel: () => void;
   pendingPermissions: Map<string, (verdict: "allow" | "deny") => void>;
@@ -270,6 +281,37 @@ export class SessionManager {
     return this.runs.size;
   }
 
+  private opencodeHeld: Promise<void> | null = null;
+
+  /**
+   * Runs fn while no OpenCode run is live, holding new OpenCode runs and model probes until it
+   * settles (the OpenCode database's one-off VACUUM, BOS-616). Resolves null, without running fn,
+   * when an OpenCode run is live or another hold is on. With maxHoldMs the hold is let go at that
+   * point even if fn hasn't settled (BOS-622: a backstop; the prune kills its VACUUM before then).
+   */
+  async whileOpencodeIdle<T>(fn: () => Promise<T>, maxHoldMs?: number): Promise<T | null> {
+    if (this.opencodeHeld || [...this.runs.values()].some((r) => r.agentKind === "opencode")) return null;
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    this.opencodeHeld = held;
+    const letGo = () => {
+      if (this.opencodeHeld === held) this.opencodeHeld = null;
+      release();
+    };
+    const backstop = maxHoldMs === undefined ? null : setTimeout(letGo, maxHoldMs);
+    try {
+      return await fn();
+    } finally {
+      if (backstop) clearTimeout(backstop);
+      letGo();
+    }
+  }
+
+  /** The agent session ids live runs are using (the OpenCode prune leaves these alone). */
+  activeSessionIds(): string[] {
+    return [...this.runs.values()].flatMap((r) => (r.sessionId ? [r.sessionId] : []));
+  }
+
   /** Process group ids of active runs, one per adapter. */
   processGroups(): number[] {
     return [...this.runs.values()].flatMap((r) => (r.child.pid ? [r.child.pid] : []));
@@ -280,6 +322,17 @@ export class SessionManager {
     for (const run of this.runs.values()) killGroup(run.child, 2000);
   }
 
+  /** Tickets whose /tmp leftovers were already looked for, so a busy ticket's every run doesn't scan /tmp again. */
+  private readonly rescued = new Set<string>();
+
+  /** Moves this ticket's /tmp leftovers into its kept scratch (BOS-592); once per ticket per runner process. */
+  private rescueTmp(ticketId: string, dirs: string[]) {
+    if (this.rescued.has(ticketId) || !this.opts.workspaces) return;
+    this.rescued.add(ticketId);
+    const moved = dirs.flatMap((d) => (d ? this.opts.workspaces!.rescueTmp(ticketId, d) : []));
+    if (moved.length) this.opts.emit({ type: "runner.log", level: "info", message: `Moved ${moved.length} leftover file(s) of ticket ${ticketId} from /tmp into its kept scratch.` });
+  }
+
   private starting = new Set<string>();
   private cancelledEarly = new Set<string>();
 
@@ -288,6 +341,15 @@ export class SessionManager {
       case "run.start":
         this.starting.add(command.runId);
         void this.start(command).finally(() => this.starting.delete(command.runId));
+        return;
+      case "check.run":
+        this.opts.checkJobs?.run(command);
+        return;
+      case "check.cancel":
+        this.opts.checkJobs?.cancel(command.jobId);
+        return;
+      case "check.ack":
+        this.opts.checkJobs?.acknowledge(command.jobId);
         return;
       case "run.cancel": {
         const run = this.runs.get(command.runId);
@@ -343,7 +405,14 @@ export class SessionManager {
           return;
         }
         const spec = { projectId: command.projectId, ticketId: command.ticketId };
-        (command.range === "last_turn" ? this.opts.workspaces.lastTurnDiff(spec) : this.opts.workspaces.diff(spec)).then(
+        const ws = this.opts.workspaces;
+        // A base diff with a default branch needs origin fetched: the merge secrets give that fetch its credential.
+        const work = command.range === "last_turn"
+          ? ws.lastTurnDiff(spec)
+          : command.baseRef
+            ? (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({})).then((secrets) => ws.diff(spec, undefined, command.baseRef, secrets))
+            : ws.diff(spec);
+        work.then(
           (data) => reply(command.requestId, { ok: true, data }),
           (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err) }),
         );
@@ -358,6 +427,21 @@ export class SessionManager {
         }
         (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
           .then((secrets) => ws.carried({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.branches, secrets))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
+      case "workspace.clash": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.clash({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets))
           .then(
             (data) => reply(command.requestId, { ok: true, data }),
             (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
@@ -385,7 +469,7 @@ export class SessionManager {
                     ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets)
                     : command.type === "workspace.migrations"
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
-                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null),
+                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, command.phase === "prepare" ? { phase: "prepare" } : command.phase === "finish" && command.commit && command.tree ? { phase: "finish", commit: command.commit, tree: command.tree } : null),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),
@@ -417,6 +501,10 @@ export class SessionManager {
       case "models.probe": {
         const reply = this.opts.reply ?? (() => {});
         (this.opts.resolveCompanyEnv?.("check") ?? Promise.resolve({} as Record<string, string>))
+          .then(async (env) => {
+            while (command.agentKind === "opencode" && this.opencodeHeld) await this.opencodeHeld; // BOS-616
+            return env;
+          })
           .then((env) => probeModels(command.agentKind, env, { baseEnv: this.opts.baseEnv, adapterBin: this.opts.adapterBins?.[command.agentKind] }))
           .then(
             (models) => {
@@ -462,7 +550,29 @@ export class SessionManager {
     }
     // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
     if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask"));
-    if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir));
+    if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir, base.BOSSMAN_CHECK_SLOT));
+    // Kept scratch (BOS-592): proofs and check logs that /tmp loses on every restart. Made here so a command
+    // that only wants to write into it never has to, and reported as a warning when it can't be made.
+    // Its own session marker, so a check script can tell a run from a shell a person is using (BOS-592).
+    // Every harness the runner starts (Claude, Codex, OpenCode) gets the marker; scripts/check-all.sh and
+    // scripts/vitest-guard.mjs refuse a hand-run full check or whole-suite run when they see it. CLAUDECODE only
+    // covers Claude Code. Set last so a granted secret can't override it.
+    env.BOSSMAN_AGENT_SESSION = "1";
+    // Commits say who made them (BOS-255). The worktrees share the repo's config, where a user.name an earlier
+    // run set would otherwise be used; env beats config. Set last so a secret can't override it.
+    if (cmd.agentName) Object.assign(env, gitAuthorEnv(cmd.agentName));
+    if (cmd.workspace && typeof this.opts.workspaces?.scratchDir === "function") {
+      const dir = this.opts.workspaces.scratchDir(cmd.workspace.ticketId);
+      try {
+        mkdirSync(dir, { recursive: true });
+        env.BOSSMAN_SCRATCH = dir;
+      } catch (err) {
+        this.opts.log?.(`couldn't make the kept scratch for ticket ${cmd.workspace.ticketId}: ${String((err as Error)?.message ?? err)}`);
+      }
+    }
+    // Which ticket this run is for, so a check script that can't write the scratch itself (a fenced run) leaves its log
+    // in /tmp under a name the runner moves into the scratch at its next start (BOS-592).
+    if (cmd.workspace) env.BOSSMAN_TICKET = cmd.workspace.ticketId;
     return env;
   }
 
@@ -493,6 +603,9 @@ export class SessionManager {
       env.npm_config_store_dir = fence.pnpmStore;
       readWrite.push(fence.pnpmStore);
     }
+    // The ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the agent writes its proofs and logs there, and
+    // nothing else on the workspaces root is granted, so it reaches no other ticket's folder.
+    if (env.BOSSMAN_SCRATCH) readWrite.push(env.BOSSMAN_SCRATCH);
     const readOnlyExtra: string[] = [];
     if (this.opts.coordDir) {
       const grant = checkQueueGrant(this.opts.coordDir);
@@ -577,8 +690,13 @@ export class SessionManager {
             }
           }
         };
-        if (spec.review) cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
-        else {
+        if (spec.review) {
+          cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
+          // BOS-693: the reviewer can run the ticket's tests in place, from the shared store. Outside the repo lock,
+          // and a failed install never stops the review: the reviewer can still read the work, or install by hand.
+          const deps = await workspaces.installReviewDeps(spec);
+          if (!deps.installed && deps.detail !== "not a pnpm project") emit({ type: "runner.log", level: "warn", message: `Run ${cmd.runId}: couldn't install the review copy's packages (${deps.detail}).` });
+        } else {
           const ws = await withLockRetry(() => workspaces.ensure(spec, secrets));
           cmd = { ...cmd, cwd: ws.path };
           emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
@@ -637,7 +755,21 @@ export class SessionManager {
         }
       }
     }
+    // A proof or log an older run of this ticket left in /tmp moves into its kept scratch, which the restart
+    // and the tmp sweep leave alone: /tmp is gone at the next restart, and so is the session's own temp folder.
+    if (cmd.workspace) this.rescueTmp(cmd.workspace.ticketId, [tmpdir(), ...(runTmp ? [runTmp] : [])]);
     const dropTmp = () => runTmp && rmSync(runTmp, { recursive: true, force: true });
+    // OpenCode's database is being vacuumed (BOS-616): wait, since OpenCode gives up on its lock after 5 s.
+    if (cmd.agentKind === "opencode" && this.opencodeHeld) {
+      emit({ type: "runner.log", level: "info", message: `Run ${cmd.runId} waits a few minutes while OpenCode's database is compacted.` });
+      while (this.opencodeHeld) await this.opencodeHeld;
+      if (this.cancelledEarly.delete(cmd.runId)) {
+        dropSkills();
+        dropTmp();
+        emit({ type: "run.ended", runId: cmd.runId, stopReason: "cancelled", error: null });
+        return;
+      }
+    }
     // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
     // Claude Code carries on headless with every permission denied (spike S4). Ending the run
     // kills the whole group.
@@ -647,7 +779,7 @@ export class SessionManager {
       stderr = (stderr + String(d)).slice(-4000);
     });
 
-    const state: RunState = { child, sessionId: null, cancel: () => {}, pendingPermissions: new Map(), queued: [] };
+    const state: RunState = { child, agentKind: cmd.agentKind, sessionId: null, cancel: () => {}, pendingPermissions: new Map(), queued: [] };
     const toolCalls = new Map<string, { rawInput: unknown; text: string }>();
     this.runs.set(cmd.runId, state);
     this.saveState();
@@ -709,7 +841,7 @@ export class SessionManager {
           }
           // A failed call whose output says the permission was refused: the server logs it with the run and ticket (BOS-306).
           const refused = u.status === "failed" && /User refused permission/i.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : ""));
-          emit({ type: "run.update", runId: cmd.runId, update: { kind: u.sessionUpdate, title: u.title ?? null, toolKind: u.kind ?? null, status: u.status ?? null, ...(refused ? { refused: true } : {}) } });
+          emit({ type: "run.update", runId: cmd.runId, update: { kind: u.sessionUpdate, title: u.title ?? null, toolKind: u.kind ?? null, status: u.status ?? null, ...(refused ? { refused: true } : {}), ...(fenced === true && u.status === "failed" && FENCE_DENIED_PATTERN.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : "")) ? { fenceDenied: true } : {}) } });
           return;
         }
         case "agent_message_chunk": {
@@ -799,6 +931,23 @@ export class SessionManager {
       }
 
       const mcpServers: McpServer[] = [{ type: "http", name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
+      // Wait out a server stall before the agent's own (about 5 s) MCP handshake can give up on us (BOS-403):
+      // one round of retries, then tell the owner and the server log and try one more round.
+      const waitForBossMan = async (budgetMs: number, tuning: { attemptTimeoutMs?: number; delayMs?: number } | undefined) => {
+        let pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs, ...tuning });
+        if (pre.ok || !this.runs.has(cmd.runId)) return pre;
+        emit({ type: "runner.log", level: "warn", message: `mcp-preflight: Boss Man tools unreachable for run ${cmd.runId} after ${pre.attempts} tries over ${Math.round(pre.waitedMs / 1000)}s (${pre.lastError}); retrying once.` });
+        emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools didn't load, retrying." } });
+        pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs, ...tuning });
+        if (!pre.ok) emit({ type: "runner.log", level: "error", message: `mcp-preflight: Boss Man tools still unreachable for run ${cmd.runId} (${pre.lastError}).` });
+        return pre;
+      };
+      if (this.opts.mcpPreflightMs && !cmd.mcpRequired) {
+        // An older server that doesn't send mcpRequired: wait, then start the turn anyway, saying so.
+        const pre = await waitForBossMan(this.opts.mcpPreflightMs, this.opts.mcpPreflightTuning);
+        if (!this.runs.has(cmd.runId)) return;
+        if (!pre.ok) emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools could not be reached after a retry; this turn may run without them." } });
+      }
       const supported = (init.agentCapabilities as { mcpCapabilities?: Record<string, boolean | undefined> } | undefined)?.mcpCapabilities;
       // Boss Man tools are required (BOS-552): OpenCode accepts a session/new even when its MCP server
       // is unreachable and then runs with no tools, so check the tools are really there first. Checking
@@ -809,14 +958,17 @@ export class SessionManager {
           finish(null, `This run was stopped because ${cmd.agentKind} doesn't support HTTP MCP servers, so it would start without the Boss Man tools.`);
           return;
         }
-        // Wait out a brief stall first (BOS-403's helper), then require the tools to actually list.
-        // A test-provided check drives both steps itself, so it isn't run against the real URL.
+        // Wait out a brief stall first (BOS-403: retries, then tell the owner and retry once more),
+        // then require the tools to actually list. A test-provided check drives both steps itself,
+        // so it isn't run against the real URL.
         const injected = this.opts.checkBossManTools;
         let result: { ok: boolean; reason?: string };
         if (injected) {
           result = await injected(this.opts.mcpUrl, cmd.mcpToken);
         } else {
-          const reach = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: MCP_PREFLIGHT_TIMEOUT_MS * MCP_PREFLIGHT_ATTEMPTS, attemptTimeoutMs: MCP_PREFLIGHT_TIMEOUT_MS, delayMs: MCP_PREFLIGHT_DELAY_MS });
+          const reach = this.opts.mcpPreflightMs
+            ? await waitForBossMan(this.opts.mcpPreflightMs, this.opts.mcpPreflightTuning)
+            : await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: MCP_PREFLIGHT_TIMEOUT_MS * MCP_PREFLIGHT_ATTEMPTS, attemptTimeoutMs: MCP_PREFLIGHT_TIMEOUT_MS, delayMs: MCP_PREFLIGHT_DELAY_MS, ...this.opts.mcpRequiredPreflight });
           if (!this.runs.has(cmd.runId)) return;
           result = reach.ok ? await checkBossManTools(this.opts.mcpUrl, cmd.mcpToken) : { ok: false, reason: reach.lastError ?? "no answer" };
         }

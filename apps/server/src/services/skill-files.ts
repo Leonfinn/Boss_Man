@@ -17,6 +17,60 @@ export function hashFiles(files: SkillFile[]) {
   return { fileHashes, bundleHash };
 }
 
+/** One side of a change to a skill, as the change log shows it. */
+export type SkillSide = { name: string; description: string; bundleHash: string; skillMd: string; paths: string[] };
+
+/** The side for a library row (files as stored, base64). */
+export const skillSide = (s: { name: string; description: string; files: SkillFile[] }): SkillSide => ({
+  name: s.name,
+  description: s.description,
+  bundleHash: hashFiles(s.files).bundleHash,
+  skillMd: Buffer.from(s.files.find((f) => f.path === "SKILL.md")?.content ?? "", "base64").toString("utf8"),
+  paths: s.files.map((f) => f.path),
+});
+
+/**
+ * The activity entry for any change to a skill's bytes (BOS-178, BOS-181), so no skill in the library
+ * changes without a trace. The summary (capped at 300) shows the short fingerprints and only the region
+ * that differs, so a hidden tail or a description change still shows; detail keeps the full old and new text.
+ * `head` says who changed what; it gets the two short fingerprints and " (was <old name>)" when the name changed.
+ */
+export function skillChangeEntry(skillId: string, before: SkillSide, after: SkillSide, head: (from: string, to: string, was: string) => string, tail: string) {
+  const min = Math.min(before.skillMd.length, after.skillMd.length);
+  let start = 0;
+  while (start < min && before.skillMd[start] === after.skillMd[start]) start++;
+  let endBefore = before.skillMd.length;
+  let endAfter = after.skillMd.length;
+  while (endBefore > start && endAfter > start && before.skillMd[endBefore - 1] === after.skillMd[endAfter - 1]) {
+    endBefore--;
+    endAfter--;
+  }
+  const diff = { before: before.skillMd.slice(start, endBefore), after: after.skillMd.slice(start, endAfter) };
+  // Keep both ends when it is long: a payload is often added at the end, after harmless opening text.
+  const flat = (text: string, max: number) => {
+    const one = text.replace(/\s+/g, " ").trim();
+    if (one.length <= max) return one;
+    const half = Math.max(1, Math.floor((max - 1) / 2));
+    return `${one.slice(0, half)}…${one.slice(-half)}`;
+  };
+  const h = `${head(before.bundleHash.slice(0, 12), after.bundleHash.slice(0, 12), after.name !== before.name ? ` (was ${flat(before.name, 40)})` : "")}.`;
+  // Leave room for the head and tail, then share what is left between the two differing sides.
+  const room = Math.max(20, 300 - h.length - tail.length - 30);
+  const shown = !diff.before && !diff.after ? "The visible text is unchanged." : `Old: "${flat(diff.before, Math.floor(room / 2))}" New: "${flat(diff.after, Math.floor(room / 2))}".`;
+  return {
+    summary: `${h} ${shown}${tail}`,
+    detail: {
+      skillId,
+      name: { before: before.name, after: after.name },
+      description: { before: before.description, after: after.description },
+      bundleHash: { before: before.bundleHash, after: after.bundleHash },
+      skillMd: { before: before.skillMd, after: after.skillMd },
+      changedRegion: diff,
+      removedFiles: before.paths.filter((p) => p !== "SKILL.md" && !after.paths.includes(p)),
+    },
+  };
+}
+
 // What "contains a script" means (BOS-87 standard, section 1), decided by content, never by a name. The system decides, not the CEO.
 // Only SKILL.md can be instructions; every other file counts as a script, whatever it is called. SKILL.md counts too
 // when it holds anything an agent could run. When unsure, review.
@@ -28,6 +82,13 @@ const INLINE_CODE = /`[^`\n]+`/;
 // A command word followed by an argument anywhere in a line, whatever comes before it (a list marker, "run this:", a sentence). Prose
 // that mentions one is reviewed too: when unsure, review. "make" and "source" are left out (everyday words); a line-start "make" is caught above.
 const WORD_CMD = /\b(?:sudo|curl|wget|bash|zsh|ksh|npx|npm|pnpm|yarn|pipx?|pip3|uvx?|python[\d.]*|node|deno|bun|ruby|perl|php|lua|powershell|pwsh|eval|exec|chmod|chown|ssh|scp|docker|kubectl|git\s+clone|run\s+make)\s+[-\w./@:~$"'(]/i;
+// A file-reading command anywhere in a line, but only with a path as its argument: "cat ~/.aws/credentials", "cp .env /tmp/x",
+// "tar czf ~/backup.tgz /srv". A path is absolute, home- or dot-relative, or a dotted name (.env); a bare word is not.
+// Without the path this is prose ("copy the notes with cat", "use cp when moving files") and stays prose. BOS-177: the
+// owner's card read "Read the operator's credentials: cat ~/.aws/credentials" as no script.
+// Flags may only hold letters, digits, "=" and "-", so a token like "-(cat" cannot carry a match start and restart the scan at
+// every flag: that made a hostile line quadratic (Jane's BOS-177 security review, round 1).
+const READ_FILE_CMD = /(?:^|[\s:;|(])(?:cat|cp|mv|tar|zip|unzip|head|tail|less|more|base64|xxd|strings|grep|sort|tee|dd|ln|touch|wc)\s+(?:-[\w=-]*\s+)*(?:~\/|\.\.?\/|\/(?!\/)|\.[A-Za-z0-9_-]+\b|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,8}\b)[^\s]*/i;
 // Prose that points at a terminal, or sends/downloads/runs something at an address.
 const TERMINAL = /\b(?:terminal|command[- ]line|command prompt|shell script|powershell|\bcmd\.exe)\b/i;
 const URL_ACTION = /https?:\/\/\S+/i;
@@ -57,7 +118,7 @@ function runnableText(text: string): boolean {
   for (const line of normalised.split(/\r?\n/)) {
     if (/^\s*(```|~~~)/.test(line)) return true; // any fenced block
     if (/^( {4}|\t)\S/.test(line)) return true; // an indented block
-    if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line) || INLINE_CODE.test(line) || WORD_CMD.test(line) || TERMINAL.test(line) || (URL_ACTION.test(line) && ACTION_WORD.test(line)) || ONE_LINER.test(line)) return true;
+    if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line) || INLINE_CODE.test(line) || WORD_CMD.test(line) || READ_FILE_CMD.test(line) || TERMINAL.test(line) || (URL_ACTION.test(line) && ACTION_WORD.test(line)) || ONE_LINER.test(line)) return true;
   }
   return false;
 }

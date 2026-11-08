@@ -33,46 +33,6 @@ const WORKSPACE = /(?:^|[\s"'=:(])(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|revie
 const WORKSPACE_PATH = /^(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\//;
 const LEADING_CD = /^\s*(?:cd|git\s+-C)\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/;
 
-/**
- * Characters the shell quotes, escapes, expands or substitutes. A path word that holds one can be written in a way the
- * judge can't read (`\/tmp`, `.'/.'/…`, `{,}`, `*`, `<(...)`, `$X`), so it never earns Allow (BOS-378, Jane's round 11).
- */
-const PATH_DISGUISE = /[\\'"{}*?[\]$`()]/;
-/** A `cd`/`pushd`/`chdir` (or `env -C`/`--chdir`) target, captured whole so the check sees any quotes or escapes in it. */
-const CD_TARGET = /\b(?:cd|pushd|chdir)\b(?=[\s;&|)]|$)(?:\s+(?:--\s+)?("[^"]*"|'[^']*'|[^\s;&|)]*))?|\benv\b\s+(?:-\S+\s+)*?(?:-C|--chdir)(?:\s+|)(?:"([^"]*)"|'([^']*)'|([^\s;&|)]*))/g;
-/** The interpreter names the judge reads; a word that is one of these is a program, not a launcher. */
-const INTERP_NAMES = "python[\\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh|g?awk|mawk|sh|bash|zsh|dash|ksh";
-
-/**
- * A path word resolved to what the shell would run: null when it holds a quote, escape, brace, glob, `$`, backtick or
- * bracket (the judge can't read those), otherwise a normalised path (`..`, `.` and `//` worked out). A relative word keeps
- * its leading `..` parts so the caller can reject it.
- */
-function plainPath(raw: string): string | null {
-  if (raw === "") return raw;
-  if (PATH_DISGUISE.test(raw)) return null;
-  const abs = raw.startsWith("/");
-  const out: string[] = [];
-  for (const seg of raw.split("/")) {
-    if (seg === "" || seg === ".") continue;
-    if (seg === "..") {
-      if (out.length && out[out.length - 1] !== "..") out.pop();
-      else if (!abs) out.push("..");
-      continue;
-    }
-    out.push(seg);
-  }
-  return (abs ? "/" : "") + out.join("/");
-}
-
-/** True when a plain path word climbs out (starts with `..`) as a relative path. */
-const climbsOut = (p: string): boolean => p === ".." || p.startsWith("../");
-
-/** The target words of every `cd`/`pushd`/`chdir` and `env -C` in the command, quotes and escapes kept so they can be judged. */
-function cdWords(c: string): string[] {
-  return [...c.matchAll(CD_TARGET)].map((m) => (m[1] ?? m[2] ?? m[3] ?? m[4] ?? "").trim());
-}
-
 /** Longest command the judge reads; longer ones are not judged. */
 export const MAX_JUDGED_COMMAND = 10_000;
 export const isJudgeable = (command: string | null): boolean => !command || command.length <= MAX_JUDGED_COMMAND;
@@ -94,7 +54,14 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
-  const c = withoutOwnMemory(command, ownProject).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  // A quoted flag is the same flag (`rm "-rf" /`, `rm -"r"f /`): drop the quotes from a word that starts with a dash.
+  const unquoteFlags = (s: string): string => s.replace(/(^|[\s;&|(])((?:["']*-["']*)[\w"'=.,:@/+-]*)(?=$|[\s;&|)])/g, (all, pre: string, w: string) =>
+    (w.split('"').length % 2 === 1 && w.split("'").length % 2 === 1 && /["']/.test(w) ? pre + w.replace(/["']/g, "") : all));
+  const c = unquoteFlags(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  // Opaque: a command substitution in the string given to `bash -c` / `sh -c` makes the inner command unknown.
+  if (/\b(?:ba|z|da|k)?sh\s+(?:-\S+\s+)*-\w*c\s+(?:--\s+)?(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)/.test(c)) {
+    for (const m of c.matchAll(/\b(?:ba|z|da|k)?sh\s+(?:-\S+\s+)*-\w*c\s+(?:--\s+)?("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g)) if (/\$\(|\x60/.test(m[1]!)) return result("opaque");
+  }
   const ids = [...c.matchAll(WORKSPACE)].map((m) => m[1]!);
   const own = ownFolder ?? LEADING_CD.exec(c)?.[1] ?? [...ids].sort((a, b) => ids.filter((x) => x === b).length - ids.filter((x) => x === a).length)[0];
 
@@ -151,7 +118,7 @@ export function judgePermission(question: string, command: string | null, ownFol
     if (/^\/tmp(\/|$)/.test(p)) return true;
     return inOwn(p);
   };
-  if (gitDenied(c, inOwn, writeOk)) return result("outside");
+  if (gitDenied(c, (d) => dirOk(d, inOwn), writeOk)) return result("outside");
   // Variables set in the same command are resolved; any other variable (and $(...)) can't be, so its target is denied.
   // $(git rev-parse --git-dir ...) is the asking agent's own git folder and $(mktemp ...) lands in /tmp, unless its
   // arguments (or a TMPDIR set anywhere) put the file somewhere else.
@@ -212,15 +179,12 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Downloaders and archive tools: the files named by their output / directory options, and every absolute path given to
   // tar and unzip, must be placed too.
   for (const t of toolTargets(forTargets)) addTarget(t);
-  // BOS-378 (CEO round 14): a command whose words include a shell, interpreter or launcher gets no Allow unless the
-  // whole command is on a short allow-list of plain forms (see codeRunDenied). The judge no longer tries to read inline
-  // code, `-c`/`-S` strings, loader variables or disguised program names: it never auto-allows them. Over-denial is the
-  // point; while the judge only watches, this costs nothing.
-  if (codeRunDenied(cs, inOwn)) return result("outside");
+  // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
+  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || usesScratchUnsafely(c)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
-  if (hasRedirect) for (const d of cdWords(c)) if (!dirOk(d, inOwn)) return result("outside");
+  if (hasRedirect) for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
   const writes = /^(changes|deletes|unknown)$/.test(explainCommand(c).effect) || /rmSync|unlinkSync|writeFileSync|shutil\.rmtree|os\.remove|reset\s+--hard/.test(c) || new RegExp(DESTRUCTIVE, "i").test(c);
   if (writes) {
     for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
@@ -229,7 +193,7 @@ export function judgePermission(question: string, command: string | null, ownFol
     for (const t of targets) if (!/^\/tmp\//.test(t) && !inOwn(t) && t !== "/dev/null") return result("outside");
     // A relative target can climb out of the folder (`rm -rf ..`), and a `cd` somewhere else makes every relative target land there.
     for (const m of c.matchAll(/\brm\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
-    for (const d of cdWords(c)) if (!dirOk(d, inOwn)) return result("outside");
+    for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
     for (const m of c.matchAll(/\bfind\s+((?:-[HLP]\s+)*)([^\s-][^\s]*|)[^\n;&|]*?(-delete\b|-exec\s+rm\b)/g)) {
       const start = m[2]!;
@@ -323,28 +287,19 @@ function shellWords(s: string): string[] {
   return out;
 }
 
-
-/**
- * True when the arguments of one git command (words after `git`) are not on the allow-list. `repoOk` places the repository
- * git runs in: it must be inside the agent's own checkout, because that repo's hooks and config can run code. `cwdOutside`
- * says a preceding `cd`/`pushd` moved somewhere outside that checkout, so a git with no `-C`/`--git-dir`/`--work-tree`
- * would run there too.
- */
-function gitArgsDenied(args: string[], repoOk: (p: string) => boolean, pathOk: (p: string) => boolean, cwdOutside: boolean): boolean {
+/** True when the arguments of one git command (words after `git`) are not on the allow-list. `dirOk` places a folder git is pointed at. */
+function gitArgsDenied(args: string[], dirOk: (p: string) => boolean, pathOk: (p: string) => boolean): boolean {
   let i = 0;
-  // Where git runs: -C, --git-dir and --work-tree must point inside the agent's own checkout (not just any /tmp folder).
-  let explicit = false;
+  // Where git runs: -C, --git-dir and --work-tree get the same own-folder test as `cd`.
   for (; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "-C") { if (i + 1 >= args.length || !repoOk(args[++i]!)) return true; explicit = true; continue; }
-    if (/^--(?:git-dir|work-tree)$/.test(a)) { if (i + 1 >= args.length || !repoOk(args[++i]!)) return true; explicit = true; continue; }
+    if (a === "-C") { if (i + 1 >= args.length || !dirOk(args[++i]!)) return true; continue; }
+    if (/^--(?:git-dir|work-tree)$/.test(a)) { if (i + 1 >= args.length || !dirOk(args[++i]!)) return true; continue; }
     const eq = /^--(?:git-dir|work-tree)=(.*)$/.exec(a);
-    if (eq) { if (!repoOk(eq[1]!)) return true; explicit = true; continue; }
+    if (eq) { if (!dirOk(eq[1]!)) return true; continue; }
     if (a === "--no-pager" || a === "--no-optional-locks") continue;
     break;
   }
-  // No folder named: git runs in the current folder. It is the agent's own checkout unless a `cd`/`pushd` moved away.
-  if (!explicit && cwdOutside) return true;
   const sub = args[i++];
   const spec = sub === undefined ? undefined : Object.hasOwn(GIT_TABLE, sub) ? GIT_TABLE[sub] : undefined;
   if (!spec) return true;
@@ -374,9 +329,7 @@ function gitArgsDenied(args: string[], repoOk: (p: string) => boolean, pathOk: (
   if (spec.none && plain.length > 0) return true;
   if (spec.first && !(plain[0] !== undefined && spec.first.test(plain[0]))) return true;
   for (const p of plain) {
-    // A `::` in a URL names a transport helper (`ext::sh -c ...`, `fd::`), which runs a program: no Allow for any command
-    // that copies from or talks to a remote.
-    if (/::/.test(p) && (sub === "clone" || sub === "fetch" || sub === "pull" || sub === "push" || sub === "ls-remote")) return true;
+    if (/::/.test(p) && sub === "clone") return true;
     if (/\{[^}]*(?:,|\.\.)[^}]*\}/.test(p)) return true; // brace expansion
     if (!spec.w) continue;
     if (/(?:^|\/)\.\.(?:\/|$)/.test(p)) return true;
@@ -390,19 +343,9 @@ function gitArgsDenied(args: string[], repoOk: (p: string) => boolean, pathOk: (
  * row of GIT_TABLE, every flag must be listed for it, and the folder git runs in must pass the same test as `cd`. A NAME=value,
  * env, export or other launcher in front of git, and any `$` or backtick in a git command, is Deny.
  */
-function gitDenied(c: string, inOwn: (p: string) => boolean, pathOk: (p: string) => boolean): boolean {
+function gitDenied(c: string, dirOk: (p: string) => boolean, pathOk: (p: string) => boolean): boolean {
   // Environment that makes git run a program or move it (GIT_DIR, GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, GIT_PAGER, ...), set anywhere on a line that uses git.
   if (/\bgit\b/.test(c) && /(?:^|[\s;&|(])(?:export\s+|env\s+|declare\s+(?:-x\s+)?)?(?:GIT_\w+|PAGER|EDITOR|VISUAL|SSH_ASKPASS|LESSOPEN|LD_\w+)\+?=/.test(c)) return true;
-  // A `cd`/`pushd` outside the agent's own checkout (any /tmp repo, say) makes a git with no folder named run there, and
-  // that repo's hooks and config can run code.
-  let cwdOutside = false;
-  for (const d of cdWords(c)) {
-    const p = plainPath(d);
-    if (p !== null && (inOwn(p) || (/^[\w.@+-]+(\/[\w.@+-]+)*$/.test(p) && !climbsOut(p)))) continue; // own folder or a sub-folder
-    cwdOutside = true;
-  }
-  // Only a plain literal folder counts; a disguised one (`.'/…`) is unread, so not the agent's own repo (BOS-378).
-  const repoOk = (p: string): boolean => { const n = plainPath(p); return n !== null && !climbsOut(n) && inOwn(n); };
   for (const seg of c.split(/[;&|\n]/)) {
     const parts = seg.split(/\$\(|[()\x60]/);
     for (let i = 0; i < parts.length; i++) {
@@ -419,31 +362,21 @@ function gitDenied(c: string, inOwn: (p: string) => boolean, pathOk: (p: string)
       // `find ... -exec git ...` runs git with arguments from elsewhere.
       if (words.some((w, n) => /^-(?:exec|execdir|ok|okdir)$/.test(w) && /(?:^|[\s/])git(?:\s|$)/.test(words[n + 1] ?? ""))) return true;
       if (!/^(?:[\w./-]*\/)?git(?:[$\x60{].*)?$/.test(head)) continue;
-      if (GIT_READ.test(raw)) {
-        // `git --version` touches no repo. A config read does: in a folder outside the agent's own checkout its config may
-        // pull in another file, so no Allow there.
-        if (/\bconfig\b/.test(raw) && cwdOutside) return true;
-        continue;
-      }
+      if (GIT_READ.test(raw)) continue;
       // No substitution, variable or backtick anywhere in a git command, quoted or not: it can't be read.
       if (/[$\x60]/.test(i === 0 ? seg : raw)) return true;
-      if (gitArgsDenied(words.slice(k + 1), repoOk, pathOk, cwdOutside)) return true;
+      if (gitArgsDenied(words.slice(k + 1), dirOk, pathOk)) return true;
     }
   }
   return false;
 }
 
-/**
- * Where a `cd` / `pushd` (or `env -C`) may go: /tmp, the own folder, or a sub-folder of where it already is. Only a plain
- * path word counts; a quoted, escaped, braced or globbed one (`.'.'/tmp/p`) is unread and so not ok (BOS-378).
- */
+/** Where a `cd` / `pushd` may go: /tmp, the own folder, or a sub-folder of where it already is. */
 function dirOk(dir: string, inOwn: (p: string) => boolean): boolean {
   if (dir === "" || dir === "-") return false; // a bare `cd` goes to $HOME, `cd -` to OLDPWD: both unknown
-  const p = plainPath(dir);
-  if (p === null) return false;
-  if (/^\/tmp(\/|$)/.test(p)) return true;
-  if (inOwn(p)) return true;
-  return /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(p) && !climbsOut(p); // a sub-folder of where it already is
+  if (/^\/tmp(\/|$)/.test(dir) && !dir.includes("..")) return true;
+  if (inOwn(dir)) return true;
+  return /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(dir) && !dir.includes(".."); // a sub-folder of where it already is
 }
 
 /**
@@ -565,356 +498,684 @@ function toolTargets(c: string): string[] {
 }
 
 /**
- * BOS-378 (CEO round 14): the judge stops trying to read hidden scripts. A command whose words include a shell, an
- * interpreter or a launcher gets no Allow, wherever it sits in the chain, unless the whole segment is on a short
- * allow-list of plain forms:
- *   - `pnpm|npm run <script>` / `pnpm|npm exec <tool>` over plain literal words;
- *   - `node|python3|bash|sh <file>` (or a shebang script run by its plain path), every word a plain literal and the file
- *     a relative path inside the agent's own checkout with no `..`.
- * Everything else is Deny: any -c/-e/-p/-m/-r/--require/-s flag, any NAME=value or env prefix, any wrapper (nohup,
- * timeout, setsid, sudo, flock, ...) or unknown word in front of an interpreter, code piped or here-stringed in, a `-c`
- * string (never parsed: `-c` alone is Deny), a program name written in disguise, and a `$(...)`/backtick that is not a
- * plain path. Over-denial is the point; while the judge only watches this costs nothing, and the card just asks a human.
- * Every command span is read: split on `;`, `&`, `|`, newlines, and inside every `$(...)`, `(...)` and backtick.
+ * True when a command word is a variable, `$(...)` or backtick (an unknown program) and it is given code: a -c/-e/-r/-E/-p
+ * option, `-` or a heredoc anywhere in its segment, or it receives a pipe. The command word is found after assignment
+ * prefixes and wrappers (exec, command, env, timeout, nice, xargs, then, do, `{`, `(`...). Linear: one pass over the words.
  */
-const SHELL_NAME = /^(?:sh|bash|zsh|dash|ksh)$/;
-const INTERP_NAME = new RegExp(`^(?:${INTERP_NAMES}|tsx|ts-node|esbuild-register|swc-node)$`);
-/** A runner's own subcommand before the file word: `deno run <file>`, `bun run <file>` — skip it. */
-const INTERP_VERB = /^(?:run|eval)$/;
-/** A build tool that reads a file named with `-f`/`--file`/`-C`; other `make` forms only run the local Makefile. */
-const MAKE = /^(?:make|gmake)$/;
-/** Words that only hand control to another program. None of them is on the allow-list. */
-const LAUNCHER = /^(?:nohup|time|timeout|sudo|doas|setsid|stdbuf|env|exec|command|builtin|xargs|nice|ionice|chrt|chroot|nsenter|unshare|script|flock|strace|ltrace|gdb|watch|parallel|busybox|su|then|do|else|if|elif|while|until|!|\{|\}|\(|\))$/;
-/** A plain literal word: a path or a value with no quoting, expansion, glob or shell operator. */
-const PLAIN_WORD = /^[A-Za-z0-9_.@%+=:,/?~-]+$/;
-/** A shell redirect token (`2>&1`, `>&2`, `&>`, `>/dev/null` handled elsewhere): it runs no code, so it does not block. */
-const REDIR = /^(?:\d*>&\d+|&>\d*|&>>?\S*|\d*>>?&?\d*)$/;
-/** The command word of a segment after its prefixes (`NAME=value`, `!`, `{`, `(`). */
-const NO_PREFIX = /^(?:\w+=[^\s]*|[({!]+)$/;
-
-/**
- * True when a segment runs code the judge will not auto-allow. `inOwn` places a script file: it must stay in the
- * agent's own checkout, and a `cd` out of it first makes a relative script file unreadable too.
- */
-function codeRunDenied(c: string, inOwn: (p: string) => boolean): boolean {
-  const base = (w: string): string => w.replace(/^.*\//, "");
-  // Output redirections (`> log`, `2>&1`, `>> out`, `&> f`) and their target file are data sinks: running a program is
-  // no less readable because its stdout goes to a file. Drop them so a plain script with `> log` still gets Allow. An
-  // input redirect (`< f`, `<<EOF`, a heredoc) still feeds the program and is left in place (a shell reading stdin runs it).
-  const OUT_REDIR = /^(?:\d*>>?|\d*>&\d+|&>>?)(.*)$/;
-  const noOutRedir = (ws: string[]): string[] => {
-    const out: string[] = [];
-    for (let k = 0; k < ws.length; k++) {
-      const w = ws[k]!;
-      const m = OUT_REDIR.exec(w);
-      if (m) { if (m[1] === "") k++; continue; } // `> log`: drop the token and its target
-      if (REDIR.test(w)) continue;
-      out.push(w);
-    }
-    return out;
-  };
-  const codeWord = (w: string): boolean => { const b = base(w); return INTERP_NAME.test(b) || SHELL_NAME.test(b) || LAUNCHER.test(b) || MAKE.test(b) || /^(?:pnpm|npm|yarn|bun|npx|pnpx|bunx)$/.test(b); };
-  // A relative script file lands wherever the shell already is: only a `cd`/`pushd` that stays inside the checkout (or a
-  // sub-folder of it) keeps it readable. A `cd /tmp` (or anywhere else) makes every relative script Deny.
-  const cdOwn = (d: string): boolean => { const p = plainPath(d); return p !== null && (inOwn(p) || (/^[\w.@+-]+(\/[\w.@+-]+)*$/.test(p) && !climbsOut(p))); };
-  const cdSafe = cdWords(c).every(cdOwn);
-  // A variable, `$(...)` or backtick used as a command word is an unknown program: no Allow (it may be an interpreter or
-  // a launcher). `$(...)` that survives safeSubst here is not the agent's own git dir or a /tmp mktemp, so it is unread.
-  const unknownWord = (w: string): boolean => /^\$\{?[\w@*#?!$(-]|^`/.test(w);
-  // A script file written earlier in the same command has content the judge can't read, so running it is not safe: a
-  // redirect, `tee`, `cp`/`mv`/`ln`/`install`/`curl -o`/`wget`/`sed -i` naming the file, anywhere before it.
-  const written = (p: string): boolean => {
-    const n = p.replace(/^.*\//, "");
-    const e = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(?:>\\s*['"]?(?:\\S*/)?${e}(?=$|[\\s;&|'"])|\\b(?:tee|cp|mv|ln|install|touch|sed|dd)\\b[^;&|\\n]*[\\s'"]${e}(?=$|[\\s;&|'"]))`).test(c);
-  };
-  const scriptOk = (w: string): boolean => {
-    // A URL with a scheme (`file:///tmp/x`, `data:...`) is never a plain script file in the checkout (BOS-638, Jane round 2).
-    if (/^[A-Za-z][\w+.-]*:/.test(w)) return false;
-    const p = plainPath(w);
-    if (p === null || p === "" || climbsOut(p) || !PLAIN_WORD.test(w) || /^~/.test(w)) return false;
-    if (written(p)) return false;
-    if (p.startsWith("/")) return inOwn(p);
-    return cdSafe && !/^\/tmp(\/|$)/.test(p);
-  };
-  // Every span that can start a command: the shell-level segments, plus the inside of each `$(...)`, `(...)`, backtick.
-  const spans: string[] = [];
-  const walk = (s: string): void => {
-    spans.push(s);
-    for (const m of s.matchAll(/\$\(([^)]*)\)|\(([^()]*)\)|`([^`]*)`/g)) walk(m[1] ?? m[2] ?? m[3] ?? "");
-  };
-  // A heredoc body (`cat > f <<'EOF' ... EOF`) is data handed to the writing program, not a set of commands. Take it out
-  // before splitting lines into spans, so a body line that happens to look like a command (`npm install`) is not judged
-  // as one. The body is still unreadable, so the file it writes stays un-runnable (see `written`/`scriptOk`).
-  const bodyless = c.replace(/<<-?\s*(['"]?)([A-Za-z_][\w]*)\1[^\n]*\n[\s\S]*?\n[^\n]*\b\2\b/g, "<<HEREDOC");
-  for (const seg of bodyless.split(/&&|\|\||[;&|\n]+/)) walk(seg);
-  for (const span of spans) {
-    // A command substitution or backtick whose content is not a plain path means a program name or argument the judge
-    // cannot read (`$(which node) x`, `n\ode`): no Allow. The inner content is also judged as its own span above.
-    for (const m of span.matchAll(/\$\(([^)]*)\)|`([^`]*)`/g)) if (!/^\s*[A-Za-z0-9_.@%+=:,/?~-]+\s*$/.test(m[1] ?? m[2] ?? "")) return true;
-    const words = shellWords(span).filter((w) => w !== "");
-    // Strip the prefixes to reach the command word. A NAME=value before an interpreter is an env prefix: not allow-listed.
-    let i = 0;
-    while (i < words.length && NO_PREFIX.test(words[i]!)) i++;
-    if (i >= words.length) continue;
-    const prefixed = i > 0 && words.slice(0, i).some((w) => /^\w+=/.test(w));
-    const head = base(words[i]!);
-    const args = words.slice(i + 1);
-    // A variable or substitution as the command word, or after a launcher that starts another program (`xargs`, `env`,
-    // `-exec`), is an unknown program: no Allow.
-    if (unknownWord(words[i]!)) return true;
-    if (LAUNCHER.test(head) && args.some((w) => unknownWord(w) && !/^\w+=/.test(w))) return true;
-    // pnpm/npm/pnpx/yarn/bunx exec|run (BOS-378 CEO round 15): `exec`, `dlx`, `x`, `npx`, `pnpx`, `bunx` run the program
-    // *after* the verb, so that program is judged as a new command head by the branches below (an interpreter or a /tmp
-    // script there is Deny). `run <script>` runs a package.json script: a plain script name, never a path outside.
-    const PM = /^(?:pnpm|npm|yarn|bun)$/;
-    const PM_EXEC = /^(?:exec|dlx|x|create)$/;
-    // A folder flag names the folder the package manager runs in: `-C`, `--dir`, `--prefix`, `--cwd`, `--filter`. The value
-    // may be attached with `=`, or written straight after the flag (`-C/tmp/p`, and the long flags' usual abbreviation
-    // `--dir/tmp/p`, which pnpm and npm both accept), so match the flag's own ending rather than requiring `=` or the end
-    // of the word (BOS-638, Rex round 1: the attached form slipped through).
-    const FOLDER_FLAG = /^(?:-C(?=$|[^A-Za-z])|--dir(?=$|=|[^A-Za-z=])|--prefix(?=$|=|[^A-Za-z=])|--cwd(?=$|=|[^A-Za-z=])|--filter(?=$|=|[^A-Za-z=]))/;
-    // The folder a folder-flag word names: after `=`, or the rest of the word when it is attached (`-C/tmp/p`), else the
-    // next argument.
-    const folderOf = (w: string, next: string | undefined): string | undefined => {
-      const eq = w.indexOf("=");
-      if (eq >= 0) return w.slice(eq + 1);
-      const m = /^(?:-C|--dir|--prefix|--cwd|--filter)/.exec(w);
-      const tail = m ? w.slice(m[0].length) : "";
-      return tail !== "" ? tail : next;
-    };
-    const attached = (w: string): boolean => {
-      const eq = w.indexOf("=");
-      if (eq >= 0) return true;
-      const m = /^(?:-C|--dir|--prefix|--cwd|--filter)/.exec(w);
-      return !!m && w.length > m[0].length;
-    };
-    const PM_TOOL = head === "npx" || head === "pnpx" || head === "bunx";
-    if (PM.test(head) || PM_TOOL) {
-      if (prefixed) return true;
-      // A package-manager setting that names a file can pick the shell that runs a script or the rc file it reads:
-      // `npm run build --script-shell=/tmp/x.sh`, `npm --userconfig=/tmp/rc run build` (BOS-638, Jane round 5, finding 2).
-      // The value can come before or after the verb, so scan every argument; a file it names must be a plain in-checkout
-      // script. The value may itself be an option with an attached path (`--require=/tmp/x.js`), so look past that prefix.
-      // `--node-options`/`--node-arg` are passed to every node process a script starts, so they load code at start. Their
-      // value can be a `data:`/`file:` URL that runs inline or /tmp code but is not a path, so the judge can't read it:
-      // they get no Allow at all, whatever the value (BOS-638, Jane round 2: the strict option she offered).
-      const NODE_OPTIONS = /^--(?:node-options|node-arg)(?:=|$)/;
-      const CONFIG_FILE = /^--(?:script-shell|userconfig|globalconfig|config)(?:=|$)/;
-      // A URL with a scheme (`data:...`, `file:///tmp/x`) is never a plain file path in the checkout: a setting that names
-      // one loads code the judge can't read. Kept here as a guard for the value checks below too.
-      const SCHEME = /^[A-Za-z][\w+.-]*:/;
-      const valueLeaves = (v: string): boolean => {
-        if (SCHEME.test(v)) return true;
-        // `--flag=/tmp/x` / `--flag /tmp/x` inside the value: judge the path, not the whole option word.
-        const inner = /^--?[\w-]+=(.*)$/.exec(v);
-        if (inner) return valueLeaves(inner[1]!);
-        // A quoted value (`--node-options="--require=/tmp/x.js"`) keeps its quotes through shellWords; strip them.
-        const bare = v.replace(/^['"]|['"]$/g, "");
-        if (bare !== v) return valueLeaves(bare);
-        return !plainPath(v) || !scriptOk(v);
-      };
-      for (let k = 0; k < args.length; k++) {
-        const w = args[k]!;
-        if (NODE_OPTIONS.test(w)) return true; // loads code at start, whatever the value
-        if (!CONFIG_FILE.test(w)) continue;
-        const v = w.includes("=") ? w.slice(w.indexOf("=") + 1) : args[++k];
-        if (v === undefined || valueLeaves(v)) return true;
-      }
-      // A tool run through a package manager (`pnpm vitest ...`, `npx <tool> ...`) reads files named in its arguments as
-      // code or config (`--config /tmp/x.config.ts`, a positional `/tmp/x.test.ts`). The judge can't tell which argument a
-      // tool loads, so any argument that leaves the checkout (an absolute path or a `..` climb) gets no Allow
-      // (BOS-638, Jane round 5, finding 3: the general rule she asked for, not one per tool).
-      // A path leaves the checkout when it is absolute, climbs with `..`, or starts with `~`/`$`/backtick (the shell turns
-      // `~` into the home folder and expands a variable to a path the judge can't read) (BOS-638, Rex/Jane round 1).
-      const leaves = (w: string): boolean => {
-        if (/^(?:~|[\s]*\$|[`])(?:$|[\/{\w])/.test(w)) return true;
-        // A URL with a scheme is not a path in the checkout: it can load code the judge can't read (`--config=file:///tmp`).
-        if (/^[A-Za-z][\w+.-]*:/.test(w)) return true;
-        // A value that is itself an option with an attached path (`--require=/tmp/x.js`, from `--node-options=...`): judge
-        // the path it names, not the whole word (BOS-638, Jane round 1, part A).
-        const inner = /^--?[\w-]+=(.*)$/.exec(w);
-        if (inner) return leaves(inner[1]!);
-        const p = plainPath(w);
-        return p !== null && (p.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(p));
-      };
-      for (let k = 0; k < args.length; k++) {
-        const w = args[k]!;
-        if (FOLDER_FLAG.test(w)) {
-          const d = folderOf(w, args[k + 1]);
-          if (d === undefined || !cdOwn(d)) return true;
-          if (!attached(w)) k++;
-          continue;
-        }
-        if (w.startsWith("-")) {
-          // `--call=<program>` (npx, npm exec) runs the program with any piped text as its code/stdin: a code word there is
-          // an executor the judge would have to read (`npx --call=node`) (BOS-638, Jane round 1, part D).
-          const call = /^--call=(.*)$/.exec(w) ?? (/^-c$/.test(w) ? [w, args[k + 1] ?? ""] : null);
-          if (call && call[1] !== undefined && codeWord(call[1]!)) return true;
-          if (w.includes("=") && leaves(w.slice(w.indexOf("=") + 1))) return true;
-          continue;
-        }
-        if (leaves(w)) return true;
-      }
-      let verb = args[0];
-      let rest = args.slice(1);
-      if (verb && verb.startsWith("-")) {
-        // A folder flag before the verb (`pnpm -C /tmp/p run x`, `npm --prefix /tmp/p run x`): the folder must stay in the
-        // checkout. Other pre-verb flags are fine; they don't change what runs. A folder flag may come *after* another flag
-        // (`pnpm --silent -C /tmp/p run x`, `npm --silent --prefix /tmp/p run x`), so every pre-verb flag is scanned, not just
-        // the first (BOS-638, Jane round 5: only the first was checked, so a later folder flag slipped through).
-        let idx = 0;
-        let pre = [verb, ...rest];
-        while (idx < pre.length && pre[idx]!.startsWith("-")) {
-          if (FOLDER_FLAG.test(pre[idx]!)) {
-            const d = pre[idx]!.includes("=") ? pre[idx]!.slice(pre[idx]!.indexOf("=") + 1) : pre[idx + 1];
-            if (d === undefined || !cdOwn(d)) return true;
-            idx += pre[idx]!.includes("=") ? 1 : 2;
-          } else {
-            idx += 1;
-          }
-        }
-        verb = pre[idx];
-        rest = pre.slice(idx + 1);
-      }
-      if (verb === undefined || verb.startsWith("-")) continue; // `pnpm --version`, `npx --help`: nothing runs code
-      if (PM_EXEC.test(verb) || PM_TOOL) {
-        // `exec`/`dlx`/`x` run the program *after* the verb; a tool runner (`npx`, `pnpx`, `bunx`) runs the tool that *is*
-        // the first word. Rebuild the segment with that program first and judge it as the head below.
-        const prog = PM_TOOL ? [verb, ...rest] : rest;
-        if (prog.length === 0) continue; // `pnpm exec`/`npx` alone: nothing to run
-        if (!prog.every((w) => PLAIN_WORD.test(w) || REDIR.test(w) || /^-{1,2}[\w-]+(=[^\s]*)?$/.test(w))) return true;
-        words.splice(0, words.length, ...prog);
-        i = 0;
-      } else {
-        // `run <script>` or a bare `pnpm <script>`: the script name, never a path or an interpreter, and the cd stays in
-        // the checkout. A bare form (`pnpm vitest run ...`) has arguments the script reads as data; only its name matters.
-        const explicit = verb === "run" || verb === "r";
-        if (!explicit) rest = [verb, ...rest];
-        if (!cdSafe) return true;
-        for (let k = 0; k < rest.length; k++) {
-          const w = rest[k]!;
-          if (k === 0) {
-            // The script name itself: a plain name, never a path, a program, or a value that can't be read.
-            if (codeWord(w) || /^[/~]|\.\./.test(w) || w.startsWith("-")) return true;
-            if (!explicit) continue; // a bare script name; the rest are its arguments (data)
-            if (!PLAIN_WORD.test(w) || w.includes("/") || /^[.]/.test(w)) return true;
-            continue;
-          }
-          if (REDIR.test(w)) continue;
-          if (/^(?:-C|--dir|--prefix|--cwd|--filter)(?:=|$)/.test(w)) {
-            const d = w.includes("=") ? w.slice(w.indexOf("=") + 1) : null;
-            if (d !== null && !cdOwn(d)) return true;
-            if (d === null) return true; // the folder is the following word: a path, not a script name
-          } else if (w.startsWith("-")) {
-            if (!/^-{1,2}[\w-]+(=[^\s]*)?$/.test(w)) return true;
-          } else if (!explicit) {
-            continue; // a bare form's arguments are data
-          } else if (!PLAIN_WORD.test(w)) {
-            return true; // a quoted/expanded argument to an explicit `run` can't be read
-          }
-        }
-        continue;
-      }
-    }
-    // After a `pnpm exec <program>` splice, the program is now the head: recompute head/args and judge it as such.
-    {
-      let j = 0;
-      while (j < words.length && NO_PREFIX.test(words[j]!)) j++;
-      if (j !== i) i = j;
-    }
-    const chead = base(words[i]!);
-    const cargs = words.slice(i + 1);
-    // `make -f <file>` / `make -C <dir>` read a file or a folder; plain `make` runs the local Makefile. A named file or
-    // folder must be an in-checkout relative path (BOS-378 CEO round 15).
-    if (MAKE.test(chead)) {
-      if (i > 0) return true;
-      for (let k = 0; k < cargs.length; k++) {
-        const w = cargs[k]!;
-        const f = /^(?:-f|--file|-C|--directory)(?:=(.*))?$/.exec(w);
-        if (f) {
-          const p = f[1] !== undefined ? f[1] : cargs[++k];
-          if (p === undefined || !scriptOk(p)) return true;
-        }
-      }
-      continue;
-    }
-    // `source <file>` and `. <file>` run a file in the shell: judge the file like a script.
-    if (chead === "source" || chead === ".") {
-      if (cargs.length < 1 || !scriptOk(cargs[0]!)) return true;
-      continue;
-    }
-    // node|python3|bash|sh <file>: no prefix, no option before the file, no redirect/pipe, plain words, file in checkout.
-    if (INTERP_NAME.test(chead) || SHELL_NAME.test(chead)) {
-      if (i > 0 || cargs.length === 0) return true; // an env prefix, or code on stdin
-      const va = noOutRedir(cargs);
-      if (va.some((w) => /[<>|]/.test(w))) return true; // an input redirect or pipe into the interpreter
-      if (va.some((w) => !PLAIN_WORD.test(w) && !/^-{1,2}[\w-]+(=[^\s]*)?$/.test(w))) return true;
-      // The runner subcommands (`deno run <file>`, `bun run <file>`, `ts-node <file>`, `tsx <file>`) name a file after the
-      // verb. Skip a leading verb, then require a script file in the checkout; a flag first (`-c`, `-e`, `-m`, `-r`) is
-      // Deny. Any later word that is a path must also be an in-checkout script (a runner's `--config /tmp/x` can load code).
-      const verb = INTERP_VERB.test(va[0] ?? "") ? 1 : 0;
-      const file = va[verb];
-      if (file === undefined || file.startsWith("-")) return true;
-      if (!scriptOk(file)) return true;
-      // A code-loading flag after the file can pull in a /tmp module even when the script is in the checkout (node's
-      // `--require`/`--loader`/`--import`, a runner's `--config`). Its outside path is Deny; a plain output path is data.
-      // Only the separated form (`-r /tmp/x`) can matter today: a flag *before* the file is already denied above
-      // (`file.startsWith("-")`), so a flag after the file reaches the script, not node. The attached form
-      // (`--require=/tmp/x`) is checked too, in case a flag before the file is ever allowed (BOS-638, Rex round 2).
-      if (va.slice(verb + 1).some((w, n, a) => {
-        const attached = /^(?:--require|--loader|--import|--experimental-loader|--config)=(.*)$/.exec(w);
-        if (attached) return !scriptOk(attached[1]!);
-        return /^(?:-r|--require|-l|--loader|--import|--experimental-loader|--config|-c)$/.test(a[n - 1] ?? "") && w.includes("/") && !scriptOk(w);
-      })) return true;
-      continue;
-    }
-    // A command word that is a path (`/tmp/x.sh`, `./x.sh`, `../x.sh`, `scripts/x.sh`) runs a file the judge can't read
-    // unless it is a plain script inside the agent's own checkout (BOS-378 CEO round 15). Test the whole word: `head` has
-    // already been base()'d, so an absolute `/tmp/x.sh` looked like a plain name and slipped through as Allow.
-    const cmdWord = words[i]!;
-    if (cmdWord.includes("/") && PLAIN_WORD.test(cmdWord)) {
-      if (i > 0 || /[<>|]/.test(cmdWord)) return true;
-      // An absolute path as the program gets no Allow, even one inside the agent's own checkout (CEO round 15): the judge
-      // can't tell what it is from a path alone. Only a plain relative path in the checkout is Allow.
-      if (cmdWord.startsWith("/")) return true;
-      const va = noOutRedir(cargs);
-      if (va.some((w) => /[<>|]/.test(w))) return true;
-      if (va.some((w) => !PLAIN_WORD.test(w) && !/^-{1,2}[\w-]+(=[^\s]*)?$/.test(w))) return true;
-      if (!scriptOk(cmdWord)) return true;
-      continue;
-    }
-    // Anything else is Deny only when the command word is a shell/interpreter/launcher, or when one is the word after a
-    // launcher that starts another program (`-exec`, `-execdir`, `-ok`, xargs, env, …). A plain program whose arguments
-    // merely mention `node` (`grep -r node src/`) is left to the other checks.
-    if (codeWord(chead)) return true;
-    // A `-exec`/`-execdir`/`-ok` program is a command the judge must read: an interpreter/launcher there is Deny, and so is
-    // a program given as a path that leaves the checkout (`find . -exec /tmp/x.sh {} ;`) (BOS-638, Jane round 5, finding 4).
-    // A path leaves the checkout when it is absolute, climbs with `..`, or starts with `~`/`$`/backtick (the shell expands
-    // those to a folder the judge can't read) (BOS-638, Jane round 1, part B: `find . -exec ~/x.sh {} ;`).
-    const leavesOut = (w: string): boolean => {
-      if (/^(?:~|[\s]*\$|[`])(?:$|[\/{\w])/.test(w)) return true;
-      const p = plainPath(w);
-      return p !== null && (p.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(p));
-    };
-    for (let k = 0; k < cargs.length; k++) {
-      const verb = cargs[k]!;
-      if (!/^-(?:exec|execdir|ok|okdir)$/.test(verb)) continue;
-      const prog = cargs[k + 1] ?? "";
-      if (codeWord(prog) || leavesOut(prog)) return true;
-      // `-execdir`/`-okdir` run their program from the folder of each file found, so a relative program runs in find's
-      // start folder, not the shell's. When a start path before the verb leaves the checkout, that program runs outside it
-      // (`find /tmp -execdir ./x.sh {} ;`) (BOS-638, Jane round 1, part C). Flags like `-L` take no path here.
-      if (/^-(?:execdir|okdir)$/.test(verb) && !prog.startsWith("/") && !/^(?:~|\$|`)/.test(prog)) {
-        if (cargs.slice(0, k).some((w) => !w.startsWith("-") && leavesOut(w))) return true;
-      }
-    }
-    if ((chead === "xargs" || chead === "env") && cargs.some((w) => !w.startsWith("-") && codeWord(w))) return true;
+function variableCommandWord(c: string, inner = false): boolean {
+  // Second pass: the text inside every `$(...)`, `(...)` and backtick is read as its own segment, whatever the outer command is.
+  if (!inner && variableCommandWord(c.replace(/\$\(|[()\x60]/g, ";"), true)) return true;
+  const parts = c.split(/(\|&|&&|\|\||[;&|\n])/);
+  const safeHead = /^(?:echo|printf|ls|cat|cd|test|\[|rm|cp|mv|mkdir|touch|for|read|export|local|unset|git|pnpm|npm)$/;
+  for (let i = 0; i < parts.length; i += 2) {
+    const seg = parts[i]!;
+    const words = (seg.match(/(?:'[^']*'|"[^"]*"|\\.|[^\s'"\\])+/g) ?? []).map((w) => w.replace(/['"\\]/g, "").replace(/^[({]+(?=.)/, ""));
+    let k = 0;
+    while (k < words.length && /^\w+=/.test(words[k]!)) k++;
+    const head = words[k];
+    // A variable word anywhere in the segment is an unknown program unless the segment starts with a known command
+    // that merely takes it as an argument.
+    if (head === undefined || safeHead.test(head)) continue;
+    const at = words.findIndex((w, j) => j >= k && /^\$\{?[A-Za-z_]\w*\}?$|^\$[\d@*#?!$({]|^\x60/.test(w));
+    if (at < 0) continue;
+    const piped = i >= 2 && (parts[i - 1] === "|" || parts[i - 1] === "|&");
+    // Any option, a redirect or heredoc into it, or a pipe: deny. Over-denial is fine.
+    if (piped || /</.test(seg) || words.slice(at + 1).some((t) => t.startsWith("-"))) return true;
   }
   return false;
 }
 
+/**
+ * True when an interpreter or shell runs code the judge can't read: a script file that is in /tmp, outside the agent's own
+ * folder, named by a variable, `~` or `..`, or written earlier in the same command; or code that arrives on stdin from a file,
+ * a process substitution or a pipe other than echo/printf. Checked-in scripts in the agent's own folder (`node scripts/x.js`)
+ * are fine. Allow-list: anything not recognised as such a script is true (Deny).
+ */
+function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
+  const interp = "python[\\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh|g?awk|mawk|sh|bash|zsh|dash|ksh";
+  // Only where a command word stands: at the start, after a separator, `then`/`do`, or a wrapper (env, nohup, timeout N, ...).
+  const wrap = "(?:\\b(?:then|do|else|exec|env|nohup|time|sudo|xargs|command|nice|setsid|stdbuf)\\s+|\\btimeout\\s+)";
+  const re = new RegExp(`(?:^|[;&|(\\n{]\\s*|${wrap})(?:(?:-\\S+|\\d+\\w*|\\w+=\\S*)\\s+)*(?:[\\w./-]*/)?(${interp})(?![\\w./-])((?:[^;&|\\n'"]|'[^']*'|"[^"]*")*)`, "g");
+  const unq = (t: string): string => t.replace(/^['"]+|['"]+$/g, "");
+  const risky = (p: string, relOk: boolean): boolean => {
+    p = unq(p);
+    if (p === "" || p === "-") return false;
+    if (/\$|\x60|^~|\.\./.test(p) || /^\/tmp(\/|$)/.test(p)) return true;
+    if (p.startsWith("/")) return !inOwn(p);
+    return !relOk;
+  };
+  const writeOp = />|\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\bdd\b|\bcurl\b|\bwget\b|\btouch\b|\bsed\b|\bpatch\b|\bgit\b[^;&|\n]*?\s(?:apply|checkout|restore|am)\b|\bunzip\b|\btar\b/;
+  // A relative path lands wherever the last `cd` went.
+  let relOk = true;
+  for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) {
+    const d = m[1] ?? "";
+    if (!dirOk(d, inOwn) || (/^[/~$]/.test(d) && !inOwn(d))) relOk = false;
+  }
+  const writtenElsewhere = (p: string, at: number, len: number): boolean => {
+    const rest = c.slice(0, at) + " " + c.slice(at + len);
+    const base = unq(p).replace(/^.*\//, "");
+    return writeOp.test(rest) && (rest.includes(unq(p)) || (base !== "" && rest.includes(base)));
+  };
+  // `source x` / `. x` runs a file in the shell.
+  for (const m of c.matchAll(/(?:^|[;&|(\n]\s*)(?:source|\.)\s+(\S+)/g)) if (risky(m[1]!, relOk) || writtenElsewhere(m[1]!, m.index!, m[0]!.length)) return true;
+  for (const m of c.matchAll(re)) {
+    const name = m[1]!;
+    const args = m[2]!;
+    const toks: string[] = args.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+    const awk =/awk$/.test(name);
+    // Inline code (-c / -e ...) is read by inlineCodeOk; an awk program is inline unless it has -f.
+    let inline = awk && !toks.includes("-f");
+    for (const t of toks) {
+      if (!t.startsWith("-") || t === "-") break;
+      // `-r` is a module to preload for node and ruby, not code.
+      if (/^-[A-Za-z]*[ceEp]$/.test(t) || (/^-[A-Za-z]*r$/.test(t) && /^(?:php|Rscript|lua)$/.test(name)) || /^--(?:eval|command|print)\b/.test(t)) { inline = true; break; }
+    }
+    if (inline) continue;
+    // Words that name the script: everything up to the first one that looks like a script file, else all of them.
+    // Redirect targets (`> file`, `2> file`) are not the script.
+    const words = toks.filter((t, i) => !/^<|^>|^\d*>/.test(t) && !/^\d*>>?$|^&>$/.test(toks[i - 1] ?? ""));
+    const extAt = words.findIndex((t) => /\.(?:[cm]?js|ts|py|pl|rb|php|lua|a?sh|bash|R|awk)['"]?$/i.test(t));
+    const named = (extAt >= 0 ? words.slice(0, extAt + 1) : words).filter((t) => t !== "-");
+    const candidates = named.flatMap((t) => (t.startsWith("-") ? (t.includes("=") ? [t.slice(t.indexOf("=") + 1)] : []) : [t]));
+    const hasScript = named.some((t) => !t.startsWith("-"));
+    if (/<\(/.test(args)) return true;
+    for (const p of candidates) if (risky(p, relOk) || writtenElsewhere(p, m.index!, m[0]!.length)) return true;
+    if (hasScript) continue;
+    // No script file: the code comes from stdin.
+    for (const r of args.matchAll(/(?<![<\d])<(?![<(])\s*(\S+)/g)) if (risky(r[1]!, relOk) || writtenElsewhere(r[1]!, m.index!, m[0]!.length)) return true;
+    const before = c.slice(0, m.index!).replace(/(?:\b(?:env|exec|command|nohup|time|sudo|xargs|timeout\s+\d+\w*)\s+|\w+=\S*\s+)*$/, "");
+    if (/^\|/.test(m[0]!) || /\|&?\s*$/.test(before)) {
+      const prev = before.replace(/\|&?\s*$/, "").split(/&&|\|\||[;&|\n]/).pop() ?? "";
+      if (!/^\s*(?:echo|printf)\s/.test(prev) || /\$\(|\x60|</.test(prev)) return true;
+    }
+  }
+  return false;
+}
 
+/**
+ * Splits a command into segments of words the way a shell would (quotes, backslashes, `$(`, backticks, `(`, `;&|`, newlines,
+ * heredoc bodies and comments), so a quoted or escaped command word (`"node"`, `n\ode`) reads as the word it runs.
+ * Redirects are lifted out: `out` holds output targets, and input targets stay as plain words. Over-splitting is fine.
+ */
+function shellSegments(c: string, bad?: { v: boolean }): { words: string[]; out: string[] }[] {
+  const segs: { words: string[]; out: string[] }[] = [];
+  let words: string[] = [];
+  let out: string[] = [];
+  let cur = "";
+  let has = false;
+  let redir: "out" | "in" | null = null;
+  const modes: ("dq" | "sub")[] = [];
+  const pendingTags: string[] = [];
+  const endWord = (): void => {
+    if (!has) return;
+    if (redir === "out") out.push(cur);
+    else words.push(cur);
+    redir = null;
+    cur = "";
+    has = false;
+  };
+  const endSeg = (): void => {
+    endWord();
+    redir = null;
+    if (words.length || out.length) segs.push({ words, out });
+    words = [];
+    out = [];
+  };
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i]!;
+    const dq = modes[modes.length - 1] === "dq";
+    if (ch === "\\") { cur += c[++i] ?? ""; has = true; continue; }
+    if (!dq && ch === "'") {
+      const e = c.indexOf("'", i + 1);
+      cur += c.slice(i + 1, e < 0 ? c.length : e);
+      has = true;
+      i = e < 0 ? c.length : e;
+      continue;
+    }
+    if (ch === '"') { if (dq) modes.pop(); else modes.push("dq"); has = true; continue; }
+    if (ch === "`") { endSeg(); continue; }
+    // Arithmetic `$((1<<2))` / `((x<<2))` is not a command or a heredoc: skip to the matching `))` when it holds no substitution.
+    if ((ch === "$" && c[i + 1] === "(" && c[i + 2] === "(") || (ch === "(" && c[i + 1] === "(" && !has && !words.length)) {
+      const start = ch === "$" ? i + 3 : i + 2;
+      let depth = 2;
+      let j = start;
+      for (; j < c.length && depth > 0; j++) { if (c[j] === "(") depth++; else if (c[j] === ")") depth--; }
+      const body = c.slice(start, j);
+      if (depth === 0 && !/\$\(|\x60/.test(body)) { cur += "ARITH"; has = true; i = j - 1; continue; }
+      if (depth !== 0 && bad) bad.v = true;
+    }
+    if (ch === "$" && c[i + 1] === "(") { endSeg(); modes.push("sub"); i++; continue; }
+    // Inside double quotes a space or newline belongs to the word (`bash -c "python3 c.py"` is one inner command, not two words).
+    if (dq) { cur += ch; has = true; continue; }
+    if (ch === "#" && !has) { while (i < c.length && c[i] !== "\n") i++; i--; continue; }
+    if (ch === ")") { endSeg(); if (modes[modes.length - 1] === "sub") modes.pop(); continue; }
+    if (ch === "(" || ch === ";" || ch === "|" || ch === "\n" || (ch === "&" && c[i + 1] !== ">")) {
+      endSeg();
+      if (ch === "\n") {
+        for (const tag of pendingTags.splice(0)) {
+          let j = i + 1;
+          for (;;) {
+            let e = c.indexOf("\n", j);
+            if (e < 0) e = c.length;
+            const found = c.slice(j, e).trim() === tag;
+            j = e + 1;
+            if (found) break;
+            if (e >= c.length) break; // no terminator line: the shell reads to the end of the command as the body too
+          }
+          i = j - 2;
+        }
+      }
+      continue;
+    }
+    if (ch === ">" || ch === "<" || ch === "&") {
+      if (/^\d+$/.test(cur) && ch !== "&") { cur = ""; has = false; }
+      endWord();
+      let op = ch;
+      while (/[>&|<]/.test(c[i + 1] ?? "") && op.length < 3) op += c[++i];
+      if (op === "<<" || op === "<<-") {
+        let j = i + 1;
+        while (c[j] === " " || c[j] === "\t") j++;
+        // Allow-list: only a plain word (`EOF`) or a fully quoted plain word (`'EOF'`, `"EOF"`) is a tag this reader knows how to
+        // match. Anything else (`$'EOF'`, `E"OF"`, `\EOF`, a tag with punctuation) fails closed.
+        const m = /^(?:(\w+)|'(\w+)'|"(\w+)")(?=[\s;&|<>()]|$)/.exec(c.slice(j));
+        if (m) pendingTags.push((m[1] ?? m[2] ?? m[3])!);
+        else if (bad) bad.v = true;
+        redir = null;
+      } else if (op[0] === ">" || op[0] === "&") redir = op.endsWith("&") && /^\s*\d/.test(c.slice(i + 1)) ? null : "out";
+      else redir = null;
+      continue;
+    }
+    if (/\s/.test(ch)) { endWord(); continue; }
+    cur += ch;
+    has = true;
+  }
+  endSeg();
+  return segs;
+}
+
+/** A command that unpacks an archive or copies a folder tree in. */
+function extractsFiles(name: string, args: string[], scratchInPlay: boolean): boolean {
+  if (name === "tar") return args.some((a, i) => /^-[A-Za-z]*x|^--(?:extract|get)$/.test(a) || (i === 0 && /^[A-Za-z]*x/.test(a)));
+  if (name === "unzip") return !args.some((a) => /^-[A-Za-z]*[lvtpZ]/.test(a));
+  if (/^(?:7z|7za|7zr|cpio|rsync)$/.test(name)) return true;
+  if (name === "cp") return args.some((a) => /^-[A-Za-z]*[rRa]|^--(?:recursive|archive)$/.test(a));
+  if (name === "git") {
+    // git verbs that write files they never name (a patch, a stash, a ref's tree).
+    // Global options before the verb (`--git-dir .git`, `-C dir`, `-c k=v`, `--work-tree dir`) must not hide it.
+    const rest: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!;
+      if (rest.length === 0 && /^(?:-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--attr-source)$/.test(a)) i++;
+      else if (!a.startsWith("-")) rest.push(a);
+    }
+    const verb = rest[0];
+    if (verb === "apply" || verb === "am") return true;
+    // Restoring paths from a ref or stash is the agent's own committed work, unless the command also touches scratch or
+    // written files (a ref fetched from /tmp): then it counts as unpacking.
+    if (!scratchInPlay) return false;
+    if (verb === "stash") return rest[1] === "pop" || rest[1] === "apply";
+    if (verb === "restore") return args.some((a) => abbreviates(a, ["source"]) || /^-s/.test(a));
+    if (verb === "checkout" || verb === "cherry-pick" || verb === "merge" || verb === "pull") return true;
+  }
+  return false;
+}
+
+/** GNU long options accept any unambiguous prefix (`--to-comm` is `--to-command`): true when `arg` abbreviates one of `names`. */
+function abbreviates(arg: string, names: string[]): boolean {
+  if (!arg.startsWith("--")) return false;
+  const o = arg.slice(2).split("=")[0]!;
+  return o.length >= 2 && names.some((n) => n.startsWith(o));
+}
+
+/**
+ * Allow-list of options for tools that can run a program through some option (BOS-377 round 5). Only the options named here
+ * are known safe; any other option, any abbreviation of a long option and any unknown flag is unsafe (fail closed).
+ * `flags` are short options without a value, `valued` are short options that take a value (the rest of a cluster is the value),
+ * `long` are exact long option names (value after `=` is fine). `oldStyle` allows tar's `xf` first word.
+ */
+interface OptionList { flags: string; valued: string; long: string[]; oldStyle?: boolean }
+const SAFE_OPTIONS: Record<string, OptionList> = {
+  tar: { flags: "cxtrufvzjJapkOhPmSwl", valued: "fCTX", oldStyle: true,
+    long: ["create", "extract", "get", "list", "file", "directory", "gzip", "bzip2", "xz", "verbose", "preserve-permissions", "keep-old-files",
+      "strip-components", "exclude", "to-stdout", "files-from", "absolute-names", "no-same-owner", "same-owner", "overwrite", "one-top-level", "auto-compress"] },
+  sort: { flags: "bcdfghiMnRrsuVzm", valued: "oktSTy",
+    long: ["reverse", "unique", "numeric-sort", "ignore-case", "key", "field-separator", "output", "stable", "version-sort", "human-numeric-sort", "check",
+      "merge", "buffer-size", "temporary-directory", "zero-terminated", "ignore-leading-blanks", "dictionary-order", "general-numeric-sort", "month-sort", "parallel"] },
+  unzip: { flags: "oqnjlvtpufaLCXKMs", valued: "dx", long: [] },
+  zip: { flags: "rqjymgDXkuSv0123456789", valued: "bix", long: ["recurse-paths", "quiet", "junk-paths", "exclude", "include", "move", "update", "freshen", "delete"] },
+  rg: { flags: "iIsSwxvcnNHhlLoqrujUaz", valued: "efgtTABCmMjdE",
+    long: ["ignore-case", "smart-case", "case-sensitive", "word-regexp", "line-regexp", "invert-match", "count", "files-with-matches", "files-without-match",
+      "line-number", "no-line-number", "with-filename", "no-filename", "only-matching", "quiet", "glob", "type", "type-not", "hidden", "no-ignore", "max-count",
+      "context", "after-context", "before-context", "fixed-strings", "regexp", "files", "color", "json", "heading", "no-heading", "follow", "max-depth", "sort", "stats"] },
+  wget: { flags: "qvcNrkSxpEKbnd", valued: "OPoiTtwlUQARDIXBa",
+    long: ["output-document", "directory-prefix", "output-file", "quiet", "no-verbose", "verbose", "continue", "timeout", "tries", "no-check-certificate",
+      "content-disposition", "max-redirect", "header", "user-agent", "no-clobber", "timestamping", "recursive", "level", "no-parent", "post-data", "post-file", "method"] },
+};
+
+/** True when an option in `args` is not on the tool's allow-list. */
+function hasUnlistedOption(list: OptionList, args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") return false;
+    if (a.startsWith("--")) {
+      if (!list.long.includes(a.slice(2).split("=")[0]!)) return true;
+      continue;
+    }
+    let cluster: string | null = null;
+    let old = false;
+    if (a.startsWith("-") && a.length > 1) cluster = a.slice(1);
+    else if (list.oldStyle && i === 0) { cluster = a; old = true; }
+    if (cluster === null) continue;
+    for (const ch of cluster) {
+      // Dash cluster: the rest of the word is the value of a valued letter. Old-style first word (`tar xfI a.tar x.sh`): every
+      // letter is an option and the values come from the following words, so every letter must be on the list.
+      if (list.valued.includes(ch)) { if (old) continue; break; }
+      if (!list.flags.includes(ch)) return true;
+    }
+  }
+  return false;
+}
+
+/** Options on commands from the reader list that run a program of the caller's choosing. */
+function runsProgramOption(name: string, args: string[]): boolean {
+  const list = SAFE_OPTIONS[name];
+  if (list) return hasUnlistedOption(list, args);
+  if (name === "less" || name === "more") return args.some((a) => /^--lesskey|^-k$/.test(a));
+  return false;
+}
+
+/** pnpm/npm/yarn/git run scripts and config from places named on their command line: not from a scratch or written path. */
+function toolingRunsScratch(name: string, args: string[], isScratch: (w: string) => boolean, isWritten: (w: string) => boolean): boolean {
+  const hit = (w: string | undefined): boolean => w !== undefined && (isScratch(w) || isWritten(w));
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    const eq = a.indexOf("=");
+    const val = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : args[i + 1];
+    const opt = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+    if (/^(?:-C|--dir|--prefix|--cwd|--config|--git-dir|--work-tree|--workspace-dir|--userconfig|--globalconfig|--use-yarnrc|--require|-r|--loglevel-file|--root)$/.test(opt) && hit(val)) return true;
+    if (/^-[CD]./.test(a) && hit(a.slice(2))) return true;
+  }
+  if (name === "git") return false;
+  // pnpm/npm/yarn: a package-manager verb may take a scratch output path; any other word is a package bin (`pnpm tsx /tmp/x.ts`).
+  const verbs = /^(?:install|i|ci|add|remove|rm|update|up|run|run-script|test|t|build|typecheck|lint|dev|start|store|prune|audit|list|ls|outdated|pack|why|licenses|dedupe|rebuild|fetch|prefetch)$/;
+  const sub = args.find((a) => !a.startsWith("-"));
+  if (sub !== undefined && !verbs.test(sub) && args.some(hit)) return true;
+  return false;
+}
+
+/**
+ * Environment variables an agent may set in front of a command, or export. Allow-list (BOS-630): a variable the judge does not
+ * know to be harmless can make a listed tool run a program or load code (TAR_OPTIONS=--to-command=..., GREP_OPTIONS, ZIPOPT,
+ * WGETRC, RIPGREP_CONFIG_PATH, BASH_ENV, ENV, PERL5OPT, NODE_OPTIONS, NODE_PATH, PYTHONSTARTUP, PYTHONPATH, LD_PRELOAD, PATH,
+ * GIT_*, PAGER ...). None of those is listed; a name not listed here is never Allow, whatever its value.
+ */
+const SAFE_ENVIRONMENT = /^(?:CI|NODE_ENV|FORCE_COLOR|NO_COLOR|CLICOLOR|CLICOLOR_FORCE|TZ|TERM|COLUMNS|LINES|LANG|LANGUAGE|LC_[A-Z]+|DEBUG|CHECK_ALL_FORCE|CHECK_ALL_LOCK_WAIT|BOSSMAN_TEST_MAX_WORKERS|CHECK_QUICK_FORCE_RELATED|BOSSMAN_VITEST_NO_SLOT|BOSSMAN_CHECK_STORE)$/;
+
+/**
+ * True when a command puts a variable that is not on SAFE_ENVIRONMENT into a program's environment: as a prefix (`X=1 cmd`,
+ * `env X=1 cmd`; `assigns` holds those), after a launcher that is not peeled (`sudo X=1 cmd`), by `export` / `declare -x` /
+ * `typeset -x`, or by switching on allexport (`set -a`) or `env -S`. A plain `X=1` on its own is a shell variable, not environment.
+ */
+function setsUnknownEnvironment(assigns: string[], sh: string, args: string[]): boolean {
+  const unknown = (word: string): boolean => {
+    const m = /^(\w+)\+?=?/.exec(word);
+    return !m || !SAFE_ENVIRONMENT.test(m[1]!);
+  };
+  if (assigns.some(unknown)) return true;
+  if (/^(?:sudo|doas|xargs|stdbuf|ionice|chroot|su|unshare|nsenter|strace|ltrace|watch|parallel)$/.test(sh) && args.some((a) => /^\w+=/.test(a) && unknown(a))) return true;
+  if (/^(?:export|declare|typeset)$/.test(sh)) {
+    const exports = sh === "export" || args.some((a) => /^-[A-Za-z]*x/.test(a));
+    if (exports && args.some((a) => !a.startsWith("-") && unknown(a))) return true;
+  }
+  if (sh === "set" && args.some((a, i) => /^-[A-Za-z]*[ak]/.test(a) || ((a === "allexport" || a === "keyword") && args[i - 1] === "-o") || /^-o?(?:allexport|keyword)$/.test(a))) return true;
+  return false;
+}
+
+/**
+ * Deny-by-default for scratch paths. In a command that names a /tmp path or a path the command itself writes (redirect, tee,
+ * cp, mv, curl -o ...), the only commands allowed to mention that path are readers and file tools (cat, grep, ls, cp, rm,
+ * tee ...). Any other command word (an interpreter however it is spelled or wrapped, `./w.js`, flock, strace, npx, `FOO=/tmp/x
+ * cmd`) is code the judge can't read. pnpm/npm/yarn/git may name a /tmp path but not a path the command wrote, and not with an
+ * exec-style word. Over-denial (generate a file, then feed it to a checked-in script) is accepted.
+ */
+function usesScratchUnsafely(c: string): boolean {
+  const bad = { v: false };
+  const segs = shellSegments(c, bad);
+  if (bad.v) return true; // the parser can't tell where a heredoc or arithmetic ends: fail closed
+  const safe = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf rm rmdir mkdir cp mv ln tee touch cd pushd popd " +
+    "test [ [[ realpath dirname basename readlink du df sort uniq cut tr jq md5sum sha256sum sha1sum mktemp export local unset set read for " +
+    "true false sleep chmod date tar unzip gzip gunzip zip curl wget sed less more tree nl od xxd hexdump column").split(" "));
+  const tooling = new Set(["pnpm", "npm", "yarn", "git"]);
+  const keywords = new Set(["if", "then", "do", "else", "elif", "while", "until", "!", "time", "{", "}", "fi", "done", "esac", "in"]);
+  const clean = (w: string): string => w.replace(/^\.\//, "").replace(/\/+$/, "");
+  const written = new Set<string>();
+  let unknownWrite = false; // a write whose file name the judge can't be sure of: plain static imports are not harmless then
+  const scratchVars = new Set<string>();
+  const scratchWord = /\/tmp(?:\/|$|:)|\$\{?TMPDIR|mktemp/;
+  const parsed = segs.map((s) => {
+    let k = 0;
+    const assigns: string[] = [];
+    while (k < s.words.length && (/^\w+\+?=/.test(s.words[k]!) || keywords.has(s.words[k]!))) { if (!keywords.has(s.words[k]!)) assigns.push(s.words[k]!); k++; }
+    const head = s.words[k] ?? "";
+    const args = s.words.slice(k + 1);
+    for (const o of s.out) if (o !== "/dev/null" && !/^\d+$|^-$/.test(o)) written.add(clean(o));
+    const flagless = args.filter((a) => !a.startsWith("-"));
+    if (/^(?:cp|mv|install|ln)$/.test(head) && flagless.length) {
+      written.add(clean(flagless[flagless.length - 1]!));
+      // Into a folder (`cp /tmp/c.py .`, `-t DIR`) the new file keeps the source's name: count that name as written too.
+      for (const a of flagless) written.add(clean(a.replace(/^.*\//, "")));
+    }
+    // A download that names its own file (`curl -O URL`, `-J`, `wget URL` without -O) writes a name the URL decides.
+    if (head === "curl" || head === "wget") {
+      const saves = head === "wget" ? !args.some((a) => /^(?:-O|--output-document)/.test(a)) : args.some((a) => /^-[A-Za-z]*[OJ]|^--remote-name|^--remote-header-name/.test(a));
+      if (saves) {
+        unknownWrite = true;
+        for (const a of args) if (/^[a-z][\w+.-]*:\/\//i.test(a)) written.add(clean(a.replace(/[?#].*$/, "").replace(/^.*\//, "")));
+      }
+    }
+    if (head === "tee") for (const a of flagless) written.add(clean(a));
+    // Readers on the safe list that still write a file: `sort -o OUT`, `uniq IN OUT`, `xxd -r IN OUT`.
+    // Output options of the other readers on the list (`sort -o`, `tree -o`), also at the end of a flag cluster (`sort -uo OUT`).
+    if (head === "sort" || head === "tree") for (let i = 0; i < args.length; i++) {
+      if (/^-[A-Za-z]*o$|^--output$/.test(args[i]!)) written.add(clean(args[i + 1] ?? ""));
+      else if (/^--output=/.test(args[i]!)) written.add(clean(args[i]!.slice(9)));
+      else if (/^-[A-Za-z]*o./.test(args[i]!) && !args[i]!.startsWith("--")) written.add(clean(args[i]!.replace(/^-[A-Za-z]*?o/, "")));
+    }
+    if ((head === "uniq" || head === "xxd") && flagless.length >= 2) written.add(clean(flagless[flagless.length - 1]!));
+    // zip OUT.zip files; tar -c/-r/-u -f OUT; sed -i FILE and sed's `w FILE`: archive or file output the command names.
+    if (head === "zip" && flagless.length) written.add(clean(flagless[0]!));
+    if (head === "tar") {
+      const mode = (args[0] ?? "").replace(/^-/, "");
+      const makes = /^[A-Za-z]*[cru]/.test(mode) || args.some((a) => /^--(?:create|append|update)$/.test(a));
+      for (let i = 0; i < args.length; i++) {
+        if (makes && /^-?[A-Za-z]*f$/.test(args[i]!) && !args[i]!.startsWith("--")) written.add(clean(args[i + 1] ?? ""));
+        else if (makes && /^--file=/.test(args[i]!)) written.add(clean(args[i]!.slice(7)));
+        else if (makes && args[i] === "--file") written.add(clean(args[i + 1] ?? ""));
+      }
+    }
+    if (head === "sed") {
+      // `sed -n 'w OUT'`, `sed 's/a/b/w OUT'`. (`sed -i` edits a file that already exists, so it is not counted here.)
+      for (const a of args) {
+        const m = /(?:^|[;{}\n])\s*[wW]\s+(\S+)\s*$/.exec(a) ?? /^s(.).*\1.*\1[gpiImMe0-9]*[wW]\s+(\S+)\s*$/s.exec(a);
+        if (m) written.add(clean(m[m.length - 1]!));
+      }
+    }
+    for (let i = 0; i < args.length; i++) {
+      if ((head === "curl" && /^(?:-o|--output)$/.test(args[i]!)) || (head === "wget" && /^(?:-O|--output-document)$/.test(args[i]!))) written.add(clean(args[i + 1] ?? ""));
+      const of = /^of=(.+)$/.exec(args[i]!);
+      if (head === "dd" && of) written.add(clean(of[1]!));
+    }
+    return { head, args, assigns };
+  });
+  for (const p of parsed) for (const a of p.assigns) {
+    const m = /^(\w+)\+?=(.*)$/.exec(a)!;
+    if (scratchWord.test(m[2]!)) scratchVars.add(m[1]!);
+  }
+  written.delete("");
+  // A command substitution in command position (`$(echo ./c)`, `` `echo ./c` ``, `"$(...)"`) builds the command word from
+  // output the judge can't read; the parser splits it into its own segment, so check the raw text. Over-denial is accepted.
+  if ((written.size > 0 || scratchVars.size > 0 || scratchWord.test(c)) &&
+    /(?:^|[;&|(\n{]|\b(?:then|do|else|elif|exec|env|nohup|time|command)\s)\s*["']?(?:\.?\/)?(?:\$\(|\x60)/.test(c)) return true;
+  const isWritten = (w: string): boolean => {
+    const t = clean(w);
+    const base = t.replace(/^.*\//, "");
+    for (const p of written) if (t === p || t.startsWith(p + "/") || (base !== "" && base === p.replace(/^.*\//, "")) || (p.includes("$") && t.includes(p))) return true;
+    return false;
+  };
+  const isScratch = (w: string): boolean => scratchWord.test(w) || [...scratchVars].some((v) => new RegExp(`\\$\\{?${v}\\b`).test(w));
+  // Names the command wrote, as path parts without their extension (`d/c.py` gives `d`, `c`, `c.py`): an interpreter that
+  // mentions one anywhere (`python3 -c 'import c'`, `node -e "require('./c.js')"`, `python3 -m c`) may load the written code.
+  const writtenNames = new Set<string>();
+  for (const p of written) for (const part of p.split("/")) {
+    if (part === "" || part === "." || part === "..") continue;
+    writtenNames.add(part);
+    writtenNames.add(part.replace(/\.[^.]*$/, ""));
+  }
+  writtenNames.delete("");
+  const named = (text: string): boolean => [...writtenNames].some((n) => new RegExp(`(?<![\\w-])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(text));
+  // Only code that loads a module or script by name counts (`import c`, `from c import`, `require('./c.js')`, `source c`,
+  // `-m c`); reading a written file as data (`readFileSync("/tmp/out.json")`) is left to inlineCodeOk.
+  const mentionsWritten = (text: string): boolean => {
+    const loaders = /(?:^|[^\w.])(?:import|from|require\w*|include\w*|dofile|loadfile|source|use|run_path|import_module)\b[\s(]*['"]?([^\s'");,]*)/g;
+    for (const m of text.matchAll(loaders)) if (named(m[1]!)) return true;
+    for (const m of text.matchAll(/(?:^|[^\w.])import\s+([\w., ]+)/g)) if (named(m[1]!)) return true; // `import os, c`
+    return false;
+  };
+  // A write by the shell, or a /tmp path somewhere other than in the inline code itself: self-contained inline code that names
+  // its own /tmp file is placed by inlineCodeOk, as before.
+  const playOutside = (code: string): boolean => written.size > 0 || scratchVars.size > 0 || scratchWord.test(code === "" ? c : c.split(code).join(""));
+  const inScratchPlay = written.size > 0 || scratchVars.size > 0 || scratchWord.test(c);
+  const interpWords = "python[\\d.]*|pypy[\\d.]*|ipython[\\d.]*|node(?:js)?|tsx|ts-node|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh";
+  const interpreters = new RegExp(`^(?:${interpWords})$`);
+  // Any word by which inline code can bring in or run other code, a dotted one too (`runpy.run_path`, `os.system`), or the
+  // shell's `source` / `.`. Reading a file as data (`readFileSync`) is not a loader; feeding it to exec / eval / Function is.
+  // A static import of a plain module name (`import json`, `from os import path`, `require('fs')`) can only load a module
+  // that `named` checks against the files the command wrote, so it is taken out first; a path or built name is not.
+  const loadsCode = (text: string): boolean => {
+    if (unknownWrite) return /\b(?:import|from|require\w*|include\w*|source|load\w*|use|do|exec\w*|eval\w*)\b|__import__|\w*Context\b|(?:^|[;&|(\s])\.\s+\S/.test(text) || loadsCodeStripped(text);
+    return loadsCodeStripped(text);
+  };
+  const loadsCodeStripped = (text: string): boolean => {
+    const rest = text
+      .replace(/\bfrom\s+[\w.]+\s+import\s+[\w*, ]+/g, " ")
+      .replace(/\bimport\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*/g, " ")
+      .replace(/\brequire\(\s*['"][^'"./][^'"]*['"]\s*\)/g, " ");
+    return /\b(?:\w*exec\w*|\w*eval\w*|require\w*|import\w*|__import__|source|load\w*|dofile|include\w*|use|do|run_path|runpy|system|spawn\w*|popen|fork|Function|compile|subprocess|child_process|\w*Context)\b|(?:^|[;&|(\s])\.\s+\S/.test(rest);
+  };
+  // A heredoc fed to an interpreter is inline code too (the parser skips its body).
+  if (inScratchPlay) {
+    const heredoc = new RegExp(`\\b(?:${interpWords})\\b[^\\n;|&]*<<-?\\s*['"]?\\w+['"]?[^\\n]*\\n([\\s\\S]*)`, "g");
+    for (const m of c.matchAll(heredoc)) if (playOutside(m[1]!) && (loadsCode(m[1]!) || mentionsWritten(m[1]!))) return true;
+    // Code piped to an interpreter that has no script argument (`echo "import c" | python3 -`, `cat c.py | node`) is read from stdin:
+    // the text before the pipe is checked like a heredoc body, and a pipe from `cat` of a written or scratch file is code too.
+    // A here-string is code on stdin too: the rest of the line is checked like a heredoc body.
+    const hereStr = new RegExp(`\\b(?:${interpWords})\\b[^\\n;|&]*<<<[ \\t]*([^\\n]*)`, "g");
+    for (const m of c.matchAll(hereStr)) if (playOutside(m[1]!) && (loadsCode(m[1]!) || mentionsWritten(m[1]!))) return true;
+    // The segment after each pipe is parsed: redirects dropped, runners looked through, then an interpreter with no script
+    // operand (no word with a dot or slash) and no -c/-e code reads its program from stdin; a lone `-` is stdin too.
+    const pipeSeg = /(?<!\|)\|(?!\|)((?:(?!&&)[^;\n|)])*)/g;
+    const piped: { index: number }[] = [];
+    for (const m of c.matchAll(pipeSeg)) {
+      const words = m[1]!
+        .replace(/\d*>&\d+|&>>?\s*\S+|\d*>>?\s*\S+|\d*<\s*\S+/g, " ")
+        .split(/\s+/)
+        .filter((w) => w !== "" && w !== "&");
+      while (words.length && /^(?:env|exec|nohup|time)$/.test(words[0]!)) words.shift();
+      let ai = 0;
+      if (words.length && /^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(words[0]!)) {
+        ai = words.findIndex((w) => interpreters.test(w.replace(/^.*\//, "")));
+        if (ai < 0) continue;
+      }
+      if (!interpreters.test((words[ai] ?? "").replace(/^.*\//, ""))) continue;
+      const rest = words.slice(ai + 1);
+      // Only a flag that carries inline code (one with an operand after it) means the program is not on stdin; for shells
+      // only a cluster ending in `c` does (`bash -e` is errexit, `python3 -E` ignores the environment, `node -p` has no code).
+      const shellInterp = /^(?:sh|bash|zsh|dash|ksh)$/.test((words[ai] ?? "").replace(/^.*\//, ""));
+      const codeFlag = shellInterp ? /^-[A-Za-z]*c$/ : /^-[A-Za-z]*[cermEpM]|^--(?:eval|print|require|import|exec)\b/;
+      if (rest.some((a, k) => codeFlag.test(a) && k + 1 < rest.length)) continue;
+      if (rest.some((a) => a !== "-" && /[./]/.test(a))) continue;
+      piped.push({ index: m.index! });
+    }
+    for (const m of piped) {
+      const before = c.slice(0, m.index);
+      if (loadsCode(before) || mentionsWritten(before)) return true;
+      const last = before.split(/[;&|\n]/).pop() ?? "";
+      if (/^\s*cat\b/.test(last) && last.split(/\s+/).some((w) => w !== "cat" && !w.startsWith("-") && w !== "" && (isWritten(w) || isScratch(w)))) return true;
+    }
+  }
+  let extracted = false;
+  for (const p of parsed) {
+    let { head, args } = p;
+    const assigns = [...p.assigns];
+    // Peel plain wrappers that only start the real command: `setsid nohup`, `env A=b`, `timeout 120`, `nice -n 5`, `time`.
+    for (let guard = 0; guard < 8 && /^(?:setsid|nohup|nice|time|command|exec|env|timeout|flock)$/.test(head); guard++) {
+      // `env -S 'A=b cmd'` splits a string into assignments and a command: not readable here.
+      if (head === "env" && args.some((a) => /^-[A-Za-z]*S|^--split-string/.test(a))) return true;
+      let i = 0;
+      if (head === "flock") {
+        // flock [-nx..] <lock file> <command...>: the lock file is not the command's code (no -c form is peeled).
+        while (args[i]?.startsWith("-")) i++;
+        if (args.slice(0, i).some((a) => /^-[A-Za-z]*c$|^--command/.test(a))) break;
+        head = args[i + 1] ?? "";
+        args = args.slice(i + 2);
+        continue;
+      }
+      while (i < args.length && (args[i]!.startsWith("-") || /^\w+=/.test(args[i]!) || (head === "timeout" && /^\d[\w.]*$/.test(args[i]!)) || (head === "nice" && /^-?\d+$/.test(args[i]!)))) {
+        if (/^\w+=/.test(args[i]!)) assigns.push(args[i]!);
+        else if (head === "env" ? /^(?:-u|-C|-P|--unset|--chdir)$/.test(args[i]!) : /^(?:-n|-u|-C|-S|-s|-k)$/.test(args[i]!)) i++;
+        i++;
+      }
+      if (head === "timeout" && /^\d[\w.]*$/.test(args[i] ?? "")) i++;
+      head = args[i] ?? "";
+      args = args.slice(i + 1);
+    }
+    if (head === "") continue; // a plain `X=1` is a shell variable, not environment
+    if (setsUnknownEnvironment(assigns, head.replace(/^.*\//, ""), args)) return true;
+    // A command word that is a variable or backtick may expand to a file the command wrote (`X=c; $X`): unread code.
+    // Any `$` or backtick anywhere in the word counts (`./$X`, `./"$X"`, `$(echo ./c)`), not just at its start.
+    // Globs and brace lists (`./c*`, `./[c]`, `./{c,d}`) are not plain literals either; `[` and `[[` are the test builtin.
+    if ((/[$\x60]/.test(head) || (head !== "[" && head !== "[[" && /[*?[{]/.test(head))) && (written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) return true;
+    const sh = head.replace(/^.*\//, "");
+    // F4: once a command has unpacked an archive or copied a folder in, files it never wrote by name may exist. Only readers
+    // and file tools may follow in the same command.
+    if (extracted && !(safe.has(sh) && !head.includes("/"))) return true;
+    if (extractsFiles(sh, args, written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) extracted = true;
+    // F2: options that make an otherwise harmless tool run a program.
+    if (runsProgramOption(sh, args)) return true;
+    // F3: xargs builds a command from its input; with a scratch or written path anywhere it is unread code.
+    if (sh === "xargs") {
+      const cmdWord = args.find((a, i) => !a.startsWith("-") && !/^-[IiLnPsdE]$/.test(args[i - 1] ?? ""));
+      if ((written.size || scratchWord.test(c) || scratchVars.size) && !(cmdWord !== undefined && safe.has(cmdWord) && cmdWord !== "tar")) return true;
+    }
+    // git's own config, hooks and -C are BOS-378 (Kit); only pnpm/npm/yarn are handled here.
+    if (tooling.has(sh) && sh !== "git" && toolingRunsScratch(sh, args, isScratch, isWritten)) return true;
+    if (tooling.has(sh) && sh !== "git" && [...written].some((p) => /(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.yml)?|\.pnpmfile\.cjs|package\.json)$/.test(p))) return true;
+    // Only the inline code or module name (the words after -c/-e/-r/-m) is checked here; a written file given as plain data
+    // to a checked-in script (`node scripts/use.js out.json`) is judged below as before.
+    // Any single-dash flag cluster holding c/e/E/r/m/M/p (`-c`, `-pe`, `-mc`, `-MC`, `-ec`), or --eval / --print / --require.
+    // An interpreter behind a runner (`pnpm exec node -e`, `pnpm tsx -e`, `npx tsx -e`, `uv run python -c`, `poetry run python -c`).
+    let ish = sh;
+    let iargs = args;
+    if (/^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(sh)) {
+      // The first interpreter word anywhere in the arguments (`pnpm --filter x exec node`, `uv run --with y python`).
+      const j = iargs.findIndex((a) => interpreters.test(a.replace(/^.*\//, "")));
+      if (j >= 0) { ish = iargs[j]!.replace(/^.*\//, ""); iargs = iargs.slice(j + 1); }
+    }
+    const codeAt = iargs.findIndex((a) => /^-[A-Za-z]*[cermEpM]/.test(a) || /^--(?:eval|print|require|import|exec)\b/.test(a));
+    if (codeAt >= 0 && interpreters.test(ish) && playOutside(iargs.slice(codeAt + 1).join(" "))) {
+      const args = iargs;
+      const flag = args[codeAt]!;
+      const code = args.slice(codeAt + 1).join(" ");
+      // After a write or with a /tmp path anywhere, inline code that loads, requires, sources, imports or executes anything gets
+      // no Allow, whatever it names: it can build the file name at run time. A module named by a joined flag (`-mc`, `-MC`) counts.
+      if (loadsCode(code) || loadsCode(flag.replace(/^-[A-Za-z]*?[mMr]/, "import "))) return true;
+      if (mentionsWritten(code) || named(flag.replace(/^-[A-Za-z]*?[mMr]/, ""))) return true;
+      if (/^-[A-Za-z]*[mMr]$|^--(?:require|import)$/.test(flag) && named(args[codeAt + 1] ?? "")) return true; // `-m c`, `-r ./c.js`
+    }
+    const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
+    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
+      // `bash -c -- 'cmd'`: the command string is the first word after -c that is not `--`.
+      const inner = args.slice(dashC + 1).find((a) => a !== "--") ?? "";
+      if (written.size > 0 && named(inner)) return true; // the inner command may run what the outer one wrote
+      if (usesScratchUnsafely(inner)) return true;
+      continue;
+    }
+    const all = [...assigns.map((a) => a.slice(a.indexOf("=") + 1)), head, ...args];
+    const hitsWritten = all.some(isWritten);
+    const hitsScratch = hitsWritten || all.some(isScratch);
+    if (!hitsScratch) continue;
+    const name = head.replace(/^.*\//, "");
+    if (head.includes("/") && !safe.has(name) && !tooling.has(name)) return true; // `/tmp/w.js`, `./w.js`, `/usr/bin/node /tmp/x`
+    if (safe.has(name) && !head.includes("/")) {
+      if (name === "find" || (name === "sed" && args.some((a) => /^-[a-zA-Z]*f|^--file/.test(a)))) return true;
+      continue;
+    }
+    if (name === "find" && !args.some((a) => /^-(?:exec|execdir|ok|okdir)$/.test(a))) continue;
+    if (tooling.has(name)) {
+      if (hitsWritten && name !== "git") return true; // git reads or stages a written file; its `-c` and exec forms are denied below
+      if (args.some((a) => /^(?:exec|dlx|x|node|nodejs|python[\d.]*|sh|bash|zsh|env|eval|-c|--eval|--exec)$/.test(a)) || (name === "git" && args.includes("-c"))) return true;
+      continue;
+    }
+    // `node scripts/build.js --out /tmp/out`: a plain interpreter whose script is a checked-in relative file. Nothing before
+    // the script (flags, -I/tmp, an assignment) may be scratch or written; later words are the script's data.
+    if (head === name && /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh)$/.test(name) && !assigns.some((a) => isScratch(a) || isWritten(a.slice(a.indexOf("=") + 1)))) {
+      // Inline code (-c / -e) is read by inlineCodeOk, which places the paths it names.
+      const inl = args.findIndex((a) => !a.startsWith("-") || /^-[A-Za-z]*[ceE]$/.test(a));
+      if (inl >= 0 && args[inl]!.startsWith("-") && !args.slice(0, inl).some((a) => isScratch(a) && /^-[A-Za-z]/.test(a) && !/^-[A-Za-z]$/.test(a))) continue;
+      const at = args.findIndex((a) => !a.startsWith("-"));
+      const before = at < 0 ? args : args.slice(0, at + 1);
+      const script = at < 0 ? "" : args[at]!;
+      if (at >= 0 && !/^[/~$]|\.\./.test(script) && !before.some((a) => isScratch(a) || isWritten(a))) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Inline code run by an interpreter (`python3 -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, `lua -e`, an awk program, a
+ * heredoc or pipe into one) is unknown and so denied, unless it provably does nothing that reaches a file: no file, process
+ * or environment API at all, or only file APIs on literal paths that `writeOk` places, with no shell-out and no way to
+ * build a path out of pieces. Interpreters that run a script file are not read here.
+ */
+function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
+  const interp = "python[\\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh|g?awk|mawk";
+  // The interpreter is found wherever it stands (after env, timeout, xargs, a full path, `then` ...), not only first.
+  const re = new RegExp(`(?<![\\w.-])(?:[\\w./-]*/)?(${interp})(?![\\w./-])((?:[^;&|\\n'"]|'[^']*'|"[^"]*")*)`, "g");
+  const piped = new RegExp(`\\|\\s*(?:${interp})\\b`);
+  // A command word that is a variable, `$(...)` or backtick is an unknown program: with -c/-e/-r it may be an interpreter.
+  if (variableCommandWord(c)) return false;
+  for (const m of c.matchAll(re)) {
+    const name = m[1]!;
+    const seg = m[0]!;
+    const isAwk = /awk$/.test(name);
+    const fed = /<<|\s-(?:\s|$)/.test(seg) || piped.test(c); // code arrives by heredoc or pipe
+    // Inline when an option like -c / -e / -r comes before the first plain argument (which would be a script file).
+    let inline = isAwk;
+    for (const t of m[2]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []) {
+      if (!t.startsWith("-") || t === "-") break;
+      if (/^-[A-Za-z]*[ceErp]$/.test(t) || /^--(?:eval|command|print)\b/.test(t)) { inline = true; break; }
+      if (isAwk && t === "-f") { inline = false; break; }
+    }
+    if (!inline && !fed) continue;
+    const code = (fed ? c : seg).replace(/\\(["'`$])/g, "$1");
+    const nodeOrPy = /^(?:python[\d.]*|node(?:js)?)$/.test(name);
+    // Code this long is not read (and the matching below stays cheap on adversarial input).
+    if (code.length > 3000) return false;
+    // `chdir`, home lookups and dynamic imports make a path (or a call) depend on something we can't see.
+    if (/\b(?:chdir|homedir|expanduser|userInfo|__import__|importlib|getattr|globals|pty)\b|\.home\s*\(/.test(code)) return false;
+    // A Path method that writes must be called right on a literal Path('...').
+    if ((code.match(/\.(?:write_text|write_bytes)\s*\(/g) ?? []).length !== (code.match(/\bPath\(\s*(['"])[^'"]*\1\s*\)\.(?:write_text|write_bytes)\s*\(/g) ?? []).length) return false;
+    if (/child_process|subprocess|\b(?:system|popen|exec|execl\w*|execv\w*|spawn\w*|shell_exec|passthru|proc_open|qx|Open3|Kernel|eval|getline)\b|\b(?:execSync|execFileSync|spawnSync)\b/.test(code) || (!nodeOrPy && /\x60/.test(code))) return false;
+    // A path is placed when it is a literal that writeOk accepts; a relative literal stays where the shell already is.
+    const literalOk = (p: string): boolean => !p.includes("..") && (!/^[~/]/.test(p) || writeOk(p));
+    const pathy = [...code.matchAll(/(?:^|[\s'"`=])((?:~|\/(?=[\w.@+-]))[\w.@+\/~-]*)(?=$|[\s'"`),;:])/g)].map((p) => p[1]!);
+    if (pathy.some((p) => !literalOk(p))) return false;
+    if (nodeOrPy) {
+      // Every file call must name its path as a literal, or as a variable set once to a literal.
+      const call = /\b(writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|copyFileSync|copyFile|cpSync|renameSync|rename|unlinkSync|unlink|rmSync|rmdirSync|mkdirSync|mkdir|symlinkSync|symlink|linkSync|chmodSync|chownSync|truncateSync|open|Path|write_text|write_bytes|shutil\.\w+|os\.(?:remove|rename|unlink|mkdir|makedirs|rmdir|chmod|symlink|link|truncate|replace))\s*\(([^,)]*)(?:,([^,)]*))?[,)]/g; // disjoint groups: linear on unclosed input
+      for (const k0 of code.matchAll(call)) {
+        const k = [k0[0], k0[1], k0[2]?.trim(), k0[3]?.trim()] as (string | undefined)[];
+        for (const arg of /^(?:copyFile|cpSync|copyFileSync|rename|renameSync|symlink|symlinkSync|linkSync|shutil|os\.(?:rename|replace|symlink|link))/.test(k[1]!) ? [k[2], k[3]] : [k[2]]) {
+          if (arg === undefined || arg === "") continue;
+          if (/^(?:['"][^'"$\\{}]*['"]|`[^`$\\]*`)$/.test(arg)) { if (!literalOk(arg.slice(1, -1))) return false; continue; }
+          if (/^[\w.]+$/.test(arg) && /^[A-Za-z_]/.test(arg)) {
+            const sets = [...code.matchAll(new RegExp(`(?:^|[\\s;,(])${arg.replace(/\./g, "\\.")}\\s*=\\s*(\\S[^;\\n]*?)\\s*(?:;|\\n|$)`, "g"))];
+            const lit = sets.length === 1 ? /^['"]([^'"$\\{}]*)['"]$/.exec(sets[0]![1]!) : null;
+            if (lit && literalOk(lit[1]!)) continue;
+          }
+          // Not a flag like 'r'/'w': those are second arguments to open and are short literals handled above.
+          return false;
+        }
+      }
+      continue;
+    }
+    // Other interpreters: no file or process API at all, or no way to build a path out of pieces.
+    const touchesFiles = /\b(?:open|write\w*|append\w*|File|IO|FileUtils|unlink|remove|rename|copy\w*|move|mkdir\w*|symlink|chmod|chown|truncate|touch|file_put_contents|fopen|fwrite|require|import|Deno|Bun)\b|>\s*["'$\w/~]/.test(code);
+    if (touchesFiles && /\+|\bjoin\b|%[sdr(]|\bformat\b|\bchr\b|fromCharCode|base64|b64|decode|\\x[0-9a-fA-F]|\\u|environ|\benv\b|HOME|argv|getenv|\$\{/.test(code)) return false;
+  }
+  return true;
+}
 
 /**
  * Hides the agent's own memory folder (`.claude/projects/<own project>/memory/...`) from the "shared folder" row.

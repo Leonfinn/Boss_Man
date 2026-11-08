@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -71,6 +71,8 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
+  /** The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323). Existing companies stay off. */
+  fenceMode: text("fence_mode", { enum: FENCE_MODES }).notNull().default("off"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -78,6 +80,10 @@ export const companies = pgTable("companies", {
   watchdogTrippedReason: text("watchdog_tripped_reason"),
   /** Written by the sweep only, so it never overwrites the owner's settings. */
   watchdogLastSweepAt: timestamp("watchdog_last_sweep_at", { withTimezone: true }),
+  /** Spare-capacity rules (BOS-659): when the sweep first found the company under-used while work waits; null once it is busy again. */
+  watchdogSpareAt: timestamp("watchdog_spare_at", { withTimezone: true }),
+  /** ...and when it last told the CEO about it, so it says so once per quiet stretch. */
+  watchdogSpareAlertedAt: timestamp("watchdog_spare_alerted_at", { withTimezone: true }),
   /** Tickets are referred to as PREFIX-number (e.g. HOL-12); one sequence per company, handed out by a database trigger. */
   ticketPrefix: text("ticket_prefix"),
   nextTicketNumber: integer("next_ticket_number").notNull().default(1),
@@ -195,6 +201,22 @@ export const runnerEvents = pgTable(
   ],
 );
 
+/**
+ * How many times applying one event of a runner has failed transiently (BOS-606), kept apart from the
+ * event row because a retry rolls that row back and the count must survive it. An event that keeps
+ * failing with no code is stored, marked and acked after a few tries so it can't stall the stream.
+ * The row is removed once the event lands or is skipped.
+ */
+export const runnerEventAttempts = pgTable(
+  "runner_event_attempts",
+  {
+    runnerId: uuid("runner_id").notNull().references(() => runners.id, { onDelete: "cascade" }),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    tries: integer("tries").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.runnerId, t.seq] })],
+);
+
 // ---------- Work structure ----------
 
 export const systemState = pgEnum("system_state", ["backlog", "ready", "in_progress", "blocked", "review", "done"]);
@@ -216,6 +238,11 @@ export const projects = pgTable("projects", {
   verifyCommand: text("verify_command"),
   /** An extra, slower check run before merging high and critical risk tickets (R48). */
   deepVerifyCommand: text("deep_verify_command"),
+  /** Whether the default branch passes its check: green, red or unknown. Set by the merge gate (BOS-316). While red, only fixes for main are checked. */
+  mainState: text("main_state").notNull().default("unknown"),
+  mainStateSince: timestamp("main_state_since", { withTimezone: true }),
+  /** The commit on the default branch that the gate last found red (or green). */
+  mainStateCommit: text("main_state_commit"),
   /** Default spend ceiling per ticket across all its runs (R53). */
   ticketCostCapMicros: micros("ticket_cost_cap_micros"),
   /** Starred projects show under Projects in the sidebar. */
@@ -353,6 +380,12 @@ export const tickets = pgTable(
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /**
+     * "Fixes live" (BOS-639): one sentence naming the live symptom this ticket fixes, e.g. "server freezes
+     * as memory climbs". Set by hand (CEO, author or reviewer), never guessed from priority or urgency.
+     * A deploy card whose range carries a marked merge leads with it and pages the owner once.
+     */
+    fixesLive: text("fixes_live"),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
@@ -369,6 +402,14 @@ export const tickets = pgTable(
     /** Optional "blocked until" time and reason (BOS-59); the same trigger clears both when the ticket leaves blocked. */
     blockedUntil: timestamp("blocked_until", { withTimezone: true }),
     blockedUntilReason: text("blocked_until_reason"),
+    /** The branch head the missed-work sweep last saw, and when it changed (BOS-612): a new commit is progress, a run start is not. */
+    progressHead: text("progress_head"),
+    progressAt: timestamp("progress_at", { withTimezone: true }),
+    /** The CEO's plan for this ticket and its deadline (BOS-612): the stuck alert stays quiet until the deadline plus a grace, then raises one card. */
+    ceoPlan: text("ceo_plan"),
+    ceoPlanDeadline: timestamp("ceo_plan_deadline", { withTimezone: true }),
+    /** When the "plan deadline passed" card was raised, so it comes once per plan. */
+    ceoPlanAlertedAt: timestamp("ceo_plan_alerted_at", { withTimezone: true }),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -878,7 +919,49 @@ export const checkResults = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     detail: text("detail"),
   },
-  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at)],
+  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at), index("check_results_company_at").on(t.companyId, t.at)],
+);
+
+/**
+ * The server-owned check queue (DR-003, BOS-316). One row per requested check; the runner runs it in a process it owns,
+ * outside any agent session. kind: merge (the gate's one full check) or pre_review (an author's or reviewer's quick or full check).
+ * state: queued, running, passed, failed, stuck (with a reason), cancelled (with a reason). A job never leaves the queue without a reason.
+ */
+export const checkJobs = pgTable(
+  "check_jobs",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    /** quick or full: how wide the check is. A passed full check satisfies a quick request on the same tree. */
+    scope: text("scope").notNull().default("full"),
+    commit: text("commit").notNull(),
+    tree: text("tree").notNull(),
+    state: text("state").notNull().default("queued"),
+    /** 0 urgent, 1 normal (see check-gate.ts checkPriority); lower goes first within a kind. */
+    priority: integer("priority").notNull().default(1),
+    /** True for a ticket that fixes a red main: it goes before every other job while main is red. */
+    fixesMain: boolean("fixes_main").notNull().default(false),
+    /** The agent to wake with the result. */
+    requestedBy: uuid("requested_by").references(() => agents.id, { onDelete: "set null" }),
+    runnerId: uuid("runner_id").references(() => runners.id, { onDelete: "set null" }),
+    command: text("command"),
+    exitCode: integer("exit_code"),
+    /** Why the job is stuck or cancelled, or how it ended. Set whenever the state is stuck or cancelled. */
+    reason: text("reason"),
+    logTail: text("log_tail"),
+    queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    lastOutputAt: timestamp("last_output_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("check_jobs_state_queued").on(t.state, t.queuedAt),
+    index("check_jobs_ticket").on(t.ticketId, t.queuedAt),
+    index("check_jobs_project_tree").on(t.projectId, t.tree),
+  ],
 );
 
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
@@ -951,7 +1034,10 @@ export const failureSignatures = pgTable(
     sample: text("sample").notNull(),
     createdAt: createdAt(),
   },
-  (t) => [index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt)],
+  (t) => [
+    index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt),
+    index("failure_signatures_company_recent").on(t.companyId, t.createdAt),
+  ],
 );
 
 /** Agent-to-agent nudges (R86), kept for the pair rate limit and ping-pong detection. */

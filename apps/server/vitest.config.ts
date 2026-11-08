@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { freemem } from "node:os";
 import { defineConfig } from "vitest/config";
+import { checkThreads } from "../../scripts/check-threads.mjs";
 import { guardVitest } from "../../scripts/vitest-guard.mjs";
 
 // Keeps whole-suite runs at the merge gate for agent sessions; see scripts/vitest-guard.mjs.
@@ -38,7 +39,8 @@ function workers() {
     } catch {}
     free = Math.min(free, max - (current - cache));
   }
-  const cap = Number(process.env.BOSSMAN_TEST_MAX_WORKERS) >= 1 ? Math.floor(Number(process.env.BOSSMAN_TEST_MAX_WORKERS)) : 4;
+  // Never more than the check's CPU budget either (BOS-674, scripts/check-threads.mjs), so a small host isn't overrun.
+  const cap = Math.min(checkThreads(), Number(process.env.BOSSMAN_TEST_MAX_WORKERS) >= 1 ? Math.floor(Number(process.env.BOSSMAN_TEST_MAX_WORKERS)) : 4);
   // 0.6 GB base + 0.9 GB per worker, keeping 1 GB spare for the rest of the run.
   return Math.max(1, Math.min(cap, Math.floor((free / GB - 1.6) / 0.9)));
 }
@@ -49,6 +51,8 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     maxWorkers: workers(),
+    // The merge check sets BOSSMAN_TEST_TIMES_FILE to also get a JSON report, for per-file times in the gate store (BOS-654).
+    ...(process.env.BOSSMAN_TEST_TIMES_FILE ? { reporters: ["default", "json"], outputFile: { json: process.env.BOSSMAN_TEST_TIMES_FILE } } : {}),
     globalSetup: ["test/global-setup.ts"],
     setupFiles: ["test/live-run-tokens.ts"],
   },

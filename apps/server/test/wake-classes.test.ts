@@ -52,6 +52,11 @@ describe("wake classes: the table", () => {
     "the owner wrote on this ticket",
     "snoozed twice in a row and still tripping",
     "runner update",
+    // Why a runner restarted (BOS-594), and the setting-change drain's label: not wakes.
+    "setting change",
+    "host",
+    "crash or out of memory",
+    "unknown",
     "it is no longer at its link",
     "it has no pinned version to check",
     "the file at the link has changed since the review",
@@ -61,6 +66,10 @@ describe("wake classes: the table", () => {
     // A command's options in the owner-replies service (BOS-425), not a wake.
     "unanswered at 5 minutes, the agent is woken again",
     "unanswered at 10 minutes, the CEO is asked",
+    // The reasons a dropped do-after/do-before link is reported to its raiser (BOS-625), not wakes.
+    "another company",
+    "not open",
+    "unknown",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {
@@ -304,6 +313,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "app.ts": DROP_RECORDED + " (assigned, feedback, skill decided); owner and rule wakes are never dropped",
     "mcp.ts": DROP_RECORDED + " (hooks.wake: note request, ...)",
     "services/alert-ladder.ts": CHECKS_OUTCOME + " (a dropped rung is not counted as sent)",
+    "services/check-dispatcher.ts": NEVER_DROPPED + " (check_result is scheduled)",
     "services/chat.ts": NEVER_DROPPED,
     "services/pa.ts": NEVER_DROPPED,
     "services/decisions.ts": NEVER_DROPPED + "; chased and engagement are " + DROP_RECORDED,

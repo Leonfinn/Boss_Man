@@ -13,6 +13,7 @@ import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { criterionText, criteriaText, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
@@ -487,11 +488,14 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         text:
           r.landing?.state === "running"
             ? `${r.signoffAnswered ? "Signed off. " : ""}Checking and merging now.`
-            : // The sign-off's own answer ran and finished the merge before it returned, so there is no
-              // landing to show: say it settled, and the reload below shows the merged state (BOS-471).
-              r.signoffAnswered
-              ? "Signed off and merged."
-              : "Approved.",
+            : // The background merge (BOS-559) finished before the page read it back, so say so here;
+              // the reload below shows the merged state.
+              r.landing?.outcome === "merged"
+              ? `${r.signoffAnswered ? "Signed off and merged. " : "Merged."}`
+              : // No landing to show: a ticket with nothing to merge was finished in the same press (BOS-471).
+                r.signoffAnswered
+                ? "Signed off."
+                : "Approved.",
       });
       ticket.reload();
     } catch (err) {
@@ -519,7 +523,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     }
   };
 
-  if (ticket.error) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such task." : ticket.error.message}</p>;
+  if (ticket.error && !away(ticket.error)) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such task." : ticket.error.message}</p>;
   if (!t) return null;
   const made = outputs.data ?? [];
   // Collapsed, a long description still shows its first 8 lines.
@@ -683,6 +687,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </label>
 
           <DoneWhen t={t} patch={patch} busy={busy} />
+          {t.fixesLive?.trim() && (
+            // BOS-639: set by the CEO, the author or a reviewer. When it merges, the deploy card says it is urgent.
+            <p className="fixes-live" style={{ margin: 0 }}>
+              <strong>Fixes a live problem:</strong> {t.fixesLive.trim()}. When this merges, its update card is marked urgent.
+            </p>
+          )}
           <OwnerSetup t={t} patch={patch} busy={busy} />
 
           <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch && !t.noCode ? "code on its branch" : "nothing yet"}>
