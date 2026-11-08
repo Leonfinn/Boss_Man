@@ -205,7 +205,10 @@ export const OWNER_FIELDS = {
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
     "Instructions, in Markdown", "A skill folder, its files, or a .zip",
   ],
-  "Server and runner": ["Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)"],
+  "Server and runner": [
+    "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
+    "Background (infinite mode) runs at once (0 to 16)",
+  ],
   "Access and funding": [
     "Server name", "Server URL", "Transport", "Token secret", "Header name", "Header value",
     // Deploy targets (BOS-619), with the tag that moves after a successful deploy.

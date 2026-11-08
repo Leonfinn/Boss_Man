@@ -1,6 +1,6 @@
 {
-  "id": "b96a7c6d-dddf-4d45-afd5-e864a097296d",
-  "prevId": "a7b53337-9629-4210-99c5-3198778804af",
+  "id": "cd023904-da94-4dfc-8af8-0b7410b75c58",
+  "prevId": "d6c8f6c0-e014-4f4a-bde1-72ebc956195b",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -6361,6 +6361,12 @@
         },
         "image_version": {
           "name": "image_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "image_commit": {
+          "name": "image_commit",
           "type": "text",
           "primaryKey": false,
           "notNull": false

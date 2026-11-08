@@ -6,7 +6,7 @@ const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }
 const dump = { argv: process.argv.slice(2), config: JSON.parse(process.env.OPENCODE_CONFIG_CONTENT ?? "null"), autoupdateOff: process.env.OPENCODE_DISABLE_AUTOUPDATE, browserArgs: process.env.AGENT_BROWSER_ARGS ?? null, runnerOnly: process.env.SOME_RUNNER_ONLY_SETTING ?? null, model: null, effort: null, mcpServers: null };
 // Like OpenCode, the effort option lists the current model's variants.
 const options = [
-  { id: "model", name: "Model", category: "model", type: "select", currentValue: "a/one", options: [{ value: "a/one", name: "One" }, { value: "b/two", name: "Two" }] },
+  { id: "model", name: "Model", category: "model", currentValue: "a/one", options: [{ value: "a/one", name: "One" }, { value: "b/two", name: "Two" }, ...(process.env.FAKE_MODELS ? JSON.parse(process.env.FAKE_MODELS).map((v) => ({ value: v, name: v })) : [])] },
   { id: "effort", name: "Effort", category: "thought_level", type: "select", currentValue: "medium", options: [{ value: "low", name: "Low" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }] },
 ];
 const save = () => writeFileSync(process.env.DUMP, JSON.stringify(dump));

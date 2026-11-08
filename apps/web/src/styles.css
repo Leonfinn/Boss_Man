@@ -118,6 +118,7 @@ p { margin: 0; }
 .side a.nav svg { flex: none; }
 .side a.nav .nav-label { flex: 1; min-width: 0; }
 .side .count { font-family: var(--mono); font-size: 12px; min-width: 22px; text-align: center; padding: 1px 6px; border-radius: 999px; background: var(--badge); color: var(--ink); }
+.side .count.warn { background: var(--amber); color: #fff; }
 .side h2 { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.08em; color: var(--side-muted); text-transform: uppercase; }
 .side .companies { display: flex; flex-direction: column; gap: 10px; padding: 0 8px; }
 .side .company { display: flex; gap: 10px; align-items: baseline; }
@@ -883,6 +884,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
   .side.collapsed .count { display: none; }
   /* The badge count stays visible as a small dot when the strip is too narrow for the number. */
   .side.collapsed .count-dot { display: block; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--badge); }
+  .side.collapsed .count-dot.warn { background: var(--amber); }
   .side.collapsed .foot { padding: 0; }
   /* Log out stays reachable from the strip as an icon (BOS-290). */
   .side.collapsed .foot .logout { display: inline-flex; align-items: center; justify-content: center; width: 100%; padding: 8px; }

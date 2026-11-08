@@ -1,5 +1,6 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { isInfiniteModel } from "@boss-man/shared";
 import { api, type Company } from "../api";
 import { away } from "../server-watch";
 import { useDraft } from "../drafts";
@@ -130,6 +131,11 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
               <span>Started {when(run.startedAt)}</span>
               {run.endedAt && <span>Ended {when(run.endedAt)}</span>}
               <span className="mono">{run.model ?? "default model"}</span>
+              {isInfiniteModel(run.model) && (
+                <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow, in a background run slot.">
+                  Infinite mode · free, slow
+                </span>
+              )}
               <span className="mono" title={usage(run).title}>
                 {usage(run).text}
               </span>

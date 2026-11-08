@@ -1932,6 +1932,72 @@ describe("rules judge: each heredoc on a line has its own owner and body (BOS-72
   });
 });
 
+describe("rules judge: rules-judge rolling follow-ups (BOS-744)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    // Kind: cat/tee heredoc body run by a command. 1. the rest of the head line feeds the body to an interpreter.
+    // `>` and `> >` before `(` are not `>(`, so the strip's own `[<>]\(` check missed them and the body was dropped.
+    "tee <<'EOF' >(bash)\nrm -rf /etc\nEOF",
+    "tee <<'EOF' > >(bash)\nrm -rf /etc\nEOF",
+    "tee <<'EOF' >(python3)\nrm -rf /etc\nEOF",
+    "cat <<'EOF' >>(bash)\nrm -rf /etc\nEOF",
+    "cat <<'EOF' | tee >(bash) > /tmp/x\nrm -rf /etc\nEOF",
+    "cat <<'EOF' >(bash) >(sh)\nrm -rf /etc\nEOF",
+    // The reader is on the cat line but the `<<` is on a later part of it.
+    "cat x; tee <<'EOF' >(bash)\nrm -rf /etc\nEOF",
+    // `<(` reads the body as data, not code: kept too, so nothing is dropped unseen.
+    "tee <<'EOF' <(cat)\nrm -rf /etc\nEOF",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "cat <<'EOF' > /tmp/x\nrm -rf /etc\nEOF",
+    "tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
+    "cat <<'EOF' > /tmp/x\nhello\nEOF",
+    "echo hi && tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
+    "echo `date`\n",
+    "cat `date` > /tmp/x\n",
+  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  // Item 2 (a backtick substitution on a cat line): already Deny on main from other rules, checked once here so a
+  // regression shows. The true gaps found while checking it closed with BOS-727 and BOS-728, not here.
+  it.each([
+    "cat `bash <<'EOF'`\nrm -rf /etc\nEOF",
+    "cat `bash <<EOF`\nrm -rf /etc\nEOF",
+    "cat x `sh <<'B'; bash`\nrm -rf /etc\nB",
+    "`bash <<'E'`\nrm -rf /etc\nE\n",
+    "echo `bash -c 'rm -rf /etc'`\n",
+  ])("deny, backtick substitution (item 2): %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  // Kind: xargs/parallel option values read as the program (Jane's round-3 review of BOS-730). The scan that decides what
+  // runs under xargs/parallel must not take the value of an option it doesn't know as the program: `echo` is the value of
+  // `--process-slot-var` / `--workdir` / `--env`, and the real program after it is `perl -e 'unlink @ARGV'`. Only a program
+  // reached through options the scan fully understands may get Allow.
+  it.each([
+    "echo / | xargs --process-slot-var echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --workdir echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --env echo perl -e 'unlink @ARGV'",
+    // getopt_long accepts unique prefixes: `--process` is not `--process-slot-var`, so its value is not the program.
+    "echo / | xargs --process echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --tmpdir echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --halt echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --timeout echo perl -e 'unlink @ARGV'",
+  ])("deny: xargs/parallel option value is not the program: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it("reads long hostile input in linear time", () => {
+    const t = Date.now();
+    const inputs = [
+      "cat `bash <<'E'` " + "x ".repeat(2000) + "\nrm -rf /etc\nE",
+      "cat <<'A' " + "((".repeat(1500) + "\n" + "> >(".repeat(800) + "A",
+      "cat x " + "`".repeat(3000) + " <<'A'\n" + "| tee ".repeat(500) + "\nA",
+      // The xargs/parallel option scan (BOS-744) reads each option word once: a long chain of unknown options stays linear.
+      "echo / | xargs " + "--unknown ".repeat(600) + "echo perl",
+      "echo / | parallel " + "-" + "z".repeat(3000) + " echo",
+    ];
+    for (const cmd of inputs) {
+      expect(cmd.length).toBeLessThan(10_000);
+      judge(cmd);
+    }
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+});
+
 // BOS-729 (Jane's round-2 review of BOS-715): the file-tool scan is linear, `shred` is a delete for the target-scope check,
 // and a file tool under `xargs` reads names the judge can't place. Every Deny row got Allow before this fix.
 describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-729)", () => {
@@ -1964,4 +2030,139 @@ describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-72
     }
     expect(tool / base).toBeLessThan(20);
   });
+});
+
+// BOS-776: what runs under xargs/parallel (Jane's BOS-744 security review, items 1 to 4). Every Deny row got Allow on 9dbbac40.
+describe("rules judge: wrappers, shells and option table under xargs/parallel (BOS-776)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  const P = "perl -e 'unlink @ARGV'";
+  it.each([
+    // 1. A wrapper in front of the program resets the safe-program check.
+    `echo / | xargs nice ${P}`,
+    `echo / | xargs env ${P}`,
+    `echo / | xargs timeout 5 ${P}`,
+    `echo / | xargs -- nice ${P}`,
+    `echo / | xargs stdbuf -oL ${P}`,
+    `echo / | xargs ionice ${P}`,
+    `echo / | xargs nohup ${P}`,
+    `echo / | xargs /usr/bin/env ${P}`,
+    `echo / | xargs xargs ${P}`,
+    `echo / | parallel nice ${P} ::: 1`,
+    `echo / | parallel -j2 env ${P} ::: 1`,
+    // 2. parallel runs its command through a shell: a metacharacter in any argument is a second command.
+    `echo / | parallel echo 'a; perl -e "unlink @ARGV"' ::: 1`,
+    "echo / | parallel echo 'a | sh' ::: 1",
+    "echo / | parallel echo 'a & sh' ::: 1",
+    "echo / | parallel echo '$(rm -rf /)' ::: 1",
+    "echo / | parallel echo '`rm -rf /`' ::: 1",
+    "echo / | parallel echo 'a > /home/node/.bashrc' ::: 1",
+    "echo / | parallel echo 'a < /etc/passwd' ::: 1",
+    "echo / | parallel echo 'a\nrm -rf /' ::: 1",
+    "echo / | parallel echo '{= system(\"rm -rf /\") =}' ::: 1",
+    "echo / | parallel echo {} ::: 'a;rm -rf /'",
+    // 3. Option table: -s takes a value (so `echo` is its value and perl is the program); --rpl holds perl code;
+    // --max-lines / --eof / --replace take a value only when attached, so the next word is the program.
+    `echo / | parallel -s echo ${P}`,
+    "echo / | parallel --rpl '{x} $_=unlink(\"/\")' echo {x} ::: 1",
+    "echo / | xargs --max-lines perl echo",
+    "echo / | xargs --eof perl echo",
+    "echo / | xargs --replace perl echo",
+    // 4. Readers that write or run code are not safe programs.
+    "echo x | xargs sort -o /home/node/.bashrc",
+    "echo x | xargs tree -o /home/node/.bashrc",
+    "echo x | xargs uniq in /home/node/.bashrc",
+    "echo x | xargs rg --pre ./evil x",
+    "echo x | xargs xxd in /home/node/.bashrc",
+    "echo x | xargs file -C",
+    "echo x | xargs date -s 2000-01-01",
+    "echo x | parallel --joblog /home/node/.bashrc echo ::: 1",
+    // 5. Jane's second round: the -I replace string can stand in for the program (B1).
+    "parallel -I echo echo -rf ~ ::: rm",
+    "parallel -Iecho echo -rf ~ ::: rm",
+    "echo rm | xargs -I echo echo -rf ~",
+    "echo rm | xargs -Iecho echo -rf ~",
+    "echo rm | xargs --replace=echo echo -rf ~",
+    "echo rm | xargs -I cat cat -rf ~",
+    // 6. No program word: parallel runs each input line as a command (B2).
+    "parallel -a cmds.txt",
+    "parallel -j4 -a cmds.txt",
+    "parallel --arg-file cmds.txt",
+    "cat cmds.txt | parallel",
+    "cat cmds.txt | parallel -j4",
+    "cat cmds.txt | sem",
+    "cat cmds.txt | sem -j2 echo ; sem rm -rf ~",
+    // 7. -J loads options from a profile file the scan can't see (B3).
+    "parallel -J evil echo ::: 1",
+    "parallel -Jevil echo ::: 1",
+  ])("deny: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "xargs grep x",
+    "parallel -j4 echo ::: a",
+    "xargs -n1 cat",
+    "find . -name x | xargs wc -l",
+    "parallel --tag echo {} ::: a",
+    "parallel -s 100 echo ::: a",
+    "xargs --max-lines=2 echo",
+    "ls | xargs -I{} head -n 1 {}",
+    "parallel -I{} echo {} ::: a",
+    "parallel -a list.txt echo",
+    "sem -j2 echo hi",
+  ])("allow: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  it("reads long hostile input in linear time", () => {
+    const t = Date.now();
+    const inputs = [
+      "echo / | xargs " + "nice ".repeat(1500) + "perl",
+      "echo / | parallel echo " + "';' ".repeat(1500) + "::: 1",
+      "echo / | parallel " + "-s 1 ".repeat(1500) + "echo",
+      "echo / | parallel echo " + "'$(' ".repeat(1500) + "::: 1",
+    ];
+    for (const cmd of inputs) {
+      expect(cmd.length).toBeLessThan(10_000);
+      judge(cmd);
+    }
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+});
+
+// BOS-730 (Jane's review of BOS-729): `..` in shred targets, xargs hidden behind an earlier file-tool word, and xargs/parallel
+// feeding a program that deletes but is not a file tool. Every Deny row got Allow before this fix.
+describe("rules judge: shred .., xargs behind a tool word, xargs/parallel deleters (BOS-730)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    "shred /tmp/../etc/passwd",
+    "cd /tmp && shred ../etc/passwd",
+    "echo / | env -u rm xargs rm -rf",
+    "echo / | nice cp xargs rm -rf",
+    "echo / | xargs perl -e 'unlink @ARGV'",
+    "echo / | xargs find -delete",
+    "echo /etc | parallel rm -rf",
+    "echo /etc | xargs -n 1 perl -e 'unlink @ARGV'",
+    "echo /etc | xargs -I{} find {} -delete",
+    "echo /etc | xargs -r find cat -delete",
+    "echo / | xargs -t find ls -delete",
+    "echo / | parallel -r find ls -delete",
+    "echo /etc | xargs -r nice ls",
+    "echo /etc | xargs -t sh ls",
+    "cat /tmp/cmds.txt | parallel",
+    "echo /etc/passwd | xargs sort -o",
+    // BOS-732: --replace/--eof/--max-lines take a value only as `--opt=value`; alone, the next word is the program.
+    "echo /etc | xargs --replace find cat {} -delete",
+    "echo /etc | xargs --eof find cat {} -delete",
+    "echo /etc | xargs --max-lines find cat -delete",
+    // parallel with no program runs every argument after ::: as a command.
+    "parallel ::: echo 'perl -e \"unlink glob q(/etc/*)\"'",
+    "parallel :::: /tmp/cmds.txt",
+    "echo /etc | parallel --tag perl cat -e 'unlink @ARGV'",
+    "echo /etc | parallel --max-lines 1 perl cat",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "ls /tmp/a | xargs echo",
+    "ls /tmp/a | xargs -r ls",
+    "ls /tmp/a | xargs -n 1 grep foo > /tmp/out.txt",
+    "ls /tmp/a | xargs --replace=X echo X",
+    "ls /tmp/a | xargs --replace echo X",
+    "ls /tmp/a | parallel --tag echo ::: a b",
+  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
 });
