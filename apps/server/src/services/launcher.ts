@@ -12,7 +12,7 @@ import type { runnersService } from "./runners.js";
 
 export type LauncherOptions = { url: string; keyFile: string };
 /** `current`: running the image `boss-man-runner:current` points at now (absent from a launcher older than the server). */
-export type LaunchedRunner = { slug: string; state: string; status: string; image: string; current?: boolean; guard?: "on" | "off" | "unavailable" };
+export type LaunchedRunner = { slug: string; state: string; status: string; image: string; current?: boolean; guard?: "on" | "off" | "unavailable" | "down" };
 
 export class LauncherError extends Error {
   constructor(

@@ -140,12 +140,12 @@ print_rollback_help() {
   say "Last 20 lines of the server log:"; docker compose logs --no-color --tail 20 server 2>&1 | cut -c1-300 || true
   say "Look at the logs first:   docker compose logs --tail 100 server"
   say "To go back to the old code (does not touch the database):   scripts/deploy.sh --rollback"
-  say "  or by hand:   git checkout $FROM && docker compose build && docker compose up -d"
+  say "  or by hand:   git checkout $FROM && docker compose build server && docker compose up -d --no-deps server"
   say "Only if the data itself is damaged, restore the backup (this loses everything written since):"
   say "  docker compose stop server"
   say "  docker compose exec -T db psql -U bossman -d postgres -c 'DROP DATABASE bossman' -c 'CREATE DATABASE bossman OWNER bossman'"
   say "  gunzip -c $BACKUP | docker compose exec -T db psql -U bossman bossman"
-  say "  docker compose up -d"
+  say "  docker compose up -d --no-deps server"
 }
 
 do_rollback() {

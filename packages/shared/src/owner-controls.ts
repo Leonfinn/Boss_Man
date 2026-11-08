@@ -215,7 +215,11 @@ export const OWNER_FIELDS = {
     // The agent fence's mode (BOS-325).
     "Fence",
   ],
-  "Import and export": ["Include the wiki", "Tickets", "Package", "Company name", "Funding for every agent"],
+  "Import and export": [
+    "Include the wiki", "Tickets", "Package", "Company name", "Funding for every agent",
+    // The import preview's opt-in for a tool server that reaches the stack or the private network (BOS-335 follow-up).
+    "I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway",
+  ],
   Funding: [
     "Hold routine work at", "I have extra usage", "Can trigger the hold",
     "Order (1 is used first; leave empty to keep this account out of the list)", "Login for this account",
