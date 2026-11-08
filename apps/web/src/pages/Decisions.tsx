@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, type StepPiece, type Where } from "@boss-man/shared";
-import { api, ApiError, type AdvisedDecision, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
+import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
@@ -432,9 +432,10 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
   );
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[] }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[] }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
+  const [alwaysScopes, setAlwaysScopes] = useState<Record<string, "agent" | "company">>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [endedHere, setEndedHere] = useState<Record<string, boolean>>({});
@@ -474,6 +475,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // The answer being sent as a .txt file, for one too long to send as a message.
   const [attaching, setAttaching] = useState<string | null>(null);
   const inFlight = useRef(new Set<string>());
+  // (BOS-739) Tell the server the owner has seen a hand-apply card, once per card, so a later system
+  // close knows they may be part-way through its steps and also tells their feed. Best effort: a failed
+  // call changes nothing on the page.
+  const openedSent = useRef(new Set<string>());
+  useEffect(() => {
+    for (const d of decisions) {
+      const c = d.context;
+      const handApply = (c?.type === "self_deploy" && c.handSteps?.length) || (c?.type === "owner_todo" && !!c.steps?.length);
+      if (!handApply || openedSent.current.has(d.id)) continue;
+      openedSent.current.add(d.id);
+      void api(`/api/decisions/${d.id}/opened`, { method: "POST", body: {} }).catch(() => undefined);
+    }
+  }, [decisions]);
   const landingIds = [...new Set(decisions.filter((d) => !answered[d.id] && d.context?.type === "risk_review" && d.context.ticketId).map((d) => d.context!.ticketId!))];
   const landingKey = landingIds.sort().join(",");
   useEffect(() => {
@@ -525,6 +539,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   };
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
+  const shownNotices = closedNotices.filter((n) => !filter || n.companyId === filter);
   // (BOS-551) The server puts waiting cards last and marks them; show them in the "Waiting, nothing to do
   // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
   const queueCards = shown.filter((d) => !d.waiting);
@@ -554,6 +569,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     }
   };
   const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
+    const isAlways = d.context?.always?.some((a) => a.label === option) ?? false;
     // A second click can land before React re-renders the disabled button: refuse it here too.
     if (inFlight.current.has(d.id)) return;
     inFlight.current.add(d.id);
@@ -561,7 +577,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     try {
       const note = notes[d.id]?.trim();
       const reasonLink = reasonLinks[d.id]?.trim();
-      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
       // The card is answered, so its kept note and answer are done with.
       forgetNote(d.id);
@@ -623,6 +639,44 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         )}
       </header>
       {banner}
+      {shownNotices.length > 0 && (
+        // (BOS-739) A card Boss Man closed by itself while the owner may have been mid-way: the notice
+        // stands where the card was, with its steps kept read-only, for a couple of hours.
+        <section aria-label="Updates closed while you were doing them" style={{ display: "grid", gap: 10, marginBottom: 16 }}>
+          {shownNotices.map((n) => (
+            <article key={n.id} className="banner" data-closed-notice={n.notice.why} style={{ background: "var(--amber-soft)", color: "var(--ink)", border: "1px solid var(--amber)", borderRadius: 10, padding: "12px 14px" }}>
+              <p style={{ fontWeight: 700, margin: 0 }}>
+                <span className="tag amber">Closed for you</span> {n.question.split("\n")[0]}
+              </p>
+              <p style={{ margin: "6px 0 0" }}>{n.notice.text}</p>
+              {n.notice.newer && (
+                <p style={{ margin: "6px 0 0" }}>
+                  <a href="#/decisions">Follow the newer card: {n.notice.newer.label}</a>
+                </p>
+              )}
+              {(() => {
+                // A hand-apply card keeps its steps as `handSteps`; a hand-apply to-do as `steps` (BOS-739).
+                const steps = n.context.handSteps?.length ? n.context.handSteps : n.context.steps;
+                return steps?.length ? (
+                  <details style={{ marginTop: 6 }}>
+                    <summary className="muted">These steps are kept to read; there is nothing to press.</summary>
+                    <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                      {steps.map((s, i) => (
+                        <li key={i}><StepText text={s} /></li>
+                      ))}
+                    </ol>
+                    {n.context.check && (
+                      <p className="muted" style={{ fontSize: 13 }}>
+                        How to check it worked: <StepText text={n.context.check} />
+                      </p>
+                    )}
+                  </details>
+                ) : null;
+              })()}
+            </article>
+          ))}
+        </section>
+      )}
       {withTeam.length > 0 && (
         // Alerts the Scrum Master or CEO still hold: listed so nothing is hidden, but not the owner's to answer yet.
         <details className="sub">
@@ -1001,7 +1055,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     )}
                     {done ? (
-                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? " Saved as a rule in Settings → Rules." : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
+                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}. To undo it, remove it under Settings → Rules.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : checking ? null : (
                       <>
                         {d.context?.hires && (
@@ -1101,6 +1155,30 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             </div>
                           </form>
                         ) : ownWords[d.id] === undefined || modelEdits[d.id] ? (
+                          <>
+                          {d.context?.always?.length ? (
+                            <div className="always-preview">
+                              {d.context.alwaysAgent && (
+                                <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+                                  <legend style={{ fontWeight: 600, marginBottom: 4 }}>If you press an Always button, it covers</legend>
+                                  <label style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
+                                    <input type="radio" name={`always-scope-${d.id}`} checked={(alwaysScopes[d.id] ?? "agent") === "agent"} onChange={() => setAlwaysScopes((s) => ({ ...s, [d.id]: "agent" }))} /> {d.context.alwaysAgent.name} only
+                                  </label>
+                                  <label style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
+                                    <input type="radio" name={`always-scope-${d.id}`} checked={alwaysScopes[d.id] === "company"} onChange={() => setAlwaysScopes((s) => ({ ...s, [d.id]: "company" }))} /> Every agent in this company
+                                  </label>
+                                </fieldset>
+                              )}
+                              <ul className="muted" style={{ fontSize: 13, paddingLeft: 18 }}>
+                                {d.context.always.filter((a) => a.what).map((a) => (
+                                  <li key={a.label}>
+                                    {a.label}: <em>Always allow {d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "any agent"} to {a.what}.</em>
+                                  </li>
+                                ))}
+                              </ul>
+                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Rules.</p>
+                            </div>
+                          ) : null}
                           <div className="actions">
                             {!modelEdits[d.id] && d.options.map((o) => (
                               <button type="button" key={o} className={`btn${o === eff.option ? " primary" : ""}`} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
@@ -1113,6 +1191,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               </button>
                             )}
                           </div>
+                          </>
                         ) : (
                           <form
                             style={{ display: "flex", flexDirection: "column", gap: 8 }}

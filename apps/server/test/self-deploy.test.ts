@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
+import { selfDeployService } from "../src/services/self-deploy.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
@@ -848,6 +849,190 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       vi.setSystemTime(new Date("2026-11-03T01:06:00Z"));
       await c.selfDeploy.sync();
       expect((await c.db.select().from(notifications)).filter((n) => n.level !== "ask")).toHaveLength(1);
+    });
+  });
+
+  // BOS-487 (DR-020 B and C): the host says which services an update changes; a changed database or proxy gets its own card.
+  describe("changed database and proxy (BOS-487)", () => {
+    const commands = (texts: string[]) => texts.flatMap((t) => parseStep(t)).filter((p) => p.type === "command").map((p) => p.text);
+    const handCard = async (c: Awaited<ReturnType<typeof setup>>, over: Record<string, unknown>) => {
+      await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"], ...LAYOUT, servicesChecked: true, ...over });
+      await c.selfDeploy.sync();
+      const [d] = await c.open();
+      return d!.context as { handSteps?: string[]; rollback?: string; update?: { risks: string[] } };
+    };
+    const svcCards = async (c: Awaited<ReturnType<typeof setup>>) => (await c.todos()).filter((d) => d.dedupeKey?.startsWith("self-deploy:services:"));
+    /** A second service instance on the same database with its own "quiet" answer, so a test can say the host is busy. */
+    const withQuiet = (c: Awaited<ReturnType<typeof setup>>, quiet: () => Promise<boolean>) => selfDeployService(c.db, { dir: c.dir, notify: async () => undefined, hosts: async () => [{ name: "nas01", ownership: [] }], hostQuiet: quiet });
+    /** Server update B ended well at 12:03; a call at 12:30 is past its standby window (the default 15 minutes + margin). */
+    const deployedAndLater = async (c: Awaited<ReturnType<typeof setup>>, over: Record<string, unknown>, at = "2026-10-20T12:30:00Z") => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-20T12:04:00Z"));
+      await c.available({ deployed: B, tip: B, commits: [], paths: [], ...LAYOUT, servicesChecked: true, changedServices: [], ...over });
+      await c.status({ id: "", result: "deployed", from_commit: A, to_commit: B });
+      await c.selfDeploy.sync();
+      vi.setSystemTime(new Date(at));
+    };
+    afterEach(() => vi.useRealTimers());
+
+    it("says plainly that the database's settings change, and never gives a restart as part of the server update", async () => {
+      const c = (ctx = await setup());
+      const x = await handCard(c, { changedServices: ["db"] });
+      const text = x.handSteps!.join("\n");
+      expect(x.update!.risks).toContain("This update changes the database's settings. Applying the update does not restart it; a separate card follows, with a backup first.");
+      expect(text).toContain("A separate card follows");
+      expect(text).not.toContain("Only if the database settings changed");
+      expect(commands(x.handSteps!).join("\n")).not.toMatch(/ up -d --no-deps (db|proxy)|pg_dump/);
+      expect(lintOwnerSteps([...x.handSteps!, x.rollback!], [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11")).toEqual([]);
+    });
+
+    it("says the same about the proxy, and about both", async () => {
+      const c = (ctx = await setup());
+      const x = await handCard(c, { changedServices: ["proxy"] });
+      expect(x.update!.risks).toContain("This update changes the proxy's settings. Applying the update does not restart it; a separate card follows.");
+      await c.available({ changedServices: ["db", "proxy"], infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"], ...LAYOUT, servicesChecked: true, tip: C });
+      await c.selfDeploy.sync();
+      const d = (await c.open()).find((o) => (o.context as { commit: string }).commit === C)!;
+      const r = (d.context as { update: { risks: string[] } }).update.risks.join("\n");
+      expect(r).toContain("database's settings");
+      expect(r).toContain("proxy's settings");
+    });
+
+    it("says nothing about the database when the update does not change it", async () => {
+      const c = (ctx = await setup());
+      const x = await handCard(c, { changedServices: ["server"] });
+      const all = [...x.handSteps!, ...x.update!.risks].join("\n");
+      expect(all).not.toMatch(/database|proxy|separate card/i);
+      // An older host script reports nothing about services at all: still nothing.
+      const c2 = await handCard(c, { servicesChecked: undefined, tip: C });
+      expect([...c2.handSteps!, ...c2.update!.risks].join("\n")).not.toMatch(/database's|proxy's|separate card|could not compare/i);
+    });
+
+    it("says honestly that the host could not compare, without a command, when the compose settings changed", async () => {
+      const c = (ctx = await setup());
+      const x = await handCard(c, { servicesChecked: false });
+      const text = x.handSteps!.join("\n");
+      expect(text).toContain("could not compare this host's service settings");
+      expect(commands(x.handSteps!).join("\n")).not.toMatch(/ up -d --no-deps (db|proxy)/);
+    });
+
+    it("raises the database card once the server update has ended well, its standby window is over and the host is quiet", async () => {
+      const c = (ctx = await setup());
+      const svc = withQuiet(c, async () => true);
+      // Inside the window: nothing yet.
+      await deployedAndLater(c, { pendingServices: ["db"], dbStartedAt: "2026-10-20T10:00:00Z" }, "2026-10-20T12:10:00Z");
+      await svc.sync();
+      expect(await svcCards(c)).toHaveLength(0);
+      // Past it: one card, with the backup first, the restart, and the checks.
+      vi.setSystemTime(new Date("2026-10-20T12:30:00Z"));
+      await c.available({ deployed: B, tip: B, commits: [], paths: [], ...LAYOUT, servicesChecked: true, changedServices: [], pendingServices: ["db"] });
+      await svc.sync();
+      const [card] = await svcCards(c);
+      expect(card!.dedupeKey).toBe(`self-deploy:services:db:${B}`);
+      expect(card!.tier).toBe("owner");
+      const ctx2 = card!.context as { steps: string[]; check?: string; rollback?: string; target?: string };
+      expect(ctx2.target).toBeUndefined(); // not a server update's to-do: the server catching up must not clear it
+      const cmds = commands(ctx2.steps);
+      expect(ctx2.steps[0]).toContain("unreachable for a few seconds");
+      expect(cmds[0]).toContain("pg_dump");
+      expect(cmds[0]).toContain(`db-backup-before-${B.slice(0, 8)}.sql.gz`);
+      expect(cmds[0]).toContain("gzip -t");
+      expect(cmds[1]).toBe("cd /srv/bm/src && docker compose up -d --no-deps db");
+      expect(cmds.join("\n")).toContain("docker compose ps db");
+      expect(cmds.join("\n")).toContain("server-green");
+      // Raised before restart steps run: the order is backup, then the restart.
+      expect(cmds.findIndex((x) => x.includes("pg_dump"))).toBeLessThan(cmds.findIndex((x) => x.includes("up -d")));
+      expect(lintOwnerSteps(ctx2.steps, [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11")).toEqual([]);
+      // A second pass raises no second card (one per service and commit).
+      vi.setSystemTime(new Date("2026-10-20T12:32:00Z"));
+      await svc.sync();
+      expect(await svcCards(c)).toHaveLength(1);
+    });
+
+    it("waits for a quiet host: nothing is raised while it is busy, and the next pass raises it", async () => {
+      const c = (ctx = await setup());
+      let quiet = false;
+      const svc = withQuiet(c, async () => quiet);
+      await deployedAndLater(c, { pendingServices: ["db"] });
+      await svc.sync();
+      expect(await svcCards(c)).toHaveLength(0);
+      quiet = true;
+      vi.setSystemTime(new Date("2026-10-20T12:32:00Z"));
+      await svc.sync();
+      expect(await svcCards(c)).toHaveLength(1);
+    });
+
+    it("raises nothing when the last server update did not end well, or the host did not compare", async () => {
+      const c = (ctx = await setup());
+      const svc = withQuiet(c, async () => true);
+      await deployedAndLater(c, { pendingServices: ["db"], servicesChecked: false });
+      await svc.sync();
+      expect(await svcCards(c)).toHaveLength(0);
+      const c2 = (ctx = await setup());
+      const svc2 = withQuiet(c2, async () => true);
+      vi.setSystemTime(new Date("2026-10-20T12:30:00Z"));
+      await c2.available({ deployed: B, tip: B, commits: [], paths: [], ...LAYOUT, servicesChecked: true, pendingServices: ["db"] });
+      await c2.status({ id: "", result: "rolled_back", from_commit: B, to_commit: B });
+      await svc2.sync();
+      expect(await svcCards(c2)).toHaveLength(0);
+    });
+
+    it("gives the proxy card no backup, and clears a card by itself once the host sees the service recreated", async () => {
+      const c = (ctx = await setup());
+      const svc = withQuiet(c, async () => true);
+      await deployedAndLater(c, { pendingServices: ["proxy"] });
+      await svc.sync();
+      const [card] = await svcCards(c);
+      expect(card!.dedupeKey).toBe(`self-deploy:services:proxy:${B}`);
+      const steps = (card!.context as { steps: string[] }).steps;
+      expect(commands(steps).join("\n")).not.toContain("pg_dump");
+      expect(commands(steps)[0]).toBe("cd /srv/bm/src && docker compose up -d --no-deps proxy");
+      expect(lintOwnerSteps(steps, [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11")).toEqual([]);
+      // The host reports nothing pending any more: the card clears. An answer-less pass from an older host does not clear it.
+      vi.setSystemTime(new Date("2026-10-20T12:31:00Z"));
+      await c.available({ deployed: B, tip: B, commits: [], paths: [], ...LAYOUT, pendingServices: [] });
+      await svc.sync();
+      expect(await svcCards(c)).toHaveLength(1);
+      vi.setSystemTime(new Date("2026-10-20T12:32:00Z"));
+      await c.available({ deployed: B, tip: B, commits: [], paths: [], ...LAYOUT, servicesChecked: true, pendingServices: [] });
+      await svc.sync();
+      expect(await svcCards(c)).toHaveLength(0);
+    });
+
+    it("lints every variant of the card: db, proxy, both, unknown host, unknown folder", async () => {
+      const facts = [{ name: "nas01", ownership: [] }];
+      const seen: string[][] = []; // the first card of each variant, by variant number
+      for (const [i, over] of [
+        { pendingServices: ["db"] },
+        { pendingServices: ["proxy"] },
+        { pendingServices: ["db", "proxy"] },
+        { pendingServices: ["db", "proxy"], bluegreen: undefined, liveColour: undefined },
+        { pendingServices: ["db", "proxy"], srcDir: undefined },
+        { pendingServices: ["db", "proxy"], bluegreen: false },
+      ].entries()) {
+        const c = (ctx = await setup());
+        const svc = withQuiet(c, async () => true);
+        await deployedAndLater(c, over);
+        await svc.sync();
+        const cards = await svcCards(c);
+        expect(cards.length, `variant ${i}`).toBe((over.pendingServices as string[]).length);
+        for (const card of cards) {
+          const x = card.context as { steps: string[]; rollback?: string; check?: string };
+          seen[i] ??= x.steps;
+          expect(lintOwnerSteps([...x.steps, ...(x.rollback ? [x.rollback] : [])], facts).refuse.filter((f) => f.rule !== "R11"), `variant ${i}`).toEqual([]);
+        }
+        vi.useRealTimers();
+        await ctx?.app.close();
+        await ctx?.close();
+        await rm(ctx!.dir, { recursive: true, force: true });
+        ctx = undefined;
+      }
+      // Unknown host folder: no command at all, and it says so.
+      const noSrc = seen[4]!.join("\n");
+      expect(noSrc).toContain("can't tell where it is installed");
+      expect(commands(seen[4]!)).toEqual([]);
+      // Unknown blue/green layout: the ready check falls back to words.
+      expect(seen[3]!.join("\n")).toContain("can't tell which server copy is live");
     });
   });
 });
