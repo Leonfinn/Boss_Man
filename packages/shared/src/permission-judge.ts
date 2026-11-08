@@ -236,6 +236,8 @@ export function judgePermission(question: string, command: string | null, ownFol
     // An unresolved substitution or variable given to a file tool (`rm -rf $(curl ...)`, `cp $(cat /tmp/l) d`) is a target
     // the judge can't place, so it gets no Allow. `shred` and any file tool under `xargs` read their targets the same way, and a
     // substitution glued to a dash (`rm -$(cat /tmp/x)`) is unseen unless the dash word is tested too (BOS-715).
+    // A heredoc piped into `xargs <file tool>` makes the heredoc body the target list (`cat <<EOF | xargs rm -rf`, BOS-727).
+    for (const m of c.matchAll(/<<-?[ \t]*['"]?\w+['"]?[^\n]*?\|[ \t]*xargs\b([^;&|\n]*)/g)) if (shellWords(m[1]!).some((w) => FILE_TOOLS.has(w))) return result("outside");
     for (const m of c.matchAll(/\b(?:rm|rmdir|cp|mv|install|ln|shred|unlink)\b|\bxargs\b([^;&|\n]*)/g)) {
       const rest = m[1] ?? c.slice(m.index! + m[0].length).split(/[;&|\n]/)[0]!;
       if (/<\(/.test(rest)) return result("outside"); // a process substitution is a path the judge can't place
