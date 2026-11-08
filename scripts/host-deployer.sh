@@ -458,7 +458,7 @@ host_extra_facts() {
     IFS=$', \t' read -r -a ntoks <<<"$nl" || true
     toks="" tsep=""
     for tok in "${ntoks[@]}"; do [[ $tok =~ ^[A-Za-z0-9.-]{1,253}:[0-9]{1,5}$ ]] && { toks+="$tsep$(jstr "$tok")"; tsep=", "; }; done
-    nlines+="$nlsep[$toks]"; nlsep=", "; nc=$((nc + 1))
+    nlines+="${nlsep}[$toks]"; nlsep=", "; nc=$((nc + 1))
   done < <(grep -sE '^[[:space:]]*(export[[:space:]]+)?BOSSMAN_NETGUARD_ALLOW[[:space:]]*=' "$REPO/.env" || true)
   out+="$sep\"netguardEnv\": {\"envFound\": $envfound, \"lines\": [$nlines]}"
   # --- memory, in kB, from /proc/meminfo
