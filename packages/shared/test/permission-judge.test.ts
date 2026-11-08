@@ -1395,9 +1395,29 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
       "cd /tmp/p && npm audit",
       "cd /tmp/p && npm audit --json",
       "cd /tmp/p && pnpm audit --fix",
+      "cd packages/shared && yarn list",
+      "cd packages/shared && yarnpkg list",
+      "cd /tmp/p && pnpm init",
+      "npm init",
+      "npm init -y",
+      "cd packages/shared && npm init",
+    ]);
+  });
+
+  // BOS-717 (Jane's review of BOS-716): yarnpkg is yarn, a bare npm init outside runs init-module, init after a valued flag.
+  describe("A8. yarnpkg, bare npm init outside, init after a flag value (BOS-717)", () => {
+    deny([
+      "cd /tmp/p && yarnpkg list",
+      "cd /tmp/p && yarnpkg install",
+      "cd /tmp/p && yarnpkg",
+      "cd /tmp/p && corepack yarnpkg list",
       "cd /tmp/p && npm init",
       "cd /tmp/p && npm init -y",
-      "cd packages/shared && yarn list",
+      "cd /tmp/p && npm --loglevel info init",
+      "npm --loglevel info init x",
+      "npm --workspace packages/shared init x",
+      "npm -w packages/shared init x",
+      "cd /tmp/p && npm --loglevel info init x",
     ]);
   });
 
