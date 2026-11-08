@@ -32,6 +32,7 @@ import {
   type OrderLink,
   alwaysChoices,
   explainPermission,
+  ownerWhy,
   formatDate,
   type AlwaysChoice,
   type AlwaysScope,
@@ -213,7 +214,7 @@ export type DecisionContext =
    */
   | { type: "owner_setup"; ticketId: string; tickets?: { ticketId: string; title: string }[]; steps: string[]; commit: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
-  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
+  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; /** Runner card only (DR-042 point 5): the live tickets whose only setup step is the runner update and whose merge the runners lack, named when the card was raised. */ tickets?: { ticketId: string; title: string }[]; /** Runner card only: raised by the owner's Build and update runners button, so it is never closed under them. */ requested?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string; /** The failed checks the "move to after the merge" choice would move (BOS-422). */ movable?: string[] }
@@ -564,28 +565,6 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
     at: new Date(),
   });
   return row;
-}
-
-/** The dedupe key of the runner-update card for a commit: the one self-deploy raises (BOS-741). */
-const runnerUpdateKey = (commit: string) => `self-deploy:runner:${commit}`;
-
-/**
- * Names on the runner-update card a ticket going live has no setup step of its own for, because its only
- * step asks for the runner update (BOS-741, DR-039 follow-up 2): the runner card covers it, so it raises no
- * card of its own, and it is listed on that card instead. The list is kept, not replaced, so an earlier
- * pass's tickets stay, and it is only ever added to on the card still open for `commit`. Returns whether it
- * changed the card's text (so the caller only counts a change).
- */
-export async function nameRunnerSetupTickets(db: Db, companyId: string, commit: string, ticketsIn: { ticketId: string; title: string }[]) {
-  const [card] = await db.select({ id: decisions.id, question: decisions.question }).from(decisions).where(and(eq(decisions.dedupeKey, runnerUpdateKey(commit)), eq(decisions.status, "open")));
-  if (!card) return false;
-  const listed = new Set([...card.question.matchAll(/^It also carries (.+)\.$/gm)].flatMap((m) => m[1]!.split("; ")));
-  const add = ticketsIn.map((t) => `"${t.title}"`).filter((name) => !listed.has(name));
-  if (!add.length) return false;
-  const line = `It also carries ${[...listed, ...add].join("; ")}. Their only setup step is the runner update above, so they have no card of their own.`;
-  const question = /^It also carries .+\.$/m.test(card.question) ? card.question.replace(/^It also carries .+\.$/m, line) : `${card.question}\n\n${line}`;
-  await db.update(decisions).set({ question }).where(and(eq(decisions.id, card.id), eq(decisions.status, "open")));
-  return true;
 }
 
 /**
@@ -1619,6 +1598,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           ladder = { rung: "ceo", since, minutes: CEO_HANDOVER_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why }] };
         } else tier = "owner";
       }
+      // BOS-793: say in one line why the owner has it and not the CEO. Display only; routing is already decided.
+      const ownerReason = tier !== "owner" ? null : outcome === "ceo" ? (agent?.role === "ceo" ? "Sent to you, not the CEO, because it is the CEO's own request." : "Sent to you, not the CEO, because the CEO could not take it first (paused, or the delete has no checkout of its own).") : ownerWhy(commandOf(info.rawInput), rule);
+      if (ownerReason) explain.ownerWhy = ownerReason;
       // Standing rules are the owner's call, never an agent's.
       const always = tier === "owner" ? alwaysChoices(info, explain) : [];
       // The rules judge (BOS-337) only picks which button is suggested. The policy above already decided who answers; nothing here answers a card.
@@ -1641,7 +1623,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           // Which checkout the run started in and which files, on every card the CEO or the owner sees
           // (BOS-120). Boss Man only knows where the shell STARTED (BOS-159): a shell keeps its folder
           // between commands, so the card never claims the paths are inside the checkout now.
-          question: `${explain.title}. ${explain.summary}${workingCopy ? ` Its relative paths delete from the shell's folder; the run started in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}), and Boss Man can't see where it has moved to since: ${fileList(workingCopy.files, 400)}.` : ""}`,
+          question: `${explain.title}. ${explain.summary}${workingCopy ? ` Its relative paths delete from the shell's folder; the run started in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}), and Boss Man can't see where it has moved to since: ${fileList(workingCopy.files, 400)}.` : ""}${ownerReason ? ` ${ownerReason}` : ""}`,
           options: [ALLOW, ...always.map((a) => a.label), DENY],
           // The same allow-list as everywhere else: build output is Allow, source or anything else is
           // Deny, so the CEO is never handed a pre-selected Allow for rm -rf src (adversarial review).

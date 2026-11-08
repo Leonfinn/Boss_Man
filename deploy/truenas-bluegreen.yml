@@ -21,6 +21,9 @@ x-server: &server
     args:
       BOSSMAN_COMMIT: ${BOSSMAN_COMMIT:-dev}
   restart: unless-stopped
+  # The SIGTERM shutdown drains background work and queued embeddings; Docker's default 10 s cut it short with SIGKILL
+  # (exit 137, BOS-794). The host deployer passes its own -t (BG_STOP_SECONDS); this covers stops and recreates by hand.
+  stop_grace_period: 60s
   depends_on:
     db:
       condition: service_healthy

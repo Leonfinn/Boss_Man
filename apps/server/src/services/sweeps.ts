@@ -6,7 +6,7 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
-import { MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
+import { isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
@@ -70,6 +70,12 @@ export type SweepLimits = {
   mergeLineLongAt: number;
   /** After a runner restart, how long its replayed "interrupted" reports get before a run it never reported is closed as lost (BOS-579). */
   restartReplayMs: number;
+  /**
+   * A run on an `infinite:` model (BOS-279) sends nothing between turns, and Infinite mode can pause for a long
+   * time between tokens. Silence this long is normal there, so the stall alert waits this much longer (30 min),
+   * and the server's "lost run" ending waits this much longer again past that.
+   */
+  infiniteStallAfterMs: number;
 };
 export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   staleAfterMs: 24 * 3_600_000,
@@ -94,6 +100,9 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   idleAskEveryMs: 30 * 60_000,
   mergeLineLongAt: 10,
   restartReplayMs: 2 * 60_000,
+  // 30 minutes: six times the normal 5, and twice the busy-command limit. A beta throttle on a free model can
+  // easily pause a minute or two at a time; a truly hung free run is still caught, just later (BOS-279).
+  infiniteStallAfterMs: 30 * 60_000,
 };
 /** How many unassigned tickets the CEO's idle-agents wake lists (BOS-615). */
 const IDLE_ASK_TICKETS = 8;
@@ -253,7 +262,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       }
       if (waiting.has(r.run.id)) continue;
       const idle = t.getTime() - (r.run.lastEventAt ?? r.run.startedAt).getTime();
-      if (idle < limits.stallAfterMs + limits.lostAfterMs) continue;
+      const stall = isInfiniteModel(r.run.model) ? limits.infiniteStallAfterMs : limits.stallAfterMs;
+      if (idle < stall + limits.lostAfterMs) continue;
       if (r.runnerId && opts.isConnected(r.runnerId) && r.run.lastEventAt) continue;
       // Cut off, not stopped by anyone: it is resumed like a run the runner reports as interrupted (BOS-574).
       if (r.run.lastEventAt) await opts.endRun(r.run.id, "lost: runner offline", t, { interrupted: true });
@@ -392,27 +402,35 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     const busy = new Map<string, string>();
     const idleOf = async (run: (typeof live)[number], withBusyChecks: boolean) => {
       const idle = t.getTime() - (run.run.lastEventAt ?? run.run.startedAt).getTime();
+      // Infinite mode (BOS-279) is slow between tokens, so its runs get a longer silence before they count as stalled.
+      const infinite = isInfiniteModel(run.run.model);
+      const stallAfter = infinite ? Math.max(limits.stallAfterMs, limits.infiniteStallAfterMs) : limits.stallAfterMs;
       // A finished ticket needs no alert about its run, and neither does one waiting on the owner.
       const eligible = !waiting.has(run.run.id) && !!run.runnerId && run.ticketState !== "done";
-      if (!eligible || idle < limits.stallAfterMs) return { idle, stalled: false };
+      if (!eligible) return { idle, stalled: false };
       // A run that has never said anything is not stalled but not started: the never-started sweep
       // retries it, and nobody is asked to cancel it (BOS-480).
       if (!run.run.lastEventAt) return { idle, stalled: false };
       if (!withBusyChecks) return { idle, stalled: true };
+      const limitOf = (busyLimit: number) => (infinite ? Math.max(stallAfter, busyLimit) : busyLimit);
       const command = await busyInCommand(run.run.id);
       if (command) {
         busy.set(run.run.id, command.title);
         // A check script waits silently for the shared check slot; the queue can be long, so it gets the longer limit (BOS-518).
-        return { idle, stalled: idle >= (command.checkScript ? limits.checkQueueAfterMs : limits.busyStallAfterMs) };
+        // An infinite-mode run keeps whichever of its own stall limit and the busy limit is longer, so
+        // waiting 45 minutes in the check queue is not called a stall (BOS-279 round 2).
+        const limit = command.checkScript ? limitOf(limits.checkQueueAfterMs) : limitOf(limits.busyStallAfterMs);
+        return { idle, stalled: idle >= limit };
       }
       // The runner answers Boss Man's pings every 15 seconds even mid-command. Events only arrive at
       // tool-call and turn boundaries, so a runner seen well after the last event is inside a long step.
       const lastSeen = run.runnerLastSeenAt?.getTime() ?? 0;
-      if (lastSeen > (run.run.lastEventAt ?? run.run.startedAt).getTime() + limits.stallAfterMs) {
+      if (lastSeen > (run.run.lastEventAt ?? run.run.startedAt).getTime() + stallAfter) {
         busy.set(run.run.id, "a long command");
-        return { idle, stalled: idle >= limits.busyRunnerAfterMs };
+        return { idle, stalled: idle >= limitOf(limits.busyRunnerAfterMs) };
       }
-      return { idle, stalled: true };
+      // The run has been quiet this long with no sign of a command: it is stalled past its own limit.
+      return { idle, stalled: idle >= stallAfter };
     };
     for (const r of live) {
       const v = await idleOf(r, true);

@@ -743,6 +743,13 @@
       "when": 1794096750385,
       "tag": "0122_policy_rule_provenance",
       "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1794157050382,
+      "tag": "0123_runner_image_commit",
+      "breakpoints": true
     }
   ]
 }
