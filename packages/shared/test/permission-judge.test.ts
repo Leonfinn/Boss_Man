@@ -1664,3 +1664,38 @@ describe("rules judge: more ways to run a script by path outside the checkout (B
     ]);
   });
 });
+
+// BOS-723 (Jane's review of BOS-722): a wrapper between `find -exec` and the script. Every "denies" row was Allow on c792cc5f.
+describe("rules judge: find -exec behind a wrapper (BOS-723)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  deny([
+    "cd /tmp/p && find . -exec env ./foo \\;",
+    "cd /tmp/p && find . -exec timeout 5 ./foo \\;",
+    "cd /tmp/p && find . -exec nice ./foo \\;",
+    "cd /tmp/p && find . -exec nice -n 5 ./foo {} +",
+    "cd /tmp/p && find . -execdir env FOO=1 ./foo {} \\;",
+    "cd /tmp/p && find . -ok env -i ./foo {} \\;",
+    "cd /tmp/p && find . -exec env nice timeout 5 ./foo \\;",
+    "cd /tmp/p && find . -exec ls {} \\; -exec env ./foo \\;",
+    "cd /tmp/p && find . -exec ls {} \\; -exec timeout 5 ./foo \\;",
+    "cd /tmp/p && find . -exec env -- ./foo \\;",
+    "find . -exec env /tmp/x/run.sh \\;",
+    "cd /tmp/p && find . -exec /usr/bin/env ./foo \\;",
+  ]);
+  allows([
+    "find . -exec env ./scripts/check-quick.sh \\;",
+    "find . -exec timeout 5 ./scripts/check-quick.sh {} \\;",
+    "find . -name '*.ts' -exec env grep -l foo {} \\;",
+    "cd /tmp/p && find . -exec env grep -l foo {} \\;",
+    "cd /tmp/p && find . -exec nice -n 5 ls {} +",
+  ]);
+  it("stays linear on many -exec words", () => {
+    const t = Date.now();
+    judge("find . " + "-exec env ".repeat(5000) + "x \\;");
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+});

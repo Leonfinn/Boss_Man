@@ -753,19 +753,13 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
     if (/\$|\x60|^~|\.\./.test(w) || /^\/tmp(\/|$)/.test(w)) return true;
     return w.startsWith("/") ? !inOwn(w) : !relOk;
   };
-  for (const seg of shellSegments(c)) {
+  // The first real command word of a word list, after wrappers, their options and assignments, is checked.
+  const firstWordBad = (words: string[]): boolean => {
     let skipNext = false;
     let cmdNext = false;
     let lead = "";
     let pos = 0;
-    let hit = false;
-    seg.words.forEach((w, i) => {
-      if (w === "-exec" || w === "-execdir" || w === "-ok" || w === "-okdir") {
-        if (bad(seg.words[i + 1] ?? "")) hit = true;
-      }
-    });
-    if (hit) return true;
-    for (const w of seg.words) {
+    for (const w of words) {
       if (cmdNext) { if (runsByPathOutside(w, inOwn, relOk)) return true; break; }
       if (skipNext) { skipNext = false; continue; }
       // A system binary that runs its argument counts as that wrapper (`/usr/bin/env ./foo`).
@@ -783,6 +777,20 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
       if (bad(w)) return true;
       break; // the first real command word of the segment
     }
+    return false;
+  };
+  for (const seg of shellSegments(c)) {
+    // BOS-723: the program after `find -exec` may sit behind a wrapper (`-exec env ./foo`, `-exec timeout 5 ./foo`): scan the words
+    // up to the `;` / `+` that ends the -exec with the same wrapper-aware scan. Each word is visited once per scan.
+    for (let i = 0; i < seg.words.length; i++) {
+      const w = seg.words[i]!;
+      if (w !== "-exec" && w !== "-execdir" && w !== "-ok" && w !== "-okdir") continue;
+      let end = i + 1;
+      // A following -exec starts its own slice, so the slices never overlap and the total work stays linear.
+      while (end < seg.words.length && !/^(?:;|\+|-exec|-execdir|-ok|-okdir)$/.test(seg.words[end]!)) end++;
+      if (firstWordBad(seg.words.slice(i + 1, end))) return true;
+    }
+    if (firstWordBad(seg.words)) return true;
   }
   return false;
 }
