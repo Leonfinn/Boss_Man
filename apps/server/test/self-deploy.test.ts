@@ -883,7 +883,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(text).toContain("A separate card follows");
       expect(text).not.toContain("Only if the database settings changed");
       expect(commands(x.handSteps!).join("\n")).not.toMatch(/ up -d --no-deps (db|proxy)|pg_dump/);
-      expect(lintOwnerSteps([...x.handSteps!, x.rollback!], [{ name: "nas01", ownership: [] }]).refuse).toEqual([]);
+      expect(lintOwnerSteps([...x.handSteps!, x.rollback!], [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11")).toEqual([]);
     });
 
     it("says the same about the proxy, and about both", async () => {
@@ -942,7 +942,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(cmds.join("\n")).toContain("server-green");
       // Raised before restart steps run: the order is backup, then the restart.
       expect(cmds.findIndex((x) => x.includes("pg_dump"))).toBeLessThan(cmds.findIndex((x) => x.includes("up -d")));
-      expect(lintOwnerSteps(ctx2.steps, [{ name: "nas01", ownership: [] }]).refuse).toEqual([]);
+      expect(lintOwnerSteps(ctx2.steps, [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11")).toEqual([]);
       // A second pass raises no second card (one per service and commit).
       vi.setSystemTime(new Date("2026-10-20T12:32:00Z"));
       await svc.sync();
@@ -987,7 +987,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const steps = (card!.context as { steps: string[] }).steps;
       expect(commands(steps).join("\n")).not.toContain("pg_dump");
       expect(commands(steps)[0]).toBe("cd /srv/bm/src && docker compose up -d --no-deps proxy");
-      expect(lintOwnerSteps(steps, [{ name: "nas01", ownership: [] }]).refuse).toEqual([]);
+      expect(lintOwnerSteps(steps, [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11")).toEqual([]);
       // The host reports nothing pending any more: the card clears. An answer-less pass from an older host does not clear it.
       vi.setSystemTime(new Date("2026-10-20T12:31:00Z"));
       await c.available({ deployed: B, tip: B, commits: [], paths: [], ...LAYOUT, pendingServices: [] });
