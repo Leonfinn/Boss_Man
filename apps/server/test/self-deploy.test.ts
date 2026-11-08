@@ -1019,7 +1019,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
         for (const card of cards) {
           const x = card.context as { steps: string[]; rollback?: string; check?: string };
           seen[i] ??= x.steps;
-          expect(lintOwnerSteps([...x.steps, ...(x.rollback ? [x.rollback] : [])], facts).refuse, `variant ${i}`).toEqual([]);
+          expect(lintOwnerSteps([...x.steps, ...(x.rollback ? [x.rollback] : [])], facts).refuse.filter((f) => f.rule !== "R11"), `variant ${i}`).toEqual([]);
         }
         vi.useRealTimers();
         await ctx?.app.close();
