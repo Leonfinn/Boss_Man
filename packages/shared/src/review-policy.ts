@@ -58,8 +58,11 @@ export const DEFAULT_REVIEW_POLICY: ReviewPolicy = {
   trivial: { planApprover: "none", reviewer: "ceo", ownerSignoff: false },
   low: { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false },
   medium: { planApprover: "ceo", reviewer: SENIOR_DEV, ownerSignoff: false },
-  high: { planApprover: "owner", reviewer: SENIOR_DEV, ownerSignoff: true },
-  critical: { planApprover: "owner", reviewer: SENIOR_DEV, ownerSignoff: true },
+  // A security review on the riskiest work is on from the start (BOS-824, DR-041: safe values are the
+  // defaults). "ceo" rather than SENIOR_DEV: the senior developer already does the code review here, and
+  // the owner names a security reviewer in Settings → Reviews. Existing companies keep their stored policy.
+  high: { planApprover: "owner", reviewer: SENIOR_DEV, ownerSignoff: true, kinds: { security: "ceo" } },
+  critical: { planApprover: "owner", reviewer: SENIOR_DEV, ownerSignoff: true, kinds: { security: "ceo" } },
 };
 
 /**
