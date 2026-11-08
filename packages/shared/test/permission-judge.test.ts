@@ -1839,9 +1839,22 @@ describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-72
     "echo / | xargs shred",
   ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
   it.each(["shred -u /tmp/a", "rm -rf /tmp/a /tmp/b"])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  // Measured against a plain line of the same length, timed in turn on the same machine, not in wall-clock ms: a 150 ms
+  // limit failed on GitHub's shared runners (271 ms) and still passed the quadratic scan's 236 ms case on a fast machine.
+  // The file-tool lines cost at most ~8x the plain one now; before this fix they cost 43-100x.
   it.each(["rm ".repeat(3333), "cp a ".repeat(2000), "shred ".repeat(1666)])("stays fast on a 10,000-char line", (cmd) => {
-    const t = performance.now();
-    judge(cmd);
-    expect(performance.now() - t).toBeLessThan(150);
+    const plain = "echo ".repeat(2000);
+    const time = (c: string) => {
+      const t = performance.now();
+      judge(c);
+      return performance.now() - t;
+    };
+    let tool = Infinity;
+    let base = Infinity;
+    for (let i = 0; i < 6; i++) {
+      tool = Math.min(tool, time(cmd));
+      base = Math.min(base, time(plain));
+    }
+    expect(tool / base).toBeLessThan(20);
   });
 });
