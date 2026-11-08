@@ -53,6 +53,9 @@ describe("git workspaces (R38)", () => {
     expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: "clone" })).toBe(true);
     // The old kind, only for rolling an image back to one that predates clones.
     expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: "worktree" })).toBe(false);
+    // Trimmed and case-insensitive, so a stray space or capital letter still rolls back as intended.
+    expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: " Worktree " })).toBe(false);
+    expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: "WORKTREE" })).toBe(false);
   });
 
   it("saves uncommitted work as a patch on release and puts it back next time", async () => {

@@ -13,8 +13,9 @@
 // another, or delete another ticket's branch. Its branch is fetched back into the shared repo
 // (syncBranch), where merges, pushes and other tickets read it. Every operation handles both
 // kinds; a new copy is a clone by default (BOS-343), turning a ticket's existing worktree into one
-// in place at its next run, so a rolling image back can't lose a clone. BOSSMAN_TICKET_COPIES=worktree
-// keeps the old kind for a runner rolled back to an image that predates clones; =clone says it outright.
+// in place at its next run. An image at or after BOS-323 keeps clones; rolling back to one older than
+// BOS-323 deletes them (and their uncommitted work) at housekeeping, so roll back no further than that.
+// BOSSMAN_TICKET_COPIES=worktree keeps the old kind for that rollback; =clone says it outright.
 //
 // Lessons from cline/kanban: creation is serialised per repo, an existing worktree is never
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
@@ -115,11 +116,13 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isClone = (dir: string) => statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
 
 /**
- * What a new copy is made as (BOS-343): clones by default, so a rolling image back can't lose one.
- * `BOSSMAN_TICKET_COPIES=worktree` keeps the old kind, for rolling an image back to one that predates
- * clones; `=clone` says it outright. Anything else, or unset, is a clone.
+ * What a new copy is made as (BOS-343): clones by default. An image at or after BOS-323 keeps clones;
+ * rolling back past it deletes them and their uncommitted work, so `BOSSMAN_TICKET_COPIES=worktree`
+ * keeps the old kind only for that rollback (never to an older image); `=clone` says it outright.
+ * Anything else, or unset, is a clone. The value is trimmed and lowercased so `Worktree` or a stray
+ * space still rolls back as intended instead of silently giving clones.
  */
-export const copiesAreClones = (env: NodeJS.ProcessEnv = process.env) => env.BOSSMAN_TICKET_COPIES !== "worktree";
+export const copiesAreClones = (env: NodeJS.ProcessEnv = process.env) => env.BOSSMAN_TICKET_COPIES?.trim().toLowerCase() !== "worktree";
 
 /** The project a copy belongs to, if its link to the shared repo still holds: a worktree's admin folder, or a clone's borrowed objects. */
 function copyProject(dir: string): string | null {
