@@ -324,7 +324,7 @@ export async function rebaseMigrations(git: RebaseGit, ref: { base: string; bran
     const idxClash = added.some((e) => mainJ.entries.some((m) => m.idx === e.idx));
     const oldWhen = added.some((e) => Number(e.when) <= mainWhen);
     if (!mainNew.length && !oldWhen) return { status: "none" };
-    if (!renumber && !idxClash && !oldWhen) return { status: "none" };
+    // Once main has newer migrations the journal conflicts as text and the snapshot chain must be re-linked, so rebuild even when no number moves.
 
     // 4. The branch's code on top of main. Its migration files and journal go back to the merge base
     // first, so the only conflicts left are real ones. A commit is needed only because this git's
@@ -405,7 +405,7 @@ export async function rebaseMigrations(git: RebaseGit, ref: { base: string; bran
       const idx = renumber || idxClash ? Math.max(-1, ...entries.map((x) => Number(x.idx))) + 1 : e.idx;
       entries.push({ ...e, idx, tag: newTag, when });
     }
-    if (!renamed.length && !idxClash && !added.some((e, i) => Number(entries[mainJ.entries.length + i]!.when) !== Number(e.when))) return { status: "none" };
+    if (!mainNew.length && !renamed.length && !idxClash && !added.some((e, i) => Number(entries[mainJ.entries.length + i]!.when) !== Number(e.when))) return { status: "none" };
     await put(journalPath, JSON.stringify({ ...mainJ, entries }, null, 2));
     const tree = await out(["write-tree"], outIndex);
     return { status: "rebuilt", tree, renamed };

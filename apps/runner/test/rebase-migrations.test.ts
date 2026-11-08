@@ -116,6 +116,21 @@ describe("the merge gate renumbers a clashing migration (BOS-690)", () => {
     expect(lintTree(main)).toEqual([]);
   });
 
+  it("a hand-numbered 0004 beside main's new 0003 merges: the number is free but the journal and snapshot chain still need rebuilding", async () => {
+    const o = origin();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-rb-ws-")));
+    const one = await ticket(ws, o, 1, (d) => addMigration(d, 3, "alpha", 3000, addColumn("alpha")));
+    const two = await ticket(ws, o, 2, (d) => addMigration(d, 4, "beta", 3100, addColumn("beta")));
+    expect((await ws.merge(one, "main", "m1")).status).toBe("merged");
+    const r = await ws.merge(two, "main", "m2");
+    expect(r.status).toBe("merged");
+    const main = mainCheckout(o);
+    expect(readJson(path.join(main, DR, "meta", "_journal.json")).entries.map((e: { tag: string }) => e.tag)).toEqual(["0001_init", "0002_second", "0003_alpha", "0004_beta"]);
+    expect(lintTree(main)).toEqual([]);
+    const last = readJson(path.join(main, DR, "meta", "0004_snapshot.json"));
+    expect(Object.keys(last.tables["public.t"].columns).sort()).toEqual(["alpha", "beta", "id", "second"]);
+  });
+
   it("(c) both change the same column differently: sent back as before", async () => {
     const o = origin();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-rb-ws-")));
