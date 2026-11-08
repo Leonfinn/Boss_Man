@@ -20,6 +20,9 @@ export const HELD_CHAT = "at a concurrency limit: this agent is already chatting
 /** A CEO reply run (BOS-434) waits only for its agent's one reply slot. */
 export const HELD_REPLY = "at a concurrency limit: this agent is already answering";
 
+/** An Infinite-mode run (BOS-279) waits for the background slots, which are its own and are separate from the work ones. */
+export const HELD_BACKGROUND = "at the background (infinite mode) run limit";
+
 /**
  * The queue in the order the pass should look at it. Lazy on purpose: `isIdle` is asked again before
  * every wake, so a launch earlier in the same pass (which makes its company busy) ends that

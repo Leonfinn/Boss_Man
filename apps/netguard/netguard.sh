@@ -10,12 +10,15 @@
 #   NETGUARD_ALLOW_FILE  optional file with one host:port per line, read again every cycle
 #                        (the company's tool servers; default /etc/netguard/allow)
 #   NETGUARD_DNS         optional, space-separated resolver addresses (default: read from /etc/resolv.conf)
-#   NETGUARD_EVERY       seconds between re-resolving the allowed addresses (default 15)
+#   NETGUARD_EVERY       seconds between re-resolving the allowed addresses (default 15); a USR1 does it at once
+# It loads a "hold" table first (private networks blocked, no lookups), so it is healthy even while the
+# launcher keeps the runner off its network; the full table (with the allowed addresses) replaces it.
 # Exit code 3 means nf_tables itself doesn't work here (a probe table can't be made): the
 # launcher reads that as "network guard unavailable on this host". Any other failure of the first
 # apply (a bad ruleset) exits 4, which the launcher treats as an error: no guard, no runner.
 # Usage: netguard.sh            apply, then keep the allowed addresses fresh
 #        netguard.sh --print    print the ruleset for the current environment and exit
+#        netguard.sh --print-hold  print the hold table and exit
 #        netguard.sh --build-only  exit 0 (lets `docker compose build` the image)
 set -eu
 
@@ -111,6 +114,9 @@ dns_servers() {
 }
 
 ruleset() {
+  # "hold": the same table with no accepts but loopback, and no lookups (BOS-576). It loads before the runner has
+  # a network, so the launcher can wait for it, then connect the network and wake this loop for the full rules.
+  if [ "${1:-}" = hold ]; then allow=""; dns=""; rules_text; return; fi
   # The server's own address and the owner's extra setting are trusted to be private addresses they meant
   # (the server lives on the stack network; a LAN host is the owner's own choice).
   allow="$(allow_rules "$NETGUARD_ALLOW" private)"
@@ -134,6 +140,11 @@ $(allow_rules "$e" "$mark")"
     ip daddr $d tcp dport 53 accept" ;;
     esac
   done
+  rules_text
+}
+
+# The table for the current $allow and $dns lines.
+rules_text() {
   # add + delete + add in one file replaces the table atomically and is safe to run twice.
   # No "established, accept" line: a connection opened before the guard loaded (a runner restart
   # leaves a short gap) must be cut off by the rejects below, not kept alive.
@@ -155,24 +166,36 @@ RULES
 case "${1:-}" in
   --build-only) exit 0 ;;
   --print) : "${NETGUARD_ALLOW:?set NETGUARD_ALLOW to host:port}"; ruleset; exit 0 ;;
+  --print-hold) ruleset hold; exit 0 ;;
 esac
 : "${NETGUARD_ALLOW:?set NETGUARD_ALLOW to host:port}"
 
 trap 'exit 0' TERM INT
+# USR1 (sent by the launcher once it has connected the runner's network): look the names up again now, not in 15 s.
+wake=0
+sleeper=""
+trap 'wake=1; [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null || true' USR1
 # Does nftables work here at all? Only a failing probe means "this host can't"; NETGUARD_PROBE_CMD is for tests.
 if ! sh -c "${NETGUARD_PROBE_CMD:-nft add table inet bossman_probe && nft delete table inet bossman_probe}" >/dev/null 2>&1; then
   echo "netguard: nf_tables isn't available here; stopping" >&2
   exit 3
 fi
+# The hold table first (BOS-576): it needs no lookups, so the guard is healthy before the runner has a network.
+if ! ruleset hold | nft -f -; then
+  echo "netguard: nftables works but the rules were refused; stopping" >&2
+  exit 4
+fi
+echo "netguard: private networks blocked; waiting for the full rules"
 last=""
 while :; do
+  wake=0
   rules="$(ruleset)"
   if [ "$rules" != "$last" ]; then
     if printf '%s\n' "$rules" | nft -f -; then
       last="$rules"
       echo "netguard: rules applied for $NETGUARD_ALLOW"
     elif [ -z "$last" ]; then
-      # Never applied: the runner is not guarded. Stop, so the launcher sees it.
+      # The full rules never loaded. The hold table stays (nothing private is reachable); stop, so the launcher sees it.
       echo "netguard: nftables works but the rules were refused; stopping" >&2
       exit 4
     else
@@ -180,5 +203,9 @@ while :; do
     fi
   fi
   sleep "${NETGUARD_EVERY:-15}" &
-  wait $!
+  sleeper=$!
+  # A USR1 that came while the names were looked up skips the wait; one during the wait ends it (the trap kills the sleep).
+  [ "$wake" = 1 ] || wait "$sleeper" || true
+  kill "$sleeper" 2>/dev/null || true
+  sleeper=""
 done

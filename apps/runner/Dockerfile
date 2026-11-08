@@ -103,7 +103,10 @@ VOLUME ["/home/node/workspaces", "/home/node/runner-data", "/home/node/.claude",
 
 WORKDIR /home/node/app/apps/runner
 ARG BOSSMAN_IMAGE_VERSION=dev
-ENV NODE_ENV=production BOSSMAN_IMAGE_VERSION=${BOSSMAN_IMAGE_VERSION}
+# The git commit the image is built from (BOS-764), so Boss Man can tell whether it already has a change.
+# Empty when built outside a git checkout; the runner then reports none.
+ARG BOSSMAN_IMAGE_COMMIT=
+ENV NODE_ENV=production BOSSMAN_IMAGE_VERSION=${BOSSMAN_IMAGE_VERSION} BOSSMAN_IMAGE_COMMIT=${BOSSMAN_IMAGE_COMMIT}
 # Healthy while the runner holds a live connection to the server.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
   CMD test -f /home/node/runner-data/connected && test $(( $(date +%s) - $(stat -c %Y /home/node/runner-data/connected) )) -lt 90

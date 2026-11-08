@@ -72,4 +72,29 @@ rc=0; PATH="$tmp/bin:$PATH" NETGUARD_ALLOW=10.1.2.3:3100 NETGUARD_ALLOW_FILE=/no
 [[ $rc == 3 ]] || fail "a failing probe should exit 3, got $rc"
 rc=0; PATH="$tmp/bin:$PATH" NETGUARD_ALLOW=10.1.2.3:3100 NETGUARD_ALLOW_FILE=/nonexistent NETGUARD_DNS="" NETGUARD_PROBE_CMD=true sh netguard.sh >/dev/null 2>&1 || rc=$?
 [[ $rc == 4 ]] || fail "refused rules with a working probe should exit 4, got $rc"
+
+# BOS-576: the hold table blocks every private range and accepts only loopback; it needs no NETGUARD_ALLOW and no lookups.
+hold="$(NETGUARD_ALLOW='' sh netguard.sh --print-hold)"
+[[ "$(grep -c ' accept$' <<<"$hold")" == 1 ]] || fail "the hold table should accept loopback only"
+grep -q 'oifname "lo" accept' <<<"$hold" || fail "the hold table should accept loopback"
+grep -q '10.0.0.0/8' <<<"$hold" || fail "the hold table should block the private IPv4 ranges"
+grep -q 'fc00::/7' <<<"$hold" || fail "the hold table should block the private IPv6 ranges"
+
+# The hold table loads first, then the full rules; a USR1 makes it look again at once instead of after NETGUARD_EVERY.
+printf '#!/bin/sh\n{ cat; echo "--- end of apply"; } >>"%s/applied"\n' "$tmp" >"$tmp/bin/nft"
+printf '10.9.9.9:1\n' >"$tmp/allow2"
+PATH="$tmp/bin:$PATH" NETGUARD_ALLOW=10.1.2.3:3100 NETGUARD_ALLOW_FILE="$tmp/allow2" NETGUARD_DNS="" NETGUARD_PROBE_CMD=true NETGUARD_EVERY=300 sh netguard.sh >/dev/null 2>&1 &
+guard=$!
+applied() { grep -c '^--- end of apply' "$tmp/applied" 2>/dev/null || true; }
+for _ in $(seq 50); do [[ "$(applied)" == 2 ]] && break; sleep 0.1; done
+[[ "$(applied)" == 2 ]] || { kill "$guard"; fail "expected the hold table and then the full rules, got $(applied) applies"; }
+first="$(sed '/^--- end of apply/q' "$tmp/applied")"
+if grep -q '10.1.2.3' <<<"$first" || ! grep -q 'oifname "lo" accept' <<<"$first"; then kill "$guard"; fail "the first table applied should be the hold table"; fi
+printf '10.9.9.9:1\n10.8.8.8:2\n' >"$tmp/allow2"
+kill -USR1 "$guard"
+for _ in $(seq 50); do [[ "$(applied)" == 3 ]] && break; sleep 0.1; done
+[[ "$(applied)" == 3 ]] || { kill "$guard"; fail "a USR1 should make the guard apply the changed rules at once"; }
+grep -q 'ip daddr 10.8.8.8 tcp dport 2 accept' "$tmp/applied" || { kill "$guard"; fail "the new allow entry is missing after USR1"; }
+kill "$guard"
+wait "$guard" || true
 echo "netguard.test.sh: ok"

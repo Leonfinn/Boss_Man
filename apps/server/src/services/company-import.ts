@@ -13,6 +13,7 @@ import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.j
 import { MAX_BODY, slugify } from "./wiki.js";
 import { cleanPath, LIMITS, normalise, parseSkillMd, skillName, SkillError, type SkillFile } from "./skills.js";
 import { allowsPrivate, reachesStack, sendableAddress } from "./launcher.js";
+import { normalizeStandingRules, standingRulesError } from "./standing-rules.js";
 import { addTicketDependency } from "./ticket-links.js";
 
 export class ImportError extends Error {
@@ -29,7 +30,7 @@ export const IMPORT_LIMITS = { zipBytes: 48 * 1024 * 1024, unpackedBytes: 256 * 
 const str = (max: number) => z.string().max(max);
 const opt = (max: number) => str(max).nullable().optional();
 const Uuidish = z.string().max(100);
-const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional(), ticketPrefix: z.string().regex(TICKET_PREFIX).nullable().optional().catch(null) });
+const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional(), ticketPrefix: z.string().regex(TICKET_PREFIX).nullable().optional().catch(null), standingRules: opt(100_000) });
 const Agent = z.object({
   ref: Uuidish.optional(),
   name: z.string().trim().min(1).max(80),
@@ -185,6 +186,18 @@ export function readPackage(zip: Uint8Array): Package {
   const manifest = parse(z.object({ format: z.string() }), json("manifest.json") ?? {}, "manifest.json");
   if (manifest.format !== EXPORT_FORMAT) throw new ImportError(400, `This isn't a Boss Man company package (format "${manifest.format}", expected "${EXPORT_FORMAT}").`);
   const company = parse(Company, json("company.json"), "company.json");
+  // Standing rules come in as plain text only (DR-041): same trimming and length cap as the owner's own
+  // save, and nothing else in the package can turn them into a permission rule. Text that is too long
+  // or holds a credential is left out, with a warning, rather than failing the whole import.
+  const rules = normalizeStandingRules(company.standingRules ?? "");
+  company.standingRules = rules || null;
+  if (rules && standingRulesError(rules)) {
+    notes.push(`The standing rules in the package were left out: ${standingRulesError(rules)}`);
+    company.standingRules = null;
+  } else if (rules && findCredential(rules)) {
+    notes.push("The standing rules in the package were left out because they look like they hold a password or key.");
+    company.standingRules = null;
+  }
 
   const under = (dir: string) => [...files.keys()].filter((p) => p.startsWith(`${dir}/`));
   const folders = (dir: string) => [...new Set(under(dir).map((p) => p.split("/")[1]!))].sort();
@@ -330,7 +343,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     const numberOf = new Map(pkg.tickets.map((t) => [t.ref, t.number && !seen.has(t.number) && seen.add(t.number) ? t.number : null]));
     const [c] = await tx
       .insert(companies)
-      .values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ownerApprovesEngagements: pkg.company.ownerApprovesEngagements, ticketPrefix: pkg.company.ticketPrefix ?? defaultTicketPrefix(name), nextTicketNumber: Math.max(0, ...seen) + 1 })
+      .values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ownerApprovesEngagements: pkg.company.ownerApprovesEngagements, ticketPrefix: pkg.company.ticketPrefix ?? defaultTicketPrefix(name), ...(pkg.company.standingRules ? { standingRules: pkg.company.standingRules, standingRulesBy: "import", standingRulesAt: new Date() } : {}), nextTicketNumber: Math.max(0, ...seen) + 1 })
       .returning();
     const companyId = c!.id;
 
@@ -447,6 +460,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // What the owner still has to do, for the checklist decision.
     const slugName = (slug: string) => pkg.agents.find((a) => a.slug === slug)?.name ?? slug;
     const checklist = [
+      ...(pkg.company.standingRules ? [`Standing rules came in as plain notes every run reads (they grant no permissions). Read them in Settings and change what doesn't fit:\n${pkg.company.standingRules}`] : []),
       ...pkg.secrets.map((s) => `Add the secret "${s.name}" and grant it as ${s.envName}${s.agents.length ? ` to ${s.agents.map(slugName).join(", ")}` : ""}.`),
       ...(opts.fundingSourceId ? [] : ["Give each agent a funding source."]),
       ...pkg.skills.filter((s) => s.files.some((f) => SCRIPT.test(f.path))).map((s) => `Read the scripts in the skill ${s.name} before agents use it.`),
