@@ -848,7 +848,8 @@ const XARGS_OPTS: Record<string, { bare: string; value: string; bareLong: string
   // options that write a file (`--joblog`, `--results`, `--compress-program`...). Short `-s` (--max-chars) takes a value.
   parallel: {
     bare: "0kmoptuvxXqhVM",
-    value: "jPSaCdEnNLIsJ",
+    // `-J` (profile) is left out: it loads options from a file the scan can't see (BOS-776).
+    value: "jPSaCdEnNLIs",
     bareLong: ["--null", "--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--interactive", "--help",
       "--version", "--tag", "--pipe", "--pipepart", "--pipe-part", "--ungroup", "--group", "--line-buffer", "--lb", "--xargs", "--open-tty",
       "--link", "--xapply", "--semaphore", "--no-keep-order", "--shuf", "--fg", "--bg", "--plus"],
@@ -870,7 +871,7 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
   }
   // BOS-722: a relative `cd` may follow a symlink the same command made (`ln -s /tmp/p l && cd l`), so it is outside.
   if (relCd && /(?:^|[;&|(\n{]\s*|\b(?:then|do|else)\s+)(?:\S*\/)?ln(?=\s)/.test(c)) relOk = false;
-  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|parallel|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
+  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|parallel|sem|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
   // Wrappers whose first plain words are not the command (`flock l ./foo`, `taskset 1 ./foo`, `chroot dir ./foo`).
   const positional: Record<string, number> = { flock: 1, taskset: 1, chrt: 1, chroot: 1 };
   // Wrappers that run the string after `-c` / `--command` (`flock -c ./foo l`, `script -qc ./foo`) as a shell command.
@@ -911,6 +912,11 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
     let lead = "";
     let pos = 0;
     let xargsOptionsDone = false;
+    // BOS-776: the `-I` replace string, and whether the next word is it. A program word that holds it is replaced by the input
+    // (`parallel -I echo echo -rf ~ ::: rm` runs `rm -rf ~`), and a `parallel`/`xargs` with no program word runs its input.
+    let replStr: string | null = null;
+    let replNext = false;
+    let progSeen = false;
     // Classify one option of `xargs`/`parallel`: "value" takes the next word, "bare" takes none, "unknown" may take either.
     const classify = (w: string, s: { bare: string; value: string; bareLong: string[]; valueLong: string[] }): "bare" | "value" | "unknown" => {
       if (w.startsWith("--")) {
@@ -929,17 +935,20 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
     };
     for (const [wi, w] of words.entries()) {
       if (cmdNext) { if (runsByPathOutside(w, inOwn, relOk)) return true; break; }
-      if (skipNext) { skipNext = false; continue; }
+      if (skipNext) { skipNext = false; if (replNext) { replNext = false; replStr = w; } continue; }
       // A system binary that runs its argument counts as that wrapper (`/usr/bin/env ./foo`).
       const base = sysBin.test(w) ? w.replace(/^.*\//, "") : w;
+      // BOS-776: `sem` is `parallel --semaphore`.
+      const leadName = base === "sem" ? "parallel" : base;
       // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
       if (wrapper.test(base)) {
         // BOS-776: a wrapper (`nice`, `env`, `timeout`...) as the program under `xargs`/`parallel` hides the program it runs, and
         // only a known-safe reader may be the program, so it gets no Allow.
         if (lead === "xargs" || lead === "parallel") return true;
-        lead = base; pos = positional[base] ?? 0; xargsOptionsDone = false;
+        lead = leadName; pos = positional[base] ?? 0; xargsOptionsDone = false;
+        replStr = null; replNext = false; progSeen = false;
         // BOS-776: `parallel` runs its command through a shell, so a shell metacharacter in any later word is a second command.
-        if (base === "parallel" && words.slice(wi + 1).some((x) => PARALLEL_SHELL_META.test(x))) return true;
+        if (leadName === "parallel" && words.slice(wi + 1).some((x) => PARALLEL_SHELL_META.test(x))) return true;
         continue;
       }
       const xopts = lead === "xargs" || lead === "parallel" ? XARGS_OPTS[lead] : null;
@@ -953,6 +962,11 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
             const k = classify(w, xopts);
             if (k === "unknown") return true;
             if (k === "value") skipNext = true;
+            // Note the replace string: `-I STR`, `-ISTR`, `--replace=STR`, or `-i` / `--replace` (default `{}`).
+            const ii = w.startsWith("--") ? -1 : w.indexOf("I", 1);
+            if (ii > 0) { if (ii === w.length - 1) replNext = true; else replStr = w.slice(ii + 1); }
+            else if (w === "--replace" || /^-[A-Za-z]*i$/.test(w)) replStr = "{}";
+            else if (w.startsWith("--replace=")) replStr = w.slice(10);
           }
         } else if (takesValue[lead]?.test(w)) skipNext = true;
         continue;
@@ -962,9 +976,13 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
       // Under `xargs`/`parallel` the first plain word is the program, and only a known-safe reader may be it: otherwise the
       // value of an option was read as the program in an earlier scan, and the real program got Allow (BOS-744).
       if (xopts && !XARGS_PROGRAM_SAFE.has(base)) return true;
+      if (xopts && replStr !== null && (replStr === "" || w.includes(replStr))) return true;
+      progSeen = true;
       if (bad(w)) return true;
       break; // the first real command word of the segment
     }
+    // BOS-776: `parallel` with no program word runs each input line as a command (`parallel -a cmds.txt`, `cat cmds | parallel`).
+    if (lead === "parallel" && !progSeen && !cmdNext) return true;
     return false;
   };
   for (const seg of shellSegments(c)) {

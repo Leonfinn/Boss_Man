@@ -2077,6 +2077,24 @@ describe("rules judge: wrappers, shells and option table under xargs/parallel (B
     "echo x | xargs file -C",
     "echo x | xargs date -s 2000-01-01",
     "echo x | parallel --joblog /home/node/.bashrc echo ::: 1",
+    // 5. Jane's second round: the -I replace string can stand in for the program (B1).
+    "parallel -I echo echo -rf ~ ::: rm",
+    "parallel -Iecho echo -rf ~ ::: rm",
+    "echo rm | xargs -I echo echo -rf ~",
+    "echo rm | xargs -Iecho echo -rf ~",
+    "echo rm | xargs --replace=echo echo -rf ~",
+    "echo rm | xargs -I cat cat -rf ~",
+    // 6. No program word: parallel runs each input line as a command (B2).
+    "parallel -a cmds.txt",
+    "parallel -j4 -a cmds.txt",
+    "parallel --arg-file cmds.txt",
+    "cat cmds.txt | parallel",
+    "cat cmds.txt | parallel -j4",
+    "cat cmds.txt | sem",
+    "cat cmds.txt | sem -j2 echo ; sem rm -rf ~",
+    // 7. -J loads options from a profile file the scan can't see (B3).
+    "parallel -J evil echo ::: 1",
+    "parallel -Jevil echo ::: 1",
   ])("deny: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
   it.each([
     "xargs grep x",
@@ -2087,6 +2105,9 @@ describe("rules judge: wrappers, shells and option table under xargs/parallel (B
     "parallel -s 100 echo ::: a",
     "xargs --max-lines=2 echo",
     "ls | xargs -I{} head -n 1 {}",
+    "parallel -I{} echo {} ::: a",
+    "parallel -a list.txt echo",
+    "sem -j2 echo hi",
   ])("allow: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
   it("reads long hostile input in linear time", () => {
     const t = Date.now();
