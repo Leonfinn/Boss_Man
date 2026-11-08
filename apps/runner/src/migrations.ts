@@ -2,6 +2,9 @@
 // applies a journal entry only when its `when` beats the last applied one, so two branches that
 // both add 0075 can't both land. This reads the branch and the other open branches from the bare
 // clone (nothing is checked out or run) and says whether a number is already taken.
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { MigrationsResult } from "@boss-man/shared";
 
 /** Matches a migration file at any depth: "apps/server/drizzle/0075_name.sql". */
@@ -194,5 +197,221 @@ export async function journalAt(git: GitCode, ref: string): Promise<JournalEntry
     return (JSON.parse(shown.stdout) as { entries?: JournalEntry[] }).entries ?? [];
   } catch {
     return [];
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The merge gate renumbers a clashing migration itself (BOS-690, DR-037 fix 2).
+// Every pair of branches that both add a migration clashes in meta/_journal.json, whatever their
+// numbers. When that is the only clash, the gate rebuilds the branch's migration on top of main:
+// next free number, new journal entry, snapshot chained to main's, `when` above main's newest.
+// The SQL file is reused as the very same git object. Everything is built in git's object store
+// (a temporary index file, no work tree) and the same inputs always give the same tree.
+// ---------------------------------------------------------------------------------------------
+
+/** git with an optional extra environment (the temporary index). Runs in the bare clone. */
+export type RebaseGit = (args: string[], env?: Record<string, string>) => Promise<{ code: number; stdout: string }>;
+
+export type RebaseResult =
+  | { status: "none" }
+  | { status: "rebuilt"; tree: string; renamed: Array<{ from: string; to: string }> }
+  | { status: "refused"; reason: string };
+
+type Json = unknown;
+type Plain = Record<string, Json>;
+const isPlain = (v: Json): v is Plain => typeof v === "object" && v !== null && !Array.isArray(v);
+const same = (a: Json, b: Json) => JSON.stringify(a) === JSON.stringify(b);
+const ABSENT = Symbol("absent");
+
+/** Thrown inside the merge of two snapshots when both sides changed the same thing differently. */
+class SnapshotClash extends Error {}
+
+/**
+ * Three-way merge of drizzle snapshots: `base` is where the branch started, `ours` the branch's,
+ * `theirs` main's. A table's column, index, foreign key or constraint is one unit: changed on one
+ * side only, it is taken; changed differently on both, the merge refuses (the branch is sent back).
+ */
+export function mergeSnapshots(base: Json, ours: Json, theirs: Json): Json {
+  const walk = (b: Json | typeof ABSENT, o: Json | typeof ABSENT, t: Json | typeof ABSENT, p: string[]): Json | typeof ABSENT => {
+    // Each snapshot's own id and its link to the one before are set by the caller, never merged.
+    if (p.length === 1 && (p[0] === "id" || p[0] === "prevId")) return o;
+    if (same(o, t)) return o;
+    if (same(o, b)) return t;
+    if (same(t, b)) return o;
+    // The unit that must not change on both sides: tables.<t>.<section>.<name>, or <section>.<name> elsewhere.
+    const unit = p[0] === "tables" ? 4 : 2;
+    if (p.length < unit && isPlain(o) && isPlain(t) && (b === ABSENT || isPlain(b))) {
+      const bb: Plain = b === ABSENT ? {} : b;
+      const out: Plain = {};
+      for (const key of [...Object.keys(t), ...Object.keys(o)]) {
+        if (key in out) continue;
+        const v = walk(key in bb ? bb[key] : ABSENT, key in o ? o[key] : ABSENT, key in t ? t[key] : ABSENT, [...p, key]);
+        if (v !== ABSENT) out[key] = v;
+      }
+      return out;
+    }
+    throw new SnapshotClash(p.join(".") || "snapshot");
+  };
+  const r = walk(base, ours, theirs, []);
+  return r === ABSENT ? {} : r;
+}
+
+/** The tag's migration number as text, "0113" from "0113_name". */
+const tagNumber = (tag: string) => /^(\d{4})_/.exec(tag)?.[1] ?? null;
+const pad4 = (n: number) => String(n).padStart(4, "0");
+
+/**
+ * Rebuilds the branch's new migrations on top of main. `base` is the merge base of `main` and
+ * `branch`. Returns "none" when there is nothing to do (no new migration, or already in order),
+ * "rebuilt" with the merged tree, or "refused" with a reason when it can't be done safely: a real
+ * code conflict, a changed existing migration, a snapshot changed on both sides, or any layout
+ * it doesn't recognise. A refusal means today's behaviour: the branch is sent back.
+ */
+export async function rebaseMigrations(git: RebaseGit, ref: { base: string; branch: string; main: string }, tmpRoot?: string): Promise<RebaseResult> {
+  const { base, branch, main } = ref;
+  const refuse = (reason: string): RebaseResult => ({ status: "refused", reason });
+  const out = async (args: string[], env?: Record<string, string>) => {
+    const r = await git(args, env);
+    if (r.code !== 0) throw new Error(`git ${args[0]} failed (exit ${r.code})`);
+    return r.stdout.trim();
+  };
+  const dir = mkdtempSync(path.join(tmpRoot ?? tmpdir(), "bm-rebase-"));
+  try {
+    // 1. Where the journal is, and what the branch added to it.
+    const files = (await out(["ls-tree", "-r", "-z", "--name-only", main])).split("\0").filter(Boolean);
+    const journalPath = files.filter((p) => /(^|\/)drizzle\/meta\/_journal\.json$/.test(p)).sort((x, y) => x.split("/").length - y.split("/").length)[0];
+    if (!journalPath) return { status: "none" };
+    const drizzle = journalPath.slice(0, -"/meta/_journal.json".length);
+    const readJson = async (rev: string, file: string): Promise<Json> => {
+      const r = await git(["show", `${rev}:${file}`]);
+      if (r.code !== 0) throw new Error(`missing ${file}`);
+      return JSON.parse(r.stdout);
+    };
+    type Journal = { entries: Plain[] } & Plain;
+    let baseJ: Journal, branchJ: Journal, mainJ: Journal;
+    try {
+      baseJ = (await readJson(base, journalPath)) as Journal;
+      branchJ = (await readJson(branch, journalPath)) as Journal;
+      mainJ = (await readJson(main, journalPath)) as Journal;
+    } catch {
+      return refuse("a journal could not be read");
+    }
+    for (const j of [baseJ, branchJ, mainJ]) if (!isPlain(j) || !Array.isArray(j.entries) || !j.entries.every(isPlain)) return refuse("the journal has a layout the gate doesn't know");
+    const tags = (j: Journal) => j.entries.map((e) => String(e.tag));
+    const baseTags = tags(baseJ);
+    const branchTags = tags(branchJ);
+    if (!baseTags.every((t, i) => branchTags[i] === t)) return refuse("the branch changed or reordered migrations that already existed");
+    const added = branchJ.entries.slice(baseTags.length);
+    if (!added.length) return { status: "none" };
+    const mainTags = tags(mainJ);
+    if (!baseTags.every((t, i) => mainTags[i] === t)) return refuse(`${main.slice(0, 8)} changed or reordered migrations that existed at the branch's start`);
+    if (added.some((e) => tagNumber(String(e.tag)) === null || typeof e.when !== "number")) return refuse("a new journal entry has an unusual tag or no usable \"when\"");
+
+    // 2. The branch may touch only its own new files in the drizzle folder.
+    const addedTags = new Set(added.map((e) => String(e.tag)));
+    const ownSql = (t: string) => `${drizzle}/${t}.sql`;
+    const ownSnap = (t: string) => `${drizzle}/meta/${tagNumber(t)}_snapshot.json`;
+    const allowed = new Set([journalPath, ...[...addedTags].flatMap((t) => [ownSql(t), ownSnap(t)])]);
+    const changed = parseNameStatus((await out(["diff", "--name-status", "-z", base, branch, "--", drizzle])));
+    for (const c of changed) if (!allowed.has(c.path) || (c.path !== journalPath && c.status !== "A")) return refuse(`the branch changes ${c.path}, which isn't one of its own new migration files`);
+
+    // 3. Does anything need to move? A tag, number or idx that main also uses, or a `when` that isn't above main's newest.
+    const mainNew = mainJ.entries.slice(baseTags.length);
+    const mainNums = new Set(mainTags.map(tagNumber));
+    const mainMaxNum = Math.max(-1, ...mainTags.map((t) => Number(tagNumber(t))).filter(Number.isFinite));
+    const mainWhen = Math.max(-Infinity, ...mainJ.entries.map((e) => Number(e.when)).filter(Number.isFinite));
+    const renumber = added.some((e) => Number(tagNumber(String(e.tag))) <= mainMaxNum || mainNums.has(tagNumber(String(e.tag))));
+    const idxClash = added.some((e) => mainJ.entries.some((m) => m.idx === e.idx));
+    const oldWhen = added.some((e) => Number(e.when) <= mainWhen);
+    if (!mainNew.length && !oldWhen) return { status: "none" };
+    if (!renumber && !idxClash && !oldWhen) return { status: "none" };
+
+    // 4. The branch's code on top of main. Its migration files and journal go back to the merge base
+    // first, so the only conflicts left are real ones. A commit is needed only because this git's
+    // merge-tree takes commits; nothing refers to it afterwards.
+    const index = path.join(dir, "index");
+    // update-index wants a work tree even in a bare clone; an empty folder of ours stands in, nothing is ever written to it.
+    const idxEnv = { GIT_INDEX_FILE: index, GIT_WORK_TREE: dir };
+    await out(["read-tree", branch], idxEnv);
+    const remove = [...addedTags].flatMap((t) => [ownSql(t), ownSnap(t)]);
+    for (const f of remove) await out(["update-index", "--force-remove", "--", f], idxEnv);
+    const baseJournalBlob = await out(["rev-parse", `${base}:${journalPath}`]);
+    await out(["update-index", "--add", "--cacheinfo", `100644,${baseJournalBlob},${journalPath}`], idxEnv);
+    const stripped = await out(["write-tree"], idxEnv);
+    const who = { GIT_AUTHOR_NAME: "Boss Man", GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: "Boss Man", GIT_COMMITTER_EMAIL: "bossman@localhost" };
+    const strippedCommit = await out(["commit-tree", stripped, "-p", base, "-m", "branch code without its migrations"], who);
+    const merged = await git(["merge-tree", "--write-tree", "--name-only", main, strippedCommit]);
+    if (merged.code === 1) {
+      const lines = merged.stdout.split("\n");
+      return refuse(`real code conflicts too: ${lines.slice(1, lines.indexOf("") === -1 ? undefined : lines.indexOf("")).filter(Boolean).slice(0, 5).join(", ")}`);
+    }
+    if (merged.code !== 0) return refuse("git could not merge the branch's code");
+    const codeTree = merged.stdout.split("\n")[0]!.trim();
+
+    // 5. Snapshots: each new snapshot is merged key by key with main's newest, in the branch's own order.
+    const lastNum = (tagList: string[]) => tagNumber(tagList[tagList.length - 1] ?? "");
+    const snapPath = (n: string | null) => `${drizzle}/meta/${n}_snapshot.json`;
+    let baseSnap: Json, mainSnap: Json;
+    const branchSnaps: Plain[] = [];
+    try {
+      baseSnap = await readJson(base, snapPath(lastNum(baseTags)));
+      mainSnap = await readJson(main, snapPath(lastNum(mainTags)));
+      for (const e of added) branchSnaps.push((await readJson(branch, ownSnap(String(e.tag)))) as Plain);
+    } catch {
+      return refuse("a snapshot could not be read");
+    }
+    if (!isPlain(baseSnap) || !isPlain(mainSnap) || branchSnaps.some((s) => !isPlain(s))) return refuse("a snapshot has a layout the gate doesn't know");
+
+    // 6. Overlay on main's tree + the branch's code.
+    const outIndex = { GIT_INDEX_FILE: path.join(dir, "out-index"), GIT_WORK_TREE: dir };
+    await out(["read-tree", codeTree], outIndex);
+    const put = async (file: string, text: string) => {
+      const tmp = path.join(dir, "blob");
+      writeFileSync(tmp, text);
+      const sha = await out(["hash-object", "-w", "--no-filters", tmp]);
+      await out(["update-index", "--add", "--cacheinfo", `100644,${sha},${file}`], outIndex);
+    };
+    const entries = [...mainJ.entries];
+    let nextNum = mainMaxNum + 1;
+    let prevWhen = mainWhen;
+    let prevSnap = mainSnap as Plain;
+    let prevBranchSnap = baseSnap as Plain;
+    let prevSnapId = (mainSnap as Plain).id;
+    const renamed: Array<{ from: string; to: string }> = [];
+    for (let i = 0; i < added.length; i++) {
+      const e = added[i]!;
+      const oldTag = String(e.tag);
+      // When any number clashes, all the branch's new migrations move to the next free numbers, in their own order.
+      const number = renumber ? nextNum : Number(tagNumber(oldTag));
+      const newTag = `${pad4(number)}_${oldTag.slice(5)}`;
+      nextNum = number + 1;
+      if (newTag !== oldTag) renamed.push({ from: oldTag, to: newTag });
+      const sqlBlob = await out(["rev-parse", `${branch}:${ownSql(oldTag)}`]);
+      await out(["update-index", "--add", "--cacheinfo", `100644,${sqlBlob},${ownSql(newTag)}`], outIndex);
+      let snap: Json;
+      try {
+        snap = mergeSnapshots(prevBranchSnap, branchSnaps[i], prevSnap);
+      } catch (err) {
+        if (err instanceof SnapshotClash) return refuse(`the migration and main both change the same part of the schema (${err.message})`);
+        throw err;
+      }
+      const merged2 = { ...(snap as Plain), id: branchSnaps[i]!.id, prevId: prevSnapId };
+      await put(ownSnap(newTag), JSON.stringify(merged2, null, 2));
+      prevSnap = merged2;
+      prevBranchSnap = branchSnaps[i]!;
+      prevSnapId = branchSnaps[i]!.id;
+      const when = Math.max(Number(e.when), prevWhen + 1);
+      prevWhen = when;
+      const idx = renumber || idxClash ? Math.max(-1, ...entries.map((x) => Number(x.idx))) + 1 : e.idx;
+      entries.push({ ...e, idx, tag: newTag, when });
+    }
+    if (!renamed.length && !idxClash && !added.some((e, i) => Number(entries[mainJ.entries.length + i]!.when) !== Number(e.when))) return { status: "none" };
+    await put(journalPath, JSON.stringify({ ...mainJ, entries }, null, 2));
+    const tree = await out(["write-tree"], outIndex);
+    return { status: "rebuilt", tree, renamed };
+  } catch (err) {
+    return refuse(`the rebuild failed: ${(err as Error).message}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 }

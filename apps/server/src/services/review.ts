@@ -1480,6 +1480,11 @@ export function reviewService(
         for (const command of checks) await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: checkedSha, kind: kindOf(command), passed: true, detail: null });
       }
       await db.update(tickets).set({ mergeCommit: m.commit, ...(checkedSha ? { checkedCommit: checkedSha } : {}) }).where(eq(tickets.id, ticketId));
+      // BOS-690 (DR-037): the gate renumbered a clashing migration itself. One line, no wake, no card: nothing for anyone to do.
+      if (m.status === "merged" && m.renamed?.length) {
+        const names = m.renamed.map((r) => `${r.from} landed as ${r.to}`).join("; ");
+        await record(db, { companyId: t.companyId, ticketId, kind: "migration_renamed", summary: `Migration ${names}; the SQL is unchanged, renamed by the merge gate because another ticket took the number first.` });
+      }
       // BOS-316: what was pushed is exactly the tree a merge job just passed, so main passes its check (P11a).
       if (serverChecks && m.status === "merged") await queue.setMainState(t.projectId, "green", m.commit);
       // Its own after-merge checks keep this ticket open (DR-024 #5), but not the ones riding along.
