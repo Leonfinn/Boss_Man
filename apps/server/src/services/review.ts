@@ -13,8 +13,8 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
-import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard } from "./signoff.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard, signoffState, type SignoffCover } from "./signoff.js";
 import { checkGate, checkPriority } from "./check-gate.js";
 import { checkQueue } from "./check-queue.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
@@ -423,7 +423,7 @@ export function reviewService(
         .returning({ id: decisions.id });
       if (d) await addTicketDependency(db, { companyId: t.companyId, blockedTicketId: t.id, blockerDecisionId: d.id, actor: { type: "system" } });
     }
-    const text = `The review of "${t.title}" was approved, but its branch also carries unmerged work from ${names}. Nothing was merged: ${names} must merge first. Once ${carried.length > 1 ? "those tickets have" : "it has"}, move this ticket back to review.`;
+    const text = `The review of "${t.title}" was approved, but its branch also carries unmerged work from ${names}. Nothing was merged: ${names} must merge first. Once ${carried.length > 1 ? "those tickets have" : "it has"}, Boss Man starts this merge again by itself (BOS-733); the ticket stays in review, so don't move it.`;
     const delivered = await tellAgent(t, text, "carried work").catch(() => null);
     return { outcome: "carried" as const, delivered, detail };
   }
@@ -554,28 +554,30 @@ export function reviewService(
     /** Whether the owner's sign-off card for this ticket is still open, so a press can settle it first (BOS-471). */
     ownerSignoffOpen,
 
-    /** The ticket's changes against its base, from the runner that holds its worktree. */
+    /** The ticket's changes against its base, from the runner that holds its worktree. A review diff is measured from the merge-base with the project's current default branch (BOS-694); a last-turn diff is that turn only. */
     async diff(ticketId: string, companyId?: string, range: "base" | "last_turn" = "base"): Promise<WorkspaceDiff> {
-      const { t, repoUrl } = await ticketWithRepo(ticketId, companyId);
+      const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId, companyId);
       if (!repoUrl) throw new ReviewError(422, "That ticket's project has no git repo, so there's no diff to review.");
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
       if (!runner) throw new ReviewError(409, "The company has no runner.");
       try {
-        return await deps.runners.request<WorkspaceDiff>(runner.id, (requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, ...(range === "last_turn" ? { range } : {}) }));
+        return await deps.runners.request<WorkspaceDiff>(runner.id, (requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, ...(range === "last_turn" ? { range } : { baseRef: defaultBranch }) }));
       } catch (err) {
         throw new ReviewError(409, (err as Error).message);
       }
     },
 
     /**
-     * Whether the ticket's new migration numbers are free (BOS-219). At review time it also looks at
-     * the other open tickets in its project, so the agent hears early. The check that counts, just
-     * before the merge, compares only against the default branch: once one ticket has merged, the
-     * next must not be sent back because a branch it clashes with is still open, or two clashing
-     * tickets would keep bouncing each other. An offline runner or an unreadable branch gives
-     * "couldn't say", which never holds a ticket up.
+     * Whether the ticket's new migration numbers are free (BOS-219). The review-time warning
+     * (withOthers false) compares only against the default branch: a clash with another open
+     * branch isn't the agent's to fix, since that branch may never merge, and advising a rename
+     * against it caused renumber churn and gaps on main (DR-037). The check that counts, just
+     * before the merge, uses the same comparison: once one ticket has merged, the next must not
+     * be sent back because a branch it clashes with is still open, or two clashing tickets would
+     * keep bouncing each other. An offline runner or an unreadable branch gives "couldn't say",
+     * which never holds a ticket up.
      */
-    async migrations(ticketId: string, companyId?: string, withOthers = true): Promise<MigrationsResult> {
+    async migrations(ticketId: string, companyId?: string, withOthers = false): Promise<MigrationsResult> {
       const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId, companyId);
       if (!repoUrl || t.noCode) return { needed: null, reason: "This ticket has no code of its own to check." };
       const others = !withOthers
@@ -737,6 +739,11 @@ export function reviewService(
         // The owner signs off a commit, not a ticket (DR-013). A runner that can't say the head never reuses a sign-off.
         const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
         const prior = await priorSignoff(db, t, head);
+        // A standing sign-off on an earlier commit also counts when only clean main merges came in since (BOS-734).
+        if (!prior.reuse && head && prior.current && prior.current.head !== head && (await this.signoffCovers(ticketId, prior.current.head, head))?.covers) {
+          prior.reuse = prior.current;
+          await record(db, { companyId: t.companyId, agentId: o.reviewerAgentId, ticketId, kind: "signoff_carried", summary: `The owner's sign-off on ${prior.current.head.slice(0, 8)} still covers ${head.slice(0, 8)}: since then main was only merged in automatically, with no clashes and no new code from the ticket.` });
+        }
         if (prior.reuse) {
           await record(db, { companyId: t.companyId, agentId: o.reviewerAgentId, ticketId, kind: "signoff_reused", summary: `The owner's sign-off from ${when(prior.reuse.at)} was reused: ${o.reviewer} approved the same commit ${head!.slice(0, 8)}, so it merges without asking again.` });
           if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
@@ -926,6 +933,50 @@ export function reviewService(
       }
     },
 
+    /**
+     * Whether the owner's sign-off on `signed` still covers the branch head: only clean automatic merges of the
+     * default branch came in since (BOS-734, DR-038). The runner works it out from git; null when it can't say,
+     * which every caller reads as "does not cover".
+     */
+    async signoffCovers(ticketId: string, signed: string, head?: string): Promise<SignoffCover | null> {
+      try {
+        const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
+        if (!repoUrl || !t.branch) return null;
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+        if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "signoff-covers")) return null;
+        const r = await deps.runners.request<Partial<SignoffCover>>(runner.id, (requestId) => ({ type: "workspace.covers", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch, signed, ...(head && /^[0-9a-f]{7,64}$/.test(head) ? { head } : {}) }), 20_000);
+        if (typeof r?.covers !== "boolean") return null;
+        return { covers: r.covers, reason: r.reason ?? "", newCommits: r.newCommits ?? 0, handMerges: r.handMerges ?? 0 };
+      } catch {
+        return null;
+      }
+    },
+
+    /**
+     * Before an owner's "Approve and merge" press: null when the card's commit still stands (it is the branch head,
+     * or only clean main merges came in), otherwise the plain reason it can't, after replacing the card with one for
+     * the current head. The owner is never left holding a card that is bound to fail (BOS-734).
+     */
+    async signoffStale(ticketId: string, cardHead: string): Promise<string | null> {
+      const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
+      if (!head || head === cardHead) return null;
+      const c = await this.signoffCovers(ticketId, cardHead, head);
+      if (c?.covers) return null;
+      // The runner couldn't say: keep the card, refuse the press, nothing is replaced or merged.
+      if (!c) return `The branch changed after this card was raised (${cardHead.slice(0, 8)} is now ${head.slice(0, 8)}) and Boss Man couldn't check what came in right now, so nothing was merged. Try again in a few minutes.`;
+      // New code of the ticket's own: the reviewers haven't seen it, so no new card until they pass it again (security review, BOS-734).
+      return this.withdrawStaleSignoff(ticketId, cardHead, head, c.reason || "new code came in");
+    },
+
+    /** Withdraws a sign-off card for older code and sends the ticket back for a new review round; the next round raises the new card. */
+    async withdrawStaleSignoff(ticketId: string, cardHead: string, head: string, why: string): Promise<string> {
+      const { t } = await ticketWithRepo(ticketId);
+      await supersedeSignoffs(db, t.id, { by: "system", note: `The branch changed after the card was raised (${why}).`, at: new Date().toISOString() });
+      await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_card_moved", summary: `The sign-off card was for ${cardHead.slice(0, 8)} but the branch is at ${head.slice(0, 8)} (${why}), so it was withdrawn and the ticket sent back for a new review.` });
+      await this.sendBack(t.id, `The owner's sign-off card was for ${cardHead.slice(0, 8)}, but the branch is now at ${head.slice(0, 8)} (${why}). The card was withdrawn. Make sure the work is committed, then move the ticket back to review for a new review round and sign-off.`, "Boss Man");
+      return `The branch changed after this card was raised (${why}), so it can't be merged as it stands. The card was withdrawn and the ticket sent back for a new review; a new card comes once the reviewers have passed the current code.`;
+    },
+
     /** Claims the ticket's merge marker, so the page shows the merge from its first moment. */
     async claimLanding(ticketId: string, reviewer: string): Promise<string> {
       const existing = landings.get(ticketId);
@@ -1109,6 +1160,7 @@ export function reviewService(
             attempt--;
             continue;
           }
+          if (r.outcome === "merged") void this.retryHeldBy(ticketId).catch(() => undefined);
           if (r.outcome !== "lock_wait") return r;
           const { t } = await ticketWithRepo(ticketId);
           const d = r.detail as { command: string; output: string };
@@ -1151,6 +1203,35 @@ export function reviewService(
     },
 
     /**
+     * A ticket just merged: start the merge again on every approved ticket the carried-work gate held for it
+     * (BOS-733). Without this they sat in review until someone happened to approve again, since the sweep's one
+     * retry was long spent. The hold names its tickets only by title in the note, so a same-titled ticket may
+     * be retried for nothing; that is harmless, as the gate runs again in full and refuses again if it must.
+     */
+    async retryHeldBy(mergedId: string): Promise<string[]> {
+      if (deps.isLeader && !deps.isLeader()) return [];
+      const [m] = await db.select({ title: tickets.title, projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, mergedId));
+      if (!m) return [];
+      const held = await db
+        .select({ id: tickets.id, companyId: tickets.companyId, note: tickets.pullRequestNote })
+        .from(tickets)
+        .where(and(eq(tickets.projectId, m.projectId), eq(tickets.systemState, "review"), ne(tickets.id, mergedId), sql`${tickets.pullRequestNote} like 'Waiting: its branch also carries %'`));
+      const started: string[] = [];
+      for (const h of held) {
+        if (!h.note?.includes(`"${m.title}"`)) continue;
+        // The owner's "merge that one first" card has done its job once every ticket it names has merged.
+        await clearCarriedCards(db, h.id, { by: "system", note: `"${m.title}" has merged.`, at: new Date().toISOString() });
+        if (!(await approvedAndWaiting(h.id))) continue;
+        // startLanding refuses one already running and an open sign-off; either way there is nothing to start here.
+        const ok = await this.startLanding(h.id, `Boss Man (the ticket it waited for, "${m.title}", has merged)`).then(() => true, () => false);
+        if (!ok) continue;
+        started.push(h.id);
+        await record(db, { companyId: h.companyId, ticketId: h.id, kind: "merge_retried", summary: `"${m.title}" merged, so the merge this ticket was waiting for was started again. Nothing to do.` });
+      }
+      return started;
+    },
+
+    /**
      * Refuses a merge the owner hasn't signed off when the policy needs it (BOS-503, DR-021). `head` null: any
      * recorded sign-off for this round will do (the early check); a string: the sign-off must cover that commit,
      * and "" (the runner couldn't say) passes only an owner's own approval, which covers what is there now.
@@ -1166,6 +1247,14 @@ export function reviewService(
         // Signed off for another commit, with no new review since: the code changed under the sign-off, and nobody
         // reviewed what would merge now. Refuse in plain sight (the merge card that follows lets the owner send it back).
         const was = await derivedSignoff(db, t, null);
+        if (was.state === "signed_off" && was.head && was.head !== head) {
+          // Only clean automatic merges of the default branch since: the sign-off still covers it (BOS-734, DR-038).
+          const c = await this.signoffCovers(t.id, was.head, head);
+          if (c?.covers) {
+            await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_carried", summary: `The owner's sign-off on ${was.head.slice(0, 8)} still covers ${head.slice(0, 8)}: since then main was only merged in automatically, with no clashes and no new code from the ticket.` });
+            return;
+          }
+        }
         if (was.state === "signed_off" && was.head && was.head !== head) throw new ReviewError(409, `The owner signed off commit ${was.head.slice(0, 8)}, but the branch is now at ${head.slice(0, 8)}, so nothing was merged. Send it back for a new review and sign-off.`);
       }
       if (d.state === "waiting") {
@@ -1237,7 +1326,7 @@ export function reviewService(
 
       // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
       // merge, and running the check anyway could send the ticket back for a failure it can't fix.
-      let changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+      let changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, baseRef: defaultBranch }), 60_000)).catch(() => null);
       // A ticket sent back after its merge as no-code, then reopened for real work (BOS-532): a commit on its
       // branch now is that work. Clear the stale no-code mark and read the diff again (a diff read over the
       // old commit may show nothing), so the review checks code and the branch merges like any other.
@@ -1246,7 +1335,7 @@ export function reviewService(
         await db.update(tickets).set({ noCode: false }).where(eq(tickets.id, ticketId));
         await record(db, { companyId: t.companyId, ticketId, kind: "reopened", summary: "Reopened for code: its branch has new commits again, so it is no longer a no-code ticket." });
         noCode = false;
-        changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
+        changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, baseRef: defaultBranch }), 60_000)).catch(() => null);
       }
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.

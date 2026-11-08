@@ -86,7 +86,7 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
         '- Stop when it\'s clear (usually 3 to 7 questions), or when I say "go".',
         draft.kind === "task"
           ? "- Then write it up and create it with create_ticket: a body with the problem or goal, what's out of scope and the risk; what done looks like as acceptanceCriteria; the feature it belongs to (featureId) and who should do it (assignee), if that's clear; and its risk."
-          : "- Then write it up and create it with create_feature: a description with the problem and who it's for, the goal, what done looks like as a list of criteria, what's out of scope, the risk and who should build it. Link it to the objective or milestone it serves. Don't break it into tasks unless I ask.",
+          : "- Then write it up and create it with create_feature: a description with the problem and who it's for, the goal, what done looks like as a list of criteria, what's out of scope, the risk and who should build it. Link it to the objective or milestone it serves. Once the feature is clear, plan it as a main ticket with sub-tasks where the work naturally divides (separate parts, different agents, separate reviews or risks). Keep it as one ticket when it is small or doesn't divide. Don't split just for the sake of it.",
         "- Reply with what you created.",
       ].join("\n");
       const m = await this.send(companyId, text, ceo.id);

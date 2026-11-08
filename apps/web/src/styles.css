@@ -176,7 +176,7 @@ p { margin: 0; }
 .decision .rec { font-size: 14px; background: var(--accent-soft); border-radius: 6px; padding: 8px 12px; }
 .decision .rec strong { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--link); margin-right: 6px; }
 .decision .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-@media (max-width: 520px) { .decision { grid-template-columns: 1fr; } .decision .score { flex-direction: row; align-items: center; padding: 14px 16px 0; } .decision .body { padding: 10px 16px 16px; } }
+@media (max-width: 520px) { .decision .actions { flex-direction: column; } .decision .actions .btn { width: 100%; } .decision { grid-template-columns: 1fr; } .decision .score { flex-direction: row; align-items: center; padding: 14px 16px 0; } .decision .body { padding: 10px 16px 16px; } }
 
 /* ---------- Board ---------- */
 /* A sideways scroller must not become a vertical one too: `overflow-x: auto` alone computes
@@ -852,6 +852,11 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .image-thumbs img { width: 120px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
 .file-chip { display: inline-block; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* The collapse toggle, badge dot and Log out icon only appear from just above the phone bar (BOS-290). These base hides must come before the media block below so the block's display rules win. */
+.side .side-collapse { display: none; }
+.side .count-dot { display: none; }
+.side .logout-icon { display: none; }
+
 /* Wherever the menu sits beside the page (a phone turns it into a bar above the page at 640px), it fills the window and stays in view while the page scrolls, scrolling on its own where it is taller than the window. */
 @media (min-width: 641px) {
   /* From just above the phone bar the menu keeps its own column beside the page, so it never wraps onto a full-width row that the full-height rule would then stretch over the whole screen. */
@@ -859,6 +864,34 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
   /* A phone browser's toolbar showing makes 100dvh shorter than the window, leaving a blank strip under a menu that only fills 100dvh. So the menu fills the window with 100vh instead and scrolls its own contents inside that: it always reaches the bottom edge, and Notifications can still be scrolled into view from behind the toolbar. */
   .app > nav.side { flex: 0 0 232px; position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
   .app > main { flex: 1 1 0; }
+  /* The icon-only strip (BOS-290): the page keeps the width the labels gave up. */
+  .app.side-collapsed > nav.side { flex: 0 0 64px; padding-left: 8px; padding-right: 8px; overflow-x: hidden; }
+  .side .side-collapse { margin-left: auto; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 1px solid #33404f; border-radius: 8px; background: var(--side-raised); color: #fff; cursor: pointer; }
+  .side.collapsed .side-bar { flex-direction: column; align-items: stretch; gap: 8px; }
+  .side.collapsed .side-bar .switcher { display: none; }
+  .side.collapsed .side-collapse { margin-left: 0; width: 100%; }
+  /* Icons only: label and group headings go, each item is a centred 40px icon with a tooltip (title). */
+  .side.collapsed .brand span,
+  .side.collapsed .nav-label,
+  .side.collapsed .nav-groups h2,
+  .side.collapsed .sub-nav,
+  .side.collapsed .foot small,
+  .side.collapsed .foot .label-full { display: none; }
+  .side.collapsed .nav-groups section + section { border-top: 0; padding-top: 0; }
+  .side.collapsed .nav-groups { gap: 8px; }
+  .side.collapsed a.nav { justify-content: center; padding: 8px; position: relative; }
+  .side.collapsed .count { display: none; }
+  /* The badge count stays visible as a small dot when the strip is too narrow for the number. */
+  .side.collapsed .count-dot { display: block; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--badge); }
+  .side.collapsed .foot { padding: 0; }
+  /* Log out stays reachable from the strip as an icon (BOS-290). */
+  .side.collapsed .foot .logout { display: inline-flex; align-items: center; justify-content: center; width: 100%; padding: 8px; }
+  .side.collapsed .logout-icon { display: block; }
+}
+/* A narrow screen's expanded menu opens over the page instead of pushing it (BOS-290). */
+@media (min-width: 641px) and (max-width: 1180px) {
+  .app:not(.side-collapsed) > nav.side { position: fixed; z-index: 30; left: 0; top: 0; bottom: 0; width: 232px; box-shadow: 8px 0 24px rgb(0 0 0 / 0.4); }
+  .app:not(.side-collapsed) > main { padding-left: 64px; }
 }
 .related { display: flex; flex-direction: column; gap: 8px; }
 .related .section-label { margin: 6px 0 0; }

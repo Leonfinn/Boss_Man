@@ -10,10 +10,18 @@ import type { Db } from "../db/client.js";
 import { companies, decisions, runs, settings } from "../db/schema.js";
 import { CANCEL_UPDATE, KEEP_WAITING_MORE, STOP_AND_UPDATE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
+import { expectRestart } from "./runner-restarts.js";
 
 export const MAINTENANCE_KEY = "maintenance";
 /** Said to every running agent when a runner update starts waiting, and after each ticket move while it waits. */
 export const WRAP_UP = "A runner update is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the update is done.";
+/** The same, for a runner restart that applies new runner settings (BOS-594). */
+export const WRAP_UP_SETTINGS = "A runner restart for a setting change is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the runner is back.";
+/** What a drain is for. "update": swap each runner not on the current image. "settings": recreate every runner once,
+ * whatever its image, so new launcher settings (memory, check slots, CPU) reach it without cutting runs off (BOS-594). */
+export type HoldKind = "update" | "settings";
+/** The reason drain.json carries for a setting change (scripts/update-runner.sh --settings). */
+export const SETTINGS_REASON = "setting change";
 /** How the last runner update ended, for Settings (BOS-465). `swapped` says which companies it swapped, so a later Settings visit knows which history belongs to which runner. */
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string; swapped?: Record<string, string> };
 export const MAINTENANCE_LAST_KEY = "maintenance:last";
@@ -22,6 +30,8 @@ export const HOLD_REASON = "update pending";
 
 export type Hold = {
   reason: string;
+  /** Absent on a hold saved before BOS-594: an update. */
+  kind?: HoldKind;
   since: string;
   deadline: string;
   /** How long one wait is: the first deadline, and each "Keep waiting". */
@@ -32,7 +42,14 @@ export type Hold = {
   swapped?: Record<string, string>;
   /** slug -> why its runner could not be recreated. */
   failed?: Record<string, string>;
+  /** slug -> failed recreate tries so far and when the last was; a recreate is tried up to RECREATE_TRIES times before it counts as failed. */
+  tries?: Record<string, { n: number; at: string }>;
+  /** The "update is stuck" page has been sent for this hold (once). */
+  stalledPaged?: boolean;
 };
+
+export const RECREATE_TRIES = 3;
+const RECREATE_RETRY_MS = 30_000;
 
 export async function getHold(db: Db): Promise<Hold | null> {
   const [row] = await db.select().from(settings).where(eq(settings.key, MAINTENANCE_KEY));
@@ -91,6 +108,20 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'maintenance'`));
   }
 
+  /** Whether this runner still needs recreating in this drain. */
+  function needsSwap(h: Hold, r: FleetRunner, swapped: Record<string, string>) {
+    return h.kind === "settings" ? !swapped[r.slug] : !r.current;
+  }
+
+  /** What drain.json asks for: a setting change when it says so, else an image update. Unreadable or odd contents count as an update, as before. */
+  function kindOf(text: string): HoldKind {
+    try {
+      return (JSON.parse(text) as { reason?: unknown })?.reason === SETTINGS_REASON ? "settings" : "update";
+    } catch {
+      return "update";
+    }
+  }
+
   async function end(title: string, level: NotifyInput["level"], body: string) {
     const h = await getHold(db);
     const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
@@ -125,15 +156,31 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
   const self = {
     /** Turns the hold on. Idempotent: a second call returns the hold that is already on. // leader-only */
-    async start(opts: { reason?: string; minutes?: number } = {}): Promise<Hold> {
+    async start(opts: { reason?: string; minutes?: number; kind?: HoldKind } = {}): Promise<Hold> {
+      const kind = opts.kind ?? "update";
       const have = await getHold(db);
-      if (have) return have;
+      if (have) {
+        // A setting change asked for during an image update: recreate every runner from now on, including any
+        // already swapped, since they were made with the old settings. The recreate also puts them on the new image.
+        if (kind === "settings" && have.kind !== "settings") {
+          const up: Hold = { ...have, kind, reason: SETTINGS_REASON, swapped: {} };
+          await save(up);
+          return up;
+        }
+        return have;
+      }
       const minutes = opts.minutes ?? deps.drainMinutes ?? 30;
       const t = now();
-      const h: Hold = { reason: opts.reason ?? "runner update", since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
+      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
       await save(h);
-      await deps.tellRunning?.(WRAP_UP).catch((err) => deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`));
-      await deps.notify({ companyId: null, level: "note", title: "Update pending: waiting for runs to finish", body: `Nothing new starts in any company. Each runner is swapped as its company goes idle. If runs are still going after ${minutes} minutes, you will be asked.`, link: "#/settings" });
+      await deps.tellRunning?.(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP).catch((err) => deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`));
+      await deps.notify({
+        companyId: null,
+        level: "note",
+        title: kind === "settings" ? "Setting change pending: waiting for runs to finish" : "Update pending: waiting for runs to finish",
+        body: `Nothing new starts in any company. Each runner is ${kind === "settings" ? "recreated with the new settings" : "swapped"} as its company goes idle. If runs are still going after ${minutes} minutes, you will be asked.`,
+        link: "#/settings",
+      });
       return h;
     },
 
@@ -182,14 +229,14 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
      * asks at the deadline, and lifts the hold once every runner is on the new image.
      */
     async step() {
-      let asked = false;
+      let asked: HoldKind | null = null;
       if (trigger && (await stat(trigger).then(() => true, () => false))) {
-        await readFile(trigger, "utf8").catch(() => ""); // contents are not used: the file's existence is the request
+        // The file's existence is the request; its "reason" says whether it is a setting change (BOS-594).
+        asked = kindOf(await readFile(trigger, "utf8").catch(() => ""));
         await rm(trigger, { force: true });
-        asked = true;
       }
       let h = await getHold(db);
-      if (!h && asked) h = await self.start({ reason: "runner update" });
+      if (asked && (!h || (asked === "settings" && h.kind !== "settings"))) h = await self.start({ kind: asked });
       if (!h) return;
 
       let fleet: FleetRunner[];
@@ -210,29 +257,53 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
       const failed = { ...h.failed };
       const swapped = { ...h.swapped };
+      const tries = { ...h.tries };
       for (const r of fleet) {
-        if (r.current || failed[r.slug]) continue;
+        if (!needsSwap(h, r, swapped) || failed[r.slug]) continue;
         if (swapped[r.slug] && t.getTime() - new Date(swapped[r.slug]!).getTime() < 60_000) continue;
+        if (tries[r.slug] && t.getTime() - new Date(tries[r.slug]!.at).getTime() < RECREATE_RETRY_MS) continue;
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
         await deps.settled();
         active = await activeByCompany(true);
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         try {
+          // Said before the call, so the runner's next hello is recorded as this, not as a crash (BOS-594).
+          if (r.companyId) await expectRestart(db, r.companyId, h.kind === "settings" ? "setting change" : "update", now());
           await deps.recreate(r.slug); // leader-only
           swapped[r.slug] = now().toISOString();
+          delete tries[r.slug];
         } catch (err) {
-          failed[r.slug] = (err as Error).message;
-          deps.log?.(`drain: could not recreate ${r.slug}: ${(err as Error).message}`);
+          const n = (tries[r.slug]?.n ?? 0) + 1;
+          tries[r.slug] = { n, at: now().toISOString() };
+          deps.log?.(`drain: could not recreate ${r.slug} (try ${n} of ${RECREATE_TRIES}): ${(err as Error).message}`);
+          if (n >= RECREATE_TRIES) failed[r.slug] = (err as Error).message;
         }
       }
-      h = { ...h, swapped, failed };
+      h = { ...h, swapped, failed, tries };
+      // No swap for twice the reconnect time while runners still wait: say so once, so a hold is never silently stuck.
+      const waiting = fleet.filter((r) => !r.current && !failed[r.slug] && !swapped[r.slug]);
+      if (waiting.length && !h.stalledPaged) {
+        const lastProgress = Math.max(new Date(h.since).getTime(), ...Object.values(swapped).map((s) => new Date(s).getTime()));
+        if (t.getTime() - lastProgress >= 2 * reconnectMs) {
+          h = { ...h, stalledPaged: true };
+          const minutes = Math.round((t.getTime() - lastProgress) / 60_000);
+          // A company with work runs going is waited for on purpose (BOS-497): say so, rather than call the update stuck.
+          const busy = (r: FleetRunner) => !h!.force && !!r.companyId && (active.get(r.companyId) ?? 0) > 0;
+          const idle = waiting.filter((r) => !busy(r));
+          const busyList = waiting.filter(busy).map((r) => r.slug);
+          if (!idle.length)
+            await deps.notify({ companyId: null, level: "page", title: "Runner update is waiting for running work", body: `No runner has been swapped for ${minutes} minutes because ${busyList.join(", ")} still ${busyList.length === 1 ? "has" : "have"} work runs going. This wait is on purpose: each runner is swapped as soon as its runs finish, and at the deadline you are asked whether to stop them. New runs are held everywhere until then. To stop waiting, open Settings > Server and runner and cancel the update.`, link: "#/settings" });
+          else
+            await deps.notify({ companyId: null, level: "page", title: "Runner update is stuck", body: `No runner has been swapped for ${minutes} minutes. Still waiting on: ${idle.map((r) => r.slug).join(", ")}${busyList.length ? ` (and on ${busyList.join(", ")}, which still ${busyList.length === 1 ? "has" : "have"} work runs going)` : ""}. New runs are held everywhere. Open Settings > Server and runner: wait for that company to finish, or cancel the update.`, link: "#/settings" });
+        }
+      }
       await save(h);
 
-      if (fleet.some((r) => !r.current && !failed[r.slug] && !swapped[r.slug])) return; // still waiting for an idle company
+      if (fleet.some((r) => needsSwap(h!, r, swapped) && !failed[r.slug] && !swapped[r.slug])) return; // still waiting for an idle company
       // Everything is swapped or failed. Re-read what runs the new image before judging.
       const after = await deps.fleet().catch(() => fleet);
-      if (after.some((r) => !r.current && !failed[r.slug])) return;
+      if (h.kind !== "settings" && after.some((r) => !r.current && !failed[r.slug])) return;
       const slow: string[] = [];
       for (const r of after) {
         const at = swapped[r.slug];
@@ -244,7 +315,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       for (const r of after) if (failed[r.slug] && r.current && r.companyId && (await deps.connected(r.companyId))) delete failed[r.slug];
       const bad = [...Object.entries(failed).map(([s, m]) => `${s}: ${m}`), ...slow.map((s) => `${s}: has not reconnected`)];
       // The hold lifts either way: keeping every company stopped for one runner would cost more than it protects.
-      if (bad.length) await end("Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
+      const settingsDone = h.kind === "settings";
+      if (bad.length) await end(settingsDone ? "Runner restart for a setting change finished with problems" : "Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
+      else if (settingsDone) await end("Runners restarted with the new settings", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " was" : "s were"}` : "No runners were"} recreated after their runs finished. New runs have started again.`);
       else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.`);
     },
   };

@@ -7,7 +7,9 @@ import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTes
 import { harnessVersions } from "./harness-versions.js";
 import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
+import { DEFAULT_VACUUM_TIMEOUT_MS, keepDaysFrom, opencodeDataHomes, pruneOpencodeSessions } from "./opencode-prune.js";
 import { RunnerConnection } from "./connection.js";
+import { hostBootAt, markStopped, previousExit } from "./restart-info.js";
 import { SessionManager } from "./session-manager.js";
 import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeRunnerToken } from "./token.js";
@@ -26,6 +28,9 @@ const dataDir = env.BOSSMAN_RUNNER_DATA ?? "/home/node/runner-data";
 mkdirSync(dataDir, { recursive: true });
 const journal = new Journal(path.join(dataDir, "journal.jsonl"));
 const log = (m: string) => console.log(`[runner] ${m}`);
+// How the last process ended, read before anything else can fail (BOS-594).
+const restart = { previousExit: previousExit(dataDir), hostBootAt: hostBootAt() };
+if (restart.previousExit) log(`previous runner process: ${restart.previousExit === "stopped" ? "stopped from outside" : "ended without being stopped (crash or out of memory)"}`);
 
 const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
 // check-all.sh's queue, slot locks and results: one folder that every session, fenced or not, and
@@ -101,6 +106,7 @@ connection = new RunnerConnection({
   log,
   onCommand: (command) => sessions.handle(command),
   pendingPermissions: () => sessions.pendingPermissions(),
+  restart,
   runningChecks: () => checkJobs.running(),
   onWelcome: () => checkJobs.resend(),
   liveRuns: () => sessions.liveRunIds(),
@@ -121,6 +127,38 @@ const housekeeping = async () => {
     connection.emit({ type: "runner.disk", ...report });
   } catch (err) {
     log(`workspace clean-up failed: ${(err as Error).message}`);
+  }
+  await pruneOpencode();
+};
+
+// OpenCode never deletes its old sessions (BOS-616): drop ones untouched for
+// BOSSMAN_OPENCODE_SESSION_DAYS (default 14, 0 = off), 50 per database per pass, then give the
+// space back (one VACUUM per database while no OpenCode run is live, small steps after that).
+// Each database is backed up and checked into runner-data/opencode-prune before its first delete.
+const opencodeKeepDays = keepDaysFrom(env.BOSSMAN_OPENCODE_SESSION_DAYS, log);
+let pruning = false;
+const pruneOpencode = async () => {
+  if (pruning || opencodeKeepDays <= 0) return;
+  pruning = true;
+  try {
+    const agentsRoot = path.join(dataDir, "agents");
+    const r = await pruneOpencodeSessions({
+      keepDays: opencodeKeepDays,
+      dataHomes: opencodeDataHomes(env, agentsRoot),
+      agentsRoot,
+      stateDir: path.join(dataDir, "opencode-prune"),
+      activeSessionIds: () => sessions.activeSessionIds(),
+      // The prune kills its VACUUM at 30 minutes (BOS-622); the hold lets go 5 minutes later whatever happens.
+      whileOpencodeIdle: (fn) => sessions.whileOpencodeIdle(fn, DEFAULT_VACUUM_TIMEOUT_MS + 5 * 60_000),
+      onVacuumCut: (cut) => connection.emit({ type: "runner.opencode_vacuum_cut", heldSeconds: Math.round(cut.heldMs / 1000), bytes: cut.bytes, agentHome: cut.agentHome }),
+      log,
+    });
+    if (r.deleted || r.failed || r.reclaimedBytes > 0)
+      log(`OpenCode sessions older than ${opencodeKeepDays} days: ${r.deleted} deleted, ${r.failed} failed, ${Math.round(r.reclaimedBytes / 1024 ** 2)} MB given back`);
+  } catch (err) {
+    log(`OpenCode session prune failed: ${(err as Error).message}`);
+  } finally {
+    pruning = false;
   }
 };
 void housekeeping();
@@ -145,6 +183,7 @@ const beat = setInterval(() => {
 }, 15_000);
 
 const stop = () => {
+  markStopped(dataDir);
   clearInterval(beat);
   clearInterval(sweep);
   clearInterval(prune);

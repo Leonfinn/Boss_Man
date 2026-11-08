@@ -7,6 +7,7 @@ import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
@@ -622,7 +623,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
         />
       )}
       {note && <p role="status">{note}</p>}
-      {board.error && (
+      {board.error && !away(board.error) && (
         <p className="error" role="alert">
           {board.error.message}
         </p>

@@ -18,10 +18,10 @@
     "@boss-man/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "1.32.1",
     "tsx": "4.23.15",
-    "ws": "8.22.0"
+    "ws": "8.22.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/ws": "8.18.2",
-    "zod": "4.6.7"
+    "@types/ws": "8.18.2"
   }
 }

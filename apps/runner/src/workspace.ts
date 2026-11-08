@@ -5,21 +5,63 @@
 //   tickets/<ticketId>        the ticket's worktree, on branch bossman/<ticket>
 //   reviews/<ticketId>        a reviewer's own detached copy of that work
 //   patches/<ticketId>.patch  uncommitted work saved when a worktree is released
+//   scratch/<ticketId>        a ticket's kept proofs and check logs (BOSSMAN_SCRATCH), unlike /tmp
 //
 // Lessons from cline/kanban: creation is serialised per repo, an existing worktree is never
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { checkQueueEnv, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { checkMigrations, journalAt, journalProblems, rebaseMigrations } from "./migrations.js";
+import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
 const run = promisify(execFile);
 const VERIFY_KILL_GRACE_MS = 2000;
+/** A review copy's install (BOS-693): seconds from a warm store; a cold one on a slow link can take a few minutes. */
+export const REVIEW_INSTALL_TIMEOUT_MS = 5 * 60_000;
+
+/** Runs a command in its own process group, killed whole at the timeout; output kept to the last 4 KB. Never rejects on exit. */
+function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; timedOut: boolean; output: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    let timedOut = false;
+    const onData = (d: Buffer) => {
+      output = (output + String(d)).slice(-4096);
+    };
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", onData);
+    const kill = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        // group already gone
+      }
+    };
+    let hard: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill("SIGTERM");
+      hard = setTimeout(() => kill("SIGKILL"), VERIFY_KILL_GRACE_MS);
+    }, timeoutMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      clearTimeout(hard);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      clearTimeout(hard);
+      resolve({ code, timedOut, output: output.trim() });
+    });
+  });
+}
 
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
@@ -97,6 +139,16 @@ export function safeGitEnv(extra: Record<string, string> = {}): Record<string, s
   return env;
 }
 
+/**
+ * The git author and committer for a name. An agent's session gets this in its environment (BOS-255):
+ * the worktrees share the repo's own config, where an agent's `git config user.name` lands for every
+ * later run, and environment variables beat any config file.
+ */
+export function gitAuthorEnv(by?: string) {
+  const name = by?.trim().slice(0, 200) || "Boss Man";
+  return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
+}
+
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>();
 
@@ -113,6 +165,8 @@ export class Workspaces {
 
   repoDir = (projectId: string) => path.join(this.root, "repos", `${projectId}.git`);
   ticketDir = (ticketId: string) => path.join(this.root, "tickets", ticketId);
+  /** A ticket's kept scratch (BOSSMAN_SCRATCH): proofs and check logs that outlive the runner and /tmp. */
+  scratchDir = (ticketId: string) => path.join(this.root, "scratch", ticketId);
   mergeCheckDir = (ticketId: string) => path.join(this.root, "merge-checks", ticketId);
   reviewDir = (ticketId: string) => path.join(this.root, "reviews", ticketId);
   patchFile = (ticketId: string) => path.join(this.root, "patches", `${ticketId}.patch`);
@@ -123,8 +177,7 @@ export class Workspaces {
    * merge) are always Boss Man, since they aren't the agent's work.
    */
   private authorEnv(by?: string) {
-    const name = by?.trim().slice(0, 200) || "Boss Man";
-    return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
+    return gitAuthorEnv(by);
   }
 
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
@@ -305,6 +358,52 @@ export class Workspaces {
     });
   }
 
+  /** One install at a time per review copy: a ticket's code and security reviewers share the folder. */
+  private readonly reviewInstalls = new Map<string, Promise<unknown>>();
+
+  /**
+   * Installs a review copy's packages (BOS-693), so its reviewer can run the ticket's tests in place instead of building a
+   * /tmp clone. Only for a pnpm project, and only from the shared store (BOS-568): with no shared store it does nothing
+   * rather than start a store of its own. The install follows the branch's lockfile and runs its packages' scripts, which
+   * nobody has reviewed yet, so it runs as a server-queued check job does: fenced where the runner can fence, with a HOME
+   * of its own under check-jobs-home that goes afterwards (and that the start-up sweep takes if the runner dies mid-install).
+   * Never throws: the review starts either way, and what happened is in `detail`.
+   */
+  async installReviewDeps(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, timeoutMs = REVIEW_INSTALL_TIMEOUT_MS): Promise<{ installed: boolean; detail: string }> {
+    const dir = this.reviewDir(spec.ticketId);
+    const prev = this.reviewInstalls.get(spec.ticketId) ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(async (): Promise<{ installed: boolean; detail: string }> => {
+      if (!existsSync(path.join(dir, "pnpm-lock.yaml"))) return { installed: false, detail: "not a pnpm project" };
+      if (!this.jobFence?.pnpmStore) return { installed: false, detail: "this runner has no shared pnpm store" };
+      const pnpm = (this.baseEnv.PATH ?? "").split(":").map((d) => d && path.join(d, "pnpm")).find((p) => p && existsSync(p));
+      if (!pnpm) return { installed: false, detail: "pnpm isn't on this runner's PATH" };
+      const id = randomUUID();
+      const home = path.join(this.root, "check-jobs-home", id);
+      this.activeJobs.add(id);
+      try {
+        const fence = this.jobFenceFor(this.repoDir(spec.projectId), dir, home);
+        // CI: no prompts (and pnpm purges a node_modules made from another store without asking).
+        const args = ["install", "--frozen-lockfile", "--prefer-offline", "--config.confirmModulesPurge=false"];
+        const launch = fence.wrap ? fence.wrap(pnpm, args) : { bin: pnpm, args };
+        const env = { PATH: this.baseEnv.PATH, CI: "1", ...fence.env } as NodeJS.ProcessEnv;
+        const r = await runGroup(launch.bin, launch.args, dir, env, timeoutMs);
+        if (r.code === 0) return { installed: true, detail: "installed" };
+        return { installed: false, detail: `${r.timedOut ? `timed out after ${Math.round(timeoutMs / 1000)} s` : `exit ${r.code}`}: ${r.output.slice(-500)}` };
+      } catch (err) {
+        return { installed: false, detail: String((err as Error)?.message ?? err).slice(0, 500) };
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+        this.activeJobs.delete(id);
+      }
+    });
+    this.reviewInstalls.set(spec.ticketId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.reviewInstalls.get(spec.ticketId) === next) this.reviewInstalls.delete(spec.ticketId);
+    }
+  }
+
   /** The worktree as it is now, as a commit no ref points at; its branch, index and files are untouched. */
   private async snapshot(dir: string): Promise<string> {
     const index = path.join(this.root, "tmp", `${path.basename(dir)}.review.index`);
@@ -342,6 +441,11 @@ export class Workspaces {
       }
       await this.git(["worktree", "remove", "--force", dir], { cwd: repo });
       await this.git(["worktree", "prune"], { cwd: repo });
+      // The ticket is done with its worktree: its kept scratch goes with it (BOS-592), like the worktree's own files.
+      // The server confirms that by itself (a ticket done, or a week past), so a stray release can't remove it first.
+      const scratch = this.scratchDir(spec.ticketId);
+      const age = Date.now() - (statSync(scratch, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
+      if (age > RELEASED_SCRATCH_KEEP_MS) rmSync(scratch, { recursive: true, force: true });
       // Turn checkpoints only matter while the ticket is being worked on.
       for (const c of await this.checkpoints(spec.projectId, spec.ticketId)) await this.git(["update-ref", "-d", c.ref], { cwd: repo });
       return { savedPatch };
@@ -388,7 +492,8 @@ export class Workspaces {
    */
   readImage(ticketId: string, file: string, maxBytes = 5 * 1024 * 1024): { base64: string; size: number } {
     if (!file || file.includes("\0")) throw new Error("Give the image's path.");
-    const dirs = [this.ticketDir(ticketId), this.reviewDir(ticketId), path.join(this.root, ticketId)].filter((d) => existsSync(d)).map((d) => realpathSync(d));
+    // The kept scratch (BOSSMAN_SCRATCH) counts too: a screenshot a proof left there is still the ticket's own image.
+    const dirs = [this.ticketDir(ticketId), this.reviewDir(ticketId), path.join(this.root, ticketId), this.scratchDir(ticketId)].filter((d) => existsSync(d)).map((d) => realpathSync(d));
     const candidates = path.isAbsolute(file) ? [path.resolve(file)] : dirs.map((d) => path.resolve(d, file));
     for (const c of candidates) {
       if (!existsSync(c)) continue;
@@ -402,15 +507,37 @@ export class Workspaces {
     throw new Error(`There's no ${file} in this ticket's working folder. Save the image there (a path relative to where you work) and try again.`);
   }
 
-  async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024): Promise<WorkspaceDiff> {
+  /**
+   * The base a review should be measured from (BOS-694): the merge-base of the ticket's head and a
+   * freshly fetched origin/<baseRef>, the same split `git diff origin/<baseRef>...HEAD` uses, so a
+   * branch that has merged main since it started shows only its own changes. Without a baseRef, or
+   * when origin can't be reached, the recorded base stands: a stale diff's better than none.
+   */
+  private async reviewBase(repo: string, head: string, recorded: string, baseRef: string | undefined, secrets: Record<string, string | undefined>): Promise<{ base: string; tip?: string }> {
+    if (!baseRef) return { base: recorded };
+    try {
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: gitAuthEnv(secrets) });
+      const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${baseRef}^{commit}`], { cwd: repo });
+      // Where the branch split from main's current tip, however far main has moved since.
+      return { base: (await this.git(["merge-base", head, tip], { cwd: repo })) || recorded, tip };
+    } catch {
+      return { base: recorded };
+    }
+  }
+
+  async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024, baseRef?: string, secrets: Record<string, string | undefined> = {}): Promise<WorkspaceDiff> {
     const repo = this.repoDir(spec.projectId);
     const dir = await this.reopen(spec);
-    const baseCommit = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
+    const recorded = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
+    // Fetches under the repo lock, like every other git call that touches the shared refs.
+    const { base: baseCommit, tip } = await this.withRepoLock(spec.projectId, () => this.reviewBase(repo, head, recorded, baseRef, secrets));
     // The tree is read from the same commit as head, before the slow steps: a commit landing
     // mid-diff must not leave head A tagged with B's tree (the check queue reuses passes by tree).
     const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: dir });
-    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`], { cwd: dir });
+    // A fresh base can be far ahead of the recorded one; main's own commits aren't the ticket's work, so with a fetched
+    // tip they are left out of its commit list.
+    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`, ...(tip ? ["--not", tip] : [])], { cwd: dir });
     const commits = log ? log.split("\n").map((l) => ({ sha: l.slice(0, 40), subject: l.slice(41) })) : [];
     const index = path.join(this.root, "tmp", `${spec.ticketId}.index`);
     mkdirSync(path.dirname(index), { recursive: true });
@@ -558,7 +685,7 @@ export class Workspaces {
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
-        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, spec.jobId) });
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) });
       } finally {
         await this.withRepoLock(spec.projectId, async () => {
           await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
@@ -577,29 +704,30 @@ export class Workspaces {
   private readonly activeJobs = new Set<string>();
 
   /**
-   * The fence and own HOME/TMPDIR for one job, like an agent session's: the job's folder, its own home and temp folder, the pnpm
-   * store, and the shared repo with only objects/refs/logs writable. The runner's token, data folder and other tickets' worktrees
-   * are outside it. On a runner that can't fence, the job runs as before (the same fallback sessions have).
+   * The environment, and fence where the runner can fence, for one job, like an agent session's: the job's folder, its own home
+   * and temp folder, the pnpm store, and the shared repo with only objects/refs/logs writable. The runner's token, data folder and
+   * other tickets' worktrees are outside the fence. On a runner that can't fence, the job still gets its own HOME/TMPDIR and the
+   * pnpm store on the workspaces volume (BOS-655), so its install doesn't fill the root disk under the runner's HOME; only the
+   * file fence is missing (the same fallback sessions have).
    */
-  private jobFenceFor(repo: string, dir: string, jobId: string): { env: Record<string, string>; wrap: (bin: string, args: string[]) => { bin: string; args: string[] } } | undefined {
-    if (!this.jobFence || this.jobFence.level === "unavailable") return undefined;
-    const home = path.join(this.root, "check-jobs-home", jobId);
+  private jobFenceFor(repo: string, dir: string, home: string): { env: Record<string, string>; wrap?: (bin: string, args: string[]) => { bin: string; args: string[] } } {
     const tmp = path.join(home, "tmp");
     mkdirSync(tmp, { recursive: true });
     const env: Record<string, string> = { HOME: home, TMPDIR: tmp, XDG_CACHE_HOME: path.join(home, ".cache"), XDG_CONFIG_HOME: path.join(home, ".config"), BOSSMAN_CHECK_STORE: "off", GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null", GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "gc.auto", GIT_CONFIG_VALUE_2: "0" };
     const readWrite: string[] = [];
-    if (this.jobFence.pnpmStore) {
+    if (this.jobFence?.pnpmStore) {
       mkdirSync(this.jobFence.pnpmStore, { recursive: true });
       env.npm_config_store_dir = this.jobFence.pnpmStore;
       readWrite.push(this.jobFence.pnpmStore);
     }
+    if (!this.jobFence || this.jobFence.level === "unavailable") return { env };
     const readOnly = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
     const rules = fenceProfile({ cwd: dir, home, tmp, repo: repoGrant(repo, dir), readOnly, readWrite });
     return { env, wrap: (bin, args) => fencedCommand(rules, bin, args) };
   }
 
   /** One check command in a folder: its own process group, output kept to the last 8 KB. */
-  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void; fence?: { env: Record<string, string>; wrap: (bin: string, args: string[]) => { bin: string; args: string[] } } }): Promise<VerifyResult> {
+  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void; fence?: { env: Record<string, string>; wrap?: (bin: string, args: string[]) => { bin: string; args: string[] } } }): Promise<VerifyResult> {
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
       // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
@@ -620,7 +748,7 @@ export class Workspaces {
       // The check starts with default HUP/INT/TERM handling: a server started with those ignored would pass that on, and a shell can't undo it
       // (so check-all's own signal trap and its tests never fire). env --default-signal needs GNU coreutils; without it the command runs as before.
       const sigScript = `if env --default-signal=HUP,INT,TERM true 2>/dev/null; then exec env --default-signal=HUP,INT,TERM ${inner}; fi; exec ${inner}`;
-      const launch = job?.fence ? job.fence.wrap("sh", ["-c", sigScript, command]) : { bin: "sh", args: ["-c", sigScript, command] };
+      const launch = job?.fence?.wrap ? job.fence.wrap("sh", ["-c", sigScript, command]) : { bin: "sh", args: ["-c", sigScript, command] };
       const child = spawn(launch.bin, launch.args, {
         cwd: dir,
         detached: true,
@@ -910,6 +1038,25 @@ export class Workspaces {
   }
 
   /**
+   * Whether the owner's sign-off on `signed` still covers the ticket's branch head (BOS-734, DR-038): only
+   * clean automatic merges of the target came in since. Fails closed: any git doubt says "does not cover".
+   */
+  async signoffCovers(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, signed: string, secrets: Record<string, string | undefined> = {}, expectHead?: string): Promise<SignoffCover> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      const head = await this.git(["rev-parse", "--verify", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
+      // The caller checked this head; if the branch ref says otherwise, the answer would be about different code (BOS-734).
+      if (expectHead && !head.startsWith(expectHead) && !expectHead.startsWith(head)) {
+        return { covers: false, reason: "the branch moved while this was being checked", newCommits: 0, handMerges: 0 };
+      }
+      return checkSignoffCovers((args) => this.gitCode(args, { cwd: repo }), signed, head, `refs/remotes/origin/${target}`);
+    });
+  }
+
+  /**
    * Where a ticket's branch really started (BOS-687). The recorded base is where the runner created
    * the branch, normally a main commit. A branch the agent then moved onto another ticket's work
    * before committing anything of its own (`git reset --hard <sha>`, `git switch -C`) started
@@ -930,6 +1077,14 @@ export class Workspaces {
     for (const line of log.stdout.split("\n").filter(Boolean).reverse()) {
       const [sha, ...msg] = line.split(" ");
       const text = msg.join(" ");
+      // A fast-forward merge before the branch's first commit moves it just as a reset does (BOS-733: BOS-726
+      // was made from main, then `git merge` fast-forwarded it onto BOS-725's tip). It has no commit of its own
+      // yet, so everything it moved onto came from elsewhere; the guards below still apply. git writes this
+      // reflog text untranslated.
+      if (/^merge [^:]+: Fast-forward$/.test(text) && sha) {
+        start = sha;
+        continue;
+      }
       if (/^commit|^merge|^rebase|^cherry-pick/.test(text)) break;
       if (/^reset: moving to|^branch: Reset to|^checkout: moving/.test(text) && sha) start = sha;
     }
@@ -986,7 +1141,8 @@ export class Workspaces {
         const bLine = await refs(b.branch, true);
         if (bLine.some((sha) => mine.has(sha))) {
           // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
-          // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
+          // server may allow when B is approved (BOS-372). From the graph alone a fast-forward can't be told from a hole; B's
+          // reflog can, when the fast-forward was B's first move (realBase, BOS-733).
           const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
           // B stacked on this ticket (BOS-629): B was created from a commit this branch holds. The graph alone can't say who
           // wrote a shared commit, but the base the runner recorded when it created B's branch can: a shared commit that is
@@ -1103,6 +1259,26 @@ export class Workspaces {
       if (UUID.test(ticketId) && UUID.test(projectId)) tickets.push({ ticketId, projectId, bytes: await diskUsage(dir) });
     }
 
+    // Scratch (BOSSMAN_SCRATCH, BOS-592) lives on the kept disk and is never the clutter the tmp sweep
+    // clears, so it goes only when its ticket's work (and review copy) are released and it has been quiet for a few
+    // hours, or after a week without a write, whichever comes first. A run inside the last week is barely writing:
+    // touching a folder at its top level keeps it alive.
+    const scratch: DiskReport["scratch"] = [];
+    const scratchRoot = path.join(this.root, "scratch");
+    for (const ticketId of list(scratchRoot)) {
+      // Only a per-ticket folder is ever touched: nothing here can reach another folder of the volume.
+      if (!UUID.test(ticketId)) continue;
+      const dir = path.join(scratchRoot, ticketId);
+      const released = !existsSync(this.ticketDir(ticketId)) && !existsSync(path.join(this.root, "reviews", ticketId));
+      const age = now - (statSync(dir, { throwIfNoEntry: false })?.mtimeMs ?? now);
+      if ((released && age > RELEASED_SCRATCH_KEEP_MS) || age > SCRATCH_KEEP_MS) {
+        rmSync(dir, { recursive: true, force: true });
+        removed.push(ticketId);
+        continue;
+      }
+      scratch.push({ ticketId, bytes: await diskUsage(dir) });
+    }
+
     // A review copy git no longer knows about (its repo pruned it) is only clutter.
     for (const ticketId of list(path.join(this.root, "reviews"))) {
       const dir = path.join(this.root, "reviews", ticketId);
@@ -1135,8 +1311,55 @@ export class Workspaces {
 
     const repos = await Promise.all(list(reposDir).filter((n) => n.endsWith(".git")).map(async (n) => ({ projectId: n.slice(0, -4), bytes: await diskUsage(path.join(reposDir, n)) })));
     const patchesBytes = await diskUsage(path.join(this.root, "patches"));
-    const usedBytes = tickets.reduce((a, t) => a + t.bytes, 0) + repos.reduce((a, r) => a + r.bytes, 0) + patchesBytes;
-    return { usedBytes, tickets, repos, removed };
+    const scratchBytes = scratch.reduce((a, s) => a + s.bytes, 0);
+    const usedBytes = tickets.reduce((a, t) => a + t.bytes, 0) + repos.reduce((a, r) => a + r.bytes, 0) + patchesBytes + scratchBytes;
+    return { usedBytes, tickets, repos, scratch, removed };
+  }
+
+  /**
+   * Moves leftovers from /tmp into a ticket's kept scratch (BOS-592), where the tmp sweep never reaches them:
+   * a proof or log an older run wrote in /tmp survives this runner's restart. Only the top level of /tmp is
+   * looked at: a folder that is one of the ticket's own folder names, or a loose file named for the ticket.
+   * Returns what it moved. Best effort: a name already in scratch is never overwritten.
+   */
+  rescueTmp(ticketId: string, tmpDir = "/tmp"): string[] {
+    if (!UUID.test(ticketId)) return [];
+    const scratch = this.scratchDir(ticketId);
+    const id = ticketId.toLowerCase();
+    const moved: string[] = [];
+    for (const name of existsSync(tmpDir) ? readdirSync(tmpDir) : []) {
+      const from = path.join(tmpDir, name);
+      const lower = name.toLowerCase();
+      // A fenced run writes its check log where it can reach (/tmp) under a kept name, and it lands in scratch as the
+      // check's own log: check-all.log for bossman-scratch-<ticket>.log, check-quick.log for the -quick one.
+      const checkLog = lower === `bossman-scratch-${id}.log` ? "check-all.log" : lower === `bossman-scratch-${id}-quick.log` ? "check-quick.log" : null;
+      const target = path.join(scratch, checkLog ?? name);
+      // A kept check log is the one thing the kept folders may already have: never copy one back over it.
+      if (name === "check-all.log" || name === "check-quick.log") continue;
+      // The check scripts work through /tmp too (it may be another file system), as bossman-scratch-<ticket>.log.
+      const mine = checkLog !== null || lower === id || lower.startsWith(`${id}.`) || lower.startsWith(`${id}-`) || lower.startsWith(`${id}_`);
+      if (!mine || existsSync(target)) continue;
+      // A symlink is never followed nor moved: it could point at another ticket's file, and a link in the scratch
+      // would read as that file from the next run on.
+      const st = lstatSync(from, { throwIfNoEntry: false });
+      if (!st || st.isSymbolicLink()) continue;
+      try {
+        mkdirSync(scratch, { recursive: true });
+        renameSync(from, target);
+        moved.push(name);
+      } catch {
+        // Another file system (/tmp on its own volume) or a file that moved meanwhile: /tmp goes, so a copy is
+        // the only way to keep it.
+        try {
+          if (st.isDirectory()) cpSync(from, target, { recursive: true });
+          else copyFileSync(from, target);
+          moved.push(name);
+        } catch {
+          // Leave it for the sweep.
+        }
+      }
+    }
+    return moved;
   }
 
   /** For tests and the run view: the saved patch, if any. */

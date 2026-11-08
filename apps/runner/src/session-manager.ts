@@ -4,19 +4,19 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
-import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { FENCE_DENIED_PATTERN, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { RepoLockTimeout, type Workspaces } from "./workspace.js";
+import { gitAuthorEnv, RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -178,6 +178,19 @@ export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP
  */
 const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|(GH_TOKEN|GH_PAT|GITHUB_TOKEN|GITHUB_PAT|GITLAB_TOKEN|GL_TOKEN|GITEA_TOKEN|CI_JOB_TOKEN|BITBUCKET_TOKEN|ATLASSIAN_API_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|YARN_NPM_AUTH_TOKEN|VERCEL_TOKEN)(_[A-Z0-9_]+)?)$/;
 
+/**
+ * The MCP servers as Claude Code's own config file (BOS-553). Handed over in session/new they would end up in the
+ * command line of Claude Code (`--mcp-config {...Bearer bm_run_...}`), which every agent on the runner can read
+ * from /proc. The adapter is told to pass this file's path instead.
+ */
+export function claudeMcpConfig(servers: McpServer[]): string {
+  const mcpServers: Record<string, unknown> = {};
+  for (const s of servers) {
+    if ("type" in s && (s.type === "http" || s.type === "sse")) mcpServers[s.name] = { type: s.type, url: s.url, headers: Object.fromEntries(s.headers.map((h) => [h.name, h.value])) };
+  }
+  return JSON.stringify({ mcpServers });
+}
+
 /** A run's granted secrets without the git credential, for the agent's own environment. */
 export function withoutGitCredentials(secrets: Record<string, string>): Record<string, string> {
   return Object.fromEntries(Object.entries(secrets).filter(([k]) => !GIT_CREDENTIAL_NAMES.test(k)));
@@ -209,6 +222,7 @@ function realDirsUnder(base: string, rel: string): boolean {
 
 type RunState = {
   child: ChildProcess;
+  agentKind: string;
   sessionId: string | null;
   cancel: () => void;
   pendingPermissions: Map<string, (verdict: "allow" | "deny") => void>;
@@ -243,6 +257,23 @@ export class SessionManager {
    * so the server can start a recovery run (R42). Call once, before handling commands.
    */
   recoverInterrupted() {
+    // A crash can leave a run's token file behind (BOS-553). Only folders older than 10 minutes go:
+    // the file is deleted seconds after the session opens, and another process sharing this tmp
+    // folder (parallel test files) may own a younger one that is still being read.
+    try {
+      for (const name of readdirSync(tmpdir())) {
+        if (!name.startsWith("bossman-mcp-")) continue;
+        const dir = path.join(tmpdir(), name);
+        try {
+          if (Date.now() - statSync(dir).mtimeMs < 600_000) continue;
+        } catch {
+          continue;
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    } catch {
+      /* best effort */
+    }
     const file = this.opts.stateFile;
     if (!file || !existsSync(file)) return [];
     let leftover: string[] = [];
@@ -280,6 +311,37 @@ export class SessionManager {
     return this.runs.size;
   }
 
+  private opencodeHeld: Promise<void> | null = null;
+
+  /**
+   * Runs fn while no OpenCode run is live, holding new OpenCode runs and model probes until it
+   * settles (the OpenCode database's one-off VACUUM, BOS-616). Resolves null, without running fn,
+   * when an OpenCode run is live or another hold is on. With maxHoldMs the hold is let go at that
+   * point even if fn hasn't settled (BOS-622: a backstop; the prune kills its VACUUM before then).
+   */
+  async whileOpencodeIdle<T>(fn: () => Promise<T>, maxHoldMs?: number): Promise<T | null> {
+    if (this.opencodeHeld || [...this.runs.values()].some((r) => r.agentKind === "opencode")) return null;
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    this.opencodeHeld = held;
+    const letGo = () => {
+      if (this.opencodeHeld === held) this.opencodeHeld = null;
+      release();
+    };
+    const backstop = maxHoldMs === undefined ? null : setTimeout(letGo, maxHoldMs);
+    try {
+      return await fn();
+    } finally {
+      if (backstop) clearTimeout(backstop);
+      letGo();
+    }
+  }
+
+  /** The agent session ids live runs are using (the OpenCode prune leaves these alone). */
+  activeSessionIds(): string[] {
+    return [...this.runs.values()].flatMap((r) => (r.sessionId ? [r.sessionId] : []));
+  }
+
   /** Process group ids of active runs, one per adapter. */
   processGroups(): number[] {
     return [...this.runs.values()].flatMap((r) => (r.child.pid ? [r.child.pid] : []));
@@ -288,6 +350,17 @@ export class SessionManager {
   /** Ends every run's process group, e.g. when the runner shuts down. */
   shutdown() {
     for (const run of this.runs.values()) killGroup(run.child, 2000);
+  }
+
+  /** Tickets whose /tmp leftovers were already looked for, so a busy ticket's every run doesn't scan /tmp again. */
+  private readonly rescued = new Set<string>();
+
+  /** Moves this ticket's /tmp leftovers into its kept scratch (BOS-592); once per ticket per runner process. */
+  private rescueTmp(ticketId: string, dirs: string[]) {
+    if (this.rescued.has(ticketId) || !this.opts.workspaces) return;
+    this.rescued.add(ticketId);
+    const moved = dirs.flatMap((d) => (d ? this.opts.workspaces!.rescueTmp(ticketId, d) : []));
+    if (moved.length) this.opts.emit({ type: "runner.log", level: "info", message: `Moved ${moved.length} leftover file(s) of ticket ${ticketId} from /tmp into its kept scratch.` });
   }
 
   private starting = new Set<string>();
@@ -362,7 +435,14 @@ export class SessionManager {
           return;
         }
         const spec = { projectId: command.projectId, ticketId: command.ticketId };
-        (command.range === "last_turn" ? this.opts.workspaces.lastTurnDiff(spec) : this.opts.workspaces.diff(spec)).then(
+        const ws = this.opts.workspaces;
+        // A base diff with a default branch needs origin fetched: the merge secrets give that fetch its credential.
+        const work = command.range === "last_turn"
+          ? ws.lastTurnDiff(spec)
+          : command.baseRef
+            ? (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({})).then((secrets) => ws.diff(spec, undefined, command.baseRef, secrets))
+            : ws.diff(spec);
+        work.then(
           (data) => reply(command.requestId, { ok: true, data }),
           (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err) }),
         );
@@ -392,6 +472,21 @@ export class SessionManager {
         }
         (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
           .then((secrets) => ws.clash({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
+      case "workspace.covers": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.signoffCovers({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.signed, secrets, command.head))
           .then(
             (data) => reply(command.requestId, { ok: true, data }),
             (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
@@ -451,6 +546,10 @@ export class SessionManager {
       case "models.probe": {
         const reply = this.opts.reply ?? (() => {});
         (this.opts.resolveCompanyEnv?.("check") ?? Promise.resolve({} as Record<string, string>))
+          .then(async (env) => {
+            while (command.agentKind === "opencode" && this.opencodeHeld) await this.opencodeHeld; // BOS-616
+            return env;
+          })
           .then((env) => probeModels(command.agentKind, env, { baseEnv: this.opts.baseEnv, adapterBin: this.opts.adapterBins?.[command.agentKind] }))
           .then(
             (models) => {
@@ -497,10 +596,28 @@ export class SessionManager {
     // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
     if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask"));
     if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir, base.BOSSMAN_CHECK_SLOT));
-    // Every harness the runner starts (Claude, Codex, OpenCode) gets this marker; scripts/check-all.sh and
+    // Kept scratch (BOS-592): proofs and check logs that /tmp loses on every restart. Made here so a command
+    // that only wants to write into it never has to, and reported as a warning when it can't be made.
+    // Its own session marker, so a check script can tell a run from a shell a person is using (BOS-592).
+    // Every harness the runner starts (Claude, Codex, OpenCode) gets the marker; scripts/check-all.sh and
     // scripts/vitest-guard.mjs refuse a hand-run full check or whole-suite run when they see it. CLAUDECODE only
     // covers Claude Code. Set last so a granted secret can't override it.
     env.BOSSMAN_AGENT_SESSION = "1";
+    // Commits say who made them (BOS-255). The worktrees share the repo's config, where a user.name an earlier
+    // run set would otherwise be used; env beats config. Set last so a secret can't override it.
+    if (cmd.agentName) Object.assign(env, gitAuthorEnv(cmd.agentName));
+    if (cmd.workspace && typeof this.opts.workspaces?.scratchDir === "function") {
+      const dir = this.opts.workspaces.scratchDir(cmd.workspace.ticketId);
+      try {
+        mkdirSync(dir, { recursive: true });
+        env.BOSSMAN_SCRATCH = dir;
+      } catch (err) {
+        this.opts.log?.(`couldn't make the kept scratch for ticket ${cmd.workspace.ticketId}: ${String((err as Error)?.message ?? err)}`);
+      }
+    }
+    // Which ticket this run is for, so a check script that can't write the scratch itself (a fenced run) leaves its log
+    // in /tmp under a name the runner moves into the scratch at its next start (BOS-592).
+    if (cmd.workspace) env.BOSSMAN_TICKET = cmd.workspace.ticketId;
     return env;
   }
 
@@ -531,6 +648,9 @@ export class SessionManager {
       env.npm_config_store_dir = fence.pnpmStore;
       readWrite.push(fence.pnpmStore);
     }
+    // The ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the agent writes its proofs and logs there, and
+    // nothing else on the workspaces root is granted, so it reaches no other ticket's folder.
+    if (env.BOSSMAN_SCRATCH) readWrite.push(env.BOSSMAN_SCRATCH);
     const readOnlyExtra: string[] = [];
     if (this.opts.coordDir) {
       const grant = checkQueueGrant(this.opts.coordDir);
@@ -615,8 +735,13 @@ export class SessionManager {
             }
           }
         };
-        if (spec.review) cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
-        else {
+        if (spec.review) {
+          cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
+          // BOS-693: the reviewer can run the ticket's tests in place, from the shared store. Outside the repo lock,
+          // and a failed install never stops the review: the reviewer can still read the work, or install by hand.
+          const deps = await workspaces.installReviewDeps(spec);
+          if (!deps.installed && deps.detail !== "not a pnpm project") emit({ type: "runner.log", level: "warn", message: `Run ${cmd.runId}: couldn't install the review copy's packages (${deps.detail}).` });
+        } else {
           const ws = await withLockRetry(() => workspaces.ensure(spec, secrets));
           cmd = { ...cmd, cwd: ws.path };
           emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
@@ -675,7 +800,24 @@ export class SessionManager {
         }
       }
     }
+    // A proof or log an older run of this ticket left in /tmp moves into its kept scratch, which the restart
+    // and the tmp sweep leave alone: /tmp is gone at the next restart, and so is the session's own temp folder.
+    if (cmd.workspace) this.rescueTmp(cmd.workspace.ticketId, [tmpdir(), ...(runTmp ? [runTmp] : [])]);
     const dropTmp = () => runTmp && rmSync(runTmp, { recursive: true, force: true });
+    // Where this run's MCP config file lives (Claude only): its own 0700 folder, removed when the run ends.
+    let mcpDir: string | null = null;
+    const dropMcp = () => mcpDir && rmSync(mcpDir, { recursive: true, force: true });
+    // OpenCode's database is being vacuumed (BOS-616): wait, since OpenCode gives up on its lock after 5 s.
+    if (cmd.agentKind === "opencode" && this.opencodeHeld) {
+      emit({ type: "runner.log", level: "info", message: `Run ${cmd.runId} waits a few minutes while OpenCode's database is compacted.` });
+      while (this.opencodeHeld) await this.opencodeHeld;
+      if (this.cancelledEarly.delete(cmd.runId)) {
+        dropSkills();
+        dropTmp();
+        emit({ type: "run.ended", runId: cmd.runId, stopReason: "cancelled", error: null });
+        return;
+      }
+    }
     // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
     // Claude Code carries on headless with every permission denied (spike S4). Ending the run
     // kills the whole group.
@@ -685,7 +827,7 @@ export class SessionManager {
       stderr = (stderr + String(d)).slice(-4000);
     });
 
-    const state: RunState = { child, sessionId: null, cancel: () => {}, pendingPermissions: new Map(), queued: [] };
+    const state: RunState = { child, agentKind: cmd.agentKind, sessionId: null, cancel: () => {}, pendingPermissions: new Map(), queued: [] };
     const toolCalls = new Map<string, { rawInput: unknown; text: string }>();
     this.runs.set(cmd.runId, state);
     this.saveState();
@@ -747,7 +889,7 @@ export class SessionManager {
           }
           // A failed call whose output says the permission was refused: the server logs it with the run and ticket (BOS-306).
           const refused = u.status === "failed" && /User refused permission/i.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : ""));
-          emit({ type: "run.update", runId: cmd.runId, update: { kind: u.sessionUpdate, title: u.title ?? null, toolKind: u.kind ?? null, status: u.status ?? null, ...(refused ? { refused: true } : {}) } });
+          emit({ type: "run.update", runId: cmd.runId, update: { kind: u.sessionUpdate, title: u.title ?? null, toolKind: u.kind ?? null, status: u.status ?? null, ...(refused ? { refused: true } : {}), ...(fenced === true && u.status === "failed" && FENCE_DENIED_PATTERN.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : "")) ? { fenceDenied: true } : {}) } });
           return;
         }
         case "agent_message_chunk": {
@@ -820,6 +962,7 @@ export class SessionManager {
       killGroup(child);
       dropSkills();
       dropTmp();
+      dropMcp();
     };
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
@@ -896,7 +1039,19 @@ export class SessionManager {
       }
       // Board tools only (owner chat): Claude's built-in tools are switched off through the
       // adapter's session options, so only the Boss Man MCP tools remain.
-      const sessionMeta = cmd.boardToolsOnly && cmd.agentKind === "claude" ? { _meta: { claudeCode: { options: { tools: [] } } } } : {};
+      // Claude: the servers go in a 0600 file in a folder of this run's own, not in session/new (BOS-553).
+      let sentServers = mcpServers;
+      let claudeOptions: Record<string, unknown> | null = cmd.boardToolsOnly && cmd.agentKind === "claude" ? { tools: [] } : null;
+      if (cmd.agentKind === "claude") {
+        dropMcp(); // a second pass must not leak the first folder
+        mcpDir = runTmp ? path.join(runTmp, "mcp") : mkdtempSync(path.join(tmpdir(), "bossman-mcp-"));
+        mkdirSync(mcpDir, { recursive: true, mode: 0o700 });
+        const file = path.join(mcpDir, "mcp.json");
+        writeFileSync(file, claudeMcpConfig(mcpServers), { mode: 0o600 });
+        sentServers = [];
+        claudeOptions = { ...claudeOptions, extraArgs: { "mcp-config": file } };
+      }
+      const sessionMeta = claudeOptions ? { _meta: { claudeCode: { options: claudeOptions } } } : {};
       const extraDirs = skillsDir ? { additionalDirectories: [skillsDir] } : {};
       // Recovery (R42): reopen the interrupted session if the agent can, else start fresh.
       // A crash before Claude Code flushes its transcript leaves nothing to load (spike S4).
@@ -904,18 +1059,20 @@ export class SessionManager {
         if (cmd.resumeSessionId && (init.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession) {
           try {
             replaying = true;
-            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta }).finally(() => (replaying = false));
+            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers: sentServers, ...extraDirs, ...sessionMeta }).finally(() => (replaying = false));
             emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "load" } });
             return { sessionId: cmd.resumeSessionId, configOptions: (loaded as { configOptions?: unknown[] | null } | null)?.configOptions ?? null, resumed: true };
           } catch (err) {
             this.opts.log?.(`couldn't reopen session ${cmd.resumeSessionId}: ${String((err as Error)?.message ?? err)}; starting fresh`);
           }
         }
-        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta });
+        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers: sentServers, ...extraDirs, ...sessionMeta });
         if (cmd.resumeSessionId) emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "fresh" } });
         return { ...(fresh as { sessionId: string; configOptions?: unknown[] | null }), resumed: false };
       };
       const session = await openSession();
+      // Claude Code has read the file by now. Production runs are unfenced and share one user, so don't leave the token readable for the whole run (BOS-553 review).
+      if (cmd.agentKind === "claude") dropMcp();
       state.sessionId = session.sessionId;
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
 

@@ -35,7 +35,10 @@ const reach = {
     attempt(() => unlinkSync(target));
     return true;
   })(),
-  env: Object.fromEntries(["HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CACHE_HOME", "npm_config_store_dir", "CHECK_ALL_LOCK", "BOSSMAN_CHECK_STORE", "CHECK_ALL_PAIR_PROOF", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0"].map((k) => [k, env[k] ?? null])),
+  // The ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the run must be able to keep a proof there, and reach no other
+  // ticket's folder on the same disk.
+  wroteScratch: attempt(() => writeFileSync(path.join(env.BOSSMAN_SCRATCH, "proof.txt"), "ok")),
+  env: Object.fromEntries(["HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CACHE_HOME", "npm_config_store_dir", "CHECK_ALL_LOCK", "BOSSMAN_CHECK_STORE", "CHECK_ALL_PAIR_PROOF", "BOSSMAN_SCRATCH", "BOSSMAN_TICKET", "BOSSMAN_AGENT_SESSION", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0"].map((k) => [k, env[k] ?? null])),
 };
 writeFileSync(path.join(process.cwd(), "reach.json"), JSON.stringify(reach));
 

@@ -20,7 +20,7 @@ export class RuleError extends Error {
 }
 
 type Row = typeof policyRules.$inferSelect;
-const view = (r: Row) => ({ id: r.id, companyId: r.companyId, name: r.name, match: r.condition as PolicyMatch, outcome: r.outcome, position: r.position });
+const view = (r: Row) => ({ id: r.id, companyId: r.companyId, name: r.name, match: r.condition as PolicyMatch, outcome: r.outcome, position: r.position, createdAt: r.createdAt ? r.createdAt.toISOString() : null, createdBy: r.createdBy, sourceDecisionId: r.sourceDecisionId });
 
 export function policyRulesService(db: Db) {
   const scope = (companyId: string | null) => and(eq(policyRules.trigger, "permission"), companyId ? eq(policyRules.companyId, companyId) : isNull(policyRules.companyId));
@@ -54,12 +54,12 @@ export function policyRulesService(db: Db) {
       };
     },
 
-    async create(input: { companyId: string | null; name: string; match: PolicyMatch; outcome: PolicyOutcome }) {
+    async create(input: { companyId: string | null; name: string; match: PolicyMatch; outcome: PolicyOutcome; createdBy?: string | null; sourceDecisionId?: string | null }) {
       check(input.match);
       const last = await rowsFor(input.companyId);
       const [row] = await db
         .insert(policyRules)
-        .values({ companyId: input.companyId, name: input.name, trigger: "permission", condition: input.match, outcome: input.outcome, position: (last.at(-1)?.position ?? -1) + 1 })
+        .values({ companyId: input.companyId, name: input.name, trigger: "permission", condition: input.match, outcome: input.outcome, position: (last.at(-1)?.position ?? -1) + 1, createdAt: new Date(), createdBy: input.createdBy ?? null, sourceDecisionId: input.sourceDecisionId ?? null })
         .returning();
       return view(row!);
     },
@@ -85,10 +85,17 @@ export function policyRulesService(db: Db) {
     },
 
     async update(id: string, patch: { name?: string; match?: PolicyMatch; outcome?: PolicyOutcome }) {
-      if (patch.match) check(patch.match);
+      // An edit that doesn't carry the agent condition keeps it: a rule for one agent must not quietly become company-wide.
+      let match = patch.match;
+      if (match && !match.agentIds) {
+        const [old] = await db.select({ condition: policyRules.condition }).from(policyRules).where(eq(policyRules.id, id));
+        const kept = (old?.condition as PolicyMatch | undefined)?.agentIds;
+        if (kept) match = { ...match, agentIds: kept };
+      }
+      if (match) check(match);
       const [row] = await db
         .update(policyRules)
-        .set({ ...(patch.name ? { name: patch.name } : {}), ...(patch.match ? { condition: patch.match } : {}), ...(patch.outcome ? { outcome: patch.outcome } : {}) })
+        .set({ ...(patch.name ? { name: patch.name } : {}), ...(match ? { condition: match } : {}), ...(patch.outcome ? { outcome: patch.outcome } : {}) })
         .where(eq(policyRules.id, id))
         .returning();
       if (!row) throw new RuleError(404, "No such rule.");

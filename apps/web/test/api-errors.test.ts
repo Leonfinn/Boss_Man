@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "../src/api";
+import { resetServerWatch } from "../src/server-watch";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  resetServerWatch();
+});
 const reply = (status: number, body: string) => vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status })));
 const failure = async () => (await api("/api/decisions/x/answer", { method: "POST", body: {} }).catch((e) => e)) as ApiError;
 

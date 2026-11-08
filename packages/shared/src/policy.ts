@@ -12,9 +12,13 @@ export type PermissionInfo = {
   /** ACP tool kind: read, edit, delete, move, search, execute, think, fetch, other. */
   kind: string | null;
   rawInput: unknown;
+  /** The agent asking, for rules limited to certain agents (PolicyMatch.agentIds). */
+  agentId?: string | null;
 };
 
 export type PolicyMatch = {
+  /** Only matches a request from one of these agents. A rule without it covers every agent. */
+  agentIds?: string[];
   kinds?: string[];
   /** Regular expression tested against the shell command, when there is one. */
   commandPattern?: string;
@@ -151,6 +155,7 @@ export const TOOL_KINDS = ["read", "edit", "delete", "move", "search", "execute"
 export function ruleProblems(match: PolicyMatch): string[] {
   const problems: string[] = [];
   if (!match.kinds?.length && !match.commandPattern && !match.titlePattern && !match.scratchOnly && !match.destructive && !match.pushing) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
+  if (match.agentIds && (!Array.isArray(match.agentIds) || !match.agentIds.length || match.agentIds.length > 50 || !match.agentIds.every((a) => typeof a === "string" && a.length > 0 && a.length <= 64))) problems.push("An agent condition needs between 1 and 50 agent ids.");
   for (const k of match.kinds ?? []) if (!(TOOL_KINDS as readonly string[]).includes(k)) problems.push(`"${k}" isn't a tool kind. Use: ${TOOL_KINDS.join(", ")}.`);
   for (const [label, p] of [["command pattern", match.commandPattern], ["title pattern", match.titlePattern]] as const) {
     if (p == null) continue;
@@ -236,6 +241,7 @@ function safeRegex(pattern: string): RegExp | null {
 export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
   // OpenCode asks about some shell commands (e.g. outside its folder) with kind "other"; a command is still a command.
   const kind = (!info.kind || info.kind === "other") && commandOf(info.rawInput) ? "execute" : info.kind;
+  if (rule.agentIds && !(info.agentId && rule.agentIds.includes(info.agentId))) return false;
   if (rule.kinds && !(kind && rule.kinds.includes(kind))) return false;
   if (rule.commandPattern) {
     const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null);
@@ -390,10 +396,18 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   if (/\$\(|`|[<>]\(/.test(cmd)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");
   const pieces = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
+  // A throwaway file this same command copied or wrote into the folder may be removed again (BOS-328): those rm pieces are vouched for.
+  const made = new Set<string>();
+  const madeDeletes = new Set<string>();
+  const okPieces = new Set<string>();
+  for (const s of pieces) {
+    if (removesOnlyMade(s, made)) madeDeletes.add(s);
+    else if (makesOnlyPlainCopy(s, made) || runsMade(s, made)) okPieces.add(s);
+  }
   // Of the reader's findings, only a plainly written delete of build output or of one-level /tmp entries can be vouched for (BOS-116, BOS-165).
   // A find whose pattern is quoted (-name '*.log') isn't "plain", so it is vouched for only when the command itself has a top-level piece
   // FIND_TMP_DELETE accepts: a find inside bash -c, a wrapper or a subshell doesn't make one.
-  const vouchedRisk = (r: Risk) => (r.plain ? vouched(r.text) : /^find\s/.test(r.text) && FIND_TMP_DELETE.test(r.text) && pieces.some((p) => FIND_TMP_DELETE.test(p)));
+  const vouchedRisk = (r: Risk) => madeDeletes.has(r.text) || (r.plain ? vouched(r.text) : /^find\s/.test(r.text) && FIND_TMP_DELETE.test(r.text) && pieces.some((p) => FIND_TMP_DELETE.test(p)));
   if (!found.every(vouchedRisk)) return "deny";
   if (hits.some((h) => !/^(?:rm|find)\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   // A plain delete of one-level /tmp entries never makes the suggestion Deny, whatever else the
@@ -403,5 +417,35 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   // so cp -t /home and a redirect into the home folder still pay Deny.
   // A piece counts as a delete when the reader finds one in it too (rm --rec dist), so the vouched check, not writesBeyondTmp, judges it.
   const deletes = (s: string) => destructive.test(s) || commandRisks(s).some((r) => r.kind === "destroys");
-  return pieces.every((s) => (deletes(s) ? vouched(s) : !writesBeyondTmp(s))) ? "allow" : "deny";
+  return pieces.every((s) => (deletes(s) ? vouched(s) || madeDeletes.has(s) : okPieces.has(s) || !writesBeyondTmp(s))) ? "allow" : "deny";
+}
+
+/** A plain file name in the working folder: one component, no leading dot, no ~, $, glob or quote. */
+const PLAIN_NAME = /^[\w+@][\w.+@-]*$/;
+
+/**
+ * A copy into the working folder from a one-level /tmp file: `cp /tmp/a.js a.js`, `cat /tmp/a.js > a.js`. Records the new name and returns true; anything else is false.
+ * Not `mv` and not an in-folder source (`mv README.md x` would make "x" stand for a real file), and no name or source may start with `-` (it would pass as a flag).
+ * Residual risk, accepted: a copy over an existing file is still read as making it.
+ */
+function makesOnlyPlainCopy(piece: string, made: Set<string>): boolean {
+  const src = String.raw`\/tmp\/[\w+@][\w.+@-]*`;
+  const m = new RegExp(String.raw`^cp\s+(?:-[npf]+\s+)*${src}\s+(\S+)$`).exec(piece) ?? new RegExp(String.raw`^cat\s+${src}\s*>\s*(\S+)$`).exec(piece);
+  if (!m || !PLAIN_NAME.test(m[1]!)) return false;
+  made.add(m[1]!);
+  return true;
+}
+
+/** `node|python|python3|perl NAME` where NAME is a plain file this same command made earlier. */
+function runsMade(piece: string, made: Set<string>): boolean {
+  const m = /^(?:node|python3?|perl)\s+(\S+)$/.exec(piece);
+  return !!m && made.has(m[1]!);
+}
+
+/** True for `rm [-f] NAME...` where every NAME is a plain file name made earlier in the same command. Anything else, including -r, is false. */
+function removesOnlyMade(piece: string, made: Set<string>): boolean {
+  const m = /^rm((?:\s+-f)*)((?:\s+\S+)+)$/.exec(piece);
+  if (!m) return false;
+  const names = m[2]!.trim().split(/\s+/);
+  return names.every((n) => !n.startsWith("-") && made.has(n));
 }

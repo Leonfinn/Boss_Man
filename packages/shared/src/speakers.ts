@@ -29,7 +29,7 @@ export const RESERVED_SPEAKERS = [
 const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 /** Combining marks, variation selectors, blank fillers and a letter from another alphabet mixed into a Latin word. */
 const HIDDEN = /[\p{M}\u115F\u1160\u3164\uFFA0\u2800\u180E]/u;
-const FOREIGN_IN_WORD = /[\p{Script=Cyrillic}\p{Script=Greek}\p{Script=Armenian}\p{Script=Cherokee}]/u;
+const LOOKALIKE = /[\p{Script=Cyrillic}\p{Script=Greek}\p{Script=Armenian}\p{Script=Cherokee}ɐ-ʯᴀ-ᶿ]/u;
 
 /**
  * Why a name can't be used as an agent's display name, or null when it can. The name is read as an accented
@@ -40,9 +40,10 @@ export function speakerNameProblem(name: string): string | null {
   if (!trimmed) return "A name can't be empty.";
   if (CONTROL.test(name)) return "A name can't contain line breaks, tabs or other control characters.";
   if (HIDDEN.test(name)) return "A name can't contain invisible accent or formatting characters: they could make it look like a label Boss Man uses (like Owner). Pick another.";
-  // "R&D Lead" is fine; a Latin word with a Cyrillic or Greek letter in it can spell "Owner" to a reader.
-  if (name.split(/\s+/).some((word) => /[A-Za-z]/.test(word) && FOREIGN_IN_WORD.test(word))) {
-    return "A name can't mix letters from different alphabets: lookalike letters could make it read as a label Boss Man uses (like Owner). Pick another.";
+  // Cyrillic, Greek, Armenian and Cherokee letters, and Latin small capitals / IPA letters (which NFKC doesn't fold),
+  // can spell "CEO" or "Owner" to a reader, whether mixed into a Latin word or used for the whole name (BOS-281).
+  if (LOOKALIKE.test(name)) {
+    return "A name can't use letters that look like Latin ones (Cyrillic, Greek, Armenian, Cherokee, small capitals): they could make it read as a label Boss Man uses (like Owner). Pick another.";
   }
   // Every part of a name made of words has to be sayable: "Zippy (Developer)" is fine, "Zippy\tOwner" is not.
   // NFKC folds full-width and other compatibility spellings back to ordinary letters before the comparison.

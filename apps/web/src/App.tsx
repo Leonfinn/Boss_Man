@@ -1,10 +1,11 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
-import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed, type TeamAlert, type AdvisedDecision } from "./api";
+import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed, type TeamAlert, type AdvisedDecision, type ClosedNoticeCard } from "./api";
 import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
-import { usePoll, useRoute } from "./hooks";
+import { useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
+import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
 import { Decisions } from "./pages/Decisions";
@@ -65,10 +66,30 @@ function useFeedNotifications(feed: NoticeFeed | null) {
 /** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
 const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "merge-queue", "rules", "settings", "projects"]);
 const CHOSEN = "bm-company";
+const SIDE_COLLAPSED = "bm-side-collapsed";
 function remember(id: string, set: (id: string) => void) {
   set(id);
   try {
     localStorage.setItem(CHOSEN, id);
+  } catch {
+    // Storage may be blocked; the choice lasts until the page reloads.
+  }
+}
+/** Whether the side menu is an icon-only strip (BOS-290): the owner's saved choice, else collapsed on a tablet or foldable and expanded on a desktop. */
+export function collapsedByDefault(): boolean {
+  try {
+    const saved = localStorage.getItem(SIDE_COLLAPSED);
+    if (saved === "1") return true;
+    if (saved === "0") return false;
+  } catch {
+    // Storage may be blocked; use the default for this width.
+  }
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia("(max-width: 1180px)").matches : false;
+}
+function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
+  set(off);
+  try {
+    localStorage.setItem(SIDE_COLLAPSED, off ? "1" : "0");
   } catch {
     // Storage may be blocked; the choice lasts until the page reloads.
   }
@@ -100,6 +121,41 @@ export function NewBuildBanner({ newer }: { newer: boolean }) {
   );
 }
 
+function useServerDown(): boolean {
+  const [down, setDown] = useState(serverDown);
+  useEffect(() => {
+    const update = () => setDown(serverDown());
+    const off = subscribeServer(update);
+    update();
+    // A check when the app is opened and whenever the tab comes back: a freeze may have missed the last probe.
+    if (!down) void checkNow();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void checkNow();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return down;
+}
+
+/**
+ * The server is restarting, stalled or unreachable: a small banner over the page, never in place of
+ * it (BOS-637). The page keeps what it had and catches up on its own once the server answers again.
+ */
+export function ServerBanner() {
+  const down = useServerDown();
+  if (!down) return null;
+  return (
+    <p className="banner server-banner" role="status" aria-live="polite">
+      Boss Man is restarting or switching versions for a moment. This page stays as it is and what you have typed is kept; it will catch up on its own when the server answers.
+    </p>
+  );
+}
+
 function Signed({ onLogout }: { onLogout: () => void }) {
   const [route, go] = useRoute();
   const page = route[0] ?? "dashboard";
@@ -107,6 +163,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const decisions = usePoll((signal) => api<Decision[]>("/api/decisions", { signal }), 10_000, "decisions");
   const advised = usePoll((signal) => api<AdvisedDecision[]>("/api/decisions/advised", { signal }), 30_000, "decisions-advised");
   const teamAlerts = usePoll((signal) => api<TeamAlert[]>("/api/decisions/with-team", { signal }), 30_000, "decisions-team");
+  // Cards Boss Man closed by itself in the last couple of hours, shown where they were (BOS-739).
+  const closedNotices = usePoll((signal) => api<ClosedNoticeCard[]>("/api/decisions/closed-notices", { signal }), 30_000, "decisions-closed");
   const runs = usePoll((signal) => api<ActiveRun[]>("/api/runs", { signal }), 15_000, "runs");
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(notifySupported() ? Notification.permission : "unsupported");
   const feed = usePoll((signal) => api<NoticeFeed>("/api/notifications", { signal }), 10_000, "notifications");
@@ -121,6 +179,16 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   useEffect(() => reloadUnprocessed(), [route.join("/"), reloadUnprocessed]);
 
   const lost = [companies.error, decisions.error].find((e) => e && e.status === 0);
+  // An away server is the banner's to say, and it goes away by itself: this page keeps its place
+  // and catches up, rather than being swapped for an error (BOS-637).
+  useEffect(() => {
+    if (!lost) return;
+    const timer = setTimeout(() => {
+      companies.reload();
+      decisions.reload();
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [lost, companies.reload, decisions.reload]);
   const expired = [companies.error, decisions.error].some((e) => e?.status === 401);
   useEffect(() => {
     if (expired) onLogout();
@@ -136,6 +204,10 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       return null;
     }
   });
+  // Tablet and foldable widths start collapsed so the page gets the room (BOS-290); a desktop starts
+  // expanded. A saved choice wins. The menu is a bar on a phone, so that width has no strip.
+  const narrow = useMediaQuery("(max-width: 1180px)");
+  const [collapsed, setCollapsed] = useState<boolean>(collapsedByDefault);
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
   // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
@@ -172,8 +244,11 @@ function Signed({ onLogout }: { onLogout: () => void }) {
     }, () => {});
   }, [companies.data, page, go]);
   return (
-    <div className="app">
+    <div className={`app${collapsed ? " side-collapsed" : ""}`}>
       <Sidebar
+        collapsed={collapsed}
+        onToggleCollapsed={() => rememberCollapsed(!collapsed, setCollapsed)}
+        narrow={narrow}
         active={page === "funding" || page === "rules" || page === "secrets" ? "settings" : page}
         activeAgent={route[2]}
         activeProject={route[1]}
@@ -191,13 +266,10 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
-        {lost ? (
-          <State img={art.stuck} alt="Lost connection to the server" title="Lost connection to the server">
-            <p>Boss Man keeps working on the server; this page will catch up as soon as it can reach it again.</p>
-          </State>
-        ) : page === "board" ? (
+        {page === "board" ? (
           <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
           <ChatPage companies={list} companyId={companyId} agentId={route[2]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
@@ -240,7 +312,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={decisions.reload} banner={<SetupChecklist companyId={current?.id} go={go} />} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={decisions.reload} banner={<SetupChecklist companyId={current?.id} go={go} />} />
         ) : (
           <Dashboard company={current} />
         )}
@@ -263,6 +335,13 @@ export function App() {
     }
   }, []);
   useEffect(() => void check(), [check]);
+  // Can't reach the server when the page opens: keep trying quietly, and show it once it answers
+  // (BOS-637). A freeze at startup should cost a few seconds, not the "Try again" click.
+  useEffect(() => {
+    if (session.state !== "offline") return;
+    const timer = setInterval(() => void check(), 4000);
+    return () => clearInterval(timer);
+  }, [session.state, check]);
   const loggedOut = useCallback(() => setSession({ state: "login" }), []);
 
   switch (session.state) {
@@ -271,7 +350,9 @@ export function App() {
     case "offline":
       return (
         <main className="auth">
+          <ServerBanner />
           <State img={art.stuck} alt="Can't reach the server" title="Can't reach the Boss Man server">
+            <p>Trying again every few seconds; this page will open on its own as soon as the server answers.</p>
             <button className="btn primary" type="button" onClick={() => void check()}>
               Try again
             </button>

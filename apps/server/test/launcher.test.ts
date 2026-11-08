@@ -1,11 +1,12 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { notifications } from "../src/db/schema.js";
+import { companies, notifications, settings } from "../src/db/schema.js";
 import { gitHostAddress, slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -31,7 +32,8 @@ function fakeLauncher() {
     if (new Headers(init?.headers).get("authorization") !== `Bearer ${KEY}`) return json(401, { error: "unauthorized" });
     if (failing) return json(502, { error: "Creating the runner failed: No such image: boss-man-runner:current" });
     const slug = url.pathname.split("/")[2];
-    if (method === "GET" && url.pathname === "/runners") return json(200, [...running.entries()].map(([s, state]) => ({ slug: s, state, status: "Up 2 seconds", image: "boss-man-runner:current" })));
+    if (method === "GET" && url.pathname === "/wanted") return json(200, [...running.keys()].sort());
+    if (method === "GET" && url.pathname === "/runners") return json(200, [...running.entries()].map(([s, state]) => ({ slug: s, state, status: "Up 2 seconds", image: "boss-man-runner:current", guard: "on" })));
     if (method === "PUT") return running.set(slug!, "running"), json(200, { slug, id: "abc" });
     if (method === "DELETE") return json(200, { slug, removed: running.delete(slug!) });
     if (method === "POST" && url.pathname.endsWith("/restart")) return running.has(slug!) ? json(200, { slug }) : json(404, { error: "There's no runner for that company." });
@@ -64,7 +66,8 @@ describe("runners through the launcher (R55)", () => {
     expect(await c.runners.authenticate((put.body as { token: string }).token)).toMatchObject({ companyId: company.id });
 
     const status = (await c.req("GET", `/api/companies/${company.id}/runner`)).json();
-    expect(status).toMatchObject({ registered: true, connected: false, launcher: { slug: "app-co", container: { state: "running" } } });
+    // The guard's state reaches Settings (BOS-335): the launcher reports it per runner, and this carries it through.
+    expect(status).toMatchObject({ registered: true, connected: false, launcher: { slug: "app-co", container: { state: "running", guard: "on" } } });
   });
 
   it("reconnects with a new token, restarts and stops, keeping the slug after a rename", async () => {
@@ -158,6 +161,40 @@ describe("runners through the launcher (R55)", () => {
     const done = c.launcher.syncAll(1, 3);
     await vi.waitFor(() => expect(c.fake.calls.length).toBe(3));
     await expect(done).resolves.toBeUndefined();
+  });
+
+  it("counts a company the launcher was never given as wanted, and looking at its runner doesn't give it a slug (BOS-497)", async () => {
+    const c = (ctx = await setup());
+    const { company: launched } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    // A company whose runner is registered by hand: no launcher start, so no slug.
+    const [byHand] = await c.db.insert(companies).values({ name: "app co" }).returning();
+    const shown = (await c.req("GET", `/api/companies/${byHand!.id}/runner`)).json() as { launcher: { slug: string; container: unknown } };
+    // It would get app-co-2 (app-co is taken), shows no container, and nothing was saved.
+    expect(shown.launcher).toMatchObject({ slug: "app-co-2", container: null });
+    expect(await c.db.select().from(settings).where(eq(settings.key, `runner-slug:${byHand!.id}`))).toHaveLength(0);
+    expect(await c.launcher.wantedCompanies()).toEqual(new Set([launched.id, byHand!.id]));
+    // A launched company the owner stopped is not wanted; the hand-run one still is.
+    await c.req("DELETE", `/api/companies/${launched.id}/runner/launch`);
+    expect(await c.launcher.wantedCompanies()).toEqual(new Set([byHand!.id]));
+  });
+
+  it("at server start, removes the runner and token the launcher keeps for a company that no longer exists (BOS-497)", async () => {
+    const c = (ctx = await setup());
+    await c.req("POST", "/api/companies", { name: "App Co" });
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    // A leftover: the launcher still has a runner (and token file) for a company deleted from the database.
+    await c.db.insert(settings).values({ key: `runner-slug:${randomUUID()}`, value: "gone-co" });
+    c.fake.running.set("gone-co", "exited");
+    c.fake.calls.length = 0;
+    await c.launcher.syncAll(1);
+    expect(c.fake.calls.map((x) => `${x.method} ${x.path}`).sort()).toEqual(["DELETE /runners/gone-co", "PUT /runners/app-co/allow"]);
+    expect(c.fake.running.has("gone-co")).toBe(false);
+    expect((await c.db.select().from(settings)).some((s) => s.value === "gone-co")).toBe(false);
+    // Nothing is left to retry on the next start.
+    c.fake.calls.length = 0;
+    await c.launcher.syncAll(1);
+    expect(c.fake.calls.map((x) => `${x.method} ${x.path}`)).toEqual(["PUT /runners/app-co/allow"]);
   });
 
   it("does nothing without the launcher", async () => {

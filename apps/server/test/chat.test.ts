@@ -131,7 +131,7 @@ describe("owner chat", () => {
 
     // Its MCP server has the board tools, plus looking up tickets, the wiki and skills (R77).
     const client = await c.mcp(start.runId);
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "board", "clear_check", "create_feature", "create_ticket", "decisions", "deploy", "engagement", "features", "feedback", "handoff", "link_tickets", "list_my_work", "log_feedback", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "raise_decision", "rename_agent", "report_key_result", "request_check", "request_engagement", "request_note", "review", "roadmap", "runs", "schedule_check", "server_status", "set_agent_picture", "set_milestone", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "standing_rules", "submit_plan", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "board", "clear_check", "create_feature", "create_ticket", "decisions", "deploy", "devices", "engagement", "features", "feedback", "handoff", "link_tickets", "list_my_work", "log_feedback", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "raise_decision", "rename_agent", "report_key_result", "request_check", "request_engagement", "request_note", "review", "roadmap", "runs", "schedule_check", "server_status", "set_agent_picture", "set_milestone", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "standing_rules", "submit_plan", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision"]);
     // The CEO can build the roadmap from chat too.
     expect(textOf(await client.callTool({ name: "roadmap", arguments: { action: "add_objective", title: "Grow search traffic", reason: "Owner asked in chat." } }))).toMatch(/^Added the objective "Grow search traffic"/);
     // It asks a colleague itself, rather than asking the owner to pass a message on.
@@ -310,6 +310,10 @@ describe("owner chat", () => {
     expect(last.text).toContain("I want to add a feature");
     expect(last.text).toContain("Description: (none yet)");
     expect(last.text).toContain("create_feature");
+    expect(last.text).not.toContain("Don't break it into tasks");
+    expect(last.text).toContain("plan it as a main ticket with sub-tasks where the work naturally divides");
+    expect(last.text).toContain("Keep it as one ticket when it is small or doesn't divide");
+    expect(last.text).toContain("Don't split just for the sake of it");
     expect((await c.req("POST", `/api/companies/${c.company.id}/chat/grill`, { kind: "task", title: "x", projectId: "00000000-0000-4000-8000-000000000000" })).statusCode).toBe(404);
     expect((await c.req("POST", `/api/companies/${c.company.id}/chat/grill`, { kind: "bug", title: "x" })).statusCode).toBe(400);
   });
