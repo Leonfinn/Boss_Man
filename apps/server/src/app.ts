@@ -1998,7 +1998,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Import (docs/11, step 2): a package becomes a new company. Preview writes nothing.
-    const ImportBody = z.object({ zip: z.string().min(1), name: z.string().trim().min(1).max(80).optional(), fundingSourceId: Uuid.nullable().optional() });
+    const ImportBody = z.object({ zip: z.string().min(1), name: z.string().trim().min(1).max(80).optional(), fundingSourceId: Uuid.nullable().optional(), allowStackServices: z.boolean().optional() });
     const importErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
       if (err instanceof ImportError) return reply.code(err.status).send({ error: "import", message: err.message });
       throw err;
@@ -2015,7 +2015,7 @@ export async function buildApp(opts: AppOptions) {
       const b = ImportBody.parse(req.body);
       let done;
       try {
-        done = await applyPackage(db, readPackage(new Uint8Array(Buffer.from(b.zip, "base64"))), { name: b.name, fundingSourceId: b.fundingSourceId });
+        done = await applyPackage(db, readPackage(new Uint8Array(Buffer.from(b.zip, "base64"))), { name: b.name, fundingSourceId: b.fundingSourceId, allowStackServices: b.allowStackServices });
       } catch (err) {
         return importErrors(reply)(err);
       }

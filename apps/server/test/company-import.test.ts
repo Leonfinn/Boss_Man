@@ -101,6 +101,34 @@ describe("company import (docs/11, step 2)", () => {
     expect((await req("GET", `/api/companies/${companyId}/review-policy`)).json().medium.kinds).toEqual({ security: [ann.id], infra: ann.id });
   });
 
+  it("previews each tool server's host:port and refuses ones aimed at Boss Man's own services unless ticked", async () => {
+    const { req } = await setup();
+    const server = (name: string, url: string) => ({ name, url, transport: "http" });
+    const pack = (servers: unknown[]) => Buffer.from(zipSync({ "manifest.json": strToU8('{"format":"bossman-company/1"}'), "company.json": strToU8('{"name":"Tools Co"}'), "tool-servers.json": strToU8(JSON.stringify(servers)) })).toString("base64");
+
+    const fine = pack([server("crawl", "http://192.168.68.20:11235/mcp"), server("pen", "https://tools.example.org/mcp")]);
+    const pre = (await req("POST", "/api/companies/import/preview", { zip: fine })).json();
+    expect(pre.toolServers).toEqual([
+      { name: "crawl", url: "http://192.168.68.20:11235/mcp", opens: "192.168.68.20:11235", stackService: false },
+      { name: "pen", url: "https://tools.example.org/mcp", opens: "tools.example.org:443", stackService: false },
+    ]);
+    expect((await req("POST", "/api/companies/import", { zip: fine })).statusCode).toBe(201);
+
+    // db, launcher, any case, any port: flagged in the preview, refused on import.
+    for (const url of ["http://db:5432/mcp", "http://launcher:3105/x", "http://LAUNCHER:9/x", "http://netguard:80/", "http://server:3100/mcp", "http://runner-app-co:1/"]) {
+      const bad = pack([server("sneaky", url)]);
+      expect((await req("POST", "/api/companies/import/preview", { zip: bad })).json().toolServers[0].stackService, url).toBe(true);
+      const refused = await req("POST", "/api/companies/import", { zip: bad, name: "Bad" });
+      expect(refused.statusCode, url).toBe(400);
+      expect(refused.json().message).toContain("Boss Man's own services");
+      expect((await req("POST", "/api/companies/import", { zip: bad, name: "Bad", allowStackServices: false })).statusCode, url).toBe(400);
+    }
+    const ticked = await req("POST", "/api/companies/import", { zip: pack([server("db", "http://db:5432/")]), name: "Ticked", allowStackServices: true });
+    expect(ticked.statusCode).toBe(201);
+    const names = ((await req("GET", "/api/companies")).json() as Array<{ name: string }>).map((c) => c.name);
+    expect(names).not.toContain("Bad");
+  });
+
   it("refuses files that aren't a safe Boss Man package", async () => {
     const { req } = await setup();
     const send = (files: Record<string, string>) => req("POST", "/api/companies/import/preview", { zip: Buffer.from(zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])))).toString("base64") });

@@ -47,8 +47,25 @@ export function toolServerAddress(url: string): string | null {
   }
 }
 
+/**
+ * Boss Man's own services on the compose network (docker-compose.yml: db, server, launcher, netguard, and the
+ * runner-* containers). A tool server aimed at one opens a direct path from the runner to it, whatever the port.
+ * The deployer is a file inbox, not a network service, so it has no entry. Matched on the host name alone.
+ */
+const STACK_SERVICE_HOSTS = /^(db|server|launcher|netguard|postgres|runner(-[a-z0-9-]+)?)$/;
+export function isStackService(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+    return STACK_SERVICE_HOSTS.test(host);
+  } catch {
+    return false;
+  }
+}
+
 /** The launcher's own check for an allow entry (apps/launcher/src/spec.ts): one bad entry makes it refuse the whole list, so never send one it would refuse. */
 const LAUNCHER_ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
+/** The host:port the guard would be told to allow for a tool server's URL, or null. */
+export const sendableAddress = (url: string): string | null => sendable(toolServerAddress(url));
 function sendable(addr: string | null): string | null {
   if (!addr || !LAUNCHER_ALLOW_ENTRY.test(addr)) return null;
   const [host, port] = [addr.slice(0, addr.lastIndexOf(":")), Number(addr.slice(addr.lastIndexOf(":") + 1))];
