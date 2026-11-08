@@ -18,6 +18,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { checkQueueEnv, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
+import { GitConfigGuard } from "./git-config-guard.js";
 import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
 import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
@@ -110,17 +111,30 @@ export class RepoLockTimeout extends Error {
 }
 
 /**
- * Settings for every git call the runner makes itself. A repo's own config can name a hook folder
- * or a filesystem monitor, and both run programs, so a shared repo could otherwise run code inside
- * the daemon. GIT_CONFIG_* sits above the repo's config file, so it wins.
+ * Settings for every git call the runner makes itself. A repo's own config can name programs (a hook
+ * folder, a filesystem monitor, a credential helper, a signing program), so a shared repo could
+ * otherwise run code inside the daemon. GIT_CONFIG_* sits above the repo's config file, so it wins.
+ * The main defence is GitConfigGuard (BOS-332), which keeps the repo config to an allowlist; these
+ * single-name overrides are the second layer, for the moment between its check and the git run.
+ * No global config (an agent without the fence can write the daemon's ~/.gitconfig), no system one,
+ * and no password prompt program (an empty GIT_ASKPASS beats core.askPass and SSH_ASKPASS).
  */
 export const SAFE_GIT_ENV = {
-  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_COUNT: "4",
   GIT_CONFIG_KEY_0: "core.hooksPath",
   GIT_CONFIG_VALUE_0: "/dev/null",
   GIT_CONFIG_KEY_1: "core.fsmonitor",
   GIT_CONFIG_VALUE_1: "false",
+  // An empty value clears the list of helpers read so far, and the repo config is read before this.
+  GIT_CONFIG_KEY_2: "credential.helper",
+  GIT_CONFIG_VALUE_2: "",
+  GIT_CONFIG_KEY_3: "commit.gpgSign",
+  GIT_CONFIG_VALUE_3: "false",
   GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_ASKPASS: "",
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_SSH_COMMAND: "ssh",
 } as const;
 
 /**
@@ -180,10 +194,119 @@ export class Workspaces {
     return gitAuthorEnv(by);
   }
 
-  private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-    const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(opts.env) };
-    const { stdout } = await run("git", args, { cwd: opts.cwd, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
+  /** Keeps each shared repo's config to the runner's allowlist before any of the runner's git calls reads it (BOS-332). */
+  private guardInstance?: GitConfigGuard;
+  private get configGuard() {
+    return (this.guardInstance ??= new GitConfigGuard(this.baseEnv));
+  }
+
+  /**
+   * The runner's own git. `cwd` is a bare repo of ours (repos/<id>.git): git is told it with GIT_DIR, so
+   * nothing in the folder can send discovery elsewhere, and its config is checked against the allowlist
+   * first. Calls inside a worktree go through wtGit, which says which repo it belongs to. A call with
+   * neither (only the clone, which makes the repo) runs from the repos folder, which is no repo at all.
+   */
+  private async git(args: string[], opts: { cwd?: string; env?: Record<string, string>; repo?: string } = {}) {
+    const repo = opts.repo ?? opts.cwd;
+    if (repo && !this.isRepoDir(repo)) throw new Error(`The runner's git only runs in one of its own repos, not ${repo} (BOS-332).`);
+    if (repo) await this.configGuard.check(path.join(repo, "config"));
+    const where = opts.repo ? { cwd: opts.cwd } : opts.cwd ? { cwd: opts.cwd, GIT_DIR: opts.cwd } : { cwd: this.reposRoot() };
+    if (!opts.cwd && !opts.repo) mkdirSync(where.cwd!, { recursive: true });
+    const env = {
+      PATH: this.baseEnv.PATH,
+      HOME: this.baseEnv.HOME,
+      HTTPS_PROXY: this.baseEnv.HTTPS_PROXY,
+      NO_PROXY: this.baseEnv.NO_PROXY,
+      ...("GIT_DIR" in where ? { GIT_DIR: where.GIT_DIR } : {}),
+      ...safeGitEnv(opts.env),
+    };
+    const { stdout } = await run("git", args, { cwd: where.cwd, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
     return stdout.trim();
+  }
+
+  private reposRoot = () => path.join(this.root, "repos");
+  private isRepoDir = (p: string) => path.dirname(path.resolve(p)) === path.resolve(this.reposRoot()) && p.endsWith(".git");
+
+  /**
+   * git inside one of a repo's worktrees (a ticket folder, a review copy, a merge-check folder), told
+   * exactly where everything is (BOS-332): GIT_DIR is the worktree's admin folder in our repo, found
+   * from the repo's side; GIT_COMMON_DIR is the repo; GIT_WORK_TREE the folder. So the folder's .git
+   * file and the admin folder's commondir, which an agent can rewrite to point at a repo it made
+   * (with any config it likes), are never read, and the config is always the checked one.
+   */
+  private wtGit(repo: string, dir: string, args: string[], opts: { env?: Record<string, string> } = {}) {
+    const admin = this.worktreeAdminFor(repo, dir);
+    return this.git(args, { repo, cwd: dir, env: { ...opts.env, GIT_DIR: admin, GIT_COMMON_DIR: repo, GIT_WORK_TREE: dir } });
+  }
+
+  /**
+   * The admin folder of the worktree at `dir`: the one folder under <repo>/worktrees whose gitdir file names
+   * <dir>/.git. Unlike fence.ts's worktreeAdmin, the folder's own .git file isn't trusted: the agent working
+   * there can rewrite it. The admin folder is the daemon's choice of path; an agent can only break its own
+   * link (its git and ours then stop working there, with this error), never point us at another repo.
+   */
+  private worktreeAdminFor(repo: string, dir: string): string {
+    const dotGit = path.join(path.resolve(dir), ".git");
+    const root = path.join(repo, "worktrees");
+    const names = existsSync(root) ? readdirSync(root) : [];
+    const found = names.filter((n) => {
+      const admin = path.join(root, n);
+      try {
+        return lstatSync(admin).isDirectory() && path.resolve(admin, readFileSync(path.join(admin, "gitdir"), "utf8").trim()) === dotGit;
+      } catch {
+        return false;
+      }
+    });
+    if (found.length !== 1) throw new Error(`${dir} isn't a worktree of ${repo} that the runner can confirm (BOS-332).`);
+    const admin = path.join(root, found[0]!);
+    // GIT_COMMON_DIR covers the config and objects, but git 2.39's ref store still reads the admin folder's
+    // commondir file, so a rewritten one would make refs (HEAD's branch) resolve in the agent's own repo.
+    // A plain file leading back to this repo, or the call is refused; it is never repaired (it could be a symlink).
+    let common: string | null = null;
+    try {
+      if (lstatSync(path.join(admin, "commondir")).isFile()) common = path.resolve(admin, readFileSync(path.join(admin, "commondir"), "utf8").trim());
+    } catch {
+      common = null;
+    }
+    if (common !== path.resolve(repo)) throw new Error(`${dir} isn't a worktree of ${repo} that the runner can confirm: its admin folder points elsewhere (BOS-332).`);
+    return admin;
+  }
+
+  /** Where a repo's fetches and pushes go: the address the runner recorded, outside the repo, so no config can move it (BOS-332). */
+  private urlFile = (repo: string) => repo.replace(/\.git$/, ".url");
+
+  private recordUrl(repo: string, url: string) {
+    const file = this.urlFile(repo);
+    if (url && (!existsSync(file) || readFileSync(file, "utf8") !== url)) writeFileSync(file, url);
+  }
+
+  /**
+   * The recorded address. A repo cloned before BOS-332 has none until its next ensure; until then the
+   * config's remote.origin.url is used if it is a single value (the guard has already removed pushurl and
+   * url.*.insteadOf, which aren't on its allowlist), and that is logged.
+   */
+  private async remoteUrl(repo: string): Promise<string> {
+    const file = this.urlFile(repo);
+    if (existsSync(file)) return readFileSync(file, "utf8");
+    const urls = (await this.git(["config", "--get-all", "remote.origin.url"], { cwd: repo }).catch(() => "")).split("\n").filter(Boolean);
+    if (urls.length !== 1) throw new Error(`No recorded address for ${repo}, and its config doesn't name exactly one (BOS-332).`);
+    console.warn(`[runner] ${repo} has no recorded address yet; using its config's remote.origin.url until the next ensure (BOS-332)`);
+    return urls[0]!;
+  }
+
+  /** Fetches origin's branches from the recorded address into refs/remotes/origin, as `git fetch origin` did. */
+  private async fetchOrigin(repo: string, auth: Record<string, string>) {
+    await this.git(["fetch", "--quiet", await this.remoteUrl(repo), "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo, env: auth });
+  }
+
+  /**
+   * Pushes to the recorded address. A push by URL doesn't move refs/remotes/origin/<branch> as a push to
+   * `origin` did, so a pushed ref is recorded there by hand, as before.
+   */
+  private async pushOrigin(repo: string, commit: string, branch: string, auth: Record<string, string>) {
+    const pushed = await this.gitCode(["push", "--quiet", await this.remoteUrl(repo), `${commit}:refs/heads/${branch}`], { cwd: repo, env: auth });
+    if (pushed.code === 0) await this.git(["update-ref", `refs/remotes/origin/${branch}`, commit], { cwd: repo });
+    return pushed;
   }
 
   /**
@@ -237,7 +360,7 @@ export class Workspaces {
         if (!path.resolve(current).startsWith(tickets)) {
           throw new Error(`Branch ${branch} is checked out in ${current}, outside this runner's workspaces; release it there first.`);
         }
-        await this.git(["switch", "--detach", "--quiet"], { cwd: current });
+        await this.wtGit(repo, current, ["switch", "--detach", "--quiet"]);
       }
     }
     await this.git(["worktree", "add", "--quiet", dir, branch], { cwd: repo });
@@ -259,7 +382,7 @@ export class Workspaces {
         return { path: dir, branch, baseCommit, created: false, restoredPatch: false };
       }
 
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      await this.fetchOrigin(repo, auth);
       await this.git(["worktree", "prune"], { cwd: repo });
       // Branch reflogs are how the real start point of a branch moved onto another ticket's work is found later (BOS-687).
       await this.git(["config", "core.logAllRefUpdates", "true"], { cwd: repo });
@@ -281,7 +404,7 @@ export class Workspaces {
       let restoredPatch = false;
       const patch = this.patchFile(spec.ticketId);
       if (existsSync(patch)) {
-        await this.git(["apply", "--whitespace=nowarn", patch], { cwd: dir });
+        await this.wtGit(repo, dir, ["apply", "--whitespace=nowarn", patch]);
         rmSync(patch);
         restoredPatch = true;
       }
@@ -306,7 +429,7 @@ export class Workspaces {
       await this.addBranchWorktree(repo, dir, branch);
       const patch = this.patchFile(spec.ticketId);
       if (existsSync(patch)) {
-        await this.git(["apply", "--whitespace=nowarn", patch], { cwd: dir });
+        await this.wtGit(repo, dir, ["apply", "--whitespace=nowarn", patch]);
         rmSync(patch);
       }
       return dir;
@@ -315,11 +438,12 @@ export class Workspaces {
 
   private async cloneIfMissing(spec: Pick<WorkspaceSpec, "projectId" | "repoUrl">, auth: Record<string, string>) {
     const repo = this.repoDir(spec.projectId);
-    if (existsSync(path.join(repo, "HEAD"))) return;
+    if (existsSync(path.join(repo, "HEAD"))) return this.recordUrl(repo, spec.repoUrl);
     mkdirSync(path.dirname(repo), { recursive: true });
     await this.git(["clone", "--bare", "--quiet", spec.repoUrl, repo], { env: auth });
     // Remote branches go under refs/remotes, so fetching never touches the bossman/* branches.
     await this.git(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo });
+    this.recordUrl(repo, spec.repoUrl);
   }
 
   /**
@@ -336,9 +460,9 @@ export class Workspaces {
       const dev = this.ticketDir(spec.ticketId);
       const dir = this.reviewDir(spec.ticketId);
       let commit: string;
-      if (existsSync(path.join(dev, ".git"))) commit = await this.snapshot(dev);
+      if (existsSync(path.join(dev, ".git"))) commit = await this.snapshot(repo, dev);
       else {
-        await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+        await this.fetchOrigin(repo, auth);
         const branch = branchFor(spec.ticketId);
         commit = await this.git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`], { cwd: repo }).catch(() =>
           this.git(["rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`], { cwd: repo }).catch(() => {
@@ -347,8 +471,8 @@ export class Workspaces {
         );
       }
       if (existsSync(path.join(dir, ".git"))) {
-        await this.git(["checkout", "--quiet", "--force", "--detach", commit], { cwd: dir });
-        await this.git(["clean", "-fdq"], { cwd: dir });
+        await this.wtGit(repo, dir, ["checkout", "--quiet", "--force", "--detach", commit]);
+        await this.wtGit(repo, dir, ["clean", "-fdq"]);
       } else {
         await this.git(["worktree", "prune"], { cwd: repo });
         mkdirSync(path.dirname(dir), { recursive: true });
@@ -405,16 +529,16 @@ export class Workspaces {
   }
 
   /** The worktree as it is now, as a commit no ref points at; its branch, index and files are untouched. */
-  private async snapshot(dir: string): Promise<string> {
+  private async snapshot(repo: string, dir: string): Promise<string> {
     const index = path.join(this.root, "tmp", `${path.basename(dir)}.review.index`);
     mkdirSync(path.dirname(index), { recursive: true });
     const env = { GIT_INDEX_FILE: index };
     try {
-      await this.git(["read-tree", "HEAD"], { cwd: dir, env });
-      await this.git(["add", "-A"], { cwd: dir, env });
-      const tree = await this.git(["write-tree"], { cwd: dir, env });
+      await this.wtGit(repo, dir, ["read-tree", "HEAD"], { env });
+      await this.wtGit(repo, dir, ["add", "-A"], { env });
+      const tree = await this.wtGit(repo, dir, ["write-tree"], { env });
       const who = this.authorEnv();
-      return await this.git(["commit-tree", tree, "-p", "HEAD", "-m", "Boss Man review copy"], { cwd: dir, env: who });
+      return await this.wtGit(repo, dir, ["commit-tree", tree, "-p", "HEAD", "-m", "Boss Man review copy"], { env: who });
     } finally {
       rmSync(index, { force: true });
     }
@@ -431,8 +555,8 @@ export class Workspaces {
       // The reviewer's copy goes with the ticket; nothing in it is kept.
       if (existsSync(path.join(this.reviewDir(spec.ticketId), ".git"))) await this.git(["worktree", "remove", "--force", this.reviewDir(spec.ticketId)], { cwd: repo });
       if (!existsSync(path.join(dir, ".git"))) return { savedPatch: false };
-      await this.git(["add", "-A"], { cwd: dir });
-      const diff = await this.git(["diff", "--cached", "--binary", "HEAD"], { cwd: dir });
+      await this.wtGit(repo, dir, ["add", "-A"]);
+      const diff = await this.wtGit(repo, dir, ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "HEAD"]);
       let savedPatch = false;
       if (diff) {
         mkdirSync(path.dirname(this.patchFile(spec.ticketId)), { recursive: true });
@@ -474,7 +598,9 @@ export class Workspaces {
     } else {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(repo)) throw new Error("This runner has no copy of that project's repo.");
-      const { stdout } = await run("git", ["show", `${branchFor(spec.ticketId)}:${rel}`], { cwd: repo, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, ...SAFE_GIT_ENV } as NodeJS.ProcessEnv }).catch(() => {
+      // Raw blob bytes: --no-textconv, so a diff driver named in the config can't run; the config is checked first too.
+      await this.configGuard.check(path.join(repo, "config"));
+      const { stdout } = await run("git", ["show", "--no-textconv", `${branchFor(spec.ticketId)}:${rel}`], { cwd: repo, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, GIT_DIR: repo, ...SAFE_GIT_ENV } as NodeJS.ProcessEnv }).catch(() => {
         throw new Error(`There's no ${rel} on that ticket's branch.`);
       });
       data = stdout as unknown as Buffer;
@@ -516,7 +642,7 @@ export class Workspaces {
   private async reviewBase(repo: string, head: string, recorded: string, baseRef: string | undefined, secrets: Record<string, string | undefined>): Promise<{ base: string; tip?: string }> {
     if (!baseRef) return { base: recorded };
     try {
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: gitAuthEnv(secrets) });
+      await this.fetchOrigin(repo, gitAuthEnv(secrets));
       const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${baseRef}^{commit}`], { cwd: repo });
       // Where the branch split from main's current tip, however far main has moved since.
       return { base: (await this.git(["merge-base", head, tip], { cwd: repo })) || recorded, tip };
@@ -529,30 +655,31 @@ export class Workspaces {
     const repo = this.repoDir(spec.projectId);
     const dir = await this.reopen(spec);
     const recorded = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
-    const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
+    const head = await this.wtGit(repo, dir, ["rev-parse", "HEAD"]);
     // Fetches under the repo lock, like every other git call that touches the shared refs.
     const { base: baseCommit, tip } = await this.withRepoLock(spec.projectId, () => this.reviewBase(repo, head, recorded, baseRef, secrets));
     // The tree is read from the same commit as head, before the slow steps: a commit landing
     // mid-diff must not leave head A tagged with B's tree (the check queue reuses passes by tree).
-    const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: dir });
+    const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: repo });
     // A fresh base can be far ahead of the recorded one; main's own commits aren't the ticket's work, so with a fetched
     // tip they are left out of its commit list.
-    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`, ...(tip ? ["--not", tip] : [])], { cwd: dir });
+    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`, ...(tip ? ["--not", tip] : [])], { cwd: repo });
     const commits = log ? log.split("\n").map((l) => ({ sha: l.slice(0, 40), subject: l.slice(41) })) : [];
     const index = path.join(this.root, "tmp", `${spec.ticketId}.index`);
     mkdirSync(path.dirname(index), { recursive: true });
     const env = { GIT_INDEX_FILE: index };
     try {
-      await this.git(["read-tree", head], { cwd: dir, env });
-      await this.git(["add", "-A"], { cwd: dir, env });
-      const numstat = await this.git(["diff", "--cached", "--numstat", baseCommit], { cwd: dir, env });
+      await this.wtGit(repo, dir, ["read-tree", head], { env });
+      await this.wtGit(repo, dir, ["add", "-A"], { env });
+      // No external diff program or textconv driver: the diff is git's own (BOS-332).
+      const numstat = await this.wtGit(repo, dir, ["diff", "--cached", "--numstat", "--no-ext-diff", "--no-textconv", baseCommit], { env });
       const files = numstat
         ? numstat.split("\n").map((l) => {
             const [a, r, ...p] = l.split("\t");
             return { path: p.join("\t"), added: a === "-" ? 0 : Number(a), removed: r === "-" ? 0 : Number(r) };
           })
         : [];
-      const full = await this.git(["diff", "--cached", baseCommit], { cwd: dir, env });
+      const full = await this.wtGit(repo, dir, ["diff", "--cached", "--no-ext-diff", "--no-textconv", baseCommit], { env });
       const truncated = Buffer.byteLength(full) > maxBytes;
       return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
     } finally {
@@ -588,18 +715,19 @@ export class Workspaces {
     const index = path.join(this.root, "tmp", `${spec.ticketId}.checkpoint.index`);
     mkdirSync(path.dirname(index), { recursive: true });
     const env = { GIT_INDEX_FILE: index };
+    const repo = this.repoDir(spec.projectId);
     try {
-      await this.git(["read-tree", "HEAD"], { cwd: dir, env });
-      await this.git(["add", "-A"], { cwd: dir, env });
-      const tree = await this.git(["write-tree"], { cwd: dir, env });
+      await this.wtGit(repo, dir, ["read-tree", "HEAD"], { env });
+      await this.wtGit(repo, dir, ["add", "-A"], { env });
+      const tree = await this.wtGit(repo, dir, ["write-tree"], { env });
       const list = await this.checkpoints(spec.projectId, spec.ticketId);
       const last = list[list.length - 1];
-      const parent = last?.commit ?? (await this.git(["rev-parse", "HEAD"], { cwd: dir }));
-      if ((await this.git(["rev-parse", `${parent}^{tree}`], { cwd: dir })) === tree) return null;
-      const commit = await this.git(["commit-tree", tree, "-p", parent, "-m", `Boss Man checkpoint: ${label}`], { cwd: dir, env: this.authorEnv(by) });
+      const parent = last?.commit ?? (await this.wtGit(repo, dir, ["rev-parse", "HEAD"]));
+      if ((await this.git(["rev-parse", `${parent}^{tree}`], { cwd: repo })) === tree) return null;
+      const commit = await this.git(["commit-tree", tree, "-p", parent, "-m", `Boss Man checkpoint: ${label}`], { cwd: repo, env: this.authorEnv(by) });
       const turn = (last?.n ?? 0) + 1;
-      await this.git(["update-ref", `${this.checkpointPrefix(spec.ticketId)}${String(turn).padStart(6, "0")}`, commit], { cwd: dir });
-      const files = await this.git(["diff", "--name-only", parent, commit], { cwd: dir });
+      await this.git(["update-ref", `${this.checkpointPrefix(spec.ticketId)}${String(turn).padStart(6, "0")}`, commit], { cwd: repo });
+      const files = await this.git(["diff", "--name-only", "--no-ext-diff", "--no-textconv", parent, commit], { cwd: repo });
       return { turn, commit, files: files ? files.split("\n").length : 0 };
     } finally {
       rmSync(index, { force: true });
@@ -617,14 +745,14 @@ export class Workspaces {
     if (!to) throw new Error("No turn has changed anything yet.");
     const from = { commit: await this.git(["rev-parse", `${to.commit}^`], { cwd: this.repoDir(spec.projectId) }) };
     const cwd = this.repoDir(spec.projectId);
-    const numstat = await this.git(["diff", "--numstat", from.commit, to.commit], { cwd });
+    const numstat = await this.git(["diff", "--numstat", "--no-ext-diff", "--no-textconv", from.commit, to.commit], { cwd });
     const files = numstat
       ? numstat.split("\n").map((l) => {
           const [a, r, ...p] = l.split("\t");
           return { path: p.join("\t"), added: a === "-" ? 0 : Number(a), removed: r === "-" ? 0 : Number(r) };
         })
       : [];
-    const full = await this.git(["diff", from.commit, to.commit], { cwd });
+    const full = await this.git(["diff", "--no-ext-diff", "--no-textconv", from.commit, to.commit], { cwd });
     const truncated = Buffer.byteLength(full) > maxBytes;
     return { baseCommit: from.commit, head: to.commit, commits: [], files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, turn: { number: to.n, at: to.at } };
   }
@@ -835,7 +963,7 @@ export class Workspaces {
       const dir = this.ticketDir(spec.ticketId);
       const branch = `refs/heads/${branchFor(spec.ticketId)}`;
       if (existsSync(path.join(dir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: dir });
+        const dirty = await this.wtGit(repo, dir, ["status", "--porcelain"]);
         if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
       }
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -848,7 +976,7 @@ export class Workspaces {
         if (problems.length) return { status: "migration_journal" as const, problems };
         const who = this.authorEnv();
         const commit = await this.git(["commit-tree", tree, "-p", targetSha, "-p", branchSha, "-m", message], { cwd: repo, env: who });
-        const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
+        const pushed = await this.pushOrigin(repo, commit, target, auth);
         if (pushed.code === 0) return { status: "merged", commit };
         if (attempt === 1) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
       }
@@ -869,7 +997,7 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async (): Promise<MergeResult> => {
       const ticketDir = this.ticketDir(spec.ticketId);
       if (existsSync(path.join(ticketDir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir });
+        const dirty = await this.wtGit(repo, ticketDir, ["status", "--porcelain"]);
         if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
       }
       const tried = await this.tryMerge(repo, branch, target, auth);
@@ -888,7 +1016,7 @@ export class Workspaces {
       const parents = (await this.git(["rev-list", "--parents", "-n", "1", phase.commit], { cwd: repo })).split(" ").slice(1);
       const same = parents[0] === tried.targetSha && parents[1] === tried.branchSha;
       const toPush = same ? phase.commit : await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
-      const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
+      const pushed = await this.pushOrigin(repo, toPush, target, auth);
       if (pushed.code !== 0) {
         // Rejected: the target moved again (try once more) or the push is refused for good (the next prepare would say so).
         const again = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
@@ -927,7 +1055,7 @@ export class Workspaces {
       const built = await this.withRepoLock(spec.projectId, async (): Promise<MergeResult | { status: "check"; commit: string; tree: string; targetSha: string; branchSha: string }> => {
         const ticketDir = this.ticketDir(spec.ticketId);
         if (existsSync(path.join(ticketDir, ".git"))) {
-          const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir });
+          const dirty = await this.wtGit(repo, ticketDir, ["status", "--porcelain"]);
           if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
         }
         const tried = await this.tryMerge(repo, branch, target, auth);
@@ -949,7 +1077,7 @@ export class Workspaces {
         // the record still names the commit the check really ran on.
         const same = checked.targetSha === tried.targetSha && checked.branchSha === tried.branchSha;
         const toPush = same ? checked.commit : commit;
-        const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
+        const pushed = await this.pushOrigin(repo, toPush, target, auth);
         if (pushed.code === 0) return { status: "merged", commit: toPush, checked: { sha: checked.commit, tree: tried.tree, ms: checkedMs } };
         // Rejected: either the target moved again, or the push is refused for good (protected branch, bad token,
         // hook). The next round tells them apart: if the target sha is unchanged, it throws git's message.
@@ -990,7 +1118,7 @@ export class Workspaces {
 
   /** Fetches, then tries the ticket's branch on top of origin's target with merge-tree. */
   private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>) {
-    await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+    await this.fetchOrigin(repo, auth);
     const targetSha = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
     const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
     const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
@@ -1029,7 +1157,7 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      await this.fetchOrigin(repo, auth);
       const head = await this.git(["rev-parse", "--verify", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
       // The caller checked this head; if the branch ref says otherwise, the answer would be about different code (BOS-734).
       if (expectHead && !head.startsWith(expectHead) && !expectHead.startsWith(head)) {
@@ -1096,7 +1224,7 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      await this.fetchOrigin(repo, auth);
       // A failed rev-list mustn't look like "no commits": a safety gate that can't answer has to
       // say so, not report the branch clean (BOS-130).
       const refs = async (ref: string, firstParent = false) => {
@@ -1163,12 +1291,12 @@ export class Workspaces {
       const dir = this.ticketDir(spec.ticketId);
       const name = branchFor(spec.ticketId);
       if (existsSync(path.join(dir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: dir });
+        const dirty = await this.wtGit(repo, dir, ["status", "--porcelain"]);
         if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
       }
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
       if (tried.status !== "clean") return tried;
-      const pushed = await this.gitCode(["push", "--quiet", "origin", `${tried.branchSha}:refs/heads/${name}`], { cwd: repo, env: auth });
+      const pushed = await this.pushOrigin(repo, tried.branchSha, name, auth);
       if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);
       return { status: "pushed", branch: name, commit: tried.branchSha };
     });
@@ -1183,12 +1311,8 @@ export class Workspaces {
     const auth = gitAuthEnv(secrets);
     const checks = await this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
-      if (!existsSync(path.join(repo, "HEAD"))) {
-        mkdirSync(path.dirname(repo), { recursive: true });
-        await this.git(["clone", "--bare", "--quiet", spec.repoUrl, repo], { env: auth });
-        await this.git(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo });
-      }
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      await this.cloneIfMissing(spec, auth);
+      await this.fetchOrigin(repo, auth);
       const ref = `refs/remotes/origin/${spec.baseRef}`;
       const files = (await this.git(["ls-tree", "--name-only", ref], { cwd: repo })).split("\n").filter(Boolean);
       const texts = new Map<string, string | null>();

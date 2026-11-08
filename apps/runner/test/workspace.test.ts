@@ -147,16 +147,21 @@ describe("git workspaces (R38)", () => {
   it("keeps the hook and fsmonitor settings when a git token adds its own config entry", () => {
     const env = safeGitEnv(gitAuthEnv({ GIT_TOKEN: "ghp_x" }));
     expect(env).toMatchObject({
-      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_COUNT: "5",
       GIT_CONFIG_KEY_0: "core.hooksPath",
       GIT_CONFIG_VALUE_0: "/dev/null",
       GIT_CONFIG_KEY_1: "core.fsmonitor",
       GIT_CONFIG_VALUE_1: "false",
-      GIT_CONFIG_KEY_2: "http.extraHeader",
+      GIT_CONFIG_KEY_2: "credential.helper",
+      GIT_CONFIG_VALUE_2: "",
+      GIT_CONFIG_KEY_3: "commit.gpgSign",
+      GIT_CONFIG_VALUE_3: "false",
+      GIT_CONFIG_KEY_4: "http.extraHeader",
+      GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_TERMINAL_PROMPT: "0",
     });
-    expect(env.GIT_CONFIG_VALUE_2).toMatch(/^Authorization: Basic /);
-    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "2" });
+    expect(env.GIT_CONFIG_VALUE_4).toMatch(/^Authorization: Basic /);
+    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "4" });
   });
 
   it("reports a clone that fails", async () => {
