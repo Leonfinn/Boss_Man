@@ -81,6 +81,8 @@ export type MergeQueueView = {
   recent: RecentRow[];
   /** How many approved tickets are waiting to merge (the side menu's badge). */
   waitingCount: number;
+  /** How many items look stuck: running past the limit, or waiting rows flagged stuck (BOS-767). */
+  stuckCount: number;
 };
 
 /** One plain line from a check's last output: the first error-looking line, or the last line. */
@@ -338,6 +340,7 @@ export function mergeQueueService(
         waiting,
         recent: await recent(companyId, prefix, t),
         waitingCount: waiting.length,
+        stuckCount: running.filter((r) => r.overLimit).length + waiting.filter((w) => w.stuck).length,
       };
     },
   };

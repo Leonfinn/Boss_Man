@@ -894,6 +894,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             {x.effect === "unknown" && " Read the exact command before you allow it."}
                           </p>
                         )}
+                        {x.ownerWhy && <p className="muted" style={{ fontSize: 13 }}>{x.ownerWhy}</p>}
                         {x.alwaysNote && !done && <p className="muted" style={{ fontSize: 13 }}>{x.alwaysNote}</p>}
                         {x.reason && <p className="muted">What the agent says it's for: {x.reason}</p>}
                         {x.command && (

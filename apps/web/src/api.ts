@@ -111,7 +111,7 @@ export type PushReading = {
   warnings: string[];
   dangerous: boolean;
 };
-export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; scratch?: { note: string; unchecked: string[] }; push?: PushReading };
+export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; ownerWhy?: string; scratch?: { note: string; unchecked: string[] }; push?: PushReading };
 
 /** One of Boss Man's alerts the Scrum Master or the CEO still holds (BOS-64): not the owner's yet. */
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */

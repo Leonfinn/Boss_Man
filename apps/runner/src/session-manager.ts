@@ -11,7 +11,7 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
-import { FENCE_DENIED_PATTERN, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { FENCE_DENIED_PATTERN, infiniteLaunchModel, isInfiniteModel, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
@@ -139,7 +139,29 @@ const currentModel = (configOptions: unknown[] | null | undefined) =>
  * told to ask (spike); "ask" sends them to Boss Man. The inline config wins over a repo's opencode.json.
  * Provider settings (e.g. a local Ollama endpoint) arrive as a granted OPENCODE_CONFIG_CONTENT and are kept.
  */
-export function opencodeEnv(granted: string | undefined, verdict: "ask" | "deny"): NodeJS.ProcessEnv {
+/**
+ * OpenCode's provider entry for Synthetic's Infinite mode (BOS-279). A stock OpenCode doesn't know the
+ * model (`ProviderModelNotFoundError`), so the runner adds the provider itself: Infinite mode is its own
+ * OpenAI-compatible endpoint, `https://api.synthetic.new/openai/v1`, and the API insists the provider be
+ * named `hf` and the model id start with `infinite:`. It streams by default, which Infinite mode requires.
+ * A provider the owner already set up under this name is kept as it is.
+ */
+export const INFINITE_PROVIDER = "hf";
+export function infiniteProviderConfig(existing: Record<string, unknown> | undefined) {
+  const providers = (existing ?? {}) as Record<string, { models?: Record<string, unknown> } | undefined>;
+  if (providers[INFINITE_PROVIDER] && typeof providers[INFINITE_PROVIDER] === "object") return existing!;
+  return {
+    ...providers,
+    [INFINITE_PROVIDER]: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "Synthetic (Infinite mode)",
+      options: { baseURL: "https://api.synthetic.new/openai/v1", apiKey: "{env:SYNTHETIC_API_KEY}" },
+      models: { "infinite:small:vision": { name: "Infinite small (free, slow)" } },
+    },
+  };
+}
+
+export function opencodeEnv(granted: string | undefined, verdict: "ask" | "deny", infinite = false): NodeJS.ProcessEnv {
   let existing: Record<string, unknown> = {};
   try {
     existing = granted ? (JSON.parse(granted) as Record<string, unknown>) : {};
@@ -151,7 +173,14 @@ export function opencodeEnv(granted: string | undefined, verdict: "ask" | "deny"
   // OpenCode's own hosted "opencode" provider needs no key and would send work to opencode.ai, so it's off.
   const disabled = [...new Set([...((existing.disabled_providers as string[] | undefined) ?? []), "opencode"])];
   return {
-    OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...existing, autoupdate: false, share: "disabled", permission, disabled_providers: disabled }),
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({
+      ...existing,
+      ...(infinite ? { provider: infiniteProviderConfig(existing.provider as Record<string, unknown> | undefined) } : {}),
+      autoupdate: false,
+      share: "disabled",
+      permission,
+      disabled_providers: disabled,
+    }),
     OPENCODE_DISABLE_AUTOUPDATE: "1",
     OPENCODE_DISABLE_CLAUDE_CODE: "1", // don't read ~/.claude as OpenCode config
   };
@@ -658,7 +687,7 @@ export class SessionManager {
       env.CODEX_CONFIG = JSON.stringify({ ...existing, ...(cmd.model ? { model: cmd.model } : {}) });
     }
     // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
-    if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask"));
+    if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask", isInfiniteModel(cmd.model)));
     if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir, base.BOSSMAN_CHECK_SLOT));
     // Kept scratch (BOS-592): proofs and check logs that /tmp loses on every restart. Made here so a command
     // that only wants to write into it never has to, and reported as a warning when it can't be made.
@@ -774,6 +803,11 @@ export class SessionManager {
     let lastContextUsed = -Infinity;
     let lastQuota = "";
     let messageText = "";
+
+    // Infinite mode's model is `hf/infinite:...` on the provider the runner adds; the server stores the same model as
+    // `synthetic/infinite:...`. Rewritten here, before the session opens and run.started is emitted, so the launch
+    // model and the reported one agree (BOS-279).
+    if (cmd.agentKind === "opencode" && isInfiniteModel(cmd.model)) cmd = { ...cmd, model: infiniteLaunchModel(cmd.model!) };
 
     let env: NodeJS.ProcessEnv;
     let secrets: Record<string, string>;

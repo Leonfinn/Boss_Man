@@ -106,6 +106,7 @@ connection = new RunnerConnection({
   journal,
   runnerVersion: "0.0.0",
   imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
+  imageCommit: /^[0-9a-f]{40}$/i.test(env.BOSSMAN_IMAGE_COMMIT ?? "") ? env.BOSSMAN_IMAGE_COMMIT : undefined,
   harnessVersions: await harnessVersions(),
   log,
   onCommand: (command) => sessions.handle(command),
