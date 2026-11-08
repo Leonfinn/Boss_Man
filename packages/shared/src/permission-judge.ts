@@ -272,8 +272,11 @@ export function judgePermission(question: string, command: string | null, ownFol
       let prog: string | undefined;
       for (let i = 0; i < words.length; i++) {
         const w = words[i]!;
-        if (w === "" || w === ":::" || w === "::::") continue;
-        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJN]$|^--(?:max-args|replace|delimiter|max-procs|max-lines|eof|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
+        if (w === "") continue;
+        // `parallel ::: a b` with no program runs every argument as a command (BOS-732): no Allow.
+        if (w === ":::" || w === "::::") return result("outside");
+        // `--replace`, `--eof` and `--max-lines` take a value only as `--opt=value` (one word), so the next word is the program.
+        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJN]$|^--(?:max-args|delimiter|max-procs|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
         prog = w.replace(/^.*\//, "");
         break;
       }
@@ -854,16 +857,22 @@ const XARGS_OPTS: Record<string, { bare: string; value: string; bareLong: string
   xargs: {
     bare: "0rtpxei",
     value: "EILPdnsa",
-    bareLong: ["--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit", "--show-limits", "--open-tty", "--help", "--version"],
-    valueLong: ["--eof", "--replace", "--max-lines", "--max-procs", "--delimiter", "--max-args", "--max-chars", "--arg-file", "--process-slot-var"],
+    // GNU xargs: the value of `--eof`, `--replace` and `--max-lines` is optional, so it counts only as `--opt=value`
+    // (handled as attached above); alone they are bare and the next word is the program (BOS-732).
+    bareLong: ["--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit", "--show-limits", "--open-tty", "--help", "--version",
+      "--eof", "--replace", "--max-lines"],
+    valueLong: ["--max-procs", "--delimiter", "--max-args", "--max-chars", "--arg-file", "--process-slot-var"],
   },
   parallel: {
     bare: "kqtsX",
     value: "jS",
-    bareLong: ["--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--serial", "--interactive", "--help", "--version"],
+    // `--tag`, `--unbuffer`, `--pipepart` take no value; `--max-lines`, `--replace`, `--eof`, `--number-of-cpus` are optional-value
+    // or unsure in parallel, so they are left unknown (no Allow) rather than guessed (BOS-732).
+    bareLong: ["--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--serial", "--interactive", "--help", "--version",
+      "--tag", "--unbuffer", "--pipepart"],
     valueLong: ["--workdir", "--env", "--tmpdir", "--halt", "--delay", "--timeout", "--basefile", "--transfer-file", "--joblog", "--sshlogin",
-      "--sshloginfile", "--results", "--colsep", "--rpl", "--max-args", "--max-lines", "--max-procs", "--max-chars", "--number-of-cpus", "--load",
-      "--memfree", "--nice", "--tag", "--block", "--recstart", "--recend", "--pipepart", "--unbuffer", "--template"],
+      "--sshloginfile", "--results", "--colsep", "--rpl", "--max-args", "--max-procs", "--max-chars", "--load",
+      "--memfree", "--nice", "--block", "--recstart", "--recend", "--template"],
   },
 };
 
