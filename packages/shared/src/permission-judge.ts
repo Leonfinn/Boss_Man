@@ -910,12 +910,24 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
   const RUNS_REPO_CODE = /^(?:git|make|gmake|cmake|gradle|mvn|ant|cargo|dotnet|rake|bundle|mix|stack)$/;
   const PM = /^(?:pnpm|npm|yarn|npx|pnpx|bunx|bun)$/;
   const PM_SCRIPT = /^(?:run|run-script|test|t|start|dev|restart|rebuild|pack|publish|exec|dlx|create)$/;
-  const pmRunsScript = (args: string[]): boolean => {
+  // BOS-710: which options take no value differs per package manager (npm `-w` is `--workspace <name>`, pnpm `-w` is the workspace
+  // root; bun `-r` is `--preload <file>` and `-d` is `--define <k:v>`), so the allow-list is per program. An option missing from
+  // a program's list gets "runs a script" (over-deny, never Allow).
+  const PM_FLAGS_COMMON = "-s|--silent|-q|--quiet|--no-color|--ignore-scripts|-D|-g|--global|--save-dev|--offline|--prefer-offline|--no-progress|--production|--force|-f|--verbose";
+  const PM_FLAGS: Record<string, RegExp> = {
+    npm: new RegExp(`^(?:${PM_FLAGS_COMMON}|--if-present|-ws|--workspaces|-y|--yes|--prod|--legacy-peer-deps|--no-audit|--no-fund|-d)$`),
+    pnpm: new RegExp(`^(?:${PM_FLAGS_COMMON}|--if-present|-w|--workspace-root|-r|--recursive|--frozen-lockfile|--no-frozen-lockfile|--prod|--no-audit)$`),
+    yarn: new RegExp(`^(?:${PM_FLAGS_COMMON}|--frozen-lockfile|--no-audit|-W|--ignore-workspace-root-check)$`),
+    bun: new RegExp(`^(?:${PM_FLAGS_COMMON}|--frozen-lockfile|--no-frozen-lockfile|--prod|--dry-run)$`),
+    npx: /^(?:-y|--yes|-q|--quiet|-s|--silent|--no)$/,
+  };
+  const pmRunsScript = (head: string, args: string[]): boolean => {
     // BOS-706 (allow-list): an option the judge does not know may take the next word as its value (`npm --cache install run evil`),
     // so the verb cannot be told. Only known value-less options may stand before the verb; any other gets "runs a script".
+    const known = PM_FLAGS[head] ?? PM_FLAGS[head === "pnpx" || head === "bunx" ? "npx" : head] ?? /^$/;
     const verbAt = args.findIndex((a) => !a.startsWith("-") && a !== "");
     for (const a of verbAt < 0 ? args : args.slice(0, verbAt)) {
-      if (a !== "--" && !a.includes("=") && !/^(?:-s|--silent|-q|--quiet|--no-color|--if-present|-w|-ws|--workspaces|-r|--recursive|--ignore-scripts|-D|-g|--global|--save-dev|--frozen-lockfile|--no-frozen-lockfile|--offline|--prefer-offline|-y|--yes|--no-progress|--production|--prod|--force|-f|--legacy-peer-deps|--no-audit|--no-fund|--verbose|-d)$/.test(a)) return true;
+      if (a !== "--" && !a.includes("=") && !known.test(a)) return true;
     }
     const first = verbAt < 0 ? undefined : args[verbAt];
     // No verb (`pnpm` alone) or a script-run verb, or a word that is not a known non-script verb (a bare script name).
@@ -946,12 +958,18 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
           if (long.length > 2 && "--chdir".startsWith(long)) {
             const v = f.includes("=") ? f.slice(f.indexOf("=") + 1) : (words[j + 1] ?? "");
             if (!repoDirOk(v)) away = true;
-          } else if (/^(?:-u|-P|--unset|--argv0)$/.test(f) || (long.length > 2 && !f.includes("=") && ("--unset".startsWith(long) || "--argv0".startsWith(long)))) {
-            j++; // takes the next word as its value: `env -u X -C /tmp/p cmd`
-          } else if (!long && /^-[A-Za-z]*C/.test(f)) {
-            const at = f.indexOf("C");
-            const v = at < f.length - 1 ? f.slice(at + 1) : (words[j + 1] ?? "");
-            if (!repoDirOk(v)) away = true;
+          } else if (long.length > 2 && !f.includes("=") && ("--unset".startsWith(long) || "--argv0".startsWith(long))) {
+            j++; // takes the next word as its value: `env --unset X -C /tmp/p cmd`
+          } else if (!long && f.length > 1) {
+            // BOS-710: a group of short options (`-0u X`, `-iP /bin`, `-uC`): the first value letter (u, C, P) ends the group, and its
+            // value is the rest of the word or the next word, the same rule as peelWrapper.
+            const at = [...f.slice(1)].findIndex((ch) => "uCP".includes(ch)) + 1;
+            if (at > 0) {
+              const attached = at < f.length - 1;
+              const v = attached ? f.slice(at + 1) : (words[j + 1] ?? "");
+              if (f[at] === "C" && !repoDirOk(v)) away = true;
+              if (!attached) j++;
+            }
           }
         }
       }
@@ -979,7 +997,7 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
       continue;
     }
     if (head === "popd") { away = true; continue; }
-    if (away && (RUNS_REPO_CODE.test(head) || (PM.test(head) && pmRunsScript(args)))) return true;
+    if (away && (RUNS_REPO_CODE.test(head) || (PM.test(head) && pmRunsScript(head, args)))) return true;
     // BOS-706 (CEO decision): outside the checkout an install runs that folder's own preinstall/install/postinstall/prepare
     // scripts, which the judge can't read. It gets no Allow unless `--ignore-scripts` (or `=true`) is given. Inside the checkout
     // and its workspaces installs stay Allow (BOS-329).

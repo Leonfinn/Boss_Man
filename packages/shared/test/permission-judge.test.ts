@@ -1152,6 +1152,28 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     ]);
   });
 
+  // BOS-710 (Jane's two variants after BOS-706): `-w` is value-less only for pnpm, and a grouped env short option ends in a value letter.
+  describe("A3. per-program value-less options and grouped env options (BOS-710)", () => {
+    deny([
+      "cd /tmp/p && npm -w install --ignore-scripts run evil",
+      "cd /tmp/p && npm -r install --ignore-scripts run evil",
+      "cd /tmp/p && yarn -w install --ignore-scripts run evil",
+      "cd /tmp/p && bun -r install --ignore-scripts run evil",
+      "cd /tmp/p && bun -d install --ignore-scripts run evil",
+      "env -0u X -C /tmp/p pnpm run evil",
+      "env -iP /bin -C /tmp/p pnpm run evil",
+      "env -0uX -C /tmp/p pnpm run evil",
+      "env -0C /tmp/p pnpm run evil",
+      "env -u X -C /tmp/p pnpm run evil",
+    ]);
+    allows([
+      "cd /tmp/p && pnpm -w install --ignore-scripts",
+      "env -0u X -C packages/shared pnpm run build",
+      "env -iP /bin -C packages/shared pnpm run build",
+      "env -0u X pnpm run build",
+    ]);
+  });
+
   describe("B. node-options by flag", () => {
     deny([
       "npm --node-options=--require=../x.js run build",
