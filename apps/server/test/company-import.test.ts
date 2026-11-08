@@ -274,6 +274,14 @@ describe("company import (docs/11, step 2)", () => {
     const ticked = await req("POST", "/api/companies/import", { zip: pack(rebind), name: "Git Ticked", allowStackServices: true });
     expect(ticked.statusCode).toBe(201);
     expect((await req("GET", `/api/companies/${ticked.json().companyId}/projects`)).json()[0].allowPrivate).toBe(true);
+
+    // An ssh scp-style git address is checked and trusted the same way (git@host:path is not a URL).
+    const scp = "git@rebind.example.org:o/r.git";
+    expect(((await req("POST", "/api/companies/import/preview", { zip: pack(scp) })).json() as { gitHosts: Array<{ stackService: boolean }> }).gitHosts[0]!.stackService).toBe(true);
+    expect((await req("POST", "/api/companies/import", { zip: pack(scp), name: "Git Scp Bad" })).statusCode).toBe(400);
+    const scpTicked = await req("POST", "/api/companies/import", { zip: pack(scp), name: "Git Scp Ticked", allowStackServices: true });
+    expect(scpTicked.statusCode).toBe(201);
+    expect((await req("GET", `/api/companies/${scpTicked.json().companyId}/projects`)).json()[0].allowPrivate).toBe(true);
   });
 
   it("refuses files that aren't a safe Boss Man package", async () => {

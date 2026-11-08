@@ -92,7 +92,10 @@ function guardHost(url: string): string | null {
     const host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
     return host.startsWith("[") ? null : host;
   } catch {
-    return null;
+    // An ssh scp-style git remote (git@host:path) isn't a URL; read its host the same way rawGitHostAddress does, so a
+    // project's ssh git address is checked and trusted like any other (BOS-708).
+    const scp = /^[\w.-]+@([A-Za-z0-9.-]+):(?!\/\/)/.exec(url);
+    return scp ? scp[1]!.toLowerCase().replace(/\.$/, "") : null;
   }
 }
 
