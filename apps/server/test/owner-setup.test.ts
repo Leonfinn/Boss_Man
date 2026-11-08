@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, tickets } from "../src/db/schema.js";
+import { activity, agents, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 const EMPTY: WorkspaceDiff = { baseCommit: "a".repeat(40), head: "a".repeat(40), commits: [], files: [], diff: "", truncated: false };
@@ -109,5 +109,38 @@ describe("a ticket carries the owner's setup steps (DR-011)", () => {
     const c = await agentFor(ctx.dev.id);
     textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Settings → Funding → Add account", reason: "Steps for the owner." } }));
     expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add account");
+  });
+
+  it("once merged, an agent can't change the steps with update_ticket; the owner can", async () => {
+    await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
+    const t = await ctx.ticket({ ownerSetup: "Settings → Funding → Add account", mergeCommit: "c".repeat(40) });
+    const c = await agentFor(ctx.dev.id);
+    const out = textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Settings → Funding → Delete the account", reason: "Better steps." } }));
+    expect(out).toMatch(/merged, so its setup steps are frozen/);
+    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add account");
+    // The owner's own web edit still works.
+    expect((await ctx.req("PATCH", `/api/tickets/${t.id}`, { ownerSetup: "Settings → Funding → Delete the account" })).statusCode).toBe(200);
+    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Delete the account");
+  });
+
+  it("once merged, set_ticket_state can't change the steps either", async () => {
+    const t = await ctx.ticket({ ownerSetup: "Settings → Funding → Add account", mergeCommit: "c".repeat(40) });
+    const c = await agentFor(ctx.dev.id);
+    const out = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Reopened.", ownerSetup: "Settings → Funding → Add account\nAnd more" } }));
+    expect(out).toMatch(/merged, so its setup steps are frozen/);
+    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add account");
+  });
+
+  it("a manager's setup-step change before the merge is named in the activity log", async () => {
+    await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
+    const t = await ctx.ticket();
+    const c = await agentFor(ctx.dev.id);
+    textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Settings → Funding → Add account", reason: "Steps for the owner." } }));
+    const log = (await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((e) => e.summary).join("\n");
+    expect(log).toContain("reorganised it (owner setup steps changed): Steps for the owner.");
+    // The owner's edit is logged too.
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { ownerSetup: "" });
+    const after = (await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((e) => e.summary).join("\n");
+    expect(after).toContain("The owner changed the owner's setup steps");
   });
 });

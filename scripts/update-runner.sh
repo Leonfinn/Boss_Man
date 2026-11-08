@@ -37,6 +37,19 @@ addons="${RUNNER_ADDONS:-$(grep -s '^RUNNER_ADDONS=' .env | tail -1 | cut -d= -f
 compose() { COMPOSE_PROFILES="${profiles:-runners}" docker compose "$@"; }
 launcher_id() { docker ps -q --filter label=com.docker.compose.project=boss-man --filter label=com.docker.compose.service=launcher; }
 
+# Rebuilds and recreates the launcher when it is running, without touching the runners (BOS-335). "Build and update
+# runners" is the button the owner uses, and it used to build only the runner and netguard images: a launcher fix,
+# like the faster network-guard check, then never went live and nothing showed that. Recreating the launcher restarts
+# only it; its runners keep running and a company's runner is not touched.
+rebuild_launcher() {
+  [[ -n "$(launcher_id)" ]] || return 0
+  echo "Rebuilding the launcher, the part that starts the company runners..."
+  local lp="${profiles:-runners}"
+  case ",$lp," in *,launcher,*) ;; *) lp="$lp,launcher" ;; esac
+  COMPOSE_PROFILES="$lp" docker compose build launcher
+  COMPOSE_PROFILES="$lp" docker compose up -d --no-deps launcher
+}
+
 restart_runners() { # everything at once: the old behaviour
   compose up -d --no-build
   local launcher
@@ -142,5 +155,7 @@ fi
 if docker image inspect "$IMAGE:current" >/dev/null 2>&1; then docker tag "$IMAGE:current" "$IMAGE:previous"; fi
 docker tag "$IMAGE:candidate" "$IMAGE:current"
 docker rmi "$IMAGE:candidate" >/dev/null
+# Put launcher code live with this same button (BOS-335), before the drain so the new launcher runs it.
+rebuild_launcher
 move_runners
 echo "The new runner image ($stamp) is current. To undo: scripts/update-runner.sh --rollback"

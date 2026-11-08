@@ -229,6 +229,44 @@ describe.skipIf(!live)("fence, live", () => {
     }
   });
 
+  // BOS-436: the fence leaves /proc readable, so the runner's memory (its token) is safe only if the
+  // kernel refuses a fenced process ptrace-level access to a process outside the fence. Landlock does
+  // that (its ptrace hook), which this keeps true. The unfenced control shows the read itself works.
+  it("can't read the runner's memory through /proc/<pid>/mem", () => {
+    const needle = "BMTOKEN-" + "x9f3k2m7q1";
+    const holder = spawn(process.execPath, ["-e", `const s = Buffer.from(${JSON.stringify(needle)}); process.stdout.write("up\\n"); setInterval(() => s.length, 500);`], { stdio: ["ignore", "pipe", "ignore"] });
+    try {
+      const inside = mkdtempSync(path.join(tmpdir(), "bm-fence-"));
+      const reader = path.join(inside, "read-mem.pl");
+      writeFileSync(
+        reader,
+        `my ($pid, $needle) = @ARGV;
+open(my $m, "<", "/proc/$pid/maps") or do { print "REFUSED maps\\n"; exit 0 };
+open(my $f, "<:raw", "/proc/$pid/mem") or do { print "REFUSED mem\\n"; exit 0 };
+while (<$m>) {
+  next unless /^([0-9a-f]+)-([0-9a-f]+) rw/;
+  my ($a, $b) = (hex $1, hex $2);
+  next if $b - $a > 64 * 1024 * 1024;
+  seek($f, $a, 0) or next;
+  my $buf;
+  my $n = read($f, $buf, $b - $a);
+  if ($n && index($buf, $needle) >= 0) { print "LEAKED\\n"; exit 0 }
+}
+print "NOT FOUND\\n";
+`,
+      );
+      // Give the holder time to start.
+      spawnSync("sleep", ["1"]);
+      const control = spawnSync("perl", [reader, String(holder.pid), needle], { encoding: "utf8" });
+      if (!control.stdout.includes("LEAKED")) return; // this host (Yama ptrace_scope, a seccomp profile) already blocks same-uid reads
+      const r = fenced(inside, `perl ${reader} ${holder.pid} ${needle}`);
+      expect(r.stdout).not.toContain("LEAKED");
+      expect(r.stdout).toContain("REFUSED");
+    } finally {
+      holder.kill();
+    }
+  });
+
   it("lets the agent commit and branch in its worktree, but not touch the shared repo's config or hooks", () => {
     const r = repoWithWorktree();
     const repo = repoGrant(r.bare, r.ticket);

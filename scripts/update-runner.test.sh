@@ -21,11 +21,13 @@ cd "$T/repo"
 run() { : >"$FAKE_LOG"; rm -f "$T/deployer/inbox/drain.json"; ./update-runner.sh "$@" >"$T/out" 2>&1; }
 logged() { grep -qF -- "$1" "$FAKE_LOG"; }
 
-# Default: image promoted, drain requested, no runner touched.
+# Default: image promoted, drain requested, no runner touched, and the launcher rebuilt (BOS-335).
 run
 logged "docker tag boss-man-runner:candidate boss-man-runner:current" || fail "image not promoted"
 logged "recreate-all" && fail "default recreated the runners"
-logged "compose up" && fail "default restarted compose runners"
+logged "compose up -d --no-build" && fail "default restarted compose runners"
+logged "docker compose build launcher" || fail "default did not rebuild the launcher"
+logged "compose up -d --no-deps launcher" || fail "default did not recreate the launcher"
 [[ -s $T/deployer/inbox/drain.json ]] || fail "no drain request written"
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$T/deployer/inbox/drain.json" || fail "drain.json is not JSON"
 [[ $(find "$T/deployer/inbox" -type f | wc -l) == 1 ]] || fail "temp file left in the inbox"

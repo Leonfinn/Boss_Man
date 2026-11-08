@@ -58,3 +58,35 @@ describe("Settings → Runner update: the live state first, a past problem as hi
     expect(history.textContent).not.toContain("PROBLEM");
   });
 });
+
+describe("Settings → Runner: the network guard warning (BOS-335)", () => {
+  const launched = (guard: "on" | "off" | "unavailable") => ({
+    registered: true, runnerId: "r1", connected: true, lastSeenAt: live.at, imageVersion: live.imageVersion, diskUsedBytes: null, addons: null,
+    launcher: { slug: "boss-man-co", container: { state: "running", status: "Up 1 hour (healthy)", image: "img", guard } },
+  });
+  const mount = (guard: "on" | "off" | "unavailable") => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (url.includes("/runner") ? json(launched(guard)) : json([]))));
+    render(<Runner company={company} />);
+  };
+
+  it("warns plainly when the guard is off", async () => {
+    mount("off");
+    const warn = await screen.findByTestId("guard-warning");
+    expect(warn.textContent).toContain("turned off");
+    expect(warn.textContent).toContain("private addresses");
+    expect(warn.textContent).toContain("Ask your admin");
+  });
+
+  it("warns plainly when the guard is unavailable on the host", async () => {
+    mount("unavailable");
+    const warn = await screen.findByTestId("guard-warning");
+    expect(warn.textContent).toContain("unavailable on this host");
+    expect(warn.textContent).toContain("Ask your admin");
+  });
+
+  it("shows no warning when the guard is on", async () => {
+    mount("on");
+    expect(await screen.findByTestId("runner-now")).toBeTruthy();
+    expect(screen.queryByTestId("guard-warning")).toBeNull();
+  });
+});

@@ -454,6 +454,8 @@ export function retroService(
       if (evidence.length < 2) throw new RetroError(422, "A change needs at least 2 different tickets as evidence.");
 
       const plan = await self.plan(companyId, input.lever, input.target, input.change);
+      // A lesson proposal whose card is gone can't be answered, so it must not hold the project's slot.
+      if (input.lever === "lesson") await self.skipOrphanLessons(companyId, { role: plan.role, reason: "Its decision card was gone, so it was closed when a new lesson was proposed." });
       const live = await db
         .select({ id: workflowChanges.id })
         .from(workflowChanges)
@@ -680,6 +682,36 @@ export function retroService(
         .returning({ id: workflowChanges.id });
       if (!row) throw new RetroError(404, "No such change in this company.");
       return row;
+    },
+
+    /**
+     * Proposed lesson changes nobody can answer any more: the decision card was deleted, or it was answered and no
+     * "which line goes" card is open for the project. Optionally only those for one project (targetRole "project:<id>").
+     */
+    async orphanLessons(companyId: string, role?: string) {
+      const rows = await db
+        .select({ id: workflowChanges.id, targetRole: workflowChanges.targetRole })
+        .from(workflowChanges)
+        .leftJoin(decisions, eq(decisions.id, workflowChanges.decisionId))
+        .where(and(eq(workflowChanges.companyId, companyId), eq(workflowChanges.lever, "lesson"), eq(workflowChanges.status, "proposed"), or(isNull(decisions.id), ne(decisions.status, "open")), role ? eq(workflowChanges.targetRole, role) : undefined));
+      if (!rows.length) return [];
+      const replacing = await db.select({ projectId: sql<string>`${decisions.context}->>'projectId'` }).from(decisions).where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'lesson_replace'`));
+      const busy = new Set(replacing.map((r) => `project:${r.projectId}`));
+      return rows.filter((r) => !busy.has(r.targetRole ?? ""));
+    },
+
+    /** Closes orphaned lesson proposals as skipped, so they stop holding the project's one lesson slot. */
+    async skipOrphanLessons(companyId: string, input: { role?: string; changeId?: string; reason: string; reasonLink?: string }) {
+      const reason = checkChangeReason(input.reason);
+      const reasonLink = checkChangeLink(input.reasonLink);
+      const orphans = (await self.orphanLessons(companyId, input.role)).filter((o) => !input.changeId || o.id === input.changeId);
+      if (!orphans.length) return [];
+      const done = await db
+        .update(workflowChanges)
+        .set({ status: "skipped", reason, reasonLink, decidedBy: "ceo" })
+        .where(and(inArray(workflowChanges.id, orphans.map((o) => o.id)), eq(workflowChanges.status, "proposed")))
+        .returning({ id: workflowChanges.id });
+      return done.map((d) => d.id);
     },
 
     /** The decision was answered: Apply carries the change out (once), anything else skips it. */

@@ -36,7 +36,8 @@ export type LoopProfiler = {
   stop(): void;
 };
 
-const APP = /\/(apps|packages)\/[^/]+\/src\//;
+// Source files (dev, tests) or the bundled server (apps/server/dist/main.js is what runs live; bundled libraries show up as that file too).
+const APP = /\/(?:(?:apps|packages)\/[^/]+\/src|apps\/server\/dist)\//;
 
 function shortUrl(url: string): string {
   const u = url.replace(/^file:\/\//, "");
