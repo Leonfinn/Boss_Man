@@ -73,6 +73,9 @@ describe("git workspaces on the server (R38)", () => {
     const start = await review();
     expect(start.workspace).toEqual({ projectId: c.project.id, ticketId: t.id, repoUrl: "https://github.com/Leonfinn/customer-app.git", baseRef: "main", review: true });
     expect(start.prompt).toContain('your own copy of "Checkout error states"');
+    // BOS-713: the reviewer is told, in one line, how to run a related test in the copy without installing anything.
+    expect(start.prompt).toContain("packages already installed from the shared store");
+    expect(start.prompt).toContain("pnpm vitest run <path/to/that.test.ts>");
   });
 
   it("keeps the review copy when the reviewer is put on the one ticket it reviews (BOS-268)", async () => {
