@@ -51,6 +51,8 @@ describe("merge queue screen (BOS-587)", () => {
     expect(row).toMatchObject({ title: "Fix the login", stuck: true, state: "check_failed_retrying", failedCheck: true });
     expect(row.label).toMatch(/check failed: retrying \(error TS1: bad\)/);
     expect(data.waitingCount).toBe(1);
+    // The side menu's warning badge counts stuck items (BOS-767).
+    expect(data.stuckCount).toBe(1);
   });
 
   it("shows a stuck-check card as needs you, linking to the decision", async () => {
@@ -157,7 +159,7 @@ describe("merge queue screen (BOS-587)", () => {
   it("is empty, with no merges, for a company that has done nothing", async () => {
     const c = (ctx = await setup());
     const data = await queue(c);
-    expect(data).toMatchObject({ waitingCount: 0, running: [], waiting: [], recent: [] });
+    expect(data).toMatchObject({ waitingCount: 0, stuckCount: 0, running: [], waiting: [], recent: [] });
     expect(data.mode).toBe("legacy");
   });
 });
