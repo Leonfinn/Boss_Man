@@ -1,5 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
+import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -51,5 +52,76 @@ describe("docker remove", () => {
   it("still fails on other errors", async () => {
     const f = fakeSocket({ deleteStatus: 500, deleteMessage: "boom" });
     await expect(dockerClient(f.sock).remove("ab23")).rejects.toThrow("Removing the runner failed: boom");
+  });
+});
+
+/** A Docker socket whose /events answers the given lines, then holds the stream open until told to end it. */
+function fakeEvents(lines: string[], status = 200) {
+  const dir = mkdtempSync(path.join(tmpdir(), "bm-dock-ev-"));
+  const sock = path.join(dir, "d.sock");
+  const seen: string[] = [];
+  let end: (() => void) | undefined;
+  const server = http.createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.statusCode = status;
+    if (status !== 200) return res.end("no");
+    for (const l of lines) res.write(`${l}\n`);
+    end = () => res.end();
+  });
+  server.listen(sock);
+  cleanup.push(() => {
+    end?.();
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return { sock, seen, end: () => end?.() };
+}
+
+describe("docker events (BOS-335)", () => {
+  it("asks for just the given filters, with a Unix-second since", async () => {
+    const f = fakeEvents([]);
+    const abort = new AbortController();
+    const done = dockerClient(f.sock).events({ type: "container", action: ["start", "restart", "die"], label: "boss-man.launcher=1" }, 1_700_000_000, () => undefined, () => undefined, abort.signal);
+    await new Promise((r) => setTimeout(r, 20));
+    const filters = decodeURIComponent(f.seen[0]!);
+    expect(filters).toContain("since=1700000000");
+    expect(filters).toContain('"type":["container"]');
+    expect(filters).toContain('"event":["start","restart","die"]');
+    expect(filters).toContain('"label":["boss-man.launcher=1"]');
+    abort.abort();
+    await done;
+  });
+
+  it("reads newline-delimited events and skips a broken line", async () => {
+    const f = fakeEvents(['{"Type":"container","Action":"restart"}', "not json", '{"Type":"container","Action":"start"}']);
+    const abort = new AbortController();
+    const got: string[] = [];
+    const done = dockerClient(f.sock).events({ type: "container" }, 0, (e) => got.push(e.Action ?? "?"), () => undefined, abort.signal);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(got).toEqual(["restart", "start"]);
+    abort.abort();
+    await done;
+  });
+
+  it("takes its abort listener off when the stream ends, so reconnects don't pile them up", async () => {
+    const f = fakeEvents([]);
+    const abort = new AbortController();
+    const docker = dockerClient(f.sock);
+    // Twelve reconnects on the one signal: if the listener stayed, Node would warn past ten.
+    for (let i = 0; i < 12; i++) {
+      const open = docker.events({ type: "container" }, 0, () => undefined, () => undefined, abort.signal);
+      await new Promise((r) => setTimeout(r, 5));
+      f.end();
+      await open;
+    }
+    expect(getEventListeners(abort.signal, "abort").length).toBe(0);
+  });
+
+  it("reports a non-200 answer to onError and resolves", async () => {
+    const f = fakeEvents([], 500);
+    const abort = new AbortController();
+    const errors: string[] = [];
+    await dockerClient(f.sock).events({ type: "container" }, 0, () => undefined, (e) => errors.push(e.message), abort.signal);
+    expect(errors.join(" ")).toContain("HTTP 500");
   });
 });

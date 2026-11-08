@@ -826,6 +826,41 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     await expect(c.review.retryMerge(c.ticket.id, asCeo)).rejects.toMatchObject({ status: 409 });
   });
 
+  it("starts the held merge again by itself once the ticket it waited for merges (BOS-733)", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Permission gate");
+    const bystander = await otherTicket(c, "Unrelated work");
+    for (const id of [c.ticket.id, other.id, bystander.id]) await c.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch }] };
+    expect(await c.review.land(c.ticket.id, "Reviewer")).toMatchObject({ outcome: "carried" });
+    // A ticket held by something else is left alone.
+    await c.db.update(tickets).set({ pullRequestNote: 'Waiting: its branch also carries unapproved work from "Something else" (medium risk), which must merge first.' }).where(eq(tickets.id, bystander.id));
+    // The carried ticket merges: the held one is started again without anyone approving it again.
+    c.answers.carried = { carried: [] };
+    expect(await c.review.land(other.id, "Reviewer")).toMatchObject({ outcome: "merged" });
+    await vi.waitFor(async () => expect(await state(c)).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) }));
+    expect((await c.db.select().from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, "merge_retried")))).map((a) => a.summary)).toEqual([
+      '"Permission gate" merged, so the merge this ticket was waiting for was started again. Nothing to do.',
+    ]);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, bystander.id)))[0]).toMatchObject({ systemState: "review" });
+  });
+
+  it("withdraws the owner's merge-that-first card and lands the held ticket once the high-risk ticket it named merges (BOS-733)", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Permission gate", "high");
+    for (const id of [c.ticket.id, other.id]) await c.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch }] };
+    expect(await c.review.land(c.ticket.id, "Reviewer")).toMatchObject({ outcome: "carried" });
+    const card = (await c.db.select().from(decisions).where(eq(decisions.status, "open"))).find((d) => (d.context as { type?: string }).type === "carried");
+    expect(card).toBeDefined();
+    // The owner signs the high-risk ticket off, and it merges.
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", status: "answered", answer: "Approve and merge", answeredAt: new Date(), context: { type: "risk_review", ticketId: other.id, reviewer: "the CEO" } });
+    c.answers.carried = { carried: [] };
+    expect(await c.review.land(other.id, "Reviewer")).toMatchObject({ outcome: "merged" });
+    await vi.waitFor(async () => expect(await state(c)).toMatchObject({ systemState: "done" }));
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, card!.id)))[0]).toMatchObject({ status: "withdrawn" });
+  });
+
   it("lands an approved ticket together with the one that holds all of it (fast-forward case, BOS-372)", async () => {
     const c = (ctx = await setup());
     const other = await otherTicket(c, "Inner work");

@@ -31,7 +31,7 @@ function fakeLauncher() {
     if (new Headers(init?.headers).get("authorization") !== `Bearer ${KEY}`) return json(401, { error: "unauthorized" });
     if (failing) return json(502, { error: "Creating the runner failed: No such image: boss-man-runner:current" });
     const slug = url.pathname.split("/")[2];
-    if (method === "GET" && url.pathname === "/runners") return json(200, [...running.entries()].map(([s, state]) => ({ slug: s, state, status: "Up 2 seconds", image: "boss-man-runner:current" })));
+    if (method === "GET" && url.pathname === "/runners") return json(200, [...running.entries()].map(([s, state]) => ({ slug: s, state, status: "Up 2 seconds", image: "boss-man-runner:current", guard: "on" })));
     if (method === "PUT") return running.set(slug!, "running"), json(200, { slug, id: "abc" });
     if (method === "DELETE") return json(200, { slug, removed: running.delete(slug!) });
     if (method === "POST" && url.pathname.endsWith("/restart")) return running.has(slug!) ? json(200, { slug }) : json(404, { error: "There's no runner for that company." });
@@ -64,7 +64,8 @@ describe("runners through the launcher (R55)", () => {
     expect(await c.runners.authenticate((put.body as { token: string }).token)).toMatchObject({ companyId: company.id });
 
     const status = (await c.req("GET", `/api/companies/${company.id}/runner`)).json();
-    expect(status).toMatchObject({ registered: true, connected: false, launcher: { slug: "app-co", container: { state: "running" } } });
+    // The guard's state reaches Settings (BOS-335): the launcher reports it per runner, and this carries it through.
+    expect(status).toMatchObject({ registered: true, connected: false, launcher: { slug: "app-co", container: { state: "running", guard: "on" } } });
   });
 
   it("reconnects with a new token, restarts and stops, keeping the slug after a rename", async () => {

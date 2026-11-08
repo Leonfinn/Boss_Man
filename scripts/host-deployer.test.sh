@@ -355,6 +355,10 @@ if [[ $1 == stats ]]; then # stats --no-stream --format {{.MemUsage}} <id>
   [[ -n ${FAKE_STATS:-} ]] || exit 1
   echo "$FAKE_STATS"; exit 0
 fi
+if [[ $1 == inspect && $3 == *compose.project* ]]; then echo bmtest; exit 0; fi # the project label (BOS-487)
+if [[ $1 == inspect && $3 == "{{.State.StartedAt}}" ]]; then # the start time of the database (BOS-487)
+  echo "docker inspect $*" >>"$DL"; cat "$W/started.db" 2>/dev/null || true; exit 0
+fi
 if [[ $1 == inspect ]]; then # inspect -f <format> cid<service>: id, start, restarts, oom, running, exit code (BOS-488)
   s=${4#cid}; f() { cat "$W/$1.$s" 2>/dev/null || echo "$2"; }
   r=false; [[ -e $W/running.$s ]] && r=true
@@ -368,9 +372,16 @@ ready() { # colour: the JSON /api/ready would print
   printf '{"ok": true, "db": true, "version": "1", "commit": "%s", "role": "%s"}\n' "$(cat "$W/commit.$1")" "$(role "$1")"
 }
 case "$a" in
-  "ps -q "*) x=${a#ps -q }; x=${x#server-}; [[ -e $W/running.$x ]] && echo cid ;;
+  "ps -q "*) x=${a#ps -q }; x=${x#server-}; if [[ -e $W/cid.$x ]]; then cat "$W/cid.$x"; elif [[ -e $W/running.$x ]]; then echo cid; fi ;;
   "ps -aq "*) x=${a#ps -aq }; x=${x#server-}; [[ -e $W/running.$x || -e $W/exists.$x ]] && echo "cid$x" || true ;;
   "exec -T db psql"*) cat "$W/pgstart" 2>/dev/null || echo "2026-11-07 08:00:00.5+00" ;;
+  "--project-name "*" config --hash"*) # one line per svc-<name> file in the unpacked commit, as Compose's --hash prints them
+    [[ -z ${FAKE_NO_HASH:-} ]] || { echo "unknown flag: --hash" >&2; exit 1; }
+    [[ -z ${FAKE_NO_RENDER:-} ]] || exit 1
+    echo "render $PWD" >>"$DL"; for f in svc-*; do [[ ! -f $f ]] || echo "${f#svc-} $(sha256sum <"$f" | cut -d' ' -f1)"; done ;;
+  "--project-name "*" config") # the same settings as a rendered file, for a Compose without --hash
+    [[ -z ${FAKE_NO_RENDER:-} ]] || exit 1
+    echo "name: p"; echo "services:"; for f in svc-*; do [[ ! -f $f ]] || { echo "  ${f#svc-}:"; echo "    image: $(cat "$f")"; }; done; echo "volumes:"; echo "  data: {}" ;;
   "exec -T db pg_dump"*) echo dump ;;
   "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
   "run --rm --no-deps migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
@@ -656,6 +667,71 @@ hasnt "$DL" "stopped"; hasnt "$DL" "signal"; live_is blue
 # Ticking again changes nothing more.
 bg; [[ $(status result) == failed ]] || fail "second tick changed the status"
 
+# 32. BOS-487: which services an update changes, read from each service's rendered settings (fake files svc-<name>), and
+# which of db/proxy still run with older settings. Nothing here may start, stop or recreate a container.
+svc_check() { rm -f "$D/state/last-server"; : >"$D/inbox/check"; : >"$DL"; bg; } # a refresh, as the cron tick does it
+avail() { jget "$D/outbox/available.json" "$1"; }
+no_changes_made() { ! grep -qE '^docker (up|run|restart|stop|kill|rm|build|exec)' "$DL" || fail "the refresh changed something: $(cat "$DL")"; }
+at() { git -C "$T/src" fetch -q origin 2>/dev/null; git -C "$T/src" reset -q --hard "$1"; }
+push svc-db >/dev/null; push svc-proxy >/dev/null; sB="$(push svc-server)"
+reset_world blue "$sB"; at "$sB"; rm -f "$D/state/applied-services" "$D/state/hold"
+touch "$W/running.db"; echo cid1 >"$W/cid.db"; echo 2026-11-07T10:00:00Z >"$W/started.db"
+conf 0
+# a server-only change: only the server is listed, and nothing is pending
+sC="$(push svc-server)"
+svc_check; no_changes_made
+[[ $(avail changedServices) == server ]] || fail "server-only change: $(cat "$D/outbox/available.json")"
+has "$D/outbox/available.json" '"changedServices": ["server"]'
+has "$D/outbox/available.json" '"servicesChecked": true'
+has "$D/outbox/available.json" '"pendingServices": []'
+has "$D/outbox/available.json" '"dbContainerId": "cid1", "dbStartedAt": "2026-11-07T10:00:00Z"'
+[[ ! -e $D/state/render ]] || fail "the render folder was left behind"
+# the same service files twice, and a change that touches no service: nothing changed (no noise from paths or the commit)
+sD="$(push apps/server/a)"
+at "$sC"; svc_check; has "$D/outbox/available.json" '"changedServices": []'; has "$D/outbox/available.json" '"servicesChecked": true'
+# db only
+sE="$(push svc-db)"; at "$sD"; svc_check; has "$D/outbox/available.json" '"changedServices": ["db"]'
+# proxy only, then db and proxy together
+sF="$(push svc-proxy)"; at "$sE"; svc_check; has "$D/outbox/available.json" '"changedServices": ["proxy"]'
+at "$sD"; svc_check; has "$D/outbox/available.json" '"changedServices": ["db", "proxy"]'
+# a service added, and one removed, count as changed
+git -C "$T/w" rm -q svc-server; git -C "$T/w" commit -qm "drop svc-server"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
+sG="$(git -C "$T/w" rev-parse HEAD)"; at "$sF"; svc_check; has "$D/outbox/available.json" '"changedServices": ["server"]'
+sH="$(push svc-extra)"; at "$sG"; svc_check; has "$D/outbox/available.json" '"changedServices": ["extra"]'
+# the same render works for a Compose without --hash (it hashes each service block of the rendered file)
+FAKE_NO_HASH=1 svc_check; has "$D/outbox/available.json" '"changedServices": ["extra"]'; has "$D/outbox/available.json" '"servicesChecked": true'
+at "$sD"; FAKE_NO_HASH=1 svc_check; has "$D/outbox/available.json" '"changedServices": ["db", "extra", "proxy", "server"]'
+# it can't render: reported as not checked, an update is still offered, and the reason is in the log
+FAKE_NO_RENDER=1 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; has "$D/outbox/available.json" '"changedServices": []'
+has "$D/outbox/available.json" "\"tip\": \"$sH\""; has "$D/deployer.log" "could not be rendered"
+[[ ! -e $D/state/render ]] || fail "the render folder was left behind after a failure"
+# switched off in host.conf: not compared, and docker is not asked to render anything
+printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\nSERVICE_COMPARE=0\n' "$T/src" >"$D/host.conf"; chmod 600 "$D/host.conf"
+svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; hasnt "$DL" "config"; has "$D/deployer.log" "Service compare is off"
+conf 0
+# pending: the live checkout asks for new db settings, the container has not been recreated since
+rm -f "$D/state/applied-services"; at "$sC"; svc_check; has "$D/outbox/available.json" '"pendingServices": []' # first look: recorded as applied
+at "$sE"; svc_check; has "$D/outbox/available.json" '"pendingServices": ["db"]'
+echo 2026-11-07T11:00:00Z >"$W/started.db"; svc_check; has "$D/outbox/available.json" '"pendingServices": ["db"]' # a restart keeps the same container: not applied
+has "$D/outbox/available.json" '"dbStartedAt": "2026-11-07T11:00:00Z"'
+echo cid2 >"$W/cid.db"; svc_check; has "$D/outbox/available.json" '"pendingServices": []' # recreated: applied
+has "$D/outbox/available.json" '"dbContainerId": "cid2"'
+at "$sF"; svc_check; has "$D/outbox/available.json" '"pendingServices": ["proxy"]'
+svc_check; has "$D/outbox/available.json" '"pendingServices": ["proxy"]' # and stays so until the proxy is recreated
+# no deploy path starts, stops or recreates the database or the proxy: the server deploy rolls the colours only (DR-020 B)
+for f in host-deployer.sh rebuild-live.sh deploy.sh; do
+  # Any compose up/run/restart/stop/kill/rm/create/down (also in the hint text) must name only the server colours,
+  # the server or the launcher: every `up` and `run` carries --no-deps, and none names db or proxy. A bare
+  # `up -d` or `restart` therefore fails here.
+  if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm|create|down)\b' "$here/$f" \
+    | grep -vE '^[0-9]+:\s*#|exec -T |rm -f |^[0-9]+:\s*finish (partial|failed) ' \
+    | grep -vE '(up|run)\b.*--no-deps .*(server|launcher|migrate|\$\{svcs\[@\]\})|(stop|kill)\b.*"?server' ; then
+    fail "$f has a compose up/run/restart/stop/kill/rm/create/down that is not limited to the server services"
+  fi
+  if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm|create|down)\b[^#]*\b(db|proxy)\b' "$here/$f" | grep -vE '^[0-9]+:\s*#|exec -T (db|proxy)|--no-deps migrate'; then
+    fail "$f starts or recreates db or proxy"
+  fi
+done
 # 31. The whole-stack checklist (DR-020 D, BOS-488): five items, recorded in outbox/health.json and in the status file.
 hget() { jget "$D/outbox/health.json" "$1"; }
 swap() { # a good swap to a new commit, blue -> green; then a clean log and webhook file

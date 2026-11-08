@@ -20,8 +20,9 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, siblingsFromSysfs } from "./cpu-layout.js";
 import { dockerClient } from "./docker.js";
+import { watchGuardEvents } from "./guard-events.js";
 import { launcher, launcherServer } from "./launcher.js";
-import { parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, type LauncherConfig } from "./spec.js";
+import { LABEL, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, type LauncherConfig } from "./spec.js";
 
 const env = process.env;
 const dataRoot = env.BOSSMAN_DATA;
@@ -47,7 +48,8 @@ const cfg: LauncherConfig = {
   guardMode: parseGuardMode(env.BOSSMAN_NETGUARD),
   guardAllow: parseAllow(env.BOSSMAN_NETGUARD_ALLOW),
 };
-const api = launcher(cfg, dockerClient(env.DOCKER_SOCKET ?? "/var/run/docker.sock"));
+const docker = dockerClient(env.DOCKER_SOCKET ?? "/var/run/docker.sock");
+const api = launcher(cfg, docker);
 
 if (process.argv[2] === "recreate-all") {
   const done = await api.recreateAll();
@@ -65,14 +67,45 @@ if (key.length < 32) {
 
 const server = launcherServer(api, key);
 server.listen(Number(env.PORT ?? 3105), "0.0.0.0", () => console.log(JSON.stringify({ at: new Date().toISOString(), msg: "launcher listening", network: cfg.network })));
-// The network guard (BOS-324) must be in the runner's namespace: check at start and every 5 seconds.
-const reconcile = () =>
-  api.reconcileGuards().then(
-    (fixed) => fixed.length && console.log(JSON.stringify({ at: new Date().toISOString(), msg: "network guard started again", companies: fixed })),
-    (err: unknown) => console.error(JSON.stringify({ at: new Date().toISOString(), msg: "network guard check failed", error: String((err as Error)?.message ?? err) })),
-  );
-void reconcile();
-setInterval(() => void reconcile(), 5_000).unref();
-const stop = () => server.close(() => process.exit(0));
+// The network guard (BOS-324) must be in the runner's namespace. BOS-335: the 5 s timer is the backstop, and Docker's
+// own events make the common case (a runner restarted by itself) re-guard at once. Checks never overlap: one is
+// always the same work (reconcileGuards), so a second request while one runs is folded into one more run afterwards.
+let reconciling = false;
+let again = false;
+const reconcile = (why: string) => {
+  if (reconciling) {
+    again = true;
+    return;
+  }
+  reconciling = true;
+  api
+    .reconcileGuards()
+    .then(
+      (fixed) => fixed.length && console.log(JSON.stringify({ at: new Date().toISOString(), msg: "network guard started again", companies: fixed, why })),
+      (err: unknown) => console.error(JSON.stringify({ at: new Date().toISOString(), msg: "network guard check failed", error: String((err as Error)?.message ?? err), why })),
+    )
+    .finally(() => {
+      reconciling = false;
+      if (again) {
+        again = false;
+        reconcile("again");
+      }
+    });
+};
+// The fast path: a runner start, restart or die from Docker runs reconcile at once (it reconciles once at start too).
+// The timer stays: events can be missed (a reconnect, a Docker restart), and it is the slow backstop.
+const guardWatch = watchGuardEvents({
+  docker,
+  // The filter matches the runner containers' own label (`boss-man.launcher=1`), not just its name, so nothing else that
+  // happens to carry the key is watched (BOS-335).
+  label: `${LABEL}=1`,
+  reconcile,
+  log: (level, entry) => console[level](JSON.stringify({ at: new Date().toISOString(), ...entry })),
+});
+setInterval(() => reconcile("timer"), 5_000).unref();
+const stop = () => {
+  guardWatch.stop();
+  server.close(() => process.exit(0));
+};
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);

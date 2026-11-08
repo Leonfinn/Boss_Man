@@ -14,6 +14,7 @@ const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { sta
 const preview = (name: string, nameTaken: boolean) => ({
   company: { name, nameTaken },
   counts: { agents: 3, skills: 1, projects: 1, objectives: 1, features: 0, toolServers: 0, wikiPages: 2, tickets: 4 },
+  toolServers: [],
   agents: [{ name: "Celebrimbor", role: "worker", title: "Engineer", agentKind: "claude", model: null, instructions: "Build things." }],
   skills: [{ name: "deploy", renamedFrom: null, description: "Deploys.", scripts: ["run.sh"] }],
   secrets: [{ name: "Gitea token", envName: "GITEA_TOKEN", agents: ["celebrimbor"] }],

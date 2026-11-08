@@ -159,6 +159,131 @@ finish() { # result message [backup]: record the outcome, tell the owner, stop
 # The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an SSH remote with a read-only deploy key for a private one; docs/00 step 2). Empty if unreachable.
 remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }' || true; }
 
+# ---------------------------------------------------------------------------------------------------
+# Which services an update changes (BOS-487, DR-020 B and C). Read from the rendered compose settings of each service,
+# never from file paths: a comment-only edit changes nothing, a changed memory limit changes the database. The server
+# deploy still rolls only the server colours (do_deploy_bluegreen and deploy.sh never start db or proxy); a changed
+# db/proxy is reported here so Boss Man can raise its own owner step with a backup. SERVICE_COMPARE=0 (host.conf) turns
+# this off; any failure to render is logged and reported as "not checked", and never blocks an update.
+# ---------------------------------------------------------------------------------------------------
+SERVICE_COMPARE="${SERVICE_COMPARE:-1}"
+# The services whose settings only the owner's own step applies (the server deploy never touches them).
+OWNER_SERVICES="db proxy"
+RENDER_DIR="$STATE/render"
+
+# stdin: `docker compose config`; prints "service hash" per service. For a Compose without `config --hash`.
+hash_block() { # name block
+  printf '%s %s\n' "$1" "$(printf '%s' "$2" | sha256sum | cut -d' ' -f1)"
+}
+split_hash() {
+  local line name="" blk="" ins=0
+  while IFS= read -r line; do
+    if [[ $line == services:* ]]; then ins=1; continue; fi
+    if [[ $line =~ ^[^[:space:]] ]]; then
+      [[ -z $name ]] || hash_block "$name" "$blk"
+      name="" blk="" ins=0; continue
+    fi
+    ((ins)) || continue
+    if [[ $line =~ ^\ \ ([A-Za-z0-9_.-]+):[[:space:]]*$ ]]; then
+      [[ -z $name ]] || hash_block "$name" "$blk"
+      name="${BASH_REMATCH[1]}" blk=""
+    fi
+    blk+="$line"$'\n'
+  done
+  [[ -z $name ]] || hash_block "$name" "$blk"
+}
+
+# The compose project this host runs, taken from the live stack's own label; else COMPOSE_PROJECT_NAME; else the
+# checkout folder's name the way Compose normalises it. Empty if nothing can be told (the render then fails).
+compose_project() {
+  local cid p=""
+  cid="$(compose ps -q db 2>/dev/null | head -n 1)" || cid=""
+  if [[ -n $cid ]]; then p="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null)" || p=""; fi
+  [[ -n $p ]] || p="${COMPOSE_PROJECT_NAME:-}"
+  [[ -n $p ]] || p="$(grep -s '^COMPOSE_PROJECT_NAME=' "$REPO/.env" | tail -1 | cut -d= -f2- | tr -d "'\"" || true)"
+  [[ -n $p ]] || p="$(basename "$(cd "$REPO" 2>/dev/null && pwd)" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+  printf '%s' "$p"
+}
+
+# "service hash" lines for a commit, on stdout. The commit is unpacked into one fixed folder (the same path for every
+# commit, so relative bind mounts render the same and don't look like a change), with the checkout's own .env, and
+# rendered under the live project's name and a pinned BOSSMAN_COMMIT, so nothing differs but the settings themselves.
+# Nothing in the checkout is touched. Returns non-zero (and logs why) when it can't render.
+render_hashes() { # commit project
+  local commit=$1 project=$2 out="" rc=0
+  [[ -n $project ]] || { log "Service compare: could not tell the compose project name."; return 1; }
+  rm -rf "$RENDER_DIR"; mkdir -p "$RENDER_DIR"
+  if ! (set -o pipefail; g archive "$commit" | tar -x -C "$RENDER_DIR") 2>>"$LOG"; then
+    log "Service compare: could not unpack ${commit:0:8}."; rm -rf "$RENDER_DIR"; return 1
+  fi
+  # The commit may carry its own .env or secrets (even a link to another file): remove them first, so the copy below
+  # can never write through a link to some other file. This folder holds a copy of the host's .env (secrets): it lives
+  # in $STATE, which is root-only, and is removed straight after the render (a run killed in between leaves it until
+  # the next refresh, which starts by removing it).
+  rm -rf "$RENDER_DIR/.env" "$RENDER_DIR/secrets"
+  [[ ! -f $REPO/.env ]] || cp "$REPO/.env" "$RENDER_DIR/.env"
+  [[ ! -d $REPO/secrets ]] || ln -s "$REPO/secrets" "$RENDER_DIR/secrets"
+  out="$(cd "$RENDER_DIR" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT=compare timeout 120 docker compose --project-name "$project" config --hash '*' 2>>"$LOG")" || rc=$?
+  if ((rc != 0)) || ! grep -qE '^[A-Za-z0-9_.-]+ [0-9a-f]{8,}$' <<<"$out"; then
+    # An older Compose has no --hash: hash each service's block of the rendered file instead.
+    out="$(cd "$RENDER_DIR" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT=compare timeout 120 docker compose --project-name "$project" config 2>>"$LOG" | split_hash)" || out=""
+  fi
+  rm -rf "$RENDER_DIR"
+  out="$(grep -E '^[A-Za-z0-9_.-]+ [0-9a-f]{8,}$' <<<"$out" || true)"
+  [[ -n $out ]] || { log "Service compare: the compose settings of ${commit:0:8} could not be rendered (see above); not comparing."; return 1; }
+  printf '%s\n' "$out"
+}
+
+# Names whose hash differs between two "service hash" lists, including services that were added or removed.
+changed_between() { # old-file new-file
+  LC_ALL=C join -a1 -a2 -e MISSING -o 0,1.2,2.2 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2") | awk '$2 != $3 { print $1 }'
+}
+
+service_container() { compose ps -q "$1" 2>/dev/null | head -n 1 || true; } # service: its container id, empty if none
+
+# A service is "pending" when the live checkout's settings for it differ from what it last ran with and it has not been
+# recreated since: the container id is the proof (a recreate gives a new one, a plain restart or reboot keeps it). The
+# first look records the present state as applied. Reads state; writes only $STATE/applied-services.
+pending_services() { # live-hashes-file: prints the pending service names
+  local f="$STATE/applied-services" svc hash cid sh0 scid new="" line
+  for svc in $OWNER_SERVICES; do
+    hash="$(awk -v s="$svc" '$1 == s { print $2 }' "$1")"
+    [[ -n $hash ]] || continue # the live stack has no such service
+    cid="$(service_container "$svc")"
+    [[ -n $cid ]] || { line="$(grep -E "^$svc " "$f" 2>/dev/null || true)"; [[ -z $line ]] || new+="$line"$'\n'; continue; } # not running: no verdict, keep what we knew
+    line="$(grep -E "^$svc " "$f" 2>/dev/null || true)"
+    if [[ -z $line ]]; then new+="$svc $hash $cid"$'\n'; continue; fi
+    read -r _ sh0 scid <<<"$line"
+    if [[ $sh0 == "$hash" ]]; then new+="$svc $hash $cid"$'\n'
+    elif [[ $scid != "$cid" ]]; then new+="$svc $hash $cid"$'\n' # recreated since: applied
+    else new+="$line"$'\n'; echo "$svc"; fi
+  done
+  printf '%s' "$new" >"$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# Sets SVC_CHANGED (space-separated names), SVC_CHECKED (true/false), SVC_PENDING, DB_STARTED and DB_CID for available.json.
+service_report() { # live-commit tip-commit (tip empty or equal to live: nothing to compare)
+  SVC_CHANGED="" SVC_CHECKED=false SVC_PENDING="" DB_STARTED="" DB_CID=""
+  [[ $SERVICE_COMPARE == 1 ]] || { log "Service compare is off (SERVICE_COMPARE in host.conf)."; return 0; }
+  local project live="$STATE/svc.live" next="$STATE/svc.tip"
+  project="$(compose_project)"
+  render_hashes "$1" "$project" >"$live" || { rm -f "$live"; return 0; }
+  if [[ -n $2 && $2 != "$1" ]]; then
+    render_hashes "$2" "$project" >"$next" || { rm -f "$live" "$next"; return 0; }
+    SVC_CHANGED="$(changed_between "$live" "$next" | tr '\n' ' ')"
+  fi
+  SVC_CHECKED=true
+  SVC_PENDING="$(pending_services "$live" | tr '\n' ' ')"
+  DB_CID="$(service_container db)"
+  if [[ -n $DB_CID ]]; then DB_STARTED="$(docker inspect -f '{{.State.StartedAt}}' "$DB_CID" 2>/dev/null || true)"; fi
+  rm -f "$live" "$next"
+}
+json_names() { # space-separated names: a JSON array of strings
+  local n out="" sep=""
+  for n in $1; do out+="$sep$(jstr "$n")"; sep=", "; done
+  printf '[%s]' "$out"
+}
+
 # Tells the server what is waiting (when main is ahead of what runs), so it can raise the decision.
 refresh_available() {
   local f="$OUTBOX/available.json" asked=0
@@ -203,8 +328,13 @@ refresh_available() {
   if [[ $bg == true ]]; then
     if [[ $SOAK_SECONDS =~ ^[0-9]{1,6}$ ]]; then soak=", \"soakSeconds\": $SOAK_SECONDS"; else log "SOAK_SECONDS is not a whole number of seconds; not reporting the trial length."; fi
   fi
-  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s%s}' \
-    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" "$soak" >"$f.tmp"
+  # Which services the update changes, and which of db/proxy still run with older settings than the live checkout (BOS-487).
+  service_report "$head" "$tip"
+  local svc
+  svc=", \"changedServices\": $(json_names "$SVC_CHANGED"), \"servicesChecked\": $SVC_CHECKED, \"pendingServices\": $(json_names "$SVC_PENDING")"
+  if [[ -n $DB_CID ]]; then svc+=", \"dbContainerId\": $(jstr "$DB_CID"), \"dbStartedAt\": $(jstr "$DB_STARTED")"; fi
+  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s%s%s}' \
+    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" "$soak" "$svc" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
