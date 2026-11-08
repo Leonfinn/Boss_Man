@@ -144,6 +144,9 @@ if ((ROLLBACK)); then
 fi
 
 stamp="$(date -u +%Y%m%d%H%M)"
+# The commit the image is built from (BOS-764): Boss Man skips a "Build and update runners" ask when the image already has the change.
+# Empty outside a git checkout, and then the runner reports none and the ask is made as before.
+commit="$(git rev-parse HEAD 2>/dev/null || true)"
 # The network guard the launcher starts beside every runner (BOS-324); a runner is not started without it.
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
 
@@ -151,6 +154,7 @@ echo "Building $IMAGE:candidate with Claude Code ${version:-(the version pinned 
 docker build --pull -f apps/runner/Dockerfile \
   ${version:+--build-arg CLAUDE_CODE_VERSION="$version"} \
   --build-arg BOSSMAN_IMAGE_VERSION="$stamp" \
+  --build-arg BOSSMAN_IMAGE_COMMIT="$commit" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
 

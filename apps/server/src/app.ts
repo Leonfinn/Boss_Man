@@ -1259,15 +1259,28 @@ export async function buildApp(opts: AppOptions) {
       return { unread: await notes.unread() };
     });
     // Run limits: how many agents may work at once (instance-wide and per company); per-agent stays fixed at 1.
+    // Infinite-mode agents have their own "background" slots instead (BOS-279), so slow free runs never take a normal one.
     const runLimits = async () => {
       const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "run_limits"));
-      const v = row?.value as { instance?: number; company?: number } | undefined;
-      return { instance: v?.instance ?? scheduler.limits.instance, company: v?.company ?? scheduler.limits.company, defaults: { instance: DEFAULT_LIMITS.instance, company: DEFAULT_LIMITS.company } };
+      const v = row?.value as { instance?: number; company?: number; background?: number } | undefined;
+      return {
+        instance: v?.instance ?? scheduler.limits.instance,
+        company: v?.company ?? scheduler.limits.company,
+        background: v?.background ?? scheduler.limits.background,
+        defaults: { instance: DEFAULT_LIMITS.instance, company: DEFAULT_LIMITS.company, background: DEFAULT_LIMITS.background },
+      };
     };
     owner.get("/api/run-limits", async () => runLimits());
     owner.put("/api/run-limits", async (req) => {
-      const value = z.object({ instance: z.number().int().min(1).max(32), company: z.number().int().min(1).max(16) }).refine((b) => b.company <= b.instance, { message: "The company limit can't be higher than the all-companies limit." }).parse(req.body);
-      await db.insert(settings).values({ key: "run_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+      const value = z
+        .object({ instance: z.number().int().min(1).max(32), company: z.number().int().min(1).max(16), background: z.number().int().min(0).max(16).optional() })
+        .refine((b) => b.company <= b.instance, { message: "The company limit can't be higher than the all-companies limit." })
+        .parse(req.body);
+      // A saved value without background (an older save) keeps whatever is stored, so this write never resets it to the default.
+      const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "run_limits"));
+      const before = row?.value as { background?: number } | undefined;
+      const merged = { instance: value.instance, company: value.company, background: value.background ?? before?.background ?? DEFAULT_LIMITS.background };
+      await db.insert(settings).values({ key: "run_limits", value: merged }).onConflictDoUpdate({ target: settings.key, set: { value: merged } });
       return runLimits();
     });
     // BOS-313: check the merged result before pushing it (off by default while it rolls out).

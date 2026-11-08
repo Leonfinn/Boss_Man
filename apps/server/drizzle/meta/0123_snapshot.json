@@ -1,5 +1,5 @@
 {
-  "id": "78735c2d-2245-45cd-a182-72cbac9ffa87",
+  "id": "d6c8f6c0-e014-4f4a-bde1-72ebc956195b",
   "prevId": "a7b53337-9629-4210-99c5-3198778804af",
   "version": "7",
   "dialect": "postgresql",
@@ -77,28 +77,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "activity_merge_line": {
-          "name": "activity_merge_line",
-          "columns": [
-            {
-              "expression": "ticket_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"activity\".\"kind\" = 'merge_line'",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -6347,6 +6325,12 @@
         },
         "image_version": {
           "name": "image_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "image_commit": {
+          "name": "image_commit",
           "type": "text",
           "primaryKey": false,
           "notNull": false

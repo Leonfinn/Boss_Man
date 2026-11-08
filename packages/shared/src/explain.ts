@@ -1,7 +1,8 @@
 // Plain-English explanations of permission requests, worked out from the command itself
 // (no model): what the owner is being asked to allow, and the worst thing it could do.
 
-import { commandOf, DESTRUCTIVE, looksLikeBossmanTool, PUSHING, type PermissionInfo, type PolicyMatch } from "./policy.js";
+import { BUILTIN_GUARDS, commandOf, DESTRUCTIVE, looksLikeBossmanTool, PUSHING, type PermissionInfo, type PolicyMatch } from "./policy.js";
+import { commandRisks } from "./destructive.js";
 
 export type Effect = "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown";
 
@@ -24,7 +25,28 @@ export type PermissionExplanation = {
   scratch?: { note: string; unchecked: string[] };
   /** Where a `git push` goes, and what is dangerous about it (BOS-208). */
   push?: PushReading;
+  /** One plain line on why the card is with the owner and not the CEO (BOS-793). Set only on owner-tier cards. */
+  ownerWhy?: string;
 };
+
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+/**
+ * Why a card went to the owner and not the CEO, in one plain sentence (BOS-793). Display only: it
+ * changes no routing. `rule` is the name of the rule that sent it; `command` is the shell command, if any.
+ */
+export function ownerWhy(command: string | null, rule: string): string {
+  const lead = "Sent to you, not the CEO, because";
+  if (command) {
+    const risks = commandRisks(command);
+    const risk = risks.find((r) => r.kind === "destroys") ?? risks.find((r) => r.kind === "pushes");
+    if (risk) return `${lead} the destructive-command guard caught part of it (${risk.why})${risk.text ? `: ${clip(risk.text, 100)}` : ""}.`;
+    if (new RegExp(DESTRUCTIVE, "i").test(command)) return `${lead} the destructive-command guard matched it.`;
+    if (new RegExp(PUSHING, "i").test(command)) return `${lead} it pushes or publishes.`;
+  }
+  const guard = BUILTIN_GUARDS.find((g) => g.name === rule);
+  return guard ? `${lead} the built-in rule "${rule}" applies.` : `${lead} the rule "${rule}" sends it to you.`;
+}
 
 /** A standing rule the owner can pick instead of "Allow once". */
 export type AlwaysChoice = {

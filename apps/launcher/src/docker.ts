@@ -12,7 +12,7 @@ export class DockerError extends Error {
 }
 
 export type ContainerSummary = { Id: string; Names: string[]; Image: string; ImageID?: string; State: string; Status: string; Labels: Record<string, string>; Created: number };
-export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null }; State: { Status: string; StartedAt?: string; ExitCode?: number; Health?: { Status: string } } };
+export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null }; State: { Status: string; StartedAt?: string; ExitCode?: number; Health?: { Status: string } }; NetworkSettings?: { Networks?: Record<string, unknown> | null } };
 /** One Docker event, as far as the launcher reads it: a container start, a restart or a die (a crash). */
 export type DockerEvent = { Type?: string; Action?: string; Actor?: { ID?: string; Attributes?: Record<string, string> } };
 
@@ -73,6 +73,23 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
     async start(id: string) {
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/start`);
       if (r.status !== 204 && r.status !== 304) fail(r, "Starting the runner failed");
+    },
+    /** Takes a container off a network (BOS-576: before it starts, it then has loopback only). Not on it already is fine. */
+    async disconnect(network: string, id: string) {
+      const r = await call("POST", `/networks/${encodeURIComponent(network)}/disconnect`, { Container: id, Force: false });
+      const msg = r.json && typeof r.json === "object" && "message" in r.json ? String((r.json as { message: unknown }).message) : "";
+      if (r.status !== 200 && !/is not connected/i.test(msg)) fail(r, "Taking the runner off its network failed");
+    },
+    /** Puts a container on a network. Being on it already is fine. */
+    async connect(network: string, id: string) {
+      const r = await call("POST", `/networks/${encodeURIComponent(network)}/connect`, { Container: id });
+      const msg = r.json && typeof r.json === "object" && "message" in r.json ? String((r.json as { message: unknown }).message) : "";
+      if (r.status !== 200 && !/already exists in network/i.test(msg)) fail(r, "Connecting the runner to its network failed");
+    },
+    /** Sends a signal, e.g. USR1 to wake the guard. */
+    async signal(id: string, signal: string) {
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/kill?signal=${encodeURIComponent(signal)}`);
+      if (r.status !== 204) fail(r, "Signalling the container failed");
     },
     async restart(id: string) {
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/restart?t=30`);

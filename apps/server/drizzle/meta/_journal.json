@@ -747,8 +747,15 @@
     {
       "idx": 123,
       "version": "7",
-      "when": 1794159370101,
-      "tag": "0123_activity_merge_line",
+      "when": 1794157050382,
+      "tag": "0123_runner_image_commit",
+      "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1794169562916,
+      "tag": "0124_activity_merge_line",
       "breakpoints": true
     }
   ]
