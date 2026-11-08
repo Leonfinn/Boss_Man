@@ -12,7 +12,7 @@ import { StarButton } from "./Agents";
 import { toBase64 } from "./Skills";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
-type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" } | null; error?: string } | null;
+type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
 type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
 type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; report?: CompanyReport | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
@@ -103,16 +103,25 @@ function Since({ connected, at }: { connected: boolean; at: string | null }) {
 
 /**
  * The network guard keeps the runner off private addresses (BOS-324). It is only "on" when its rules are loaded
- * (or the host is known to be able to load them); "off" and "unavailable" mean the runner can reach the home
- * network, so say so plainly and how to fix it (BOS-335).
+ * (or the host is known to be able to load them); "off", "unavailable" and "down" mean the runner can reach the
+ * home network, so say so plainly and how to fix it (BOS-335, BOS-709).
  */
-function GuardWarning({ guard }: { guard: "off" | "unavailable" }) {
+function GuardWarning({ guard }: { guard: "off" | "unavailable" | "down" }) {
+  const what =
+    guard === "off"
+      ? "The network guard is turned off, so this runner can reach private addresses (your home network and the database)."
+      : guard === "down"
+        ? "The network guard is down for this runner: it is missing, stopped or out of date, so this runner can reach private addresses (your home network and the database)."
+        : "The network guard is unavailable on this host, which can't load firewall rules, so this runner can reach private addresses (your home network and the database).";
+  const fix =
+    guard === "off"
+      ? "Ask your admin to turn the network guard back on for the launcher, then restart the runner."
+      : guard === "down"
+        ? "The launcher repairs the guard by itself; if this is still shown after a minute, tell your admin."
+        : "Ask your admin to make the launcher refuse runners on hosts that can't run the guard.";
   return (
     <p className="error" role="alert" data-testid="guard-warning">
-      {guard === "off"
-        ? "The network guard is turned off, so this runner can reach private addresses (your home network and the database)."
-        : "The network guard is unavailable on this host, which can't load firewall rules, so this runner can reach private addresses (your home network and the database)."}{" "}
-      {guard === "off" ? "Ask your admin to turn the network guard back on for the launcher, then restart the runner." : "Ask your admin to make the launcher refuse runners on hosts that can't run the guard."}
+      {what} {fix}
     </p>
   );
 }
@@ -181,7 +190,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </dl>
-        {c && (c.guard === "off" || c.guard === "unavailable") && <GuardWarning guard={c.guard} />}
+        {c && (c.guard === "off" || c.guard === "unavailable" || c.guard === "down") && <GuardWarning guard={c.guard} />}
         {s?.report?.last && (
           <div data-testid="company-update-history">
             <UpdateHistory r={s.report.last} />
