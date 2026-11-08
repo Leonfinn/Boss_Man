@@ -14,6 +14,7 @@ import type { AddonFacts } from "./addons.js";
 import type { CardLint, HostFacts } from "./steps.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
+import { heldTicketIds } from "./review-holds.js";
 import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { backtest } from "./watchdog-backtest.js";
 import { buildSummary } from "./watchdog-summary.js";
@@ -387,6 +388,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const rr = await latestRows(db, r.id);
       if (rr.length && evaluateReviews(rr) === "passed") mergeWaiting.add(r.id);
     }
+    const heldIds = await heldTicketIds(db, rows.map((r) => r.id));
     const snapTickets: SnapTicket[] = rows.map((r) => ({
       id: r.id,
       state: r.systemState,
@@ -398,6 +400,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       awaitingPlan: r.planFirst && !r.planApprovedAt,
       withOwner: withOwner.has(r.id),
       mergeWaiting: mergeWaiting.has(r.id),
+      held: heldIds.has(r.id),
       unblockedAt: releasedAt(r),
       bounces: bounces.get(r.id) ?? 0,
     }));

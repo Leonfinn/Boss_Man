@@ -893,6 +893,45 @@ export const reviewRequests = pgTable(
 );
 
 /**
+ * A reviewer's "passed, but hold the merge" (BOS-808). The review itself stays approved; nothing merges while a hold
+ * is open. Kept apart from ticket_dependencies so a held ticket is never shown as "Blocked by" nor released by the
+ * blocker sweep. One open hold per ticket.
+ */
+export const reviewHolds = pgTable(
+  "review_holds",
+  {
+    id: id(),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** The reviewer's slot that carried the pass, so a cancel can put it back to pending. */
+    reviewRequestId: uuid("review_request_id").references(() => reviewRequests.id, { onDelete: "set null" }),
+    reviewerAgentId: uuid("reviewer_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    reason: text("reason").notNull(),
+    /** The date the hold ends, if it has one. */
+    releaseAt: timestamp("release_at", { withTimezone: true }),
+    /** open, released (merge went on) or cancelled (the pass was withdrawn). */
+    status: text("status").notNull().default("open"),
+    closedBy: text("closed_by"),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    /** When the reviewer was woken to re-check, once every wait had closed. */
+    wokenAt: timestamp("woken_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("review_holds_one_open").on(t.ticketId).where(sql`${t.status} = 'open'`), index("review_holds_ticket").on(t.ticketId)],
+);
+
+/** What a hold waits on: one ticket or one decision per row. */
+export const reviewHoldWaits = pgTable(
+  "review_hold_waits",
+  {
+    id: id(),
+    holdId: uuid("hold_id").notNull().references(() => reviewHolds.id, { onDelete: "cascade" }),
+    blockerTicketId: uuid("blocker_ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
+    blockerDecisionId: uuid("blocker_decision_id").references(() => decisions.id, { onDelete: "cascade" }),
+  },
+  (t) => [check("review_hold_waits_one_blocker", sql`num_nonnulls(${t.blockerTicketId}, ${t.blockerDecisionId}) = 1`), index("review_hold_waits_hold").on(t.holdId)],
+);
+
+/**
  * One row per ticket state change, written by the same database trigger that keeps state_changed_at,
  * so every write path counts (docs/19-workflow-retros.md).
  */

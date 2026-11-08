@@ -20,6 +20,7 @@ import { checkQueue } from "./check-queue.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import { lineEvent, type CheckWay, type HoldReason } from "./merge-line.js";
+import { closeHold, createHold, openHold, type HoldWaitInput } from "./review-holds.js";
 import type { notificationsService } from "./notifications.js";
 
 export class ReviewError extends Error {
@@ -164,6 +165,22 @@ export class SignoffPendingError extends ReviewError {
     super(409, "The owner's sign-off for this ticket is still open, so nothing was merged. Approve and merge on the ticket settles that sign-off and merges in one press.");
   }
 }
+
+/**
+ * A merge that can't start because a reviewer passed the work but holds the merge (BOS-808). Like the sign-off wait it
+ * is a normal wait: no failure trail, no retry card.
+ */
+export class ReviewHeldError extends ReviewError {
+  constructor() {
+    super(409, "A reviewer passed this work but is holding the merge, so nothing was merged. Release the hold first (on the ticket page, or the reviewer or the CEO can); it merges after that.");
+  }
+}
+
+/** What a reviewer asks for with "Passed, hold merge" (BOS-808). */
+export type HoldInput = { reason: string; waitsOn: HoldWaitInput[]; releaseAt: Date | null };
+
+/** Who releases or cancels a hold: the holding reviewer, the CEO, or the owner (no agent). */
+export type HoldActor = { name: string; agentId?: string | null; isCeo?: boolean };
 
 /** True for the error a landing throws when the owner's sign-off card still holds the ticket. */
 export function isSignoffPending(err: unknown): boolean {
@@ -341,6 +358,7 @@ export function reviewService(
     if (so !== "not_needed" && so !== "signed_off") return false;
     const rows = await latestRows(db, ticketId);
     if (!rows.length || evaluate(rows) !== "passed") return false;
+    if (await openHold(db, ticketId)) return false;
     const [signoff] = await db
       .select({ id: decisions.id })
       .from(ticketDependencies)
@@ -553,6 +571,35 @@ export function reviewService(
     return { ...DEFAULT_GIT_TEMPLATES, ...((row?.value as Partial<GitTemplates> | undefined) ?? {}) };
   }
 
+  /** Checks a "Passed, hold merge" before anything is recorded (BOS-808): a reason, something it waits for, and nothing already held. */
+  async function checkHoldInput(t: typeof tickets.$inferSelect, hold: HoldInput, reviewerAgentId: string | null | undefined) {
+    if (!reviewerAgentId) throw new ReviewError(422, "Only a reviewer holds a merge; the owner can simply not approve it yet.");
+    if (t.systemState !== "review") throw new ReviewError(409, "A merge can only be held while the ticket is in review.");
+    if (!hold.reason.trim()) throw new ReviewError(422, "Say why the merge is held (holdReason).");
+    if (!hold.waitsOn.length && !hold.releaseAt) throw new ReviewError(422, "A hold needs something to end it: the tickets or decisions it waits on (waitsOn), a date (holdUntil), or both.");
+    if (hold.releaseAt && hold.releaseAt.getTime() <= Date.now()) throw new ReviewError(422, "The hold date is already past (holdUntil).");
+    if (await openHold(db, t.id)) throw new ReviewError(409, "This ticket already has a hold. Release or cancel it first.");
+    for (const w of hold.waitsOn) {
+      if ("ticketId" in w) {
+        const [o] = await db.select({ companyId: tickets.companyId, state: tickets.systemState }).from(tickets).where(eq(tickets.id, w.ticketId));
+        if (!o || o.companyId !== t.companyId) throw new ReviewError(422, "A ticket the hold waits on was not found in this company.");
+        if (w.ticketId === t.id) throw new ReviewError(422, "A ticket can't wait on itself.");
+        if (o.state === "done") throw new ReviewError(422, "A ticket the hold waits on is already closed.");
+      } else {
+        const [o] = await db.select({ companyId: decisions.companyId, status: decisions.status }).from(decisions).where(eq(decisions.id, w.decisionId));
+        if (!o || o.companyId !== t.companyId) throw new ReviewError(422, "A decision the hold waits on was not found in this company.");
+        if (o.status !== "open") throw new ReviewError(422, "A decision the hold waits on is already answered.");
+      }
+    }
+  }
+
+  /** Records the hold and the activity line for it (BOS-808). */
+  async function startHold(t: typeof tickets.$inferSelect, row: ReviewRow, hold: HoldInput, reviewer: string) {
+    const h = await createHold(db, { ticketId: t.id, reviewRequestId: row.id, reviewerAgentId: row.reviewerAgentId, reason: hold.reason.trim(), releaseAt: hold.releaseAt, waits: hold.waitsOn });
+    await record(db, { companyId: t.companyId, agentId: row.reviewerAgentId, ticketId: t.id, kind: "review_hold_started", summary: `${reviewer} passed the review but is holding the merge: ${hold.reason.trim()}` });
+    return h;
+  }
+
   /** True while the owner's "Merge it, or send it back?" sign-off card for this ticket is open (BOS-471). */
   async function ownerSignoffOpen(ticketId: string): Promise<boolean> {
     return !!(await openSignoffCard(db, ticketId));
@@ -645,9 +692,15 @@ export function reviewService(
      */
     async submit(
       ticketId: string,
-      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; /** Optional one-line lesson learned, when sending it back (R-review-lessons); the owner decides. */ lesson?: string; reviewer: string; reviewerAgentId?: string | null; /** Which of the agent's reviews, when it holds several. */ kind?: string; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean },
+      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; /** Optional one-line lesson learned, when sending it back (R-review-lessons); the owner decides. */ lesson?: string; reviewer: string; reviewerAgentId?: string | null; /** Which of the agent's reviews, when it holds several. */ kind?: string; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean; /** "Passed, hold merge" (BOS-808): an approval that does not merge until the hold ends. */ hold?: HoldInput },
     ) {
       const { t, projectName } = await ticketWithRepo(ticketId, input.companyId);
+      // The owner approving over a reviewer's hold must hear that nothing merged, not get a quiet "approved" (BOS-808).
+      if (!input.reviewerAgentId && input.verdict === "approved" && (await openHold(db, ticketId))) throw new ReviewHeldError();
+      if (input.hold) {
+        if (input.verdict !== "approved") throw new ReviewError(422, "A hold goes with an approval (verdict approved_hold).");
+        await checkHoldInput(t, input.hold, input.reviewerAgentId);
+      }
       // The coder doesn't review its own work (R49).
       if (input.reviewerAgentId && t.assigneeAgentId === input.reviewerAgentId) throw new ReviewError(403, "You can't review a ticket assigned to you.");
       if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
@@ -683,6 +736,7 @@ export function reviewService(
       let diffText = "";
       if (input.verdict === "changes_requested" && input.comments?.some((c) => !c.code)) diffText = await this.diff(ticketId).then((d) => d.diff, () => "");
       if (!rows.length) {
+        if (input.hold) throw new ReviewError(422, "You have no review on this ticket to hold the merge from.");
         if (input.verdict === "approved") return this.approve(t, { reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId, background: input.background, causedByRunId: input.causedByRunId });
         // The owner sending it back ends any reviews still open.
         if (!input.reviewerAgentId) await skipPending(db, await latestRows(db, ticketId));
@@ -695,6 +749,13 @@ export function reviewService(
       // and let an approval from a reviewer who held a slot start the merge instead of refusing it ("no open review").
       if (!mine.length && t.systemState === "review" && evaluate(rows) === "passed" && rows.some((r) => r.reviewerAgentId === input.reviewerAgentId)) {
         if (input.verdict !== "approved") throw new ReviewError(409, "Every review on this ticket is already in and approved; it is waiting to merge. Ask the CEO if it should go back to the agent.");
+        // A reviewer who already passed it can still ask for the merge to wait (BOS-808): the pass stands.
+        if (input.hold) {
+          const mineApproved = rows.filter((r) => r.reviewerAgentId === input.reviewerAgentId && r.status === "approved").at(-1)!;
+          await startHold(t, mineApproved, input.hold, input.reviewer);
+          return { verdict: "approved" as const, outcome: "held" as const, delivered: `the pass stands; the merge is held: ${input.hold.reason.trim()}` };
+        }
+        if (await openHold(db, ticketId)) return { verdict: "approved" as const, outcome: "held" as const, delivered: "the merge is held by a reviewer; it goes on once the hold is released" };
         const [signoff] = await db
           .select({ id: decisions.id })
           .from(ticketDependencies)
@@ -714,6 +775,8 @@ export function reviewService(
       const who = row.kind === "code" ? input.reviewer : `${input.reviewer}, ${row.kind} review`;
       if (input.verdict === "approved") {
         await decide(db, row.id, { status: "approved", notes: input.summary?.trim() || null });
+        // "Passed, hold merge": the pass stands, and every path into a merge now waits for the hold to end (BOS-808).
+        if (input.hold) await startHold(t, row, input.hold, who);
       } else {
         await decide(db, row.id, { status: "changes_requested", notes: formatReviewComments(who, input.comments ?? [], diffText, input.summary), comments: input.comments ?? [] });
       }
@@ -744,6 +807,8 @@ export function reviewService(
     /** Approval is final unless the owner signs off (R48); then it asks them. The CEO cannot stand in for that. */
     async approve(t: typeof tickets.$inferSelect, o: { reviewer: string; reviewerAgentId?: string | null; background?: boolean; causedByRunId?: string | null }) {
       const ticketId = t.id;
+      // A reviewer's hold (BOS-808): the pass stands but nothing lands, asks the owner or starts a check until it is released.
+      if (await openHold(db, ticketId)) return { verdict: "approved" as const, outcome: "held" as const, delivered: "passed; the merge is held by a reviewer and goes on once the hold is released" };
       await deps.loops.approved(ticketId, o.reviewer);
       await lineEvent(db, t, { event: "approved", by: o.reviewer, reviewerAgentId: o.reviewerAgentId ?? null });
       // Where the review policy says the owner signs off, an agent's approval asks them (R48).
@@ -819,10 +884,47 @@ export function reviewService(
       // Refused before anything is cleared or recorded, so a no-op press leaves the ticket as it was.
       if (landings.get(ticketId)?.state === "running" && !(await landingStale(ticketId))) throw new ReviewError(409, "This ticket is already being checked and merged.");
       if (await ownerSignoffOpen(ticketId)) throw new ReviewError(409, "The owner's sign-off is open on this ticket; nothing can merge until it is answered.");
+      if (await openHold(db, ticketId)) throw new ReviewHeldError();
       await record(db, { companyId: t.companyId, agentId: input.byAgentId, ticketId, kind: "merge_retried", summary: "The CEO started the merge again." });
       // An older merge card no longer describes the state of the ticket: this attempt will raise its own if it fails.
       await clearMergeCards(db, ticketId, { by: "system", note: "Replaced by a new merge attempt the CEO started.", at: new Date().toISOString() });
       return this.startLanding(ticketId, "the CEO (retrying the merge)", input.causedByRunId);
+    },
+
+    /** Who may end a hold: the reviewer who set it, the CEO, or the owner (no agent). */
+    async holdActorCheck(ticketId: string, by: HoldActor) {
+      const hold = await openHold(db, ticketId);
+      if (!hold) throw new ReviewError(409, "That ticket has no hold.");
+      if (by.agentId && !by.isCeo && hold.reviewerAgentId !== by.agentId) throw new ReviewError(403, "Only the reviewer who set the hold, the CEO or the owner can release or cancel it.");
+      return hold;
+    },
+
+    /**
+     * Release (BOS-808): the hold ends, the reviewer's pass stands, and the normal approve path runs next, so owner sign-off
+     * and the merge gate apply exactly as for any approval.
+     */
+    async releaseHold(ticketId: string, by: HoldActor, o: { companyId?: string; background?: boolean; causedByRunId?: string | null } = {}) {
+      const { t } = await ticketWithRepo(ticketId, o.companyId);
+      const hold = await this.holdActorCheck(ticketId, by);
+      if (!(await closeHold(db, hold, "released", by.name))) throw new ReviewError(409, "That hold was already ended.");
+      await record(db, { companyId: t.companyId, agentId: by.agentId ?? null, ticketId, kind: "review_hold_released", summary: `${by.name} released the hold; the merge goes on.` });
+      if (t.systemState !== "review") return { outcome: "released" as const, delivered: "released; the ticket is no longer in review, so there is nothing to merge" };
+      const rows = await latestRows(db, ticketId);
+      if (!rows.length || evaluate(rows) !== "passed") return { outcome: "released" as const, delivered: "released; the other reviews are still to come, and it merges when they pass" };
+      const [r] = hold.reviewerAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, hold.reviewerAgentId)) : [];
+      const res = await this.approve(t, { reviewer: r?.name ?? by.name, reviewerAgentId: hold.reviewerAgentId, background: o.background, causedByRunId: o.causedByRunId });
+      return { outcome: "released" as const, delivered: res.delivered ?? null, approval: res };
+    },
+
+    /** Cancel (BOS-808): the pass is withdrawn (the slot goes back to pending), so the work is reviewed again. */
+    async cancelHold(ticketId: string, by: HoldActor, o: { companyId?: string } = {}) {
+      const { t } = await ticketWithRepo(ticketId, o.companyId);
+      const hold = await this.holdActorCheck(ticketId, by);
+      if (!(await closeHold(db, hold, "cancelled", by.name))) throw new ReviewError(409, "That hold was already ended.");
+      await record(db, { companyId: t.companyId, agentId: by.agentId ?? null, ticketId, kind: "review_hold_cancelled", summary: `${by.name} cancelled the hold; the earlier pass no longer counts, so the work is reviewed again.` });
+      const rows = await latestRows(db, ticketId);
+      if (wake && t.systemState === "review") await wakeReviewers(db, t, activeRows(rows).filter((r) => r.id === hold.reviewRequestId), (id, i) => wake!(id, i));
+      return { outcome: "cancelled" as const, delivered: "cancelled; the review is open again" };
     },
 
     /**
@@ -1030,6 +1132,8 @@ export function reviewService(
       // landing, so a press cannot leave a retry marker or a retry card behind for a ticket that is simply
       // waiting on one answer.
       if (await ownerSignoffOpen(ticketId)) throw new SignoffPendingError();
+      // Nor while a reviewer holds the merge (BOS-808): a normal wait, no marker and no card.
+      if (await openHold(db, ticketId)) throw new ReviewHeldError();
       const startedAt = await this.claimLanding(ticketId, reviewer);
       let ctx: Awaited<ReturnType<typeof ticketWithRepo>>;
       try {
@@ -1209,6 +1313,8 @@ export function reviewService(
           await lineEvent(db, t, { event: "hold_started", hold: "sign_off" });
           throw err;
         }
+        // A reviewer's hold (BOS-808) is a wait too: no failure trail, no merge card.
+        if (err instanceof ReviewHeldError) throw err;
         // Handed over mid-merge (a deploy swapped the server copies): the copy now in charge tries again by itself.
         if (deps.isLeader && !deps.isLeader()) {
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `The merge was cut off when the server handed over (${err.message}); the server now in charge will try again.` });
@@ -1293,6 +1399,8 @@ export function reviewService(
       // A retry must not merge past the owner's sign-off (BOS-149): if a "Merge it, or send it back?"
       // card is still open, this ticket waits for the owner, whatever answered the merge card.
       if (await ownerSignoffOpen(ticketId)) throw new SignoffPendingError();
+      // Nor past a reviewer's hold (BOS-808); every merge path comes through here, so this fails them all closed.
+      if (await openHold(db, ticketId)) throw new ReviewHeldError();
       // Nor past a sign-off that isn't recorded (BOS-503, DR-021): a lost card used to let the unmerged-approvals
       // retry and carried-work landing merge a high-risk ticket the owner never saw. Every path into a merge comes
       // through here, so this one check fails them all closed. A card that went missing is raised again.
