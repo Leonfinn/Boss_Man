@@ -177,7 +177,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // tar and unzip, must be placed too.
   for (const t of toolTargets(forTargets)) addTarget(t);
   // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
-  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || usesScratchUnsafely(c)) return result("outside");
+  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || runsByPathOutside(cs2, inOwn) || usesScratchUnsafely(c)) return result("outside");
   // A tool run through pnpm/npm/yarn/npx, or a find -exec program, that names a path leaving the checkout runs code or reads
   // config the judge can't see (BOS-638, Jane's round-5 findings for BOS-378): the program word and any folder flag are
   // judged wherever they appear among the flags.
@@ -695,6 +695,52 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
     if (/^\|/.test(m[0]!) || /\|&?\s*$/.test(before)) {
       const prev = before.replace(/\|&?\s*$/, "").split(/&&|\|\||[;&|\n]/).pop() ?? "";
       if (!/^\s*(?:echo|printf)\s/.test(prev) || /\$\(|\x60|</.test(prev)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * BOS-721 (CEO decision on BOS-720 item 4): a program run by its own path (`./foo.js`, `.yarn/releases/yarn-1.22.22.cjs`,
+ * `/tmp/x/run.sh`, `cd /tmp/p && ./foo`) is code the judge hasn't read. When the file resolves outside the agent's own checkout
+ * the command gets no Allow, whatever the file is called. Inside the checkout nothing changes (`scripts/check-quick.sh`,
+ * `./node_modules/.bin/vitest`). Allow-list: the path counts as inside only when it is absolute under the own folder, or relative
+ * with every `cd` staying inside it; `$`, `~` and `..` are unknown, so they are outside. The only outside paths let through are
+ * system binaries one level under /bin, /usr/bin, /usr/local/bin, /sbin, /usr/sbin (the image's own tools, not agent-writable).
+ * Linear: one pass over the shell words of each segment.
+ */
+function runsByPathOutside(c: string, inOwn: (p: string) => boolean): boolean {
+  let relOk = true;
+  for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) {
+    const d = m[1] ?? "";
+    if (!dirOk(d, inOwn) || (/^[/~$]/.test(d) && !inOwn(d))) relOk = false;
+  }
+  const wrapper = /^(?:then|do|else|elif|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs)$/;
+  const sysBin = /^\/(?:usr\/(?:local\/)?)?s?bin\/[\w.+-]+$/;
+  // Short options of each wrapper that take a value in the next word (`env -P /bin`, `timeout -s KILL`, `nice -n 5`). Any other
+  // option is value-less, so the word after it is still the command.
+  const takesValue: Record<string, RegExp> = {
+    env: /^-[A-Za-z]*[CPSua]$|^--(?:chdir|split-string|unset|argv0)$/,
+    timeout: /^-[A-Za-z]*[sk]$|^--(?:signal|kill-after)$/,
+    nice: /^-[A-Za-z]*n$|^--adjustment$/,
+    stdbuf: /^-[A-Za-z]*[ioe]$|^--(?:input|output|error)$/,
+    sudo: /^-[A-Za-z]*[ugCDhprRTU]$/,
+    xargs: /^-[A-Za-z]*[nIdPLEsa]$/,
+  };
+  for (const seg of shellSegments(c)) {
+    let skipNext = false;
+    let lead = "";
+    for (const w of seg.words) {
+      if (skipNext) { skipNext = false; continue; }
+      // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
+      if (wrapper.test(w)) { lead = w; continue; }
+      if (/^-/.test(w)) { if (takesValue[lead]?.test(w)) skipNext = true; continue; }
+      if (/^\w+=/.test(w) || /^\d+[smhd]?$/.test(w)) continue;
+      if (w.includes("/") && !sysBin.test(w)) {
+        if (/\$|\x60|^~|\.\./.test(w) || /^\/tmp(\/|$)/.test(w)) return true;
+        if (w.startsWith("/") ? !inOwn(w) : !relOk) return true;
+      }
+      break; // the first real command word of the segment
     }
   }
   return false;
