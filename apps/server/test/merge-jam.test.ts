@@ -8,6 +8,22 @@ import { carriedTitles, waitedText } from "../src/services/merge-queue.js";
 import { jammedRows, JAM_REMINDER_MS, mergeJamService } from "../src/services/merge-jam.js";
 
 const HOUR = 3_600_000;
+
+// The jam sweep's own view, driven by a fake screen so a running merge check can be simulated without a runner.
+function fakeService(db: never, view: { current: unknown }, clock: () => Date) {
+  const sent: Array<{ companyId: string; level: string; title: string; body: string; link: string; id: string }> = [];
+  let n = 0;
+  const service = mergeJamService(db, {
+    view: async () => view.current as never,
+    notify: async (input) => {
+      const row = { ...input, id: `n${++n}` };
+      sent.push(row);
+      return { id: row.id };
+    },
+    now: clock,
+  });
+  return { service, sent };
+}
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
   await ctx?.app.close();
@@ -155,6 +171,61 @@ describe("merge line jam alert (BOS-766)", () => {
     await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: card!.id });
     expect((await c.sweep()).mergeJam).toEqual({ alerted: 0, reminded: 0, cleared: 0 });
     expect(await c.allNotes()).toHaveLength(0);
+  });
+
+  it("alerts a long merge check once, pages once an hour later, and never a third time", async () => {
+    const c = (ctx = await setup());
+    let t = c.clock().getTime();
+    const view = {
+      current: {
+        companyId: c.company.id,
+        mode: "server",
+        slots: 1,
+        recent: [],
+        waitingCount: 0,
+        running: [{ ticketId: "x", ref: "BOS-9", title: "The big merge", phase: "checking", startedAt: new Date(t - 65 * 60_000).toISOString(), startedBy: "you", minutes: 65, what: "merge_check", slot: 1, overLimit: true }],
+        waiting: [],
+      },
+    };
+    const clock = () => new Date(t);
+    const { service, sent } = fakeService(c.db as never, view, clock);
+    expect(await service.run()).toEqual({ alerted: 1, reminded: 0, cleared: 0 });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ level: "flag", link: `#/merge-queue/${c.company.id}` });
+    expect(sent[0]!.title).toContain("BOS-9");
+    expect(sent[0]!.title).toContain("1 h 5 min");
+    // Still running an hour on: one page, then silence however long it runs.
+    t += JAM_REMINDER_MS;
+    expect(await service.run()).toEqual({ alerted: 0, reminded: 1, cleared: 0 });
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({ level: "page", title: "Merges are still stuck" });
+    t += 4 * HOUR;
+    expect(await service.run()).toEqual({ alerted: 0, reminded: 0, cleared: 0 });
+    expect(sent).toHaveLength(2);
+  });
+
+  it("counts no jam for work held on a sign-off, a card or an agent fix", async () => {
+    const c = (ctx = await setup());
+    const t = c.clock().getTime();
+    const row = (over: Record<string, unknown>) => ({ ticketId: "y", ref: "BOS-10", title: "Held work", minutes: 90, risk: "medium", urgent: false, failedCheck: false, state: "waiting_for_sign_off", label: "waiting for your sign-off", stuck: true, next: null, actor: "owner", decisionId: "d1", ...over });
+    const view = {
+      current: {
+        companyId: c.company.id,
+        mode: "server",
+        slots: 1,
+        recent: [],
+        waitingCount: 3,
+        running: [],
+        waiting: [
+          row({}),
+          row({ actor: "ceo", state: "waiting_for_decision", decisionId: "d2" }),
+          row({ actor: "agent", state: "check_failed_retrying", decisionId: null }),
+        ],
+      },
+    };
+    const { service, sent } = fakeService(c.db as never, view, () => new Date(t));
+    expect(await service.run()).toEqual({ alerted: 0, reminded: 0, cleared: 0 });
+    expect(sent).toHaveLength(0);
   });
 
   it("raises nothing for a paused company", async () => {
