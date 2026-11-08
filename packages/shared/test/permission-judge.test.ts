@@ -1899,6 +1899,14 @@ describe("rules judge: each heredoc on a line has its own owner and body (BOS-72
     "cat <<'EOF' | xargs rm -rf\n/etc\nEOF",
     "cat <<'EOF' | tee /tmp/x | xargs rm -rf\n/etc\nEOF",
     "tee >(bash) <<'EOF'\nrm -rf /etc\nEOF",
+    // A `<<` inside quotes, a comment or arithmetic is not a heredoc: it must not eat the real interpreter's body (Rex).
+    "cat '<<A'; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat \"x<<A\"; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "echo foo > /tmp/x\ncat '<<A'; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat x # <<A\nbash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat \\<<A; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat $((1<<A)); bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "echo \"a\ncat <<A\"; bash <<'B'\nrm -rf /etc\nB\nA\nB",
   ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
   it.each([
     "cat <<'A' > /tmp/x; cat <<'B' > /tmp/y\nrm -rf /etc\nA\nfoo\nB",
