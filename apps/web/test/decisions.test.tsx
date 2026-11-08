@@ -232,7 +232,36 @@ describe("decision queue", () => {
 
   it("explains a paused agent's score", () => {
     render(<Decisions decisions={[decision({ score: 5, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 5 } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByText("Score 5: 5 for a paused agent + 0 for waiting.")).toBeTruthy();
+    expect(screen.getByText("Score 5: 5 for a paused agent.")).toBeTruthy();
+  });
+
+  it("shows no score line or number for a card scoring 0 (BOS-804)", () => {
+    render(<Decisions decisions={[decision({ score: 0, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 0 }, reasons: ["Raised just now"], blocks: [] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.queryByText(/Score 0/)).toBeNull();
+    expect(screen.queryByText(/for waiting/)).toBeNull();
+    expect(screen.queryByLabelText(/^Score/)).toBeNull();
+  });
+
+  it("says how long ago a card was raised, not 'just now', once it is minutes old (BOS-804)", () => {
+    const eightMin = new Date(Date.now() - 8 * 60_000).toISOString();
+    render(<Decisions decisions={[decision({ createdAt: eightMin })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("8 min ago")).toBeTruthy();
+    expect(screen.queryByText("just now")).toBeNull();
+  });
+
+  it("shows the age in hours and days as the card gets older (BOS-804)", () => {
+    const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const { unmount } = render(<Decisions decisions={[decision({ createdAt: hours })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("3h ago")).toBeTruthy();
+    unmount();
+    const days = new Date(Date.now() - 5 * 86_400_000).toISOString();
+    render(<Decisions decisions={[decision({ createdAt: days })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("5d ago")).toBeTruthy();
+  });
+
+  it("still says 'just now' for a card raised in the last minute (BOS-804)", () => {
+    render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("just now")).toBeTruthy();
   });
 
   it("says why an answer was refused", async () => {
@@ -428,16 +457,19 @@ describe("references in steps and folded text", () => {
 });
 
 describe("raised time", () => {
-  it("every card kind shows when it was raised, in the notifications format, from the original time", () => {
+  it("every card kind shows how long ago it was raised, with the exact time on hover (BOS-804)", () => {
     const earlier = "2026-10-20T09:30:00.000Z";
     const now = new Date().toISOString();
     const kinds = ["budget", "question", "permission", "approval"];
     const ds = kinds.map((kind, i) => decision({ id: `d${i}`, kind, createdAt: i === 0 ? earlier : now, question: `Card ${kind}` }));
     render(<Decisions decisions={ds} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    const times = Array.from(document.querySelectorAll("time")).map((t) => t.textContent);
+    const times = Array.from(document.querySelectorAll("time"));
     expect(times).toHaveLength(4);
-    expect(times[0]).toBe(when(earlier));
-    expect(times[1]).toBe(when(now));
+    // Old cards say how many days, as the Plan page does; the flat Notifications wording is on hover.
+    expect(times[0]!.textContent).toMatch(/^\d+d ago$/);
+    expect(times[0]!.getAttribute("title")).toBe(when(earlier));
+    expect(times[1]!.textContent).toBe("just now");
+    expect(times[1]!.getAttribute("title")).toBe(when(now));
   });
 
   it("Reassign on a stale-blocker card opens a picker of that company's agents, and won't send without a pick", async () => {
