@@ -20,7 +20,18 @@ export type JamEpisode = {
   reminded: boolean;
   /** The jam alerts sent for this episode, marked read at the all-clear. */
   notificationIds: string[];
+  /**
+   * False while the first alert was held back as a plain feed note (quiet hours), so the owner was never
+   * told above the feed: there is no all-clear to send for a jam they never heard about (BOS-819). Absent on
+   * an episode written before this field existed; such an episode already sent its alert, so it counts as told.
+   */
+  ownerTold?: boolean;
 };
+
+/** The level a jam alert reached the owner at: a flag or a page tells them; a held-back note does not. */
+export function reachesOwner(n: { level: string } | null | undefined): boolean {
+  return n?.level === "flag" || n?.level === "page" || n?.level === "ask";
+}
 
 const KEY = (companyId: string) => `merge_jam:${companyId}`;
 
@@ -49,7 +60,8 @@ export function mergeJamService(
   deps: {
     /** The same read the Merge queue screen makes, for one company. */
     view: (companyId: string) => Promise<MergeQueueView>;
-    notify: (input: { companyId: string; level: "note" | "flag" | "page"; title: string; body: string; link: string }) => Promise<{ id: string } | null>;
+    /** Returns the owner's notification as delivered (its `level` after quiet hours), or null when none was written. */
+    notify: (input: { companyId: string; level: "note" | "flag" | "page"; title: string; body: string; link: string }) => Promise<{ id: string; level: string } | null>;
     now?: () => Date;
   },
 ) {
@@ -109,16 +121,20 @@ export function mergeJamService(
         const jam = jammedRows(view);
         const jammed = jam.running.length + jam.waiting.length;
         // Merges moving again, and the owner was told about the jam: one quiet note, and the jam alerts
-        // are read. A failed read above left the episode alone rather than calling this a clear.
+        // are read. A jam whose first alert was held back (quiet hours made it a feed note) gets no
+        // all-clear: an all-clear for a jam they never heard about is worse than silence (BOS-819). A failed
+        // read above left the episode alone rather than calling this a clear.
         if (!jammed) {
           if (!episode) continue;
-          const link = `#/merge-queue/${companyId}`;
-          await deps.notify({ companyId, level: "note", title: "Merges are moving again", body: "The merge line is clear: nothing is stuck any more.", link });
-          if (episode.notificationIds.length) {
-            await db
-              .update(notifications)
-              .set({ readAt: t })
-              .where(and(inArray(notifications.id, episode.notificationIds), isNull(notifications.readAt)));
+          if (episode.ownerTold !== false) {
+            const link = `#/merge-queue/${companyId}`;
+            await deps.notify({ companyId, level: "note", title: "Merges are moving again", body: "The merge line is clear: nothing is stuck any more.", link });
+            if (episode.notificationIds.length) {
+              await db
+                .update(notifications)
+                .set({ readAt: t })
+                .where(and(inArray(notifications.id, episode.notificationIds), isNull(notifications.readAt)));
+            }
           }
           await writeEpisode(companyId, null);
           out.cleared++;
@@ -130,7 +146,7 @@ export function mergeJamService(
           const line = stuckLine(jam);
           const alert = firstAlert(line);
           const sent = await deps.notify({ companyId, level: "flag", title: alert.title, body: alert.body, link });
-          await writeEpisode(companyId, { firstAlertAt: t.toISOString(), reminded: false, notificationIds: sent ? [sent.id] : [] });
+          await writeEpisode(companyId, { firstAlertAt: t.toISOString(), reminded: false, notificationIds: sent ? [sent.id] : [], ownerTold: reachesOwner(sent) });
           if (sent) out.alerted++;
           continue;
         }
@@ -144,7 +160,7 @@ export function mergeJamService(
           body: `An hour on, merges are still not moving. ${line.title}: ${line.body}`,
           link,
         });
-        await writeEpisode(companyId, { ...episode, reminded: true, notificationIds: sent ? [...episode.notificationIds, sent.id] : episode.notificationIds });
+        await writeEpisode(companyId, { ...episode, reminded: true, notificationIds: sent ? [...episode.notificationIds, sent.id] : episode.notificationIds, ownerTold: episode.ownerTold !== false || reachesOwner(sent) });
         if (sent) out.reminded++;
       }
       return out;

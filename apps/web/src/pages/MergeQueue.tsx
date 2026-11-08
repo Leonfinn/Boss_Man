@@ -9,7 +9,9 @@ import { ago } from "./Dashboard";
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean };
 type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket";
-type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean };
+/** Approved work held by the carried-work guard (BOS-130, BOS-766): the ticket(s) it waits for. */
+type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
+type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[] };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
 type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number };
 
@@ -87,6 +89,26 @@ function Waiting({ rows }: { rows: WaitingRow[] }) {
                 <span className={`tag ${r.stuck ? "red" : r.state === "waiting_for_sign_off" || r.state === "needs_you" || r.state === "waiting_for_decision" ? "amber" : "grey"}`}>{r.label}</span>
                 {r.urgent && <span className="tag blue"> urgent</span>}
               </p>
+              {/* A carried-work hold (BOS-130, BOS-766, BOS-819): name the ticket it waits for, from the typed
+                  list, so the row never depends on reading a title out of the hold's sentence. */}
+              {r.carried?.length ? (
+                <p className="mq-line" data-carried="true">
+                  It needs{" "}
+                  {r.carried.map((c, i) => (
+                    <span key={c.ticketId ?? `${c.title}-${i}`}>
+                      {i > 0 ? (i === r.carried!.length - 1 ? " and " : ", ") : null}
+                      {c.ticketId ? (
+                        <a href={`#/tickets/${c.ticketId}`} title={c.title}>
+                          {c.ref ?? c.title}
+                        </a>
+                      ) : (
+                        c.ref ?? c.title
+                      )}
+                    </span>
+                  ))}{" "}
+                  to merge first.
+                </p>
+              ) : null}
               {r.next && (
                 <p className="mq-next">
                   Next: {r.next}

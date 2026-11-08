@@ -117,14 +117,41 @@ export const PHASE_LABEL: Record<MergePhase, string> = {
   waiting_to_retry: "trying again after the runner restarted",
 };
 
+/** The prefix of the carried-work note `refuseCarried` writes on the held ticket (BOS-130). */
+export const CARRIED_NOTE_PREFIX = "Waiting: its branch also carries";
+
 /**
- * The ticket titles a carried-work hold names, from the note `refuseCarried` writes (BOS-766):
- * `Waiting: its branch also carries unapproved work from "Some title", "Another title" (...)`.
- * Titles are quoted; a title that itself contains a quote is cut short rather than guessed at.
+ * The carried-work hold's note and the titles it names, kept apart so a title is never parsed back out of
+ * the prose (BOS-819): a title with a quote or an apostrophe used to be cut short there. `titles` is stored
+ * as JSON in the note's own line, after the sentence the owner reads; a note without it is read the old way.
  */
+export function carriedHold(note: string | null | undefined): { titles: string[]; note: string | null } {
+  if (!note?.startsWith(CARRIED_NOTE_PREFIX)) return { titles: [], note: null };
+  // The hidden line is the last one: the owner's sentence first, then the titles exactly as they are.
+  const cut = note.lastIndexOf("\n");
+  if (cut >= 0) {
+    const rest = note.slice(cut + 1).trim();
+    if (rest.startsWith("[")) {
+      try {
+        const parsed: unknown = JSON.parse(rest);
+        if (Array.isArray(parsed) && parsed.every((t) => typeof t === "string")) return { titles: parsed, note: note.slice(0, cut) };
+      } catch {
+        // Not our marker (a title that happens to look like one): the sentence carries no titles.
+      }
+    }
+  }
+  // An older note, written before the titles were kept apart: quoted titles, best effort.
+  return { titles: [...note.matchAll(/"([^"]+)"/g)].map((m) => m[1]!), note };
+}
+
+/** The ticket titles a carried-work hold names, as carriedHold reads them. */
 export function carriedTitles(note: string | null | undefined): string[] {
-  if (!note?.startsWith("Waiting: its branch also carries")) return [];
-  return [...note.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+  return carriedHold(note).titles;
+}
+
+/** What the owner reads for a hold on `titles`: the sentence only, never the hidden title list. */
+export function carriedNoteText(note: string | null | undefined): string {
+  return carriedHold(note).note ?? (note ?? "");
 }
 
 /** One plain duration for the owner, e.g. "1 h 10 min". */
@@ -232,8 +259,7 @@ export function mergeQueueService(
    * the same company: a branch may carry work from a ticket in another project. A title that matches
    * nothing keeps its name, with no ref.
    */
-  async function carriedOf(companyId: string, prefix: string | null, note: string): Promise<CarriedHold[]> {
-    const titles = carriedTitles(note);
+  async function carriedOf(companyId: string, prefix: string | null, titles: string[]): Promise<CarriedHold[]> {
     if (!titles.length) return [];
     const found = await db
       .select({ id: tickets.id, title: tickets.title, number: tickets.number })
@@ -351,13 +377,14 @@ export function mergeQueueService(
           continue;
         }
         if (r.pullRequestUrl && r.pullRequestNote) {
-          waiting.push({ ...base, state: "waiting_host", label: `pull request waiting on the host: ${r.pullRequestNote.slice(0, 120)}`, stuck: overAnHour || failedCheck, next: "Boss Man checks the host again every couple of minutes.", actor: "system", decisionId: null });
+          waiting.push({ ...base, state: "waiting_host", label: `pull request waiting on the host: ${carriedNoteText(r.pullRequestNote).slice(0, 120)}`, stuck: overAnHour || failedCheck, next: "Boss Man checks the host again every couple of minutes.", actor: "system", decisionId: null });
           continue;
         }
         // The carried-work guard held it (BOS-130, BOS-766): its branch also has another ticket's unapproved
         // work, so it waits for that ticket, not for a check slot. A card here was handled above.
-        if (!r.pullRequestUrl && carriedTitles(r.pullRequestNote).length) {
-          const carried = await carriedOf(companyId, prefix, r.pullRequestNote!);
+        const heldTitles = carriedTitles(r.pullRequestNote);
+        if (!r.pullRequestUrl && heldTitles.length) {
+          const carried = await carriedOf(companyId, prefix, heldTitles);
           const names = carried.map((c) => c.ref ?? `"${c.title}"`).join(", ");
           const one = carried.length === 1;
           waiting.push({
