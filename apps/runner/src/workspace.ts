@@ -285,6 +285,9 @@ export class Workspaces {
       clone = kind?.isDirectory() ?? false;
       if (clone) {
         const gitDir = path.join(path.resolve(opts.cwd), ".git");
+        // As in worktreeAdminFor: git 2.39's ref store reads a commondir file even with GIT_COMMON_DIR set,
+        // so one planted in a clone (which never has one) would move HEAD and the refs to the agent's repo. Refused, not removed.
+        if (lstatSync(path.join(gitDir, "commondir"), { throwIfNoEntry: false })) throw new Error(`${opts.cwd} isn't a clone the runner can confirm: its .git has a commondir that points elsewhere (BOS-332).`);
         await this.configGuard.check(path.join(gitDir, "config"));
         place = { GIT_DIR: gitDir, GIT_COMMON_DIR: gitDir, GIT_WORK_TREE: path.resolve(opts.cwd) };
       } else {

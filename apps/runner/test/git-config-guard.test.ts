@@ -385,26 +385,33 @@ describe("programs named in a ticket's own clone's config never run in the runne
     await f.ws.ensureReview(f.spec);
     plantAll();
     expect((await f.ws.diff(f.spec)).files.map((x) => x.path)).toContain("work.txt");
-    plantAll();
-    expect(await f.ws.lastTurnDiff(f.spec)).toBeTruthy();
+    // diff ran git in the clone, so its config was cut back to the allowlist (lastTurnDiff below only reads the shared repo).
     expect(f.cloneKeys().some((k) => /^(filter|diff|gpg|commit)\./.test(k))).toBe(false);
     expect(f.cloneKeys()).toEqual(expect.arrayContaining(["remote.origin.url", "remote.shared.url", "remote.shared.fetch"]));
+    plantAll();
+    expect(await f.ws.lastTurnDiff(f.spec)).toBeTruthy();
     plantAll();
     expect(await f.ws.release(f.spec)).toEqual({ savedPatch: true });
     expect(f.p.ran()).toBe(false);
   });
 
-  it("a .git/commondir planted in the clone pointing at a repo the agent made is ignored", async () => {
+  // git's ref store reads commondir even when GIT_COMMON_DIR is set, so (as for a worktree) it's refused rather than worked around.
+  it("a .git/commondir planted in the clone pointing at a repo the agent made: refused, and nothing runs or lands there", async () => {
     const f = await cloneFixture();
     f.attributes("* filter=x");
     writeFileSync(path.join(f.w.path, "work.txt"), "work\n");
     const fake = fakeRepo(f.p.pass);
-    writeFileSync(path.join(f.w.path, ".git", "commondir"), `${fake}\n`);
+    const planted = path.join(f.w.path, ".git", "commondir");
+    writeFileSync(planted, `${fake}\n`);
+    await expect(f.ws.checkpoint(f.spec, "after a turn")).rejects.toThrow(/points elsewhere/);
+    await expect(f.ws.diff(f.spec)).rejects.toThrow(/points elsewhere/);
+    expect(agent(fake, "for-each-ref")).toBe("");
+    expect(f.p.ran()).toBe(false);
+    // Taken away, it works again and the checkpoint lands in the real repo.
+    rmSync(planted);
     const c = await f.ws.checkpoint(f.spec, "after a turn");
     expect(c).not.toBeNull();
-    // Synced into the shared repo from the real clone; the agent's repo got nothing.
     expect(agent(f.repo, "rev-parse", `refs/bossman/checkpoints/${ids.a}/000001`)).toBe(c!.commit);
-    expect(agent(fake, "for-each-ref")).toBe("");
     expect(f.p.ran()).toBe(false);
   });
 
