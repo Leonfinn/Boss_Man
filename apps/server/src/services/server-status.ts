@@ -144,7 +144,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
     /** The read-only server status, filtered to one company wherever it could name another's work. */
     async status(companyId: string) {
       const at = now();
-      const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, harnessVersions: runners.harnessVersions, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
+      const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, imageCommit: runners.imageCommit, harnessVersions: runners.harnessVersions, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
       // Mid-swap: an update hold is on and the runner is away, or it only just came back and is
       // starting its queued runs. "Never started" alerts wait while this is true.
       const connected = runner ? deps.isConnected(runner.id) : false;
@@ -239,7 +239,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
               connected: deps.isConnected(runner.id),
               connectedSince: deps.connectedSince?.(runner.id)?.toISOString() ?? null,
               swapping,
-              lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null,
+              lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, imageCommit: runner.imageCommit, harnessVersions: runner.harnessVersions ?? null,
               // When and why the runner last restarted (BOS-594): update, setting change, owner restart, host, crash or out of memory.
               lastRestart: await lastRestart(db, runner.id),
             }
