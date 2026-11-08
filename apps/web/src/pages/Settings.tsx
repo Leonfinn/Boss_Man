@@ -2426,6 +2426,7 @@ type ImportPreview = {
   agents: Array<{ name: string; role: string; title: string | null; agentKind: string; model: string | null; instructions: string | null }>;
   skills: Array<{ name: string; renamedFrom: string | null; description: string; scripts: string[] }>;
   secrets: Array<{ name: string; envName: string; agents: string[] }>;
+  projects: Array<{ name: string; verifyCommand: string | null; deepVerifyCommand: string | null }>;
   toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
   warnings: string[];
 };
@@ -2539,6 +2540,24 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                 {scripts.map((s) => (
                   <li key={s.name}>
                     {s.name}: {s.scripts.join(", ")}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {preview.projects.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Checks each project runs.</strong> These commands run on the runner before work is merged. Read them before you import:
+              <ul>
+                {preview.projects.map((p, i) => (
+                  <li key={i}>
+                    {p.name}: {p.verifyCommand ? <code style={{ whiteSpace: "pre-wrap" }}>{p.verifyCommand}</code> : "none"}
+                    {p.deepVerifyCommand && (
+                      <>
+                        {" "}
+                        (full check: <code style={{ whiteSpace: "pre-wrap" }}>{p.deepVerifyCommand}</code>)
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>
