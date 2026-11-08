@@ -1581,12 +1581,22 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
       : sb.level === "unavailable"
         ? "This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). Agents run as before."
         : `This host fences agents ${sb.level === "full" ? "fully" : "partly"}${sb.missing.length ? ` (not covered: ${sb.missing.join(", ")})` : ""}.${sb.probe === false ? " Its self-test did not see a write outside the agent's folders refused." : ""} Last checked ${status.data?.sandboxCheckedAt ? when(status.data.sandboxCheckedAt) : "never"}.`;
+  // What the fence means for runs reading each other (BOS-555): said plainly, so Off never looks safe.
+  const isolationLine =
+    mode === "off" || sb?.level === "unavailable"
+      ? "Agent runs are not isolated: one run can read another run's memory and start-up keys."
+      : !sb
+        ? null
+        : sb.level === "partial"
+          ? "Agent runs are isolated from each other, except that one run can send signals to another (this host's kernel is older than 6.12)."
+          : "Agent runs are isolated from each other.";
   return (
     <Section id="fence-h" title="Agent fence">
       <p className="muted" style={{ fontSize: 14 }}>
         The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
       </p>
       <p style={{ fontSize: 14 }}>{hostLine}</p>
+      {isolationLine && <p style={{ fontSize: 14 }}>{isolationLine}</p>}
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="fence-mode">Fence</label>
         <select
@@ -1602,7 +1612,9 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
           }
         >
           <option value="off">Off: agents run as before</option>
-          <option value="watch">Watch: agents run inside the fence and every refusal is logged</option>
+          <option value="watch" disabled={sb?.level === "unavailable" && mode !== "watch"}>
+            {sb?.level === "unavailable" ? "Watch: not available, this host can't fence agents" : "Watch: agents run inside the fence and every refusal is logged"}
+          </option>
           <option value="enforce" disabled>
             Enforce: not available yet (waiting for a security fix, BOS-323)
           </option>
@@ -1611,7 +1623,7 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
       <details style={{ marginTop: 10 }}>
         <summary>Setting up a host</summary>
         <ul style={{ fontSize: 14 }}>
-          <li>The fence needs a Linux kernel with Landlock (5.13 or newer, and 6.x for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
+          <li>The fence needs a Linux kernel with Landlock (5.19 or newer, and 6.12 or newer for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
           <li>The runner tests the fence each time it starts. If this page says "can't fence", update the host's kernel, or check that the container's security profile doesn't block Landlock, then restart the runner.</li>
           <li>A fenced agent has its own temporary folder for each run and can't write to the shared /tmp. A skill that hard-codes /tmp needs to use the folder in $TMPDIR instead.</li>
           <li>Start with Watch on one company, look at the permission log after a few days, and fix what it shows before anything stricter.</li>
@@ -1876,8 +1888,20 @@ type SelfDeployView = {
   enabled: boolean;
   pending: boolean;
   status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
-  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[] } | null;
+  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[]; bluegreen?: boolean } | null;
+  /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
+  deployer?: { reportedAt: string | null; late: boolean };
+  lateAfterMinutes?: number;
 };
+
+/** The line under "Last deploy" when the host has no offer to show (BOS-753): "not reported" only when it really is overdue. */
+function deployerLine(v: SelfDeployView): string {
+  const d = v.deployer;
+  if (!d) return "The host deployer has not reported yet.";
+  if (!d.reportedAt) return "The host deployer has not reported yet. Check that its cron job is running.";
+  if (d.late) return `The host deployer last reported ${when(d.reportedAt)}, more than ${v.lateAfterMinutes ?? 10} minutes ago; it should report every minute. Check that its cron job is running.`;
+  return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
+}
 
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 function SelfDeploy({ go }: { go: (to: string) => void }) {
@@ -1894,7 +1918,7 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
         {s ? `Last deploy: ${s.result.replace(/_/g, " ")}, ${s.target} ${s.to_commit.slice(0, 8)}, ${when(s.ended || s.started)}. ${s.message}` : "No deploy yet."}
       </p>
       <p className="muted" style={{ fontSize: 14 }}>
-        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : "The host deployer has not reported yet."}
+        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
       <div>
         <button
@@ -1929,6 +1953,25 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
           }
         >
           Build and update runners
+        </button>{" "}
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || v.pending || s?.result === "running" || !v.available?.deployed}
+          title="Starts the server again at the version it runs now (BOS-647). Use it when a server-health card says memory is high or freezes are piling up and no update is waiting."
+          onClick={() => {
+            const bg = v.available?.bluegreen === true;
+            const ask = bg
+              ? "Restart the server? It starts a fresh copy of the current version and switches over; pages keep working. The one-step rollback to the release before this one is lost. Continue?"
+              : "Restart the server? It stops for about a minute while it restarts; runs pick up again after. Continue?";
+            if (!window.confirm(ask)) return;
+            act.run(async () => {
+              await api("/api/self-deploy/restart", { method: "POST", body: {} });
+              return "Restart requested. The host picks it up within a minute; the line above shows how it went.";
+            });
+          }}
+        >
+          Restart the server
         </button>
       </div>
       {act.view}

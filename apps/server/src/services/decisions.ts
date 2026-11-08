@@ -24,6 +24,7 @@ import {
   type PermissionJudgeMode,
   TEMP_CLEANUP_RULE,
   UNKNOWN_TOOL_RULE,
+  UNMATCHED_RULE,
   WORKING_COPY_RULE,
   cleanupScope,
   type BlockedTicket,
@@ -206,8 +207,10 @@ export type DecisionContext =
    * The owner's setup steps for a ticket, raised by Boss Man once the ticket's change is live (DR-011).
    * `ticketId` links it back; `commit` is the live commit it was raised on, so a later switch-back to
    * before that commit withdraws it. Steps are the ticket author's words, checked by review.
+   * `tickets` lists every ticket going live with identical steps that share this one card (BOS-741); it
+   * always starts with `ticketId`, and a card with one ticket is the same card DR-011 raised before.
    */
-  | { type: "owner_setup"; ticketId: string; steps: string[]; commit: string }
+  | { type: "owner_setup"; ticketId: string; tickets?: { ticketId: string; title: string }[]; steps: string[]; commit: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
@@ -514,45 +517,85 @@ export async function markDecisionNotificationRead(db: Db, decisionId: string, a
 export const ownerSetupKey = (ticketId: string) => `owner-setup:${ticketId}`;
 
 /**
- * The owner's setup card for a ticket whose change is now live (DR-011). `steps` is the author's text,
- * already through the card check. One card per ticket: the key is unique, so a repeat go-live pass or a
- * second deploy that already includes the commit can't stack a second card. Returns the row, or null
- * when a card is already open for this ticket.
+ * The owner's setup card for the tickets whose change is now live (DR-011, BOS-741). `steps` is the author's
+ * text, already through the card check, and shared by every ticket in `tickets` (identical after normalising
+ * whitespace): one card lists them all, so one Done clears it for every one. The key is the first ticket's,
+ * the same key DR-011 used when a ticket was alone, so a repeat go-live pass can't stack a second card.
+ * Returns the row, or null when a card is already open for the first ticket.
  */
-export async function raiseOwnerSetup(db: Db, t: { companyId: string; ticketId: string; title: string; steps: string[]; commit: string }) {
+export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: { ticketId: string; title: string }[]; steps: string[]; commit: string }) {
   // The card check (DR-008), the part that exists today: any command block must be copy-safe. A step set
   // that fails it raises no card and is logged, so the developer is the one who fixes the steps, never the
   // owner meeting an un-runnable command. Newer lint rules run here too once they land on main.
   const bad = ownerSetupProblem(t.steps);
+  const [first, ...others] = t.tickets;
+  if (!first) return null;
   if (bad) {
-    await record(db, { companyId: t.companyId, ticketId: t.ticketId, kind: "owner_setup_refused", summary: `The setup card wasn't raised: ${bad}`, at: new Date() });
+    await record(db, { companyId: t.companyId, ticketId: first.ticketId, kind: "owner_setup_refused", summary: `The setup card wasn't raised: ${bad}`, at: new Date() });
     return null;
   }
+  const heading =
+    others.length === 0
+      ? `"${first.title}" is live.`
+      : others.length === 1
+        ? `"${first.title}" and "${others[0]!.title}" are live.` // two read better than a list of two
+        : `${t.tickets.length} tickets are live: ${t.tickets.map((x) => `"${x.title}"`).join(", ")}.`;
   const [row] = await db
     .insert(decisions)
     .values({
       companyId: t.companyId,
       kind: "question",
-      question: `"${t.title}" is live. To start using it:\n\n${t.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}`,
+      question: `${heading}${others.length ? " To start using them all:" : " To start using it:"}\n\n${t.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}`,
       options: [TODO_DONE],
       recommendedOption: TODO_DONE,
       tier: "owner",
-      dedupeKey: ownerSetupKey(t.ticketId),
-      context: { type: "owner_setup", ticketId: t.ticketId, steps: t.steps, commit: t.commit } satisfies DecisionContext,
+      dedupeKey: ownerSetupKey(first.ticketId),
+      context: { type: "owner_setup", ticketId: first.ticketId, tickets: t.tickets, steps: t.steps, commit: t.commit } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id, companyId: decisions.companyId });
   if (!row) return null;
-  await record(db, { companyId: row.companyId, ticketId: t.ticketId, kind: "decision_raised", summary: `The owner's setup steps for "${t.title}" are live: raised their card.`, at: new Date() });
+  await record(db, {
+    companyId: row.companyId,
+    ticketId: first.ticketId,
+    kind: "decision_raised",
+    summary: others.length ? `The owner's setup steps for ${t.tickets.length} tickets are live (${t.tickets.map((x) => `"${x.title}"`).join(", ")}): raised one card for them all.` : `The owner's setup steps for "${first.title}" are live: raised their card.`,
+    at: new Date(),
+  });
   return row;
 }
 
+/** The dedupe key of the runner-update card for a commit: the one self-deploy raises (BOS-741). */
+const runnerUpdateKey = (commit: string) => `self-deploy:runner:${commit}`;
+
 /**
- * Takes back a ticket's setup card when the live commit moves back to before its merge (DR-011): a
- * rollback or a switch-back. Frees the key so the next go-live raises it again with its steps.
+ * Names on the runner-update card a ticket going live has no setup step of its own for, because its only
+ * step asks for the runner update (BOS-741, DR-039 follow-up 2): the runner card covers it, so it raises no
+ * card of its own, and it is listed on that card instead. The list is kept, not replaced, so an earlier
+ * pass's tickets stay, and it is only ever added to on the card still open for `commit`. Returns whether it
+ * changed the card's text (so the caller only counts a change).
  */
-export async function withdrawOwnerSetup(db: Db, ticketId: string, note: string) {
-  const [open] = await db.select().from(decisions).where(and(eq(decisions.dedupeKey, ownerSetupKey(ticketId)), eq(decisions.status, "open")));
+export async function nameRunnerSetupTickets(db: Db, companyId: string, commit: string, ticketsIn: { ticketId: string; title: string }[]) {
+  const [card] = await db.select({ id: decisions.id, question: decisions.question }).from(decisions).where(and(eq(decisions.dedupeKey, runnerUpdateKey(commit)), eq(decisions.status, "open")));
+  if (!card) return false;
+  const listed = new Set([...card.question.matchAll(/^It also carries (.+)\.$/gm)].flatMap((m) => m[1]!.split("; ")));
+  const add = ticketsIn.map((t) => `"${t.title}"`).filter((name) => !listed.has(name));
+  if (!add.length) return false;
+  const line = `It also carries ${[...listed, ...add].join("; ")}. Their only setup step is the runner update above, so they have no card of their own.`;
+  const question = /^It also carries .+\.$/m.test(card.question) ? card.question.replace(/^It also carries .+\.$/m, line) : `${card.question}\n\n${line}`;
+  await db.update(decisions).set({ question }).where(and(eq(decisions.id, card.id), eq(decisions.status, "open")));
+  return true;
+}
+
+/**
+ * Takes back an owner setup card when the live commit moves back to before its merge (DR-011): a
+ * rollback or a switch-back. `cardId` is the card itself (`tickets.ownerSetupDecisionId`), not a key,
+ * because one card can cover several tickets (BOS-741): every ticket in `ticketIds` that points at it has
+ * its pointer cleared, so none keeps a stale card for a card that is gone. Frees the key so the next
+ * go-live raises it again with its steps. Returns null when the card is already answered or withdrawn.
+ */
+export async function withdrawOwnerSetup(db: Db, cardId: string, ticketIds: string[], note: string) {
+  const [open] = await db.select().from(decisions).where(and(eq(decisions.id, cardId), eq(decisions.status, "open")));
   if (!open) return null;
   const withdrawal: Withdrawal = { by: "system", note, at: new Date().toISOString() };
   const [row] = await db
@@ -561,8 +604,8 @@ export async function withdrawOwnerSetup(db: Db, ticketId: string, note: string)
     .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")))
     .returning({ id: decisions.id, companyId: decisions.companyId });
   if (row) {
-    await db.update(tickets).set({ ownerSetupDecisionId: null }).where(eq(tickets.id, ticketId));
-    await record(db, { companyId: row.companyId, ticketId, kind: "decision_withdrawn", summary: note, at: new Date() });
+    if (ticketIds.length) await db.update(tickets).set({ ownerSetupDecisionId: null }).where(inArray(tickets.id, ticketIds));
+    await record(db, { companyId: row.companyId, ticketId: ticketIds[0] ?? (open.context as { ticketId?: string }).ticketId ?? null, kind: "decision_withdrawn", summary: note, at: new Date() });
   }
   return row ?? null;
 }
@@ -1564,7 +1607,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (ceo && !ceo.paused) {
           ceoId = ceo.id;
           const since = now().toISOString();
-          const why = workingCopy ? "deletes in the agent's working copy go to the CEO first" : rule === TEMP_CLEANUP_RULE ? "temp-file cleanup goes to the CEO first" : rule === UNKNOWN_TOOL_RULE ? "the tool isn't one Boss Man recognises, so it goes to the CEO first" : `the rule "${rule}" sends it to the CEO`;
+          const why = workingCopy ? "deletes in the agent's working copy go to the CEO first" : rule === TEMP_CLEANUP_RULE ? "temp-file cleanup goes to the CEO first" : rule === UNKNOWN_TOOL_RULE ? "the tool isn't one Boss Man recognises, so it goes to the CEO first" : rule === UNMATCHED_RULE ? "no rule covers it, so it goes to the CEO first" : `the rule "${rule}" sends it to the CEO`;
           ladder = { rung: "ceo", since, minutes: CEO_HANDOVER_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why }] };
         } else tier = "owner";
       }
@@ -1632,6 +1675,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
               : rule === UNKNOWN_TOOL_RULE
                 ? [
                     "Boss Man doesn't recognise this tool, so it came to you before the owner. Allow it only if you know what the tool does and the asking agent should have it; a name close to one of Boss Man's own tools (see the warning in the request) may be a copy made to get past the checks. Deny it if you can't vouch for it; escalate it to the owner (decisions tool, action escalate) if only they can settle it.",
+                  ]
+              : rule === UNMATCHED_RULE
+                ? [
+                    "No rule covers this request, so it came to you before the owner (every company works this way). Allow it if it is ordinary work for the asking agent in its own checkout or /tmp; deny it if not; if only the owner can settle it (a secret, host access, sign-off, an owner-only choice), escalate it to them (decisions tool, action escalate).",
                   ]
               : [
                   "A company rule sends it to you rather than the owner. Allow it if you can vouch for it, or deny it if not; if only the owner can settle it (a secret, host access, sign-off, an owner-only choice), escalate it to them (decisions tool, action escalate).",
