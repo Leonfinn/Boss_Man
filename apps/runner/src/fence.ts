@@ -182,7 +182,7 @@ export function addGitConfig(env: NodeJS.ProcessEnv, key: string, value: string)
  * runner's root disk (BOS-633).
  */
 export function runnerFence(level: FenceLevel, dataDir: string, workspacesRoot: string) {
-  return { level, agentsRoot: path.join(dataDir, "agents"), pnpmStore: path.join(workspacesRoot, ".pnpm-store") };
+  return { level, agentsRoot: path.join(dataDir, "agents"), runTmpRoot: path.join(dataDir, "run-tmp"), pnpmStore: path.join(workspacesRoot, ".pnpm-store") };
 }
 
 /**

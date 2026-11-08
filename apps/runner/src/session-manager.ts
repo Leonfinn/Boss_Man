@@ -4,7 +4,7 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -67,9 +67,10 @@ export type SessionManagerOptions = {
   /**
    * The agent fence (DR-004, BOS-321), for runs started with fence: this runner's level from its
    * self-test, where each agent's own home goes, and the shared pnpm store. Without it, or on an
-   * unavailable level, such runs start unfenced, as before.
+   * unavailable level, such runs start unfenced, as before. Each run's temp folder goes under runTmpRoot
+   * (default: run-tmp beside agentsRoot), outside every agent's home, so it is granted to that run alone (BOS-555).
    */
-  fence?: { level: FenceLevel; agentsRoot: string; pnpmStore?: string };
+  fence?: { level: FenceLevel; agentsRoot: string; runTmpRoot?: string; pnpmStore?: string };
   /** The folder check-all.sh's queue and results share across sessions and the merge check (checkQueueEnv). */
   coordDir?: string;
   /** Runs and stops server-queued check jobs (BOS-316). */
@@ -220,6 +221,11 @@ function realDirsUnder(base: string, rel: string): boolean {
   return true;
 }
 
+/** Where fenced runs' temp folders go: one per run, outside every agent's home (BOS-555). */
+function runTmpRoot(fence: { agentsRoot: string; runTmpRoot?: string }): string {
+  return fence.runTmpRoot ?? path.join(path.dirname(fence.agentsRoot), "run-tmp");
+}
+
 type RunState = {
   child: ChildProcess;
   agentKind: string;
@@ -274,6 +280,7 @@ export class SessionManager {
     } catch {
       /* best effort */
     }
+    this.sweepRunTmp();
     const file = this.opts.stateFile;
     if (!file || !existsSync(file)) return [];
     let leftover: string[] = [];
@@ -287,6 +294,49 @@ export class SessionManager {
     }
     this.saveState();
     return leftover;
+  }
+
+  /**
+   * Fenced runs' temp folders a crash left behind (BOS-555): each one under the run-tmp root, and the per-run folders
+   * the older layout made in each agent's home (`<home>/tmp/<runId>`). The same 10-minute guard as the token folders
+   * above. rmSync removes a link an agent planted, never what it points at.
+   */
+  private sweepRunTmp() {
+    const fence = this.opts.fence;
+    if (!fence) return;
+    const isRun = (name: string) => /^[0-9a-f-]{36}$/i.test(name);
+    const dropOld = (parent: string) => {
+      let names: string[] = [];
+      try {
+        names = readdirSync(parent);
+      } catch {
+        return;
+      }
+      for (const name of names.filter(isRun)) {
+        const dir = path.join(parent, name);
+        try {
+          if (Date.now() - lstatSync(dir).mtimeMs < 600_000) continue;
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          /* best effort */
+        }
+      }
+    };
+    dropOld(runTmpRoot(fence));
+    let agents: string[] = [];
+    try {
+      agents = readdirSync(fence.agentsRoot).filter(isRun);
+    } catch {
+      /* no agents yet */
+    }
+    for (const agent of agents) {
+      const old = path.join(fence.agentsRoot, agent, "tmp");
+      try {
+        if (lstatSync(old, { throwIfNoEntry: false })?.isDirectory()) dropOld(old);
+      } catch {
+        /* best effort */
+      }
+    }
   }
 
   private saveState() {
@@ -616,12 +666,21 @@ export class SessionManager {
     const base = this.opts.baseEnv ?? process.env;
     if (!/^[0-9a-f-]{36}$/i.test(cmd.agentId) || !/^[0-9a-f-]{36}$/i.test(cmd.runId)) throw new Error("the agent or run id isn't a UUID");
     const home = path.join(fence.agentsRoot, cmd.agentId);
-    const tmp = path.join(home, "tmp", cmd.runId);
+    // The run's temp folder (it holds the run's mcp.json while the session opens) sits outside the agent's home:
+    // the home is granted to every run of that agent, so two runs of one agent at once could read each other's (BOS-555 G1).
+    const tmpRoot = runTmpRoot(fence);
+    const tmp = path.join(tmpRoot, cmd.runId);
     const dirs = { CLAUDE_CONFIG_DIR: path.join(home, ".claude"), CODEX_HOME: path.join(home, ".codex"), XDG_CONFIG_HOME: path.join(home, ".config"), XDG_CACHE_HOME: path.join(home, ".cache"), XDG_DATA_HOME: path.join(home, ".local", "share"), XDG_STATE_HOME: path.join(home, ".local", "state") };
     mkdirSync(home, { recursive: true });
-    for (const d of [tmp, ...Object.values(dirs)]) {
+    for (const d of Object.values(dirs)) {
       if (!realDirsUnder(home, path.relative(home, d))) throw new Error(`${path.relative(home, d)} in the agent's home isn't a folder`);
     }
+    // No agent is granted the root, but its parts are still made only through real folders, as the home's are.
+    mkdirSync(tmpRoot, { recursive: true, mode: 0o700 });
+    // A leftover with this run's id (a crash mid-start) goes first; rmSync removes a link, never what it points at.
+    rmSync(tmp, { recursive: true, force: true });
+    if (!realDirsUnder(tmpRoot, cmd.runId)) throw new Error(`the run's temp folder ${tmp} isn't a folder`);
+    chmodSync(tmp, 0o700);
     Object.assign(env, { HOME: home, TMPDIR: tmp }, dirs);
     // The shared repo's root is read-only to the agent, where auto-gc and pack-refs would write.
     addGitConfig(env, "gc.auto", "0");
