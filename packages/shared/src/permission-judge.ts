@@ -42,7 +42,7 @@ export const isJudgeable = (command: string | null): boolean => !command || comm
  * the interpreter checks and the `xargs <shell> -c` check, so a shell is never caught in one place and missed in another.
  * `busybox sh` reaches the same list through the `busybox` launcher (`busybox sh -c ...`).
  */
-export const SHELL_NAMES = "sh bash zsh dash ksh ash mksh fish tcsh csh";
+export const SHELL_NAMES = "sh bash rbash zsh dash ksh ash mksh fish tcsh csh";
 /** A regex alternation of the shell names, longest-first so `ash`/`mksh` are not partly read as `sh`/`ksh`. */
 const SHELL_ALT = SHELL_NAMES.split(" ").sort((a, b) => b.length - a.length).join("|");
 
@@ -71,13 +71,21 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
   // A quoted word reads as the word it is: quote removal (`"..."`, `'...'`, `$'...'`, `$"..."`, `\-`, backslash-newline)
   // is applied to every plain word before every check below, not only to flags (BOS-715).
-  const base = dequoteWords(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  const base = dequoteWords(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (m: string, head: string, q: string, end: string, body: string) => {
+    // With an unquoted delimiter bash expands the body: `$(…)` and backticks in it run (BOS-725). Keep such a body so the
+    // checks below read it; a body with no substitution is data and is dropped as before.
+    if (q === "" && /\$\(|\x60/.test(body)) return m;
+    return head + end;
+  });
   // The command string of each shell `-c` runs too, so `bash -c 'r''m -rf /'`, `bash -c $'\x72m -rf /'` and
   // `sh -c 'echo '$'\x24(cat /tmp/x)'` are all read (BOS-715). It is judged as its own command rather than glued onto the
   // outer line, so its redirects do not change how the outer line is read. A shell nested inside a shell is bounded by
   // `depth`; an unresolved inner string is already caught as opaque, so it is skipped here.
   if (depth < 8) {
     for (const innerCmd of shellDashCInner(base)) {
+      // A command string that ends inside a quote (`bash -c 'rm -rf /tmp/a'\'' /etc'` is `rm -rf /tmp/a' /etc`) is read
+      // differently by the judge and by bash, so it gets no Allow (BOS-725).
+      if (endsInsideQuote(innerCmd)) return result("opaque");
       const r = judgePermission(question, innerCmd, ownFolder, ownProject, workspaceRoot, depth + 1);
       if (r.verdict === "deny") return r;
     }
@@ -215,11 +223,11 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (hasRedirect) for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
   const writes = /^(changes|deletes|unknown)$/.test(explainCommand(c).effect) || /rmSync|unlinkSync|writeFileSync|shutil\.rmtree|os\.remove|reset\s+--hard/.test(c) || new RegExp(DESTRUCTIVE, "i").test(c);
   if (writes) {
-    for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
+    for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|shred|unlink|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
     for (const m of c.matchAll(/\bcd\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/g)) if (own && m[1] !== own) return result("outside");
     // Every target a delete tool names must be in /tmp or the checkout, not only the first: `rm -rf /tmp/a /etc` is as bad
     // as `rm -rf /etc` (BOS-715). The text is already dequoted, so `$'/etc'`, `\/etc` and `/e"tc"` read as `/etc`.
-    for (const m of c.matchAll(/(?:\brm\b|rmSync\(|rmtree\(|unlinkSync\()([^;&|\n]*)/g)) {
+    for (const m of c.matchAll(/(?:\b(?:rm|rmdir|shred|unlink)\b|rmSync\(|rmtree\(|unlinkSync\()([^;&|\n]*)/g)) {
       for (const tok of shellWords(m[1]!)) {
         if (tok === "" || tok.startsWith("-")) continue;
         const p = tok.replace(/^['"]|['"]$/g, "");
@@ -229,13 +237,14 @@ export function judgePermission(question: string, command: string | null, ownFol
       }
     }
     // A relative target can climb out of the folder (`rm -rf ..`), and a `cd` somewhere else makes every relative target land there.
-    for (const m of c.matchAll(/\brm\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
+    for (const m of c.matchAll(/\b(?:rm|rmdir|shred|unlink)\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
     // An unresolved substitution or variable given to a file tool (`rm -rf $(curl ...)`, `cp $(cat /tmp/l) d`) is a target
     // the judge can't place, so it gets no Allow. `shred` and any file tool under `xargs` read their targets the same way, and a
     // substitution glued to a dash (`rm -$(cat /tmp/x)`) is unseen unless the dash word is tested too (BOS-715).
-    for (const m of c.matchAll(/\b(?:rm|cp|mv|install|ln|shred)\b|\bxargs\b([^;&|\n]*)/g)) {
+    for (const m of c.matchAll(/\b(?:rm|rmdir|cp|mv|install|ln|shred|unlink)\b|\bxargs\b([^;&|\n]*)/g)) {
       const rest = m[1] ?? c.slice(m.index! + m[0].length).split(/[;&|\n]/)[0]!;
       if (/<\(/.test(rest)) return result("outside"); // a process substitution is a path the judge can't place
+      if (hasBraceExpansion(rest)) return result("outside"); // `rm -rf /tmp/a {/etc,/tmp/b}` is several paths (BOS-725)
       for (const tok of shellWords(rest)) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
     }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
@@ -330,6 +339,38 @@ function shellWords(s: string): string[] {
   }
   if (has || cur) out.push(cur);
   return out;
+}
+
+/** True when a quote opened in `s` is never closed (a linear scan; a backslash escapes outside `'...'`). */
+function endsInsideQuote(s: string): boolean {
+  let q = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (q === "'") { if (ch === "'") q = ""; continue; }
+    if (ch === "\\") { i++; continue; }
+    if (q === '"') { if (ch === '"') q = ""; continue; }
+    if (ch === "'" || ch === '"') q = ch;
+  }
+  return q !== "";
+}
+
+/**
+ * True when a word holds an unquoted brace expansion (`{a,b}`, `{1..3}`): bash turns it into several words, so a target that
+ * uses one is a set of paths the judge can't place (BOS-725). Quoted braces are literal.
+ */
+function hasBraceExpansion(s: string): boolean {
+  let q = "";
+  let open = -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (q === "'") { if (ch === "'") q = ""; continue; }
+    if (ch === "\\") { i++; continue; }
+    if (q === '"') { if (ch === '"') q = ""; continue; }
+    if (ch === "'" || ch === '"') { q = ch; continue; }
+    if (ch === "{") open = i;
+    else if (ch === "}" && open >= 0) { if (/,|\.\./.test(s.slice(open + 1, i))) return true; open = -1; }
+  }
+  return false;
 }
 
 /**
@@ -431,7 +472,9 @@ function dequoteWords(s: string): string {
     // what the shell reads: an option is the same option, and a target (`\/etc`, `/e"tc"`, `$'/'`) is the same path
     // (BOS-715). A word with a space or a metacharacter stays quoted, so data is not split or joined, and a `#` stays
     // quoted so `echo '#!...'` does not turn into a mid-line shell comment that hides the commands after it.
-    out += d !== null && !/[\s;&|()<>"'\x60$*?[{#]/.test(d) ? d : w;
+    // A backslash left in the result also keeps the word quoted: bare, `\` plus the next space reads as an escaped space and
+    // the word swallows the next argument (`/tmp/a'\' /etc` -> `/tmp/a\ /etc`, BOS-725).
+    out += d !== null && !/[\s;&|()<>"'\x60$*?[{#\\]/.test(d) ? d : w;
   }
   return out;
 }
@@ -1124,7 +1167,9 @@ function shellDashCInner(c: string): string[] {
     if (ok === false || word === "" || hasUnresolvedExpansion(word)) continue;
     // shellWords already dropped `'...'` / `"..."`; decode a `$'...'` string and any backslash by the same quote removal.
     const d = dequoteWord(word);
-    if (d !== null && d.trim() !== "") out.push(d);
+    // A string that dequoting can't finish (a quote never closed, `/tmp/a' /etc`) is kept as it is; judgePermission refuses it.
+    if (d === null) out.push(word);
+    else if (d.trim() !== "") out.push(d);
   }
   return out;
 }

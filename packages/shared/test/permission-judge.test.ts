@@ -1809,3 +1809,48 @@ describe("rules judge: a lone + inside find -exec (BOS-724)", () => {
     expect(judge("cd /tmp/p && find . -exec ls {} + ./foo").verdict).toBe("allow");
   });
 });
+
+// BOS-725 (Jane's review of BOS-715): every "denies" row was Allow on b46501e4 and on its base 2be8b4f7.
+describe("rules judge: heredoc substitutions, escaped backslash, braces, shred/unlink, rbash (BOS-725)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  deny([
+    // 1. an unquoted heredoc delimiter lets bash run $(…) and backticks in the body
+    "cat <<EOF > /tmp/x\n$(rm -rf /)\nEOF",
+    "cat <<EOF > /tmp/x\n`rm -rf /etc`\nEOF",
+    "tee /tmp/x <<-EOF\n\t$(rm -rf /etc)\nEOF",
+    // 2. a word ending in a backslash must not swallow the next argument
+    "rm -rf /tmp/a'\\' /etc",
+    "rm -rf /tmp/a\\\\ /etc",
+    "rm -rf /tmp/a\"\\\\\" /etc",
+    "bash -c 'rm -rf /tmp/a\\\\ /etc'",
+    // 3. the '\'' idiom leaves the -c string ending inside a quote
+    "bash -c 'rm -rf /tmp/a'\\'' /etc'",
+    // 4. brace expansion
+    "rm -rf /tmp/a {/etc,/tmp/b}",
+    "rm -rf {/etc,/tmp/b}",
+    "rm -rf /tmp/{a,../../etc}",
+    "rm -rf /tmp/a{1..3} /etc",
+    // 5. shred and unlink targets
+    "shred -u ~/.bashrc",
+    `shred -u ${ws}/tickets/11111111-2222-3333-4444-555555555555/x`,
+    "unlink /etc/passwd",
+    "shred -u /tmp/a /etc/passwd",
+    "unlink ../x",
+    // 6. rbash is a shell
+    "rbash -c 'r''m -rf /'",
+  ]);
+  allows([
+    "cat <<'EOF' > /tmp/x\n$(rm -rf /)\nEOF",
+    "cat <<EOF > /tmp/x\nhello $HOME and /etc\nEOF",
+    "rm -rf /tmp/a'\\'",
+    "rm -rf '/tmp/a{b,c}'",
+    "rm -rf /tmp/a /tmp/b",
+    "shred -u /tmp/x",
+    `rm -rf ${ws}/tickets/${own}/x`,
+    "bash -c \"echo 'hi' && rm -rf /tmp/x\"",
+  ]);
+});
