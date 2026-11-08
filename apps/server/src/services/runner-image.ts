@@ -17,13 +17,17 @@ export async function runnerImageCommit(db: Db, companyId: string): Promise<stri
   return isSha(row?.commit) ? row.commit.toLowerCase() : null;
 }
 
-/** This company's merge commits, oldest merge first (the merge gate merges one at a time, so this is merge order). */
+/**
+ * This company's merge commits, oldest merge first (the merge gate merges one at a time, so this is merge order).
+ * Ordered by stateChangedAt, which is set when the ticket moves to done and not by later notes or touches;
+ * lastActivityAt keeps moving on a done ticket and would reorder merges. Release-log shares this helper.
+ */
 export async function mergeCommitOrder(db: Db, companyId: string): Promise<string[]> {
   const rows = await db
     .select({ mergeCommit: tickets.mergeCommit })
     .from(tickets)
     .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")))
-    .orderBy(asc(tickets.lastActivityAt));
+    .orderBy(asc(tickets.stateChangedAt));
   return [...new Set(rows.map((r) => r.mergeCommit?.toLowerCase()).filter((c): c is string => !!c))];
 }
 

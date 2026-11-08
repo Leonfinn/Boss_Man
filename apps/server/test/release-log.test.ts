@@ -189,7 +189,7 @@ describe("release log: the Release Manager is woken when the live commit changes
 /** A finished code ticket with its merge commit and setup steps, as the merge gate and its author left it. */
 async function doneTicket(c: Awaited<ReturnType<typeof setupApp>>, projectId: string, over: { title: string; mergeCommit: string; ownerSetup?: string; at: Date }) {
   const t = await c.work.createTicket(projectId, { title: over.title, noCode: false, state: "done" });
-  await c.db.update(tickets).set({ mergeCommit: over.mergeCommit, lastActivityAt: over.at, ...(over.ownerSetup ? { ownerSetup: over.ownerSetup } : {}) }).where(eq(tickets.id, t.id));
+  await c.db.update(tickets).set({ mergeCommit: over.mergeCommit, lastActivityAt: over.at, stateChangedAt: over.at, ...(over.ownerSetup ? { ownerSetup: over.ownerSetup } : {}) }).where(eq(tickets.id, t.id));
   return t;
 }
 
@@ -497,6 +497,19 @@ describe("runner-update asks close themselves when the live runner image already
     await c.db.update(runners).set({ imageCommit: null });
     await c.selfDeploy.sync();
     expect(Object.values(await states(c))).toEqual(["open", "open"]);
+  });
+
+  it("keeps the card open when the image's own ticket gets later activity after a newer merge (merge order doesn't move)", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    const [a] = await merged(c, projectId);
+    await c.db.insert(decisions).values(runnerCard(companyId, C));
+    await withImage(c, companyId, A);
+    // A note on A's done ticket after C merged: lastActivityAt moves, the merge order must not.
+    await c.db.update(tickets).set({ lastActivityAt: new Date("2026-11-08T20:00:00Z") }).where(eq(tickets.id, a!.id));
+    await writeFile(availableFile(c), JSON.stringify({ version: 1, checkedAt: new Date().toISOString(), deployed: C, tip: C, commits: [], paths: [], infraPaths: [], runnerChanged: false }));
+    await c.selfDeploy.sync();
+    expect(Object.values(await states(c))).toEqual(["open"]);
   });
 
   it("drops a held runner offer whose runner change the image already has", async () => {

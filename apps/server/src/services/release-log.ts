@@ -312,14 +312,7 @@ export const releaseLogService = (
    * order of merge times. It includes tickets whose setup card is already raised, so a switch-back can
    * still place them.
    */
-  async function mergeOrder(companyId: string) {
-    const rows = await db
-      .select({ mergeCommit: tickets.mergeCommit, mergedAt: tickets.lastActivityAt })
-      .from(tickets)
-      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")))
-      .orderBy(asc(tickets.lastActivityAt));
-    return [...new Set(rows.map((r) => r.mergeCommit).filter((c): c is string => !!c))];
-  }
+  const mergeOrder = (companyId: string) => mergeCommitOrder(db, companyId);
 
   /** Done tickets in this company that carry setup steps and a merge commit, with their card if raised. */
   async function ticketsWithSetup(companyId: string) {
