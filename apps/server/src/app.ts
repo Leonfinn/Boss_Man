@@ -39,6 +39,7 @@ import { serverHealthService, type ServerHealth, type ServerHealthDeps } from ".
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
+import { deviceProfilesService } from "./services/device-profiles.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
@@ -301,6 +302,7 @@ export async function buildApp(opts: AppOptions) {
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
   const hostFacts = hostFactsService({ dir: opts.deployerDir, db, now: opts.now, log: (m) => app.log.warn(m) });
+  const deviceProfiles = deviceProfilesService(db);
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m) });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
@@ -856,7 +858,7 @@ export async function buildApp(opts: AppOptions) {
     },
   });
   const checkRequests = checkRequestService(db, { command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -898,6 +900,14 @@ export async function buildApp(opts: AppOptions) {
     const token = req.cookies[SESSION_COOKIE];
     const [row] = token ? await db.select({ username: owners.username }).from(sessions).innerJoin(owners, eq(owners.id, sessions.ownerId)).where(eq(sessions.tokenHash, hashToken(token))) : [];
     return row?.username ?? "the owner";
+  }
+
+  /** The signed-in owner's id, for rows kept per owner (device profiles). Only valid behind requireOwner. */
+  async function currentOwnerId(req: FastifyRequest): Promise<string | null> {
+    const token = req.cookies[SESSION_COOKIE];
+    if (!token) return null;
+    const [s] = await db.select({ ownerId: sessions.ownerId }).from(sessions).where(and(eq(sessions.tokenHash, hashToken(token)), gt(sessions.expiresAt, new Date())));
+    return s?.ownerId ?? null;
   }
 
   async function requireOwner(req: FastifyRequest, reply: FastifyReply) {
@@ -1009,6 +1019,32 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/me", async () => {
       const [o] = await db.select({ username: owners.username }).from(owners);
       return o;
+    });
+
+    // Device profiles (BOS-641): the owner's browsers report their measured screens so a layout
+    // ticket can be checked at the real device. Only screen facts; one row per signed-in browser.
+    owner.get("/api/devices", async (req) => {
+      const ownerId = await currentOwnerId(req);
+      return ownerId ? deviceProfiles.list(ownerId) : [];
+    });
+    owner.post("/api/devices", async (req, reply) => {
+      const ownerId = await currentOwnerId(req);
+      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
+      return deviceProfiles.report(ownerId, req.body);
+    });
+    owner.patch("/api/devices/:id", async (req, reply) => {
+      const ownerId = await currentOwnerId(req);
+      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
+      const { id } = IdParam.parse(req.params);
+      const { label } = z.object({ label: z.string().trim().min(1).max(80) }).parse(req.body);
+      const p = await deviceProfiles.rename(ownerId, id, label);
+      return p ?? reply.code(404).send({ error: "not_found" });
+    });
+    owner.delete("/api/devices/:id", async (req, reply) => {
+      const ownerId = await currentOwnerId(req);
+      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
+      const { id } = IdParam.parse(req.params);
+      return (await deviceProfiles.remove(ownerId, id)) ? { ok: true } : reply.code(404).send({ error: "not_found" });
     });
 
     // Companies: creating one always creates its CEO (R18).

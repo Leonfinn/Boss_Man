@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings, type DeviceMeasures } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -1774,3 +1774,27 @@ export const agentAvatars = pgTable("agent_avatars", {
   /** The ticket image the CEO picked (BOS-265): copies are shared by it, so agents sharing a picture keep one copy. Null for one the owner uploaded. */
   imageId: uuid("image_id").references(() => ticketImages.id, { onDelete: "set null" }),
 });
+
+// ---------- Device profiles (BOS-641) ----------
+
+/**
+ * The owner's own browsers measure their screens (width, height, the real 100vh/100dvh/100svh/lvh,
+ * visual viewport, pixel ratio, touch, standalone mode) and report them here, so a layout ticket is
+ * checked at the real device, not a guessed emulated size. One row per signed-in browser, replaced
+ * on each report through its fingerprint. Only screen facts are kept: no personal data.
+ */
+export const deviceProfiles = pgTable(
+  "device_profiles",
+  {
+    id: id(),
+    ownerId: uuid("owner_id").notNull().references(() => owners.id, { onDelete: "cascade" }),
+    /** Kept by the browser in local storage, so a second report replaces its row. */
+    fingerprint: text("fingerprint").notNull(),
+    label: text("label").notNull(),
+    browser: text("browser").notNull(),
+    /** Each reading's measured units, load and after the first scroll, in report order. */
+    readings: jsonb("readings").$type<DeviceMeasures[]>().notNull(),
+    reportedAt: timestamp("reported_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("device_profiles_owner_fingerprint").on(t.ownerId, t.fingerprint), index("device_profiles_owner").on(t.ownerId)],
+);

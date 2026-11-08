@@ -16,10 +16,12 @@ import { agents, companies, decisions as decisionsTable, engagements as engageme
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
+import { readZip, ZipReadError } from "./services/attachment-zip.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
 import { type CardLint, type SelfDeployFacts, lintLines } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
+import type { deviceProfilesService } from "./services/device-profiles.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
@@ -152,6 +154,8 @@ type Services = {
   checkRequests?: ReturnType<typeof checkRequestService>;
   /** What each host recorded about itself (BOS-427), for the owner-card lint's R6. */
   hostFacts: ReturnType<typeof hostFactsService>;
+  /** The owner's measured screens (BOS-641), so a layout ticket is checked at the real device. */
+  deviceProfiles: ReturnType<typeof deviceProfilesService>;
   /** Add-on facts for server_status and the card lint's R9 (addons.ts, DR-023). Absent: R9 is not checked. */
   addons?: () => Promise<AddonFacts>;
   /** Facts for the card lint's R15 (DR-036): whether Boss Man raises its own update card, and its commit. Absent: R15 is not checked. */
@@ -201,7 +205,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
  * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, addons, selfDeployCards, checkRequests }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons, selfDeployCards, checkRequests }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -1368,6 +1372,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     );
   }
 
+  server.registerTool(
+    "devices",
+    {
+      description:
+        "The owner's recorded screens (BOS-641), read-only. Each profile is one of the owner's own browsers, measured there: CSS width and height, pixel ratio, touch (coarse pointer), display-mode (standalone or browser), and the measured pixel heights of 100vh, 100dvh, 100svh, 100lvh and the visual viewport, once at load and again after the first scroll (the phone toolbar shows on load and hides after a scroll). A layout or sizing ticket that names a device is accepted at this profile: write a rendering test (headless browser at the exact figures) rather than a CSS-text test, and take any imitated toolbar or safe-area gap from the readings here, saying so in the test. A CSS-text test never counts as the rendering check. Only screen facts are kept; a device the owner hasn't opened Boss Man on won't appear.",
+      inputSchema: {},
+    },
+    async () => text(JSON.stringify(await deviceProfiles.allRenderable())),
+  );
+
   if (skip?.size) (server.registerTool as unknown) = originalRegister;
 }
 
@@ -1426,7 +1440,7 @@ function registerViewImage(server: McpServer, images: Services["images"], scope:
   server.registerTool(
     "open_attachment",
     {
-      description: "Open something the owner attached. In a task, a message or the chat, a picture appears as ![name](/api/ticket-images/<id>) and a file as [📎 name](/api/ticket-images/<id>); open each one with this tool (pass the id) before you act on it. Pictures come back as images, text files as text, PDFs as a document. Long text comes in parts; pass offset to read the rest.",
+      description: "Open something the owner attached. In a task, a message or the chat, a picture appears as ![name](/api/ticket-images/<id>) and a file as [📎 name](/api/ticket-images/<id>); open each one with this tool (pass the id) before you act on it. Pictures come back as images, text files as text, PDFs as a document, and a .zip (such as a company export) as a listing of its entries plus the text files inside it. Long text comes in parts; pass offset to read the rest.",
       inputSchema: { id: z.string().uuid(), offset: z.number().int().min(0).optional() },
     },
     async ({ id, offset }) => {
@@ -1441,6 +1455,16 @@ function registerViewImage(server: McpServer, images: Services["images"], scope:
         return text(`${label}\n\n${cut(body, CAP, (m) => `continue with open_attachment id=${id} offset=${m}`, offset)}`);
       }
       if (a.type === "application/pdf") return { content: [{ type: "resource" as const, resource: { uri: `bossman:attachment/${id}`, mimeType: a.type, blob: bytes.toString("base64") } }, { type: "text" as const, text: `${label} (PDF)` }] };
+      // A zip (BOS-228) comes back as its file listing plus the text files inside, in parts like any long text.
+      if (a.type === "application/zip") {
+        try {
+          const body = readZip(bytes);
+          return text(`${label} (zip)\n\n${cut(body, CAP, (m) => `continue with open_attachment id=${id} offset=${m}`, offset)}`);
+        } catch (err) {
+          if (err instanceof ZipReadError) return fail(`${label}: ${err.message}`);
+          throw err;
+        }
+      }
       return text(`${label} is a ${a.type} file of ${bytes.length} bytes that can't be shown as text or a picture. Ask the owner what's in it, or for a PDF or text copy.`);
     },
   );
