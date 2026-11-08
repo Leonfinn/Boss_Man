@@ -43,6 +43,7 @@ const isRunnerOnlyStep = (step: string) => RUNNER_ONLY_STEPS.has(stepKey(step));
  * its normalised text so identical steps from different tickets group. The ordered map keeps the author's order.
  */
 function setupStepsOf(steps: string[]) {
+  // shortcut: built fresh for each pass and thrown away, so it never outlives a call.
   const unique = new Map<string, string>();
   for (const step of steps) if (!isRunnerOnlyStep(step)) unique.set(stepKey(step), step);
   return unique;
