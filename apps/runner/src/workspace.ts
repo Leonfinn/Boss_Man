@@ -738,15 +738,39 @@ export class Workspaces {
     throw new Error(`There's no ${file} in this ticket's working folder. Save the image there (a path relative to where you work) and try again.`);
   }
 
-  async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024): Promise<WorkspaceDiff> {
+  /**
+   * The base a review should be measured from (BOS-694): the merge-base of the ticket's head and a
+   * freshly fetched origin/<baseRef>, the same split `git diff origin/<baseRef>...HEAD` uses, so a
+   * branch that has merged main since it started shows only its own changes. Without a baseRef, or
+   * when origin can't be reached, the recorded base stands: a stale diff's better than none.
+   */
+  private async reviewBase(repo: string, dir: string, head: string, recorded: string, baseRef: string | undefined, secrets: Record<string, string | undefined>): Promise<{ base: string; tip?: string }> {
+    if (!baseRef) return { base: recorded };
+    try {
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: gitAuthEnv(secrets) });
+      const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${baseRef}^{commit}`], { cwd: repo });
+      // Where the branch split from main's current tip, however far main has moved since. Run in the
+      // ticket's folder: a clone's own commits live in the clone, not the shared repo, which has only
+      // tip (the clone sees it through its alternates).
+      return { base: (await this.git(["merge-base", head, tip], { cwd: dir, repo })) || recorded, tip };
+    } catch {
+      return { base: recorded };
+    }
+  }
+
+  async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024, baseRef?: string, secrets: Record<string, string | undefined> = {}): Promise<WorkspaceDiff> {
     const repo = this.repoDir(spec.projectId);
     const dir = await this.reopen(spec);
-    const baseCommit = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
+    const recorded = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir, repo });
+    // Fetches under the repo lock, like every other git call that touches the shared refs.
+    const { base: baseCommit, tip } = await this.withRepoLock(spec.projectId, () => this.reviewBase(repo, dir, head, recorded, baseRef, secrets));
     // The tree is read from the same commit as head, before the slow steps: a commit landing
     // mid-diff must not leave head A tagged with B's tree (the check queue reuses passes by tree).
     const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: dir, repo });
-    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`], { cwd: dir, repo });
+    // A fresh base can be far ahead of the recorded one; main's own commits aren't the ticket's work, so with a fetched
+    // tip they are left out of its commit list.
+    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`, ...(tip ? ["--not", tip] : [])], { cwd: dir, repo });
     const commits = log ? log.split("\n").map((l) => ({ sha: l.slice(0, 40), subject: l.slice(41) })) : [];
     const scratch = this.scratch(`${spec.ticketId}.diff`);
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };

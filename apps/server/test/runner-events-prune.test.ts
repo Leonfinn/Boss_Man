@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
-import { companies, runnerEvents, runners } from "../src/db/schema.js";
-import { pruneRunnerEvents, runnerEventsDays } from "../src/services/housekeeping.js";
+import { companies, failureSignatures, runnerEvents, runners } from "../src/db/schema.js";
+import { failureSignaturesDays, pruneFailureSignatures, pruneRunnerEvents, runnerEventsDays } from "../src/services/housekeeping.js";
 
 const DAY = 86_400_000;
 describe("runner events prune (BOS-416)", () => {
@@ -26,5 +26,25 @@ describe("runner events prune (BOS-416)", () => {
     expect(runnerEventsDays("0")).toBe(60);
     expect(runnerEventsDays("abc")).toBe(60);
     expect(runnerEventsDays("30")).toBe(30);
+  });
+});
+
+describe("failure signatures prune (BOS-611)", () => {
+  it("deletes rows older than the cutoff in batches and keeps recent ones", async () => {
+    const { db, close } = await openPglite();
+    const now = new Date("2026-11-06T00:00:00Z");
+    const [co] = await db.insert(companies).values({ name: "C", slug: "c" } as never).returning();
+    const sig = (ageDays: number) => ({ companyId: co!.id, signature: "sig", sample: "s", createdAt: new Date(now.getTime() - ageDays * DAY) });
+    await db.insert(failureSignatures).values([sig(90), sig(60), sig(31), sig(29), sig(1)]);
+    expect(await pruneFailureSignatures(db, { days: 30, batch: 2, now })).toBe(3);
+    expect(await db.select({ n: sql<number>`count(*)::int` }).from(failureSignatures)).toEqual([{ n: 2 }]);
+    expect(await pruneFailureSignatures(db, { days: 30, batch: 2, now })).toBe(0);
+    await close();
+  });
+  it("reads the days setting", () => {
+    expect(failureSignaturesDays(undefined)).toBe(30);
+    expect(failureSignaturesDays("0")).toBe(30);
+    expect(failureSignaturesDays("abc")).toBe(30);
+    expect(failureSignaturesDays("7")).toBe(7);
   });
 });

@@ -197,6 +197,53 @@ describe("git workspaces (R38)", () => {
     expect((await ws.diff(spec, 50)).truncated).toBe(true);
   });
 
+  it("measures a review diff from the merge-base with current main, so a branch that merged main shows only its own changes (BOS-694)", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    // The ticket's own commit.
+    writeFileSync(path.join(w.path, "ticket.txt"), "ours\n");
+    git(w.path, "add", "ticket.txt");
+    git(w.path, "commit", "-qm", "Ticket work");
+    // Main moves on a long way after the branch started.
+    for (let i = 0; i < 5; i++) r.commit(`main ${i + 2}`);
+    const mainTip = git(r.dir, "rev-parse", "HEAD");
+    // The agent merges main in, so the recorded base is now hundreds of commits behind the branch.
+    git(w.path, "fetch", "-q", "origin");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", mainTip);
+
+    // Without a base ref the diff is still the old recorded-base one: it sees main's work too.
+    const stale = await ws.diff(spec);
+    expect(stale.files.map((f) => f.path)).toContain("README.md");
+
+    // With the default branch, it is the branch's own changes, the same file list as `origin/main...HEAD`.
+    const d = await ws.diff(spec, undefined, "main");
+    const byHand = git(w.path, "diff", "--name-only", "origin/main...HEAD").split("\n").filter(Boolean).sort();
+    expect(d.files.map((f) => f.path).sort()).toEqual(byHand);
+    expect(d.files.map((f) => f.path)).toEqual(["ticket.txt"]);
+    // The branch's own commits: its work and the merge that brought main in, but none of main's own commits.
+    expect(d.commits.map((c) => c.subject).filter((s) => !s.startsWith("Merge"))).toEqual(["Ticket work"]);
+    expect(d.commits.map((c) => c.subject)).not.toContain("main 5");
+    // The base is now the merge-base with main, not the ticket's stale recorded start.
+    expect(d.baseCommit).toBe(git(w.path, "merge-base", "origin/main", "HEAD"));
+    expect(d.baseCommit).not.toBe(w.baseCommit);
+  });
+
+  it("falls back to the recorded base when the default branch can't be fetched", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "ticket.txt"), "ours\n");
+    git(w.path, "add", "ticket.txt");
+    git(w.path, "commit", "-qm", "Ticket work");
+    // origin/<baseRef> can't be resolved: the diff still answers from the recorded base.
+    const d = await ws.diff(spec, undefined, "no-such-branch");
+    expect(d.baseCommit).toBe(w.baseCommit);
+    expect(d.files.map((f) => f.path)).toEqual(["ticket.txt"]);
+  });
+
   it("reports the tree of the head it read, even when a commit lands mid-diff", async () => {
     const r = remote();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));

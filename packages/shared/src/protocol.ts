@@ -160,8 +160,14 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   }),
   /** The ticket is finished with its worktree: save any uncommitted work and free it (R38). */
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
-  /** Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. */
-  z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, range: z.enum(["base", "last_turn"]).optional() }),
+  /**
+   * Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. With
+   * `baseRef` (the project's default branch) the runner measures them from the merge-base of its
+   * recorded base and a freshly fetched origin/<baseRef>, so a branch that has merged main since it
+   * started shows only its own changes (BOS-694). Without it, or when origin can't be reached, the
+   * recorded base stands.
+   */
+  z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, range: z.enum(["base", "last_turn"]).optional(), baseRef: z.string().min(1).max(200).optional() }),
   /** Reads one file of a ticket's work: its worktree if it has one here, else its branch (R77). */
   z.object({ type: z.literal("workspace.file"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, path: z.string().min(1).max(500) }),
   /** An image (a screenshot) from the ticket's working folder, to attach to the ticket; the reply carries it as base64. */
@@ -240,6 +246,10 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     features: z.array(z.string().max(40)).max(50).optional(),
     /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
     bootId: z.string().max(100).optional(),
+    /** How the previous runner process ended (BOS-594): told to stop (SIGTERM) or not (a crash or out of memory); absent on a first start or from an older runner. */
+    previousExit: z.enum(["stopped", "crashed"]).optional(),
+    /** When the host machine booted (ISO time), so the server can tell a host restart (BOS-594); absent from an older runner. */
+    hostBootAt: z.string().max(40).optional(),
     /** The ids of every run this runner really has (BOS-583); the server closes any other open run of this runner. Absent from an older runner: the server then closes nothing. */
     liveRuns: z.array(Uuid).max(2000).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),

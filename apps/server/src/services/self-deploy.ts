@@ -13,7 +13,7 @@ import { companies, decisions, owners, settings, tickets } from "../db/schema.js
 import { record } from "./activity.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
-import { sh, step, type HostFacts } from "./steps.js";
+import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
@@ -274,7 +274,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         hostDeployerChanged
           ? src && deployer
             ? host
-              ? step("Copy the changed host-deployer script into the deployer folder with this command, on the same machine:", cmd(`cp ${src}/scripts/host-deployer.sh ${deployer}/host-deployer.sh && chown root:root ${deployer}/host-deployer.sh && chmod 750 ${deployer}/host-deployer.sh`))
+              ? step("Copy the changed host-deployer script into the deployer folder with this command, on the same machine. It prints the one file it copied:", cmd(`cp -v ${src}/scripts/host-deployer.sh ${deployer}/host-deployer.sh && chown root:root ${deployer}/host-deployer.sh && chmod 750 ${deployer}/host-deployer.sh`))
               : noHost
             : "host-deployer.sh changed and has to be copied into the deployer folder, but Boss Man can't tell where the install or deployer folder is, so no command is shown. Ask us on this ticket."
           : "host-deployer.sh didn't change; no copy needed.",
@@ -330,6 +330,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       : undefined;
     const n = a?.paths.length ?? 0;
     const migrations = (a?.paths ?? []).filter((p) => /^apps\/server\/drizzle\/[^/]+\.sql$/.test(p)).length;
+
     // What changes the risk of the update, in plain words (BOS-213). The deploy itself is unchanged.
     const risks: string[] = [];
     if (migrations) risks.push(`${migrations} database migration${migrations === 1 ? "" : "s"} ${migrations === 1 ? "is" : "are"} included. Boss Man backs the database up first.`);
@@ -378,12 +379,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     // The heading is the card's first paragraph, so the card, its phone push and the CEO's view all lead with it.
     const lead = urgent ? `${urgent.heading}.\n\n` : "";
+    // The tickets this update carries, in the owner's words (BOS-683, DR-036): the new card lists them, so
+    // the card that clears the older one says what it includes. Only the tickets, never the bare commits.
+    const carried = (update?.changes ?? []).slice(0, 10).map((c) => `${c.ref}: ${c.title}`);
+    const carries = carried.length ? ` It includes ${carried.join("; ")}${update && update.more > 0 ? `; and ${update.more} more` : ""}.` : "";
     const question =
       lead +
       (target === "runner"
         ? `Update the runners to ${short(commit)}?\n\nThis rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
-          ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue until it's applied or you mark it done.`
+          ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue until it's applied or you mark it done.${carries}`
           : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`);
     // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
     // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).
@@ -405,6 +410,21 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // An older, still-open question about an earlier commit can no longer be answered: the host only deploys the tip.
       // Free each one's dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped (Freddy).
       for (const d of await openFor("server")) if (d.id !== row.id) await withdrawOpen(d.id);
+      // BOS-683 (DR-036): an older server hand-apply to-do, still open or waiting in the owner's queue, is now
+      // covered by this newer card — applying the newer commit brings the older one's changes in too. So it is
+      // cleared with a note naming the new card, instead of sitting beside it. A to-do for the same commit is left
+      // alone (the new card is the same update, not a newer one). A runner to-do is left alone: it is its own thing.
+      const todos = await db
+        .select({ id: decisions.id, context: decisions.context })
+        .from(decisions)
+        .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'owner_todo'`, sql`${decisions.context}->>'target' = 'server'`));
+      const includes = carried.length ? ` It includes ${carried.join("; ")}.` : "";
+      for (const t of todos) {
+        const c = t.context as Extract<DecisionContext, { type: "owner_todo" }>;
+        if (!c.commit || c.commit === commit) continue;
+        const r = await clearOwnerTodo(db, `owner-todo:self-deploy:${c.commit}`, `Covered by the newer update card ("Main has moved to ${short(commit)}"): applying ${short(commit)} brings this in too.${includes} Marked done.`);
+        if (r) deps.log?.(`self-deploy: older hand-apply to-do for ${short(c.commit)} covered by ${short(commit)} (BOS-683)`);
+      }
     }
     return row ?? null;
   }
@@ -615,6 +635,20 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     /** What Settings shows. */
     async overview() {
       return { enabled: !!dir, status: await status(), available: await available(), pending: await pending() };
+    },
+
+    /**
+     * The facts the owner-card lint's R15 needs (DR-036): whether Boss Man raises its own update card here (the
+     * deployer folder is set), the install folder the host reported, and the commit its open card offers. An
+     * install without the deployer is `enabled: false`, so agent update cards are left alone there.
+     */
+    async cardFacts(): Promise<SelfDeployFacts> {
+      if (!dir) return { enabled: false };
+      const a = await available();
+      const rec = await deps.facts?.().catch(() => ({} as Record<string, string>)) ?? {};
+      const installDir = folder(a?.srcDir ?? rec["paths.src"]) ?? undefined;
+      const open = (await openFor("server")).map((d) => (d.context as SelfDeployContext)).find((c) => !!c.commit);
+      return { enabled: true, ...(installDir ? { installDir } : {}), ...(open?.commit ? { openCommit: open.commit } : {}) };
     },
 
     /** Checked before an approval is recorded: one request at a time. */
