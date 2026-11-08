@@ -475,6 +475,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // The answer being sent as a .txt file, for one too long to send as a message.
   const [attaching, setAttaching] = useState<string | null>(null);
   const inFlight = useRef(new Set<string>());
+  // (BOS-799) The reason box on each workflow-change card, so a tap on its disabled buttons can point at it.
+  const reasonBoxes = useRef(new Map<string, HTMLTextAreaElement | null>());
   // (BOS-739) Tell the server the owner has seen a hand-apply card, once per card, so a later system
   // close knows they may be part-way through its steps and also tells their feed. Best effort: a failed
   // call changes nothing on the page.
@@ -894,6 +896,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             {x.effect === "unknown" && " Read the exact command before you allow it."}
                           </p>
                         )}
+                        {x.ownerWhy && <p className="muted" style={{ fontSize: 13 }}>{x.ownerWhy}</p>}
                         {x.alwaysNote && !done && <p className="muted" style={{ fontSize: 13 }}>{x.alwaysNote}</p>}
                         {x.reason && <p className="muted">What the agent says it's for: {x.reason}</p>}
                         {x.command && (
@@ -1105,7 +1108,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           <>
                             <div className="field">
                               <label htmlFor={`reason-${d.id}`}>Why (shown on the Changes table, required)</label>
-                              <textarea id={`reason-${d.id}`} rows={2} maxLength={500} required value={notes[d.id] ?? ""} onChange={(e) => editNote(d.id, e.target.value)} placeholder="e.g. adds a skill; waits for BOS-172" />
+                              <textarea ref={(el) => {
+                                reasonBoxes.current.set(d.id, el);
+                              }} id={`reason-${d.id}`} rows={2} maxLength={500} required value={notes[d.id] ?? ""} onChange={(e) => editNote(d.id, e.target.value)} placeholder="e.g. adds a skill; waits for BOS-172" />
                             </div>
                             <div className="field">
                               <label htmlFor={`reason-link-${d.id}`}>Wiki page that explains it (optional)</label>
@@ -1179,12 +1184,20 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Rules.</p>
                             </div>
                           ) : null}
-                          <div className="actions">
+                          <div className="actions" onClickCapture={(e) => {
+                            const target = e.target as HTMLElement | null;
+                            if (target && target.tagName === "BUTTON" && (target as HTMLButtonElement).disabled && d.context?.type === "workflow_change" && !notes[d.id]?.trim()) {
+                              reasonBoxes.current.get(d.id)?.focus();
+                            }
+                          }}>
                             {!modelEdits[d.id] && d.options.map((o) => (
-                              <button type="button" key={o} className={`btn${o === eff.option ? " primary" : ""}`} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
+                              <button type="button" key={o} className={`btn${o === eff.option ? " primary" : ""}`} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} title={d.context?.type === "workflow_change" && !notes[d.id]?.trim() ? "Type a reason above to Apply or Skip" : undefined} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
                                 {o}
                               </button>
                             ))}
+                            {d.context?.type === "workflow_change" && !notes[d.id]?.trim() && (
+                              <p className="muted" style={{ fontSize: 13 }}>Type a reason above to Apply or Skip</p>
+                            )}
                             {!modelEdits[d.id] && d.kind === "question" && (
                               <button type="button" className="btn" disabled={busy === d.id} onClick={() => editOwn(d.id, readDraft(draftOwn(d.id)))}>
                                 Write my own answer

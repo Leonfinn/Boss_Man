@@ -28,9 +28,9 @@ export async function runnerSocketRoutes(
     const runId = (req.query as { runId?: string }).runId;
     const validRunId = runId && /^[0-9a-f-]{36}$/i.test(runId) ? runId : undefined;
     reply.header("cache-control", "no-store");
-    // Outside a run, a runner needs secrets only to push a merge (R46) or check the setup-token (R58).
+    // Outside a run, a runner needs secrets only to push a merge (R46), check the setup-token (R58) or move a deploy tag (DR-033).
     const asked = (req.query as { purpose?: string }).purpose;
-    const purpose = !validRunId && (asked === "merge" || asked === "check") ? asked : "run";
+    const purpose = !validRunId && (asked === "merge" || asked === "check" || asked === "deploy_tag") ? asked : "run";
     return { env: await secrets.resolveCompanyEnv(runner.companyId, purpose, validRunId) };
   });
 
@@ -83,7 +83,7 @@ export async function runnerSocketRoutes(
               return;
             }
             queue = queue.then(async () => {
-              await runners.touch(runner, msg.imageVersion, msg.harnessVersions);
+              await runners.touch(runner, msg.imageVersion, msg.harnessVersions, msg.imageCommit);
               await runners.bootSeen(runner, msg.bootId, { previousExit: msg.previousExit, hostBootAt: msg.hostBootAt }).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "waking parked checks after a restart failed"));
               release = runners.connect(runner.id, (command) => {
                 if (socket.readyState !== socket.OPEN) return false;

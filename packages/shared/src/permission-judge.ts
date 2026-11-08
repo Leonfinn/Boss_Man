@@ -272,8 +272,11 @@ export function judgePermission(question: string, command: string | null, ownFol
       let prog: string | undefined;
       for (let i = 0; i < words.length; i++) {
         const w = words[i]!;
-        if (w === "" || w === ":::" || w === "::::") continue;
-        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJN]$|^--(?:max-args|replace|delimiter|max-procs|max-lines|eof|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
+        if (w === "") continue;
+        // `parallel ::: a b` with no program runs every argument as a command (BOS-732): no Allow.
+        if (w === ":::" || w === "::::") return result("outside");
+        // `--replace`, `--eof` and `--max-lines` take a value only as `--opt=value` (one word), so the next word is the program.
+        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJN]$|^--(?:max-args|delimiter|max-procs|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
         prog = w.replace(/^.*\//, "");
         break;
       }

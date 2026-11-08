@@ -127,6 +127,7 @@ export function Sidebar(props: {
   unread: number;
   feedback: number;
   mergeWaiting: number;
+  mergeStuck: number;
   notifications: NotificationPermission | "unsupported";
   collapsed: boolean;
   narrow: boolean;
@@ -165,7 +166,7 @@ export function Sidebar(props: {
   const label = GROUPS.flatMap((g) => g.items).find((i) => i.id === props.active || ((props.active === "tickets" || props.active === "board") && i.id === "projects"))?.label ?? "Menu";
   const isCurrent = (id: string) => props.active === id || ((props.active === "tickets" || props.active === "board") && id === "projects");
   const badge = (n: Item) =>
-    n.id === "decisions" && decisionsHere > 0 ? { value: decisionsHere, label: `${decisionsHere} waiting` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: `${props.feedback} to process` } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: `${props.mergeWaiting} waiting to merge` } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: `${props.unread} unread` } : null;
+    n.id === "decisions" && decisionsHere > 0 ? { value: decisionsHere, label: `${decisionsHere} waiting` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: `${props.feedback} to process` } : n.id === "merge-queue" && props.mergeStuck > 0 ? { value: props.mergeStuck, label: `${props.mergeStuck} stuck`, warn: true } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: `${props.mergeWaiting} waiting to merge` } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: `${props.unread} unread` } : null;
   return (
     <nav ref={nav} className={`side${props.collapsed ? " collapsed" : ""}`} aria-label="Main">
       <div className="brand">
@@ -195,8 +196,8 @@ export function Sidebar(props: {
                     <a className="nav" href={`#/${n.id}`} onClick={closeIfNarrow} title={n.label} aria-current={isCurrent(n.id) ? "page" : undefined}>
                       <n.icon size={18} strokeWidth={1.75} aria-hidden="true" />
                       <span className="nav-label">{n.label}</span>
-                      {b && <span className="count" aria-label={b.label}>{b.value}</span>}
-                      {b && <span className="count-dot" aria-hidden="true" />}
+                      {b && <span className={`count${b.warn ? " warn" : ""}`} aria-label={b.label}>{b.value}</span>}
+                      {b && <span className={`count-dot${b.warn ? " warn" : ""}`} aria-hidden="true" />}
                     </a>
                     {n.id === "chat" && starred.length > 0 && (
                       <ul className="sub-nav" aria-label="Starred agents">

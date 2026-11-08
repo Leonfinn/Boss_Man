@@ -29,6 +29,17 @@ HEALTH_TIMEOUT="${BOSSMAN_HEALTH_TIMEOUT:-120}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+env_get() { # file key: the last KEY=value in a .env-style file; accepts "export KEY=v", quotes and a trailing " # comment"
+  [[ -f $1 ]] || return 0
+  local line v
+  line="$({ grep -E "^[[:space:]]*(export[[:space:]]+)?$2[[:space:]]*=" "$1" || true; } | tail -n 1)"
+  [[ -n $line ]] || return 0
+  v="${line#*=}"; v="${v#"${v%%[![:space:]]*}"}"
+  if [[ $v == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
+  elif [[ $v == \'* ]]; then v="${v#\'}"; v="${v%%\'*}"
+  else v="${v%%[[:space:]]#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
+  printf '%s\n' "$v"
+}
 # BEGIN readable-check (the same text is in rebuild-live.sh, host-deployer.sh and deploy.sh; deploy.test.sh keeps them equal)
 # BOS-562: the server image copies file modes as they are on disk and the server runs as user node, so a git-tracked
 # file that others can't read (or a folder they can't read and search) makes it crash at start. Reads modes only and
@@ -170,10 +181,13 @@ main() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
   # BOS-69: this script builds and starts production's images and project. In a staging folder it would start a launcher
   # that manages production's runners, so it refuses; use scripts/deploy-staging.sh there.
-  local proj stack
-  proj="${COMPOSE_PROJECT_NAME:-$(grep -s '^COMPOSE_PROJECT_NAME=' .env | tail -1 | cut -d= -f2- || true)}"
-  stack="${BOSSMAN_STACK:-$(grep -s '^BOSSMAN_STACK=' .env | tail -1 | cut -d= -f2- || true)}"
-  if [[ -n $stack || ( -n $proj && $proj != boss-man ) ]]; then
+  # A staging folder is also recognised by its compose overlay (COMPOSE_FILE with deploy/staging.yml), so one with no
+  # project name or stack in .env still refuses. .env is read tolerantly: "export KEY=v", quotes, a trailing " # note".
+  local proj stack cfs
+  proj="${COMPOSE_PROJECT_NAME:-$(env_get .env COMPOSE_PROJECT_NAME)}"
+  stack="${BOSSMAN_STACK:-$(env_get .env BOSSMAN_STACK)}"
+  cfs="${COMPOSE_FILE:-$(env_get .env COMPOSE_FILE)}"
+  if [[ -n $stack || ( -n $proj && $proj != boss-man ) || $cfs == *deploy/staging.yml* ]]; then
     die "This folder is not the production install (project '${proj:-boss-man}', stack '${stack:-none}'). deploy.sh only handles production; for staging use scripts/deploy-staging.sh."
   fi
   # With blue/green the server is two colours behind a proxy; this script knows only the single server. Swaps are the host deployer's job.

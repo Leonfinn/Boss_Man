@@ -163,6 +163,12 @@ export const ALERT_KINDS = {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
   },
+  // deploys.ts finishTag / runTag (DR-033): a deploy tag that couldn't be moved after a successful deploy,
+  // or a runner offline for 30 minutes with the move waiting. The deploy stands; the CEO fixes the host settings
+  // or tells the owner. One card per deploy.
+  deploy_tag: {
+    topRung: "ceo",
+  },
   // no-progress.ts (BOS-593, N4): a company with work waiting and no clean run for an hour, or one error
   // hitting several agents. One card per company. It may reach the owner: a stopped company usually can't
   // run its own CEO either (HolidayHours went two days unseen that way). Closes on the company's next clean run.

@@ -2147,10 +2147,22 @@ describe("rules judge: shred .., xargs behind a tool word, xargs/parallel delete
     "echo /etc | xargs -t sh ls",
     "cat /tmp/cmds.txt | parallel",
     "echo /etc/passwd | xargs sort -o",
+    // BOS-732: --replace/--eof/--max-lines take a value only as `--opt=value`; alone, the next word is the program.
+    "echo /etc | xargs --replace find cat {} -delete",
+    "echo /etc | xargs --eof find cat {} -delete",
+    "echo /etc | xargs --max-lines find cat -delete",
+    // parallel with no program runs every argument after ::: as a command.
+    "parallel ::: echo 'perl -e \"unlink glob q(/etc/*)\"'",
+    "parallel :::: /tmp/cmds.txt",
+    "echo /etc | parallel --tag perl cat -e 'unlink @ARGV'",
+    "echo /etc | parallel --max-lines 1 perl cat",
   ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
   it.each([
     "ls /tmp/a | xargs echo",
     "ls /tmp/a | xargs -r ls",
     "ls /tmp/a | xargs -n 1 grep foo > /tmp/out.txt",
+    "ls /tmp/a | xargs --replace=X echo X",
+    "ls /tmp/a | xargs --replace echo X",
+    "ls /tmp/a | parallel --tag echo ::: a b",
   ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
 });

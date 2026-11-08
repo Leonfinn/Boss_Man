@@ -10,7 +10,7 @@ const agent = (id: string, name: string, starred: boolean): Agent => ({ id, comp
 const show = (agents: Agent[], activeAgent?: string, projects: Company["projects"] = [], active = "chat", activeProject?: string) => {
   const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents, projects };
   const noop = () => {};
-  render(<Sidebar active={active} activeAgent={activeAgent} activeProject={activeProject} companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={0} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
+  render(<Sidebar active={active} activeAgent={activeAgent} activeProject={activeProject} companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={0} mergeStuck={0} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
 };
 
 describe("starred agents in the sidebar", () => {

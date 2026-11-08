@@ -4,7 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkResults, companies, decisions, reviewRequests, settings, ticketDependencies, tickets } from "../src/db/schema.js";
-import { failingLine, failingStep } from "../src/services/merge-queue.js";
+import { failingLine, failingStep, mergeQueueService } from "../src/services/merge-queue.js";
 import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY } from "../src/services/check-queue.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -51,6 +51,8 @@ describe("merge queue screen (BOS-587)", () => {
     expect(row).toMatchObject({ title: "Fix the login", stuck: true, state: "check_failed_retrying", failedCheck: true });
     expect(row.label).toMatch(/check failed: retrying \(error TS1: bad\)/);
     expect(data.waitingCount).toBe(1);
+    // The side menu's warning badge counts stuck items (BOS-767).
+    expect(data.stuckCount).toBe(1);
   });
 
   it("shows a stuck-check card as needs you, linking to the decision", async () => {
@@ -102,6 +104,15 @@ describe("merge queue screen (BOS-587)", () => {
     await approve(c, fresh.id);
     const again = await queue(c);
     expect(again.waiting.find((r: { ticketId: string }) => r.ticketId === fresh.id)).toMatchObject({ state: "waiting_for_slot", stuck: false });
+    // QA, BOS-800: the side menu badge counts only the stuck one (1 stuck), while waitingCount still counts both.
+    expect(again.stuckCount).toBe(1);
+    expect(again.waitingCount).toBe(2);
+    // With two healthy ones besides it, the badge still reads 1 stuck.
+    const third = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Also fine" })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, third.id));
+    await approve(c, third.id);
+    const three = await queue(c);
+    expect(three).toMatchObject({ waitingCount: 3, stuckCount: 1 });
   });
 
   it("leaves out a ticket still with its reviewers, and keeps an approved one", async () => {
@@ -144,6 +155,22 @@ describe("merge queue screen (BOS-587)", () => {
     }
   });
 
+  it("counts a running check over its limit as stuck, with nothing else stuck (BOS-767)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Running too long" })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    await approve(c, t.id);
+    // The merge is running (not waiting), and it started past the 60-minute limit.
+    const service = mergeQueueService(c.db, {
+      runningMerges: () => [{ ticketId: t.id, startedAt: new Date(Date.now() - 90 * 60_000).toISOString(), startedBy: "the reviewer" }],
+      limit: async () => 1,
+    });
+    const data = await service.get(c.company.id);
+    expect(data.running.find((r: { ticketId: string }) => r.ticketId === t.id)).toMatchObject({ overLimit: true });
+    expect(data.waiting.some((r: { ticketId: string }) => r.ticketId === t.id)).toBe(false);
+    expect(data.stuckCount).toBe(1);
+  });
+
   it("shows a recently merged ticket and its failing check, newest first", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "All done" })).json() as { id: string };
@@ -157,7 +184,7 @@ describe("merge queue screen (BOS-587)", () => {
   it("is empty, with no merges, for a company that has done nothing", async () => {
     const c = (ctx = await setup());
     const data = await queue(c);
-    expect(data).toMatchObject({ waitingCount: 0, running: [], waiting: [], recent: [] });
+    expect(data).toMatchObject({ waitingCount: 0, stuckCount: 0, running: [], waiting: [], recent: [] });
     expect(data.mode).toBe("legacy");
   });
 });
