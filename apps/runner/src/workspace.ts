@@ -24,7 +24,7 @@ import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, re
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, DEPLOY_REF, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { checkMigrations, journalAt, journalProblems, rebaseMigrations } from "./migrations.js";
 import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
@@ -1541,6 +1541,96 @@ export class Workspaces {
       () => false,
     );
     return { checks, tools };
+  }
+
+  /**
+   * What a deploy's ref is (DR-033): after a fetch, the commit it names (a remote branch first, then a tag or
+   * sha), whether that commit is on origin's base branch, and the remote's branch names. Read-only. A ref
+   * that isn't git-shaped, or names nothing, gives commit null rather than an error: deploys of image tags go on.
+   */
+  async resolve(spec: { projectId: string; repoUrl: string; ref: string; baseRef: string }, secrets: Record<string, string | undefined> = {}): Promise<ResolveResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      await this.cloneIfMissing(spec, auth);
+      await this.git(["fetch", "--quiet", "--tags", "--force", "origin"], { cwd: repo, env: auth });
+      const branches = await this.remoteBranches(repo);
+      if (!DEPLOY_REF.test(spec.ref) || !DEPLOY_REF.test(spec.baseRef)) return { commit: null, onBase: false, branches, error: "That ref isn't a git branch, tag or commit." };
+      const candidates = [`refs/remotes/origin/${spec.ref}`, `refs/tags/${spec.ref}`, spec.ref];
+      let commit: string | null = null;
+      for (const c of candidates) {
+        const r = await this.gitCode(["rev-parse", "--verify", "--quiet", "--end-of-options", `${c}^{commit}`], { cwd: repo });
+        if (r.code === 0 && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(r.stdout)) {
+          commit = r.stdout;
+          break;
+        }
+      }
+      if (!commit) return { commit: null, onBase: false, branches, error: `${spec.ref} doesn't name a commit in the repository.` };
+      return { commit, onBase: await this.onBase(repo, commit, spec.baseRef), branches };
+    });
+  }
+
+  /** The remote's branch names, as fetched into refs/remotes/origin. */
+  private async remoteBranches(repo: string): Promise<string[]> {
+    const out = await this.git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"], { cwd: repo });
+    return out
+      .split("\n")
+      .map((l) => l.replace(/^refs\/remotes\/origin\//, ""))
+      .filter((b) => b && b !== "HEAD");
+  }
+
+  private async onBase(repo: string, commit: string, baseRef: string): Promise<boolean> {
+    const r = await this.gitCode(["merge-base", "--is-ancestor", commit, `refs/remotes/origin/${baseRef}`], { cwd: repo });
+    return r.code === 0;
+  }
+
+  /**
+   * Moves a deploy target's tag on origin to the commit a deploy shipped (DR-033). The daemon trusts nothing it
+   * is sent: under the repo lock it checks the name (check-ref-format, one component, not a branch on the
+   * remote) and that the commit is on the base branch, reads the tag's current value from the remote, and pushes
+   * `<commit>:refs/tags/<name>` with a lease on that value. The refspec is built here only; it always has a sha on
+   * the left, so it can never delete, and always refs/tags/ on the right, so it can never move a branch.
+   *
+   * A lease failure means someone else moved the tag between the read and the push. The tag is read once more:
+   * if it now points at this commit the result is "unchanged", otherwise "failed" and it stays where they put it.
+   */
+  async tag(spec: { projectId: string; repoUrl: string; name: string; commit: string; baseRef: string }, secrets: Record<string, string | undefined> = {}): Promise<TagResult> {
+    const auth = gitAuthEnv(secrets);
+    const refuse = (error: string): TagResult => ({ result: "refused", from: null, to: spec.commit, error });
+    const nameProblem = deployTagNameProblem(spec.name);
+    if (nameProblem) return refuse(nameProblem);
+    if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(spec.commit)) return refuse("The commit isn't a full sha.");
+    if (!DEPLOY_REF.test(spec.baseRef)) return refuse("The base branch name isn't valid.");
+    const ref = `refs/tags/${spec.name}`;
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      await this.cloneIfMissing(spec, auth);
+      const format = await this.gitCode(["check-ref-format", ref], { cwd: repo });
+      if (format.code !== 0) return refuse(`git refuses ${spec.name} as a tag name.`);
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      const heads = await this.gitCode(["ls-remote", "--heads", "origin"], { cwd: repo, env: auth });
+      if (heads.code !== 0) return { result: "failed", from: null, to: spec.commit, error: `Couldn't list the remote's branches: ${heads.stderr.slice(0, 500)}` };
+      const branchNames = heads.stdout.split("\n").map((l) => l.split("\t")[1]?.replace(/^refs\/heads\//, "")).filter(Boolean);
+      if (branchNames.includes(spec.name)) return refuse(`${spec.name} is also a branch on the remote, so it can't be used as the deploy tag.`);
+      if (!(await this.onBase(repo, spec.commit, spec.baseRef))) return refuse(`${spec.commit.slice(0, 7)} isn't on ${spec.baseRef}, so the tag stays where it is.`);
+      const read = async (): Promise<string | null | Error> => {
+        const r = await this.gitCode(["ls-remote", "origin", ref], { cwd: repo, env: auth });
+        if (r.code !== 0) return new Error(r.stderr.slice(0, 500));
+        const line = r.stdout.split("\n").find((l) => l.split("\t")[1] === ref);
+        return line ? line.split("\t")[0]! : null;
+      };
+      const before = await read();
+      if (before instanceof Error) return { result: "failed", from: null, to: spec.commit, error: `Couldn't read the tag from the remote: ${before.message}` };
+      if (before === spec.commit) return { result: "unchanged", from: before, to: spec.commit };
+      const pushed = await this.gitCode(["push", "--quiet", "--no-verify", `--force-with-lease=${ref}:${before ?? ""}`, "origin", `${spec.commit}:${ref}`], { cwd: repo, env: auth });
+      if (pushed.code === 0) return { result: "moved", from: before, to: spec.commit };
+      const after = await read();
+      if (after === spec.commit) return { result: "unchanged", from: before, to: spec.commit };
+      if (typeof after === "string" && after !== before) {
+        return { result: "failed", from: before, to: spec.commit, error: `Someone else moved ${spec.name} to ${after.slice(0, 7)} while Boss Man was moving it, so it was left there.` };
+      }
+      return { result: "failed", from: before, to: spec.commit, error: pushed.stderr.slice(0, 1000) || `git push exited with code ${pushed.code}` };
+    });
   }
 
   /**

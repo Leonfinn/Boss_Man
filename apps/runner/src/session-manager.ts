@@ -57,7 +57,7 @@ export type SessionManagerOptions = {
   /** The pause between those retries (default 5-10 seconds, random so queued runs don't move in step). */
   lockRetryDelayMs?: number;
   /** The company's granted secrets outside a run, e.g. a GIT_TOKEN for pushing a merge. */
-  resolveCompanyEnv?: (purpose: "merge" | "check") => Promise<Record<string, string>>;
+  resolveCompanyEnv?: (purpose: "merge" | "check" | "deploy_tag") => Promise<Record<string, string>>;
   /** Where each run's skills are written for the agent to load (R71). */
   skillsRoot?: string;
   /** Answers request commands such as workspace.diff. */
@@ -613,6 +613,28 @@ export class SessionManager {
           (data) => reply(command.requestId, { ok: true, data }),
           (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
         );
+        return;
+      }
+      case "workspace.resolve":
+      case "workspace.tag": {
+        // DR-033: a deploy's commit, and the deploy tag moved after it succeeds. The token is the daemon's own
+        // (fetched as a merge's is, logged as deploy_tag for a tag move) and never reaches an agent's session.
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.(command.type === "workspace.tag" ? "deploy_tag" : "merge") ?? Promise.resolve({}))
+          .then((secrets): Promise<unknown> =>
+            command.type === "workspace.tag"
+              ? ws.tag({ projectId: command.projectId, repoUrl: command.repoUrl, name: command.name, commit: command.commit, baseRef: command.baseRef }, secrets)
+              : ws.resolve({ projectId: command.projectId, repoUrl: command.repoUrl, ref: command.ref, baseRef: command.baseRef }, secrets),
+          )
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
         return;
       }
       case "credential.check": {
