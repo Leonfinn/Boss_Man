@@ -16,6 +16,7 @@ import { agents, companies, decisions as decisionsTable, engagements as engageme
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
+import { readZip, ZipReadError } from "./services/attachment-zip.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
 import { type CardLint, type SelfDeployFacts, lintLines } from "./services/steps.js";
@@ -1434,7 +1435,7 @@ function registerViewImage(server: McpServer, images: Services["images"], scope:
   server.registerTool(
     "open_attachment",
     {
-      description: "Open something the owner attached. In a task, a message or the chat, a picture appears as ![name](/api/ticket-images/<id>) and a file as [📎 name](/api/ticket-images/<id>); open each one with this tool (pass the id) before you act on it. Pictures come back as images, text files as text, PDFs as a document. Long text comes in parts; pass offset to read the rest.",
+      description: "Open something the owner attached. In a task, a message or the chat, a picture appears as ![name](/api/ticket-images/<id>) and a file as [📎 name](/api/ticket-images/<id>); open each one with this tool (pass the id) before you act on it. Pictures come back as images, text files as text, PDFs as a document, and a .zip (such as a company export) as a listing of its entries plus the text files inside it. Long text comes in parts; pass offset to read the rest.",
       inputSchema: { id: z.string().uuid(), offset: z.number().int().min(0).optional() },
     },
     async ({ id, offset }) => {
@@ -1449,6 +1450,16 @@ function registerViewImage(server: McpServer, images: Services["images"], scope:
         return text(`${label}\n\n${cut(body, CAP, (m) => `continue with open_attachment id=${id} offset=${m}`, offset)}`);
       }
       if (a.type === "application/pdf") return { content: [{ type: "resource" as const, resource: { uri: `bossman:attachment/${id}`, mimeType: a.type, blob: bytes.toString("base64") } }, { type: "text" as const, text: `${label} (PDF)` }] };
+      // A zip (BOS-228) comes back as its file listing plus the text files inside, in parts like any long text.
+      if (a.type === "application/zip") {
+        try {
+          const body = readZip(bytes);
+          return text(`${label} (zip)\n\n${cut(body, CAP, (m) => `continue with open_attachment id=${id} offset=${m}`, offset)}`);
+        } catch (err) {
+          if (err instanceof ZipReadError) return fail(`${label}: ${err.message}`);
+          throw err;
+        }
+      }
       return text(`${label} is a ${a.type} file of ${bytes.length} bytes that can't be shown as text or a picture. Ask the owner what's in it, or for a PDF or text copy.`);
     },
   );
