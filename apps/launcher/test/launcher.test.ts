@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DockerError } from "../src/docker.js";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, serverAddress, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
@@ -59,6 +59,10 @@ function fakeDocker() {
     async remove(id) {
       calls.push(`remove ${id}`);
       for (const [name, c] of containers) if (c.id === id) containers.delete(name);
+    },
+    // BOS-335: the launcher watches Docker events; this fake's stream stays open until aborted (tested in guard-events.test.ts).
+    events(_filter, _since, _onEvent, _onError, signal: AbortSignal) {
+      return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     },
   };
   return { docker, containers, calls, image, fail };
@@ -123,9 +127,31 @@ describe("the runner launcher (R55)", () => {
     expect(containerSpec(config(), "app-co").HostConfig).not.toHaveProperty("NanoCpus");
     expect(containerSpec({ ...config(), checkSlots: 2 }, "app-co").Env).toContain("BOSSMAN_CHECK_SLOTS=2");
     expect(containerSpec({ ...config(), checkSlots: 1 }, "app-co").Env.join()).not.toContain("BOSSMAN_CHECK_SLOTS");
+    // BOS-568: the shared pnpm store is only set when the operator asks for another place, and it must stay
+    // under the workspaces volume (the runner's only writable one), or it would land on the root disk.
+    expect(containerSpec({ ...config(), pnpmStoreDir: "/home/node/workspaces/big/pnpm" }, "app-co").Env).toContain("PNPM_STORE_DIR=/home/node/workspaces/big/pnpm");
+    expect(containerSpec(config(), "app-co").Env.join()).not.toContain("PNPM_STORE_DIR");
+    expect([parsePnpmStoreDir(undefined), parsePnpmStoreDir("  "), parsePnpmStoreDir("/home/node/workspaces/big/pnpm/")]).toEqual([undefined, undefined, "/home/node/workspaces/big/pnpm"]);
+    expect(() => parsePnpmStoreDir("pnpm-store")).toThrow();
+    expect(() => parsePnpmStoreDir("relative/pnpm")).toThrow();
+    expect(() => parsePnpmStoreDir("/big/../etc")).toThrow();
+    expect(() => parsePnpmStoreDir("/big/pnpm")).toThrow(/under/);
+    expect(() => parsePnpmStoreDir("/home/node/workspaces-other")).toThrow(/under/);
+    expect(() => parsePnpmStoreDir("/tmp/pnpm-store")).toThrow(/under/);
+    // BOS-633: the volume's own root is refused too: the fence would grant the whole volume, and the gate store
+    // (/home/node/workspaces-gate) would sit on the root disk.
+    expect(() => parsePnpmStoreDir("/home/node/workspaces")).toThrow(/root/);
+    expect(() => parsePnpmStoreDir("/home/node/workspaces/")).toThrow(/root/);
+    expect(() => parsePnpmStoreDir("/")).toThrow();
     expect([parseCheckSlots(undefined), parseCheckSlots(""), parseCheckSlots("2")]).toEqual([1, 1, 2]);
     expect(() => parseCheckSlots("0")).toThrow();
     expect(() => parseCheckSlots("lots")).toThrow();
+    // BOS-616: the OpenCode session retention reaches the runner only when set; 0 (never delete) is passed on too.
+    expect(containerSpec(config(), "app-co").Env.join()).not.toContain("BOSSMAN_OPENCODE_SESSION_DAYS");
+    expect(containerSpec({ ...config(), opencodeSessionDays: 0 }, "app-co").Env).toContain("BOSSMAN_OPENCODE_SESSION_DAYS=0");
+    expect([parseOpencodeSessionDays(undefined), parseOpencodeSessionDays(" "), parseOpencodeSessionDays("0"), parseOpencodeSessionDays("30")]).toEqual([undefined, undefined, 0, 30]);
+    expect(() => parseOpencodeSessionDays("-1")).toThrow();
+    expect(() => parseOpencodeSessionDays("two weeks")).toThrow();
     expect(parseCpuShares(undefined)).toBe(512);
     expect(parseCpuShares("1024")).toBe(1024);
     expect(() => parseCpuShares("1")).toThrow();
@@ -283,6 +309,39 @@ describe("the runner launcher (R55)", () => {
     fake.containers.delete("boss-man-netguard-app-co");
     expect(await api.reconcileGuards()).toEqual(["app-co"]);
     expect(fake.containers.has("boss-man-netguard-app-co")).toBe(true);
+  });
+
+  it("reports the guard's real state: a dead, missing or older guard is 'down', also after a launcher restart (BOS-436)", async () => {
+    const fake = fakeDocker();
+    await launcher(config(), fake.docker).put("app-co", TOKEN);
+    const guardOf = () => fake.containers.get("boss-man-netguard-app-co")!;
+    // A new launcher process has no memory of the first one's work.
+    const api = launcher(config(), fake.docker);
+    expect((await api.list())[0]!.guard).toBe("on");
+    guardOf().state = "exited"; // the guard died after start
+    expect((await api.list())[0]!.guard).toBe("down");
+    guardOf().state = "running";
+    guardOf().health = "unhealthy";
+    expect((await api.list())[0]!.guard).toBe("down");
+    guardOf().health = "healthy";
+    fake.containers.delete("boss-man-netguard-app-co"); // e.g. the host rebooted and it never came back
+    expect((await api.list())[0]!.guard).toBe("down");
+    // The runner comes back by itself (unless-stopped) and the guard hasn't: reconcile repairs it.
+    expect(await api.reconcileGuards()).toEqual(["app-co"]);
+    expect((await api.list())[0]!.guard).toBe("on");
+    // Runner restarted after the guard started: the guard is in an old namespace.
+    await fake.docker.restart(fake.containers.get("boss-man-runner-app-co")!.id);
+    expect((await api.list())[0]!.guard).toBe("down");
+    expect(await api.reconcileGuards()).toEqual(["app-co"]);
+    expect((await api.list())[0]!.guard).toBe("on");
+  });
+
+  it("a host that can't load nftables stays 'unavailable' after a launcher restart; enforce mode says 'down'", async () => {
+    const fake = fakeDocker();
+    fake.fail.nft = true;
+    await launcher(config(), fake.docker).put("app-co", TOKEN);
+    expect((await launcher(config(), fake.docker).list())[0]!.guard).toBe("unavailable");
+    expect((await launcher({ ...config(), guardMode: "enforce" }, fake.docker).list())[0]!.guard).toBe("down");
   });
 
   it("recreates one company's runner and says which runners are on the current image", async () => {

@@ -28,6 +28,7 @@ import {
   type OrderLink,
   alwaysChoices,
   explainPermission,
+  formatDate,
   type AlwaysChoice,
   type PermissionExplanation,
   type PermissionInfo,
@@ -42,7 +43,7 @@ import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
 import { REVIEW_REASON } from "./review-kinds.js";
-import { type CardLint, type HostFacts, NOT_OVERRIDABLE, fillHostTokens, lintLines, lintOwnerSteps } from "./steps.js";
+import { type CardLint, type HostFacts, type SelfDeployFacts, NOT_OVERRIDABLE, fillHostTokens, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -96,6 +97,34 @@ async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string;
   );
 }
 
+/** A do-this-next link the raiser asked for but that wasn't stored (BOS-625), and why. */
+export type DroppedOrderLink = { decisionId: string; link: "doAfter" | "doBefore"; reason: "another company" | "not open" | "unknown" };
+
+/**
+ * Do-this-next links (BOS-551) that point at a card the raiser may legitimately order against:
+ * an open decision in the caller's own company (BOS-625). A link to another company's card, or to
+ * an answered one, is dropped rather than stored, so one company can't nudge another's queue order.
+ * The queue already ignores ids it can't see; this keeps the bad link out of the card in the first place.
+ * Each dropped link comes back with its reason, so raise_decision's reply can say which weren't applied.
+ */
+async function keepOpenInCompany<T extends OrderLink>(db: Db, companyId: string, links: T[] | undefined, link: DroppedOrderLink["link"]): Promise<{ kept?: T[]; dropped: DroppedOrderLink[] }> {
+  if (!links?.length) return { dropped: [] };
+  const ids = [...new Set(links.map((l) => l.decisionId))];
+  const rows = await db.select({ id: decisions.id, companyId: decisions.companyId, status: decisions.status }).from(decisions).where(inArray(decisions.id, ids));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  // Judged once per id, so a link asked for in both directions is reported once.
+  const why = new Map(ids.map((id): [string, DroppedOrderLink["reason"] | null] => {
+    const r = byId.get(id);
+    if (!r) return [id, "unknown"];
+    if (r.companyId !== companyId) return [id, "another company"];
+    if (r.status !== "open") return [id, "not open"];
+    return [id, null];
+  }));
+  const kept = links.filter((l) => why.get(l.decisionId) === null);
+  const dropped = ids.flatMap((id) => { const reason = why.get(id); return reason ? [{ decisionId: id, link, reason }] : []; });
+  return { ...(kept.length ? { kept } : {}), dropped };
+}
+
 /** One ticket a Boss Man update brings, as the owner sees it on a deploy card (BOS-213). */
 export type DeployChange = { ticketId: string; ref: string; title: string };
 /**
@@ -124,6 +153,34 @@ export type DeployUpdate = {
   risks: string[];
 };
 
+/** A marked ticket in a deploy card's range (BOS-639): the live symptom it fixes, in its author's words. */
+export type LiveFix = { ticketId: string; ref: string; symptom: string };
+/**
+ * A deploy card that carries the fix for a live problem (BOS-639). `heading` leads the card, the phone push
+ * and the CEO's wake. `repeat`: every fix on it was already on an earlier card, so it isn't paged again
+ * (the owner was paged once per fix, not once per commit main moves on by).
+ */
+export type DeployUrgent = { heading: string; fixes: LiveFix[]; repeat?: boolean };
+
+/** Longest "fixes live" marker: one sentence, short enough to head a card and fit a phone push title. */
+export const FIXES_LIVE_MAX = 200;
+/** Why a "fixes live" marker can't be stored, or null when it's fine (one line, one short sentence). */
+export function fixesLiveProblem(text: string): string | null {
+  const t = text.trim();
+  if (!t) return null;
+  if (/[\r\n]/.test(t)) return "fixesLive must be one line: one sentence naming the live symptom, e.g. \"server freezes as memory climbs\".";
+  if (t.length > FIXES_LIVE_MAX) return `fixesLive must be at most ${FIXES_LIVE_MAX} characters: one sentence naming the live symptom.`;
+  return null;
+}
+/** The words that head an urgent deploy card and the CEO's wake (BOS-639): "Urgent: contains the fix for <symptom> (BOS-n)". */
+export function fixesLiveHeading(fixes: Array<{ symptom: string; ref: string }>): string {
+  const clean = (s: string) => s.trim().replace(/[.!\s]+$/, "");
+  const [first, ...rest] = fixes;
+  if (!first) return "";
+  const also = rest.length ? `; also ${rest.map((f) => `${clean(f.symptom)} (${f.ref})`).join("; ")}` : "";
+  return `Urgent: contains the fix for ${clean(first.symptom)} (${first.ref})${also}`;
+}
+
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
@@ -149,7 +206,7 @@ export type DecisionContext =
    */
   | { type: "owner_setup"; ticketId: string; steps: string[]; commit: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
-  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[] }
+  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[] }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string; /** The failed checks the "move to after the merge" choice would move (BOS-422). */ movable?: string[] }
@@ -301,6 +358,36 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
  * choice: dropping one as a "duplicate" would take away that choice.
  */
 const STALE_ONLY_WITHDRAW_TYPES = new Set(["review_loop", "check_stuck"]);
+
+/**
+ * Withdraws the open "must merge first" cards the carried-work gate raised on this ticket (BOS-733) once every
+ * ticket a card names is done, so the card stops holding a merge that can now go ahead. A card still naming an
+ * unfinished ticket stays.
+ */
+export async function clearCarriedCards(db: Db, ticketId: string, withdrawal: Withdrawal) {
+  const rows = await db
+    .select()
+    .from(decisions)
+    .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'carried'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`));
+  let cleared = 0;
+  for (const r of rows) {
+    const named = ((r.context as { carried?: unknown[] }).carried ?? []).filter((id): id is string => typeof id === "string");
+    if (!named.length) continue;
+    // Merged counts as well as done: a ticket with an after-merge check left is merged but back in progress.
+    const open = await db.select({ id: tickets.id }).from(tickets).where(and(inArray(tickets.id, named), ne(tickets.systemState, "done"), isNull(tickets.mergeCommit)));
+    if (open.length) continue;
+    const [done] = await db
+      .update(decisions)
+      .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(r.context as object), withdrawn: withdrawal } })
+      .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (done) {
+      cleared++;
+      await markDecisionNotificationRead(db, r.id, new Date(withdrawal.at));
+    }
+  }
+  return cleared;
+}
 
 /**
  * Withdraws every open merge card for a ticket (BOS-149): one ticket never shows two, and a card for a
@@ -508,13 +595,15 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * and its steps must work as written (BOS-417: `lintOwnerSteps`). `error` is the refusal; otherwise `lint` is what
  * the card keeps (warnings, and a CEO override). Every route that raises an agent card calls this, so the lint
  * can't be skipped: raise_decision, the CEO's reissue and escalate, and the Scrum Master's raise_decision.
- * `lintOverride` lets a refusal through with a reason; only the CEO may pass one (`byCeo`), and never past R3/R4.
+ * `lintOverride` lets a refusal through with a reason; only the CEO may pass one (`byCeo`), and never past R3/R4/R10 (`NOT_OVERRIDABLE`).
  * `hosts` are the host facts Boss Man recorded (BOS-427): when given, R6 checks a login-run block against what the
  * host says it can read; without them it only checks that every block names a host and an account.
  * `addons` are the add-on facts for R9 (DR-023); a route that has them passes them, and `setsUp` names the
  * add-on this card sets up, so its own setup steps aren't refused for it not running yet.
+ * `proof` says how host commands were proven (R11, DR-024); a malformed one is refused before the lint runs,
+ * and a good one is kept on the card for its banner.
  */
-export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -526,6 +615,8 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
   if (override !== undefined && !a.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the steps instead, or ask the CEO to raise the card." };
   if (override !== undefined && override.length < 10) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
   if (!a.steps?.length) return { error: null };
+  const proof = a.proof?.trim() ? parseProof(a.proof) : undefined;
+  if (typeof proof === "string") return { error: `The ${proof}.` };
   // `{{host.…}}` tokens (DR-008): filled from the recorded host facts before the lint, so the lint reads what the owner
   // will. A fact that isn't recorded stops the card; a caller with no facts leaves the token, which R4 refuses.
   let steps = a.steps;
@@ -536,14 +627,14 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
     }
     steps = filled.steps;
   }
-  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}) });
+  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}) }, proof);
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
   const soft = refuse.filter((f) => !NOT_OVERRIDABLE.has(f.rule));
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
-  if (hard.length) return { error: `These steps can't go to the owner as written:\n${lintLines(refuse)}\n${tail}${override ? " lintOverride can't let through a command that isn't copy-safe or a value Boss Man doesn't have." : ""}` };
+  if (hard.length) return { error: `These steps can't go to the owner as written:\n${lintLines(refuse)}\n${tail}${override ? " lintOverride can't let through a command that isn't copy-safe, a value Boss Man doesn't have, or a command that waits for typed input, opens a pager or never returns." : ""}` };
   if (soft.length && !override) return { error: `These steps can't go to the owner as written:\n${lintLines(soft)}\n${tail}${a.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
-  const lint: CardLint = { warn, ...(soft.length && override ? { override: { reason: override, findings: soft } } : {}) };
-  return { error: null, steps, ...(lint.warn.length || lint.override ? { lint } : {}) };
+  const lint: CardLint = { warn, ...(soft.length && override ? { override: { reason: override, findings: soft } } : {}), ...(proof ? { proof } : {}) };
+  return { error: null, steps, ...(lint.warn.length || lint.override || lint.proof ? { lint } : {}) };
 }
 
 /**
@@ -740,6 +831,7 @@ export type LoopHooks = {
 };
 
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
+type SelfDeployCtx = Extract<DecisionContext, { type: "self_deploy" }>;
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
@@ -1546,6 +1638,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; setsUp?: Addon; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+      // Ordering links may only point at open cards in the raiser's own company (BOS-625).
+      const after = await keepOpenInCompany(db, input.companyId, input.doAfter, "doAfter");
+      const before = await keepOpenInCompany(db, input.companyId, input.doBefore, "doBefore");
+      const doAfter = after.kept;
+      const doBefore = before.kept;
+      const droppedLinks = [...after.dropped, ...before.dropped];
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -1558,7 +1656,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             raisedByAgentId: input.agentId,
             context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
-              ...(input.doAfter?.length ? { doAfter: input.doAfter } : {}), ...(input.doBefore?.length ? { doBefore: input.doBefore } : {}),
+              ...(doAfter?.length ? { doAfter } : {}), ...(doBefore?.length ? { doBefore } : {}),
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
               ...(input.resetsOnRestart ? { resetsOnRestart: true } : {}),
               // An add-on's setup card closes itself once the add-on is seen working (DR-023 D, BOS-522).
@@ -1582,7 +1680,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return row!;
       });
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
-      return raised;
+      // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
+      return { ...raised, droppedLinks };
     },
 
     /** Re-sends permission verdicts that couldn't be delivered, once the runner is back. */
@@ -1672,6 +1771,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     async onRefusedCall(runner: { companyId: string }, runId: string, title: string | null) {
       const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
       permLog.refusedCall({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
+    },
+
+    /** A fenced run's tool call failed with a kernel refusal (BOS-325): logged with the run, agent and ticket. Wording only, never a decision. */
+    async onFenceDenied(runner: { companyId: string }, runId: string, title: string | null) {
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
+      permLog.fenceDenied({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
     },
 
     setMaintenanceHook(hook: MaintenanceHook) {
@@ -1986,8 +2091,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
-      // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164).
-      const sorted = rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164). The one
+      // exception is a deploy card carrying the fix for a live problem (BOS-639): it goes to the top, because
+      // the owner leaving it for later is what kept the BOS-410 memory fix off the live server for 12 hours.
+      // It is put first here, in the base order the do-this-next ordering below breaks ties by, so it is
+      // step 1, except that cards it says to do first (BOS-551: readings its restart would wipe) still
+      // come just before it. Deploying first would destroy those readings, and they are quick.
+      const urgent = (r: (typeof rows)[number]) => ((r.context as DecisionContext).type === "self_deploy" && !!(r.context as SelfDeployCtx).urgent ? 1 : 0);
+      const sorted = rows.sort((a, b) => urgent(b) - urgent(a) || b.createdAt.getTime() - a.createdAt.getTime());
 
       // (BOS-551) Do-this-next ordering and the "waiting on an agent" group. Only cards that need the
       // owner's hands are numbered and ordered against each other; everything else keeps the newest-first
@@ -2471,7 +2582,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
       if (always) {
         const [last] = await db.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
-        const on = now().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+        const on = formatDate("en-GB", now(), { day: "numeric", month: "short" });
         await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name} (from a request on ${on})`, trigger: "permission", condition: always.match, outcome: "allow", position: (last?.position ?? -1) + 1 });
         answer = ALLOW;
       }

@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
+import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
 import { companies, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
@@ -34,8 +35,7 @@ async function setup(opts: { deployer?: boolean } = {}) {
   const logQuery = { logQuery: (sql: string) => made.push(sql) };
   const { db, close } = await openPglite(undefined, logQuery);
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, deployerDir: opts.deployer === false ? undefined : dir });
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   await req("POST", "/api/companies", { name: "App Co" });
   // The poller skips a pass when a file keeps its size and mtime (BOS-414), and a file system stamps mtime
@@ -173,6 +173,29 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
     const [todo] = await c.todos();
     expect((todo!.context as { update: Update }).update).toEqual(update);
+  });
+
+  it("a newer server update card covers the older hand-apply to-do and lists the tickets it carries (BOS-683, DR-036)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const [t490] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "rebuild-live.sh fix", number: 490 }).returning();
+    // An older server hand-apply to-do is open: its commit (C) was approved but never applied.
+    await c.db.insert(decisions).values({ companyId: co!.id, kind: "question", tier: "owner", question: "Apply the last update by hand", options: ["Done"], recommendedOption: "Done", dedupeKey: `owner-todo:self-deploy:${C}`, context: { type: "owner_todo", ofDecisionId: randomUUID(), steps: ["Apply it."], target: "server", commit: C, fromCommit: A } as never });
+    // Main moves again, carrying BOS-490, and the host offers the newer commit by hand.
+    await c.available({ deployed: A, tip: B, commits: [{ sha: B, subject: `Merge "rebuild-live.sh fix" (${t490!.id})` }], paths: ["scripts/rebuild-live.sh"], infraPaths: ["scripts/rebuild-live.sh"] });
+    await c.selfDeploy.sync();
+    // The new card is raised, and it names the ticket it carries.
+    const [card] = await c.open();
+    expect(card!.question).toContain("BOS-490: rebuild-live.sh fix");
+    // The older to-do is gone from the owner's queue, having been marked covered by the newer card.
+    const [remaining] = await c.todos();
+    expect(remaining).toBeUndefined();
+    const answered = (await c.db.select().from(decisions)).find((d) => (d.context as { type: string; commit?: string }).type === "owner_todo" && (d.context as { commit?: string }).commit === C);
+    expect(answered!.status).toBe("answered");
+    expect(answered!.answer).toContain(`Covered by the newer update card ("Main has moved to ${B.slice(0, 8)}")`);
+    expect(answered!.answer).toContain("BOS-490");
   });
 
   it("shows the first 20 tickets and says how many more there are (BOS-213)", async () => {
@@ -380,7 +403,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
           const x = (await stepsOf(c, { ...layout, ...change })) as { handSteps?: string[]; rollback?: string; check?: string };
           const all = [...x.handSteps!, ...(x.rollback ? [x.rollback] : []), ...(x.check ? [x.check] : [])];
           const where = JSON.stringify({ layout, change });
-          expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse, where).toEqual([]);
+          // R11 (DR-024) is an agent's claim about rehearsal, checked when an agent raises a card (checkAsk); these
+          // cards are Boss Man's own and never go through it, so only the other rules apply.
+          expect(lintOwnerSteps(all, [{ name: "nas01", ownership: [] }]).refuse.filter((f) => f.rule !== "R11"), where).toEqual([]);
           expect(all.join("\n"), where).not.toMatch(/docs\/0\d/);
           // Every git the server writes runs in the umask subshell (DR-028), never after a bare umask; so does
           // deploy.sh, which runs git checkout/merge itself (the lint can't see inside a script).
@@ -427,7 +452,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const steps = (todo!.context as { steps: string[] }).steps;
     const text = steps.join("\n");
     expect(text).toContain(
-      "cp /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh && chown root:root /srv/bm/deployer/host-deployer.sh && chmod 750 /srv/bm/deployer/host-deployer.sh",
+      "cp -v /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh && chown root:root /srv/bm/deployer/host-deployer.sh && chmod 750 /srv/bm/deployer/host-deployer.sh",
     );
     expect(text).not.toContain("host-deployer.sh didn't change");
     expect(text).toContain("docker compose build launcher && docker compose up -d --no-deps launcher");
@@ -824,5 +849,96 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       await c.selfDeploy.sync();
       expect((await c.db.select().from(notifications)).filter((n) => n.level !== "ask")).toHaveLength(1);
     });
+  });
+});
+
+// BOS-639: on 6–7 Nov the BOS-410 memory fix merged at 08:44, but its deploy card looked like every other
+// one, and the live server stayed on the old code for 12 hours. A ticket marked "fixes live" now heads the
+// card, pages the owner once and sorts first; an unmarked card is unchanged.
+describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
+  const HEADING = "Urgent: contains the fix for server freezes as memory climbs (BOS-410)";
+  async function seed(c: Awaited<ReturnType<typeof setup>>, opts: { marked: boolean }) {
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    // Urgent and high priority on both: the marker is never guessed from either.
+    const [fix] = await c.db
+      .insert(tickets)
+      .values({ companyId: co!.id, projectId: p!.id, title: "Server memory fix", number: 410, urgent: true, risk: "high", ...(opts.marked ? { fixesLive: "server freezes as memory climbs." } : {}) })
+      .returning();
+    const [other] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Plan page titles are cut off", number: 200, urgent: true }).returning();
+    const commits = [
+      { sha: B, subject: `Merge "Server memory fix" (${fix!.id})` },
+      { sha: C, subject: `Merge "Plan page titles are cut off" (${other!.id})` },
+    ];
+    // A hands-on card (steps for the owner) raised after the deploy card: the do-this-next order (BOS-551)
+    // breaks the tie between two hands-on cards newest first, so without the marker it goes on top.
+    const newer = async () =>
+      (await c.db.insert(decisions).values({ companyId: co!.id, kind: "question", question: "A newer question", options: ["Done", "Not now"], recommendedOption: "Done", context: { type: "question", steps: ["Open Settings → Secrets and add the key"] }, createdAt: new Date(Date.now() + 60_000) }).returning())[0]!;
+    return { co: co!, fix: fix!, commits, newer };
+  }
+  type Urgent = { heading: string; fixes: Array<{ ticketId: string; ref: string; symptom: string }>; repeat?: boolean };
+  const urgentOf = (d: { context: unknown }) => (d.context as { urgent?: Urgent }).urgent;
+
+  it("heads the card with the symptom, pages the owner once, and sorts it first", async () => {
+    const c = (ctx = await setup());
+    const s = await seed(c, { marked: true });
+    await c.available({ commits: s.commits });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.question.split("\n\n")[0]).toBe(`${HEADING}.`);
+    expect(d!.question).toContain(`Deploy Boss Man ${A.slice(0, 8)} -> ${B.slice(0, 8)}?`);
+    expect(urgentOf(d!)).toEqual({ heading: HEADING, fixes: [{ ticketId: s.fix.id, ref: "BOS-410", symptom: "server freezes as memory climbs." }] });
+    // Boss Man still never deploys by itself: the owner approves.
+    expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+    expect(d!.options).toEqual(["Deploy", "Not now"]);
+
+    const newer = await s.newer();
+    await c.notes.syncDecisions();
+    const sent = await c.db.select().from(notifications);
+    expect(sent.find((n) => n.decisionId === d!.id)).toMatchObject({ requested: "page", level: "page", title: HEADING });
+    expect(sent.find((n) => n.decisionId === newer.id)).toMatchObject({ level: "ask" });
+    const queue = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>;
+    expect(queue.map((q) => q.id)).toEqual([d!.id, newer.id]);
+
+    // Main moves on: the new card still leads with the fix and still sorts first, but the owner isn't paged again.
+    await c.available({ tip: C, commits: [...s.commits, { sha: C, subject: "Tidy a comment" }] });
+    await c.selfDeploy.sync();
+    const [d2] = await c.open();
+    expect(d2!.id).not.toBe(d!.id);
+    expect(d2!.question.split("\n\n")[0]).toBe(`${HEADING}.`);
+    expect(urgentOf(d2!)).toMatchObject({ heading: HEADING, repeat: true });
+    await c.notes.syncDecisions();
+    expect((await c.db.select().from(notifications)).find((n) => n.decisionId === d2!.id)).toMatchObject({ requested: "ask", title: HEADING });
+    expect((await c.db.select().from(notifications)).filter((n) => n.requested === "page")).toHaveLength(1);
+    expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>)[0]!.id).toBe(d2!.id);
+  });
+
+  it("quiet hours still lower the page", async () => {
+    const c = (ctx = await setup());
+    const s = await seed(c, { marked: true });
+    const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
+    await c.notes.setSettings({ ...(await c.notes.getSettings()), quietHours: { start: hhmm(Date.now() - 3_600_000), end: hhmm(Date.now() + 3_600_000), timeZone: "UTC" } });
+    await c.available({ commits: s.commits });
+    await c.selfDeploy.sync();
+    await c.notes.syncDecisions();
+    const [n] = await c.db.select().from(notifications);
+    expect(n).toMatchObject({ requested: "page", demotedBy: "quiet hours", title: HEADING });
+    expect(n!.level).not.toBe("page");
+  });
+
+  it("an unmarked card is unchanged: no heading, an ordinary ask, newest first", async () => {
+    const c = (ctx = await setup());
+    const s = await seed(c, { marked: false });
+    await c.available({ commits: s.commits });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.question).toMatch(/^Deploy Boss Man /);
+    expect(d!.question).not.toContain("Urgent");
+    expect(urgentOf(d!)).toBeUndefined();
+    const newer = await s.newer();
+    await c.notes.syncDecisions();
+    expect((await c.db.select().from(notifications)).find((n) => n.decisionId === d!.id)).toMatchObject({ requested: "ask", level: "ask", title: "App Co needs a decision" });
+    expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((q) => q.id)).toEqual([newer.id, d!.id]);
   });
 });

@@ -10,12 +10,14 @@ import { openPglite } from "../src/db/client.js";
 import { decisions } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { checkAsk } from "../src/services/decisions.js";
-import { lintOwnerSteps, sh, step, type CardLint } from "../src/services/steps.js";
+import { lintOwnerSteps, sh, step, type CardLint, type SelfDeployFacts } from "../src/services/steps.js";
 
 // The owner-step lint (BOS-417, DR-008 Q1): cards with steps for the owner are checked when they are raised.
 
 const TRIED = "Checked the host from the runner; agents have no access to the owner's machine.";
 const rules = (steps: string[]) => lintOwnerSteps(steps).refuse.map((f) => `${f.step}:${f.rule}`);
+/** These cards have host commands; R11 (proof, card-lint-proof.test.ts) is not what they test. */
+const REHEARSED = { rehearsed: true as const, script: "tailscale", commit: "0123abcd" };
 /** Every command block says where and as whom (BOS-427, R6); these tests are about the other rules. */
 const H = { host: "nas01", as: "root" as const };
 
@@ -27,17 +29,17 @@ describe("lintOwnerSteps", () => {
   });
 
   it("refuses a variable no step up to there sets (the $BOSSMAN_HOME card)", () => {
-    expect(rules([step("Go to the install folder:", sh("cd $BOSSMAN_HOME", H))])).toEqual(["1:R2"]);
-    expect(rules([step("Go there:", sh("cd ${BOSSMAN_HOME}/src", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go to the install folder. This prints nothing:", sh("cd $BOSSMAN_HOME", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go there. This prints nothing:", sh("cd ${BOSSMAN_HOME}/src", H))])).toEqual(["1:R2"]);
     // Unfenced, in a sentence, it is still a command the owner will paste.
     expect(rules(["Run sudo ls $BOSSMAN_HOME on the new host."])).toEqual(["1:R2"]);
     // Set later is set too late.
-    expect(rules([step("Go:", sh("cd $DIR", H)), step("Set it:", sh("DIR=/srv/bm", H))])).toEqual(["1:R2"]);
+    expect(rules([step("Go: this prints nothing.", sh("cd $DIR", H)), step("Set it: this prints nothing.", sh("DIR=/srv/bm", H))])).toEqual(["1:R2"]);
   });
 
   it("accepts variables the card sets, inline assignments, and shell text that isn't a variable", () => {
     const ok = [
-      step("Set the folder:", sh("export DIR=/srv/bm", H)),
+      step("Set the folder. This prints nothing:", sh("export DIR=/srv/bm", H)),
       step("Go there:", sh("cd $DIR/src && ls", H)),
       step("Build with a flag set just for this command:", sh("DOCKER_BUILDKIT=1 docker compose build", H)),
       step("Same command, inline:", sh("COMPOSE_FILE=a.yml docker compose ps && echo $COMPOSE_FILE", H)),
@@ -48,7 +50,8 @@ describe("lintOwnerSteps", () => {
       "Open Settings → Server and runner → Updates and press Build and update runners. It costs $5 a month.",
       "Follow the instructions on the screen to sign in.",
     ];
-    expect(lintOwnerSteps(ok).refuse).toEqual([]);
+    // read still sets NAME for R2, but R10 refuses it: the owner would have to type the value (DR-024).
+    expect(lintOwnerSteps(ok, undefined, REHEARSED).refuse).toEqual([expect.objectContaining({ step: 8, rule: "R10" })]);
   });
 
   it("refuses a command the owner would have to edit, and an unfilled {{token}}", () => {
@@ -56,7 +59,7 @@ describe("lintOwnerSteps", () => {
     expect(rules([`Run this:\n\n${F}ssh root@<host-ip>\n\`\`\``])).toEqual(["1:R3"]);
     expect(rules(["Run `scp YOUR_KEY root@nas:/x` on the old host."])).toEqual(["1:R3"]);
     expect(rules([`Run this:\n\n${F}$ ls\n\`\`\``])).toEqual(["1:R3"]);
-    expect(rules([`Go there:\n\n${F}cd {{host.srcDir}}\n\`\`\``])).toEqual(["1:R4"]);
+    expect(rules([`Go there (this prints nothing):\n\n${F}cd {{host.srcDir}}\n\`\`\``])).toEqual(["1:R4"]);
   });
 
   it("only warns about links, several commands in one step, hedging and long cards", () => {
@@ -64,7 +67,7 @@ describe("lintOwnerSteps", () => {
       "Background is on BOS-276; open Settings → Server and runner.",
       step("Check it:", sh("docker ps", H), "Then:", sh("docker logs server-blue", H)),
       step("It should be green by now:", sh("docker ps", H)),
-    ]);
+    ], undefined, REHEARSED);
     expect(r.refuse).toEqual([]);
     expect(r.warn.map((f) => f.step)).toEqual([1, 2, 3]);
     expect(lintOwnerSteps(Array.from({ length: 13 }, () => "Open Settings.")).warn).toHaveLength(1);
@@ -265,6 +268,60 @@ describe("R14: git that writes the checkout runs in a (umask 022 && …) subshel
   });
 });
 
+describe("R15: an agent card can't update the machine itself (DR-036, the 7 Nov duplicate cards)", () => {
+  const r15 = (steps: string[], selfDeploy: SelfDeployFacts = { enabled: true, installDir: "/srv/bm/src", openCommit: "6d679f9a12" }) => lintOwnerSteps(steps, { selfDeploy }).refuse.filter((x) => x.rule === "R15");
+  const card = (command: string) => [step("Run this:", sh(command, H))];
+
+  it("refuses an update script, however it is called", () => {
+    for (const c of [
+      "cd /srv/bm/src && scripts/rebuild-live.sh",
+      "/srv/bm/src/scripts/deploy.sh --commit 6d679f9a",
+      "update-runner.sh",
+      "sh scripts/deploy.sh --rollback",
+      "bash -eu scripts/update-runner.sh",
+    ])
+      expect(r15(card(c)), c).toHaveLength(1);
+    // The refusal points the agent at Boss Man's own card, not just saying no.
+    expect(r15(card("scripts/rebuild-live.sh"))[0]!.problem).toMatch(/open "Main has moved to 6d679f9a" card/);
+  });
+
+  it("refuses a git write on the install folder, by -C, by cd, or from the host's reported folder", () => {
+    for (const c of [
+      "git -C /srv/bm/src checkout 6d679f9a",
+      "cd /srv/bm/src && git merge --ff-only 6d679f9a",
+      "(cd /srv/bm/src && git reset --hard 6d679f9a)",
+      "git checkout main", // no cd: falls back to the reported install folder
+    ])
+      expect(r15(card(c)), c).toHaveLength(1);
+    // Without a reported install folder a bare git is an agent's own checkout: left alone.
+    expect(r15(card("git checkout main"), { enabled: true })).toEqual([]);
+  });
+
+  it("passes one-off setup cards, an agent's own checkout, and the read-only git the release notes use", () => {
+    for (const c of ["cd /home/me/work && git checkout feature-x", "git -C /home/me/repo status", "git -C /srv/bm/src status", "git -C /srv/bm/src log --oneline -5", "git -C /srv/bm/src stash list"])
+      expect(r15(card(c)), c).toEqual([]);
+    expect(r15(["Add the secret in Settings → Secrets, then press Save."])).toEqual([]);
+    // A config file the owner writes inside the install folder isn't a git write.
+    expect(r15(card("cd /srv/bm/src && docker compose up -d db"))).toEqual([]);
+  });
+
+  it("is not checked at all when Boss Man doesn't raise its own card (an install without the deployer)", () => {
+    expect(r15(card("cd /srv/bm/src && scripts/rebuild-live.sh"), { enabled: false })).toEqual([]);
+  });
+
+  it("can't be overridden by the CEO: the fix is to leave the update to Boss Man's card", () => {
+    const r = checkAsk({ triedFirst: TRIED, steps: [step("Update it:", sh("cd /srv/bm/src && scripts/rebuild-live.sh", H))], lintOverride: "The server card has no steps this time.", byCeo: true, selfDeploy: { enabled: true, installDir: "/srv/bm/src" } });
+    expect(r.error).toMatch(/runs the machine's own update script/);
+  });
+
+  it("checkAsk passes the facts through, and the refusal names the open card", () => {
+    const r = checkAsk({ triedFirst: TRIED, steps: [step("Update it:", sh("cd /srv/bm/src && scripts/rebuild-live.sh", H))], selfDeploy: { enabled: true, openCommit: "6d679f9a" } });
+    expect(r.error).toMatch(/Main has moved to 6d679f9a/);
+    // No self-deploy facts at all: R15 is not checked, so the same card is only refused by the other rules (none here).
+    expect(checkAsk({ triedFirst: TRIED, steps: [step("Pin it:", sh("git -C /srv/bm/src status", H))] }).error).toBeNull();
+  });
+});
+
 describe("checkAsk with the lint", () => {
   const bad = ["Follow docs/06 for the folder."];
   it("returns the refusal with the step and the reason", () => {
@@ -346,7 +403,11 @@ describe("raise_decision checks the owner's steps", () => {
   it("raises a good card with its warnings stored, and a CEO override with its reason", async () => {
     const c = (ctx = await setup());
     const w = await c.mcp(c.worker.id);
-    const ok = await w.callTool({ name: "raise_decision", arguments: card([step("On the new host, list the containers (background on BOS-276):", sh("DOCKER_HOST=unix:///run/docker.sock docker ps", H))]) });
+    const steps = [step("On the new host, list the containers (background on BOS-276):", sh("DOCKER_HOST=unix:///run/docker.sock docker ps", H))];
+    // A host command without proof is refused (R11, DR-024); with it, the card keeps the proof for its banner.
+    expect(textOf(await w.callTool({ name: "raise_decision", arguments: card(steps) }))).toMatch(/Step 1: has a host command, so the card needs proof/);
+    expect(textOf(await w.callTool({ name: "raise_decision", arguments: card(steps, { proof: "rehearsed" }) }))).toMatch(/proof must be/);
+    const ok = await w.callTool({ name: "raise_decision", arguments: card(steps, { proof: "not rehearsed: the owner's new host, never tried there" }) });
     expect(isError(ok)).toBe(false);
     const ceo = await c.mcp(c.ceo.id);
     const over = await ceo.callTool({ name: "raise_decision", arguments: card(["Follow docs/06 on the new host."], { question: "Install on the new host?", lintOverride: "The owner asked to be pointed at the guide." }) });
@@ -354,6 +415,7 @@ describe("raise_decision checks the owner's steps", () => {
     const rows = await c.db.select().from(decisions);
     const lintOf = (q: string) => (rows.find((d) => d.question === q)!.context as { lint?: CardLint }).lint;
     expect(lintOf("Move Boss Man to the new host?")!.warn).toEqual([expect.objectContaining({ step: 1, rule: "warn", problem: expect.stringMatching(/links to a wiki page or ticket/) })]);
+    expect(lintOf("Move Boss Man to the new host?")!.proof).toEqual({ rehearsed: false, part: "the owner's new host, never tried there" });
     expect(lintOf("Install on the new host?")!.override).toMatchObject({ reason: "The owner asked to be pointed at the guide.", findings: [{ step: 1, rule: "R1" }] });
     // The CEO's list shows both.
     const list = textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list" } }));

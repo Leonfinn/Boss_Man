@@ -112,6 +112,24 @@ describe("stall monitor", () => {
     ]);
   });
 
+  it("a frame in the bundled live server (apps/server/dist/main.js) counts as server code", () => {
+    const frame = (functionName: string, url: string, lineNumber = 9) => ({ functionName, url, lineNumber, columnNumber: 0, scriptId: "1" });
+    const profile = {
+      nodes: [
+        { id: 1, callFrame: frame("(root)", ""), children: [2] },
+        { id: 2, callFrame: frame("sweep", "file:///app/apps/server/dist/main.js", 1233), children: [3] },
+        { id: 3, callFrame: frame("stringify", "file:///app/node_modules/.pnpm/x/node_modules/fast-json/index.js"), children: [] },
+      ],
+      startTime: 0,
+      endTime: 40_000,
+      samples: [3, 3, 3, 3],
+      timeDeltas: Array(4).fill(10_000),
+    };
+    const s = summariseProfile(profile, 0, 40_000);
+    expect(s.top).toEqual([{ fn: "stringify fast-json/index.js:10", ms: 40, via: "sweep apps/server/dist/main.js:1234" }]);
+    expect(s.app).toEqual([{ fn: "sweep apps/server/dist/main.js:1234", ms: 40 }]);
+  });
+
   // BOS-602: on the live server the profiler is on by default; BOSSMAN_STALL_PROFILE=0 starts no inspector session at all.
   it("BOSSMAN_STALL_PROFILE=0 starts no profiler session on the live server; without it one starts", () => {
     const connect = vi.spyOn(Session.prototype, "connect");

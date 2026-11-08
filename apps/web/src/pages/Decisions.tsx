@@ -5,11 +5,18 @@ import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
+import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
 import { SkillProposal } from "../components/SkillProposal";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
+
+// A card's note and own-word answer are kept in this browser as they are typed (BOS-637): a
+// freeze or a reload must not cost the owner what they wrote. The cards arrive one at a time, so
+// each field reads its own draft when it is first shown.
+const draftNote = (id: string) => `decision/${id}/note`;
+const draftOwn = (id: string) => `decision/${id}/own-answer`;
 
 /** The answer sent when it is too long for the box: the text is in the .txt file the line links. */
 export const ANSWER_IN_FILE = "My answer is too long to type here, so it's in this file (open it to read it whole):";
@@ -94,6 +101,20 @@ export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars, refs
       )}
     </div>
   );
+}
+
+/**
+ * The one recommendation a card shows (BOS-328). Boss Man's rule sets `recommendedOption` when the
+ * card is made; when the CEO has since advised Allow or Deny on a permission card, the CEO's call
+ * is the headline and the primary button, and `rule` carries the rule's opposite verdict so the
+ * card can say so instead of showing two recommendations.
+ */
+export function effectiveRecommendation(d: Pick<Decision, "kind" | "options" | "recommendedOption" | "context">): { option: string | null | undefined; rule: string | null } {
+  const advice = d.context?.advice;
+  if (d.kind !== "permission" || advice?.state !== "advised" || !advice.recommendation) return { option: d.recommendedOption, rule: null };
+  const option = d.options.find((o) => (advice.recommendation === "allow" ? /^allow once$/i.test(o) : /^deny$/i.test(o)));
+  if (!option) return { option: d.recommendedOption, rule: null };
+  return { option, rule: d.recommendedOption && d.recommendedOption !== option ? d.recommendedOption : null };
 }
 
 function TicketLink({ t }: { t: { ticketId: string; ref?: string | null; title: string } }) {
@@ -418,10 +439,27 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [busy, setBusy] = useState<string | null>(null);
   const [endedHere, setEndedHere] = useState<Record<string, boolean>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+  // Written to this browser as they are typed, so a freeze keeps them (BOS-637).
+  const editNote = (id: string, text: string) => {
+    setNotes((n) => ({ ...n, [id]: text }));
+    saveDraft(draftNote(id), text);
+  };
+  const forgetNote = (id: string) => {
+    setNotes(({ [id]: _, ...rest }) => rest);
+    clearDraft(draftNote(id));
+  };
   // A workflow-retro change's optional wiki link, e.g. a page slug with a section after it.
   const [reasonLinks, setReasonLinks] = useState<Record<string, string>>({});
   // The owner's own answer to an agent's question, being written; absent while not.
   const [ownWords, setOwnWords] = useState<Record<string, string>>({});
+  const editOwn = (id: string, text: string) => {
+    setOwnWords((w) => ({ ...w, [id]: text }));
+    saveDraft(draftOwn(id), text);
+  };
+  const forgetOwn = (id: string) => {
+    setOwnWords(({ [id]: _, ...rest }) => rest);
+    clearDraft(draftOwn(id));
+  };
   // A team plan's ticked hires, by position; all of them until the owner unticks one.
   const [picks, setPicks] = useState<Record<string, number[]>>({});
   // A model-change card being edited before approval.
@@ -504,7 +542,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       const markdown = await uploadText(d.companyId, ticketId || undefined, long);
       await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: `${ANSWER_IN_FILE}\n\n${markdown}`, custom: true } });
       setAnswered((a) => ({ ...a, [d.id]: ANSWER_IN_FILE }));
-      setOwnWords(({ [d.id]: _, ...rest }) => rest);
+      forgetOwn(d.id);
       setErrors(({ [d.id]: _, ...rest }) => rest);
       setNotices(({ [d.id]: _, ...rest }) => rest);
       onAnswered();
@@ -525,6 +563,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       const reasonLink = reasonLinks[d.id]?.trim();
       const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
+      // The card is answered, so its kept note and answer are done with.
+      forgetNote(d.id);
+      forgetOwn(d.id);
       setModelEdits(({ [d.id]: _, ...rest }) => rest);
       if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
@@ -669,6 +710,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const x = d.context?.explain;
               const rule = d.context?.rule;
               const advice = d.context?.advice;
+              const eff = effectiveRecommendation(d);
               const ranOut = d.context?.handoverRanOut;
               const asking = advice?.state === "asking";
               const ticketId = d.context?.type === "risk_review" ? d.context.ticketId : null;
@@ -712,8 +754,17 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     ) : null}
                     <TicketRefs about={d.about} />
+                    {/* A Boss Man update carrying the fix for a live problem (BOS-639) leads with it, above everything else on the card. */}
+                    {d.context?.type === "self_deploy" && d.context.urgent && (
+                      <p className="urgent-deploy" style={{ margin: "8px 0", padding: "8px 12px", borderRadius: 8, background: "var(--red-soft)", color: "var(--red-ink)", fontWeight: 700, fontSize: 16, overflowWrap: "anywhere" }}>
+                        {d.context.urgent.heading}
+                      </p>
+                    )}
                     {d.context?.update && <DeployUpdateView u={d.context.update} />}
-                    {d.context?.type === "instructions" && d.context.instructions ? (
+                    {d.context?.type === "self_deploy" && d.context.urgent ? (
+                      // The question's first paragraph is the heading shown just above; the rest is the usual deploy question.
+                      <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n").slice(1).join("\n\n") || d.question} refs={d.refs} /></h2>
+                    ) : d.context?.type === "instructions" && d.context.instructions ? (
                       <>
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\nNew instructions:")[0]!} refs={d.refs} /></h2>
@@ -862,6 +913,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     )}
                     {d.context?.steps && d.context.steps.length > 0 && (
                       <div>
+                        {/* How the host commands were proven (R11, DR-024 C): one line above the steps. */}
+                        {d.context.lint?.proof && (
+                          <p className="banner" data-proof={d.context.lint.proof.rehearsed ? "rehearsed" : "not-rehearsed"} style={d.context.lint.proof.rehearsed ? { background: "var(--green-soft)", color: "var(--green-ink)" } : undefined}>
+                            {d.context.lint.proof.rehearsed ? `Tried on a test machine at ${d.context.lint.proof.commit.slice(0, 7)} (${d.context.lint.proof.script}).` : `First time on a real machine: ${d.context.lint.proof.part}`}
+                          </p>
+                        )}
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.steps.map((s, i) => (
@@ -967,10 +1024,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <small className="muted">A reviewer you hire does code, security, infra or adversarial reviews once you name them in Settings › Reviews.</small>
                           </fieldset>
                         )}
-                        {d.recommendedOption && (
+                        {eff.option && (
                           <p className="rec">
                             <strong>RECOMMENDED</strong>
-                            {d.recommendedOption}
+                            {eff.option}
                             {d.context?.judge?.mode === "advise" && <span className="muted"> — {d.context.judge.second?.state === "pending" ? "Waiting a few seconds for the second opinion" : d.context.judge.reason}.</span>}
                             {d.context?.judge?.mode === "advise" && d.context.judge.second?.state === "deny" && (
                               <span className="muted" style={{ display: "block" }}>
@@ -979,17 +1036,22 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             )}
                           </p>
                         )}
+                        {eff.rule && (
+                          <p className="muted" style={{ fontSize: 13 }}>
+                            Boss Man's automatic check suggested {eff.rule}, but the CEO looked at this request and advises {eff.option}. Their reasons are above.
+                          </p>
+                        )}
                         {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
                           <div className="field">
                             <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : "Note for the agent (if you send it back)"}</label>
-                            <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} />
+                            <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => editNote(d.id, e.target.value)} />
                           </div>
                         )}
                         {d.context?.type === "workflow_change" && (
                           <>
                             <div className="field">
                               <label htmlFor={`reason-${d.id}`}>Why (shown on the Changes table, required)</label>
-                              <textarea id={`reason-${d.id}`} rows={2} maxLength={500} required value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} placeholder="e.g. adds a skill; waits for BOS-172" />
+                              <textarea id={`reason-${d.id}`} rows={2} maxLength={500} required value={notes[d.id] ?? ""} onChange={(e) => editNote(d.id, e.target.value)} placeholder="e.g. adds a skill; waits for BOS-172" />
                             </div>
                             <div className="field">
                               <label htmlFor={`reason-link-${d.id}`}>Wiki page that explains it (optional)</label>
@@ -1041,12 +1103,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         ) : ownWords[d.id] === undefined || modelEdits[d.id] ? (
                           <div className="actions">
                             {!modelEdits[d.id] && d.options.map((o) => (
-                              <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
+                              <button type="button" key={o} className={`btn${o === eff.option ? " primary" : ""}`} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
                                 {o}
                               </button>
                             ))}
                             {!modelEdits[d.id] && d.kind === "question" && (
-                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => setOwnWords((w) => ({ ...w, [d.id]: "" }))}>
+                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => editOwn(d.id, readDraft(draftOwn(d.id)))}>
                                 Write my own answer
                               </button>
                             )}
@@ -1070,11 +1132,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                 autoFocus
                                 placeholder={d.recommendedOption ?? undefined}
                                 value={ownWords[d.id] ?? ""}
-                                onChange={(text) => setOwnWords((w) => ({ ...w, [d.id]: text }))}
+                                onChange={(text) => editOwn(d.id, text)}
                                 onKeyDown={(e) => {
                                   if (e.key === "Tab" && !e.shiftKey && d.recommendedOption && !ownWords[d.id]) {
                                     e.preventDefault();
-                                    setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }));
+                                    editOwn(d.id, d.recommendedOption!);
                                   }
                                 }}
                                 textareaStyle={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
@@ -1082,7 +1144,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                 attaching={attaching === d.id}
                               />
                               {d.recommendedOption && !ownWords[d.id] && (
-                                <button type="button" className="use-suggestion" onClick={() => setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }))}>
+                                <button type="button" className="use-suggestion" onClick={() => editOwn(d.id, d.recommendedOption!)}>
                                   Use suggestion
                                 </button>
                               )}
@@ -1091,7 +1153,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim() || tooLongToSend(ownWords[d.id] ?? "")}>
                                 Send my answer
                               </button>
-                              <button type="button" className="btn" onClick={() => setOwnWords(({ [d.id]: _, ...rest }) => rest)}>
+                              <button type="button" className="btn" onClick={() => forgetOwn(d.id)}>
                                 Back to the options
                               </button>
                             </div>

@@ -7,8 +7,9 @@
 // ```sh host="nas01" as="login". That line is not part of what the owner pastes; the web app reads it and shows
 // "On nas01, as the logged-in account." above the command. A block with neither is refused (R6).
 
-import { HOST_NAME, parseStep, strayFence, type StepPiece, type Where } from "@boss-man/shared";
+import { HOST_NAME, OWNER_CONTROLS, parseStep, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
+import { norm, screenFindings, type Pressed } from "./owner-screens.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
 export { parseStep, strayFence, type StepPiece, type Where };
@@ -58,7 +59,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R9" | "R14" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -71,8 +72,9 @@ const ADDON_WORDS: Record<Addon, { label: string; re: RegExp }> = {
 };
 const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up", stopped: "stopped", needs_login: "waiting for a login", running: "running", unknown: "unknown" };
 /** What the lint can be given: add-on facts for R9 (and the add-on this card sets up, whose steps are exempt),
- * and the host facts for R6 (BOS-427). Either may be absent, and then that rule only checks what it can without them. */
-export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[] };
+ * the host facts for R6 (BOS-427), the card's options, and the machine's own update card for R15 (DR-036). Each
+ * may be absent, and then that rule only checks what it can without them. */
+export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; options?: readonly string[]; selfDeploy?: SelfDeployFacts };
 
 /** R9: a step that relies on an add-on that isn't running is refused; one Boss Man can't see is warned about. */
 function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: Addon | undefined, refuse: LintFinding[], warn: LintFinding[]) {
@@ -90,8 +92,294 @@ function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: A
     }
   }
 }
-/** What a raised card keeps from the lint: warnings, and a CEO override with its reason and what it let through. */
-export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[] } };
+/**
+ * How a card with host commands was proven (R11, DR-024 C): rehearsed by a script in CI at a commit, or not
+ * rehearsed, naming the part that is the first time on a real machine. The card shows it as a banner.
+ */
+export type Proof = { rehearsed: true; script: string; commit: string } | { rehearsed: false; part: string };
+
+/** Reads an agent's `proof` field: "rehearsed <script> @ <commit>" or "not rehearsed: <what and why>". A string is why it can't. */
+export function parseProof(text: string): Proof | string {
+  const t = text.replace(/\s+/g, " ").trim();
+  const r = /^rehearsed (\S+) ?@ ?([0-9a-f]{7,40})$/i.exec(t);
+  if (r) return { rehearsed: true, script: r[1]!, commit: r[2]!.toLowerCase() };
+  const n = /^not rehearsed: ?(.+)$/i.exec(t);
+  if (n && n[1]!.trim().length >= 10) return { rehearsed: false, part: n[1]!.trim() };
+  return `proof must be "rehearsed <script> @ <commit>" (the CI rehearsal script under scripts/rehearse/ and the commit it passed on) or "not rehearsed: <what hasn't been tried and why>", at least 10 characters after the colon`;
+}
+
+/** What a raised card keeps from the lint: warnings, a CEO override with its reason and what it let through, and the proof (R11). */
+export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[] }; proof?: Proof };
+
+/**
+ * R10 (DR-024 D): commands that stop and wait for typed input. The owner reads every prompt as something to
+ * fill in, and a secret typed into a terminal is the wrong channel: it goes in an editor step naming the exact
+ * line, or through Boss Man's Secrets screen. Matched where a command starts (line start, after ; & | ( or `),
+ * also behind sudo and VAR=value prefixes.
+ */
+const CMD = String.raw`(?:^|[;&|(\`])\s*(?:sudo\s+(?:-\S+\s+)*)?(?:[A-Za-z_]\w*=\S*\s+)*`;
+const INTERACTIVE: Array<[RegExp, string]> = [
+  [new RegExp(CMD + String.raw`read\b(?!-)`, "m"), "reads typed input (read)"],
+  [/\bsudo\s+(?:-\w*\s+)*-\w*S/, "reads a password from typed input (sudo -S)"],
+  [new RegExp(CMD + String.raw`passwd\b(?!-)`, "m"), "asks for a password (passwd)"],
+  [new RegExp(CMD + String.raw`ssh-keygen\b(?![^;&|\n]*\s-(?:N|[a-zA-Z]*[lFR]))`, "m"), "asks for a file name and passphrase (ssh-keygen without -N)"],
+  [new RegExp(CMD + String.raw`docker\s+login\b(?![^;&|\n]*--password-stdin)`, "m"), "asks for a user name and password (docker login)"],
+];
+
+/**
+ * One simple command of a piece of shell: its words (quotes kept), and whether its output goes into a pipe or
+ * its input comes from one or a `<` redirect. The R10 forms below and R12 judge commands, not text, so the
+ * `;` or `|` inside `$(…)` or quotes doesn't split a command, and `D=$(psql …)` (output captured, no terminal)
+ * isn't read as a psql in the terminal.
+ */
+type SimpleCommand = { words: string[]; pipedOut: boolean; pipedIn: boolean };
+
+/**
+ * Splits shell into simple commands at ; & | && || newlines and ( ), outside quotes, `$(…)` and backticks.
+ * Not R6's `simpleCommands` (below): that one unquotes words for path checks and has no pipe or `$(…)` sense,
+ * and R10 needs both (a psql into `| cat` or inside `$(…)` has no terminal).
+ */
+export function shellCommands(code: string): SimpleCommand[] {
+  const src = code.replace(/\\\n/g, " ");
+  const out: SimpleCommand[] = [];
+  let words: string[] = [];
+  let word = "";
+  let depth = 0;
+  let quote: "'" | '"' | "`" | null = null;
+  let pipedIn = false;
+  const endWord = () => { if (word) words.push(word); word = ""; };
+  const endCommand = (pipe: boolean) => {
+    endWord();
+    if (words.length) out.push({ words, pipedOut: pipe, pipedIn });
+    words = [];
+    pipedIn = pipe;
+  };
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i]!;
+    if (quote) {
+      word += ch;
+      if (ch === "\\" && quote !== "'" && i + 1 < src.length) word += src[++i]!;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < src.length) { word += ch + src[++i]!; continue; }
+    if (ch === "'" || ch === '"' || ch === "`") { quote = ch; word += ch; continue; }
+    if (ch === "$" && src[i + 1] === "(") { depth++; word += "$("; i++; continue; }
+    if (depth) {
+      word += ch;
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      continue;
+    }
+    if (ch === "#" && !word) { while (i + 1 < src.length && src[i + 1] !== "\n") i++; continue; }
+    if (ch === "|" && src[i + 1] !== "|") { endCommand(true); continue; }
+    if (ch === ";" || ch === "&" || ch === "|" || ch === "\n" || ch === "(" || ch === ")") {
+      if ((ch === "&" || ch === "|") && src[i + 1] === ch) i++;
+      // `2>&1` and `&>` are redirects, not a separator.
+      if (ch === "&" && (word.endsWith(">") || src[i + 1] === ">")) { word += ch; continue; }
+      endCommand(false);
+      continue;
+    }
+    if (/\s/.test(ch)) { endWord(); continue; }
+    word += ch;
+  }
+  endCommand(false);
+  return out;
+}
+
+/** A word without its quotes, for comparing (`"$D/x"` → `$D/x`). */
+const bare = (w: string) => w.replace(/^(['"])(.*)\1$/s, "$2");
+/** sudo's options that take a value (`sudo -u postgres psql`). */
+const SUDO_VALUE_FLAGS = new Set(["-u", "-g", "-U", "-C", "-D", "-h", "-p", "-r", "-t"]);
+/** Words that start a command without being it: shell keywords, sudo, env, nohup, time, and leading VAR=value. */
+function commandWords(words: string[]): { env: string[]; rest: string[] } {
+  const env: string[] = [];
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i]!;
+    if (/^[A-Za-z_]\w*=/.test(w)) { env.push(w); i++; continue; }
+    if (["!", "if", "then", "else", "elif", "do", "while", "until", "{", "}", "time", "nohup", "exec", "command"].includes(w)) { i++; continue; }
+    if (w === "env") { i++; while (i < words.length && /^-/.test(words[i]!)) i++; continue; }
+    if (w === "sudo") {
+      i++;
+      while (i < words.length && /^-/.test(words[i]!)) i += SUDO_VALUE_FLAGS.has(words[i]!) ? 2 : 1;
+      continue;
+    }
+    break;
+  }
+  return { env, rest: words.slice(i) };
+}
+
+/**
+ * The command a `docker exec`, `docker compose exec` or `kubectl exec` runs inside the container, and whether it
+ * gets a terminal (`-t`; compose exec gives one unless `-T`). Null when `words` isn't one of those.
+ */
+function execInner(words: string[]): { inner: string[]; tty: boolean } | null {
+  let i: number;
+  let tty: boolean;
+  let valueFlags: Set<string>;
+  if (words[0] === "docker" && words[1] === "exec") { i = 2; tty = false; valueFlags = new Set(["-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys"]); }
+  else if ((words[0] === "docker" && words[1] === "compose") || words[0] === "docker-compose") {
+    i = words[0] === "docker" ? 2 : 1;
+    while (i < words.length && /^-/.test(words[i]!)) i += ["-f", "--file", "-p", "--project-name", "--env-file", "--profile", "--project-directory"].includes(words[i]!) ? 2 : 1;
+    if (words[i] !== "exec" && words[i] !== "run") return null;
+    i++;
+    tty = true;
+    valueFlags = new Set(["-e", "--env", "-u", "--user", "-w", "--workdir", "--index", "--name", "--entrypoint", "-p", "--publish", "-v", "--volume", "-l", "--label"]);
+  } else if (words[0] === "kubectl" && words[1] === "exec") { i = 2; tty = false; valueFlags = new Set(["-n", "--namespace", "-c", "--container", "--context"]); }
+  else return null;
+  const compose = tty;
+  for (; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === "--") { i++; break; }
+    if (!w.startsWith("-")) break;
+    if (valueFlags.has(w)) { i++; continue; }
+    if (compose && (w === "-T" || w === "--no-TTY" || w === "--no-tty")) tty = false;
+    else if (w === "--tty" || (/^-[A-Za-z]+$/.test(w) && w.includes("t"))) tty = true;
+  }
+  // The container (or service, or pod) comes next, then the command; kubectl puts the command after `--`.
+  const inner = words[0] === "kubectl" ? words.slice(words.indexOf("--") + 1 || words.length) : words.slice(i + 1);
+  return { inner, tty };
+}
+
+/** A short-option cluster or long option: `has("-n 5 -f", "f", "--follow")`. */
+// The letters of a cluster stop at a digit: `-bn1` is -b and -n 1, `-n50` is -n 50.
+const hasFlag = (args: string[], short: string, long?: string) =>
+  args.some((a) => (long !== undefined && (a === long || a.startsWith(`${long}=`))) || (/^-([A-Za-z]+)\w*$/.exec(a)?.[1]?.includes(short) ?? false));
+
+/** Database clients that open a prompt unless given what to run; each with the options that make it one-shot. */
+const DB_ONE_SHOT: Record<string, RegExp> = {
+  // -c, -f or -l, also in a cluster (`-tAc`).
+  psql: /^--(?:command|file|list)(?:=|$)|^-[A-Za-z]*[cfl]/,
+  mysql: /^--execute(?:=|$)|^-[A-Za-z]*e/,
+  mariadb: /^--execute(?:=|$)|^-[A-Za-z]*e/,
+};
+const SHELLS = new Set(["sh", "bash", "ash", "zsh", "dash"]);
+
+/** psql's pager is off: `-P pager=off`, `--pset=pager=off`, a PAGER/PSQL_PAGER prefix, or `\pset pager off` in the same command. */
+function psqlPagerOff(args: string[], env: string[], code: string): boolean {
+  if (env.some((e) => /^(?:PSQL_)?PAGER=/.test(e))) return true;
+  if (/\\pset\s+pager\s+(?:off|0)\b/.test(code)) return true;
+  for (let i = 0; i < args.length; i++) {
+    const a = bare(args[i]!);
+    const val = a === "-P" || a === "--pset" ? bare(args[i + 1] ?? "") : /^(?:-P|--pset=)(.*)$/.exec(a)?.[1];
+    if (val !== undefined && /^pager=(?:off|0)$/.test(val)) return true;
+  }
+  return false;
+}
+
+/** systemctl verbs that print through a pager. */
+const SYSTEMCTL_PAGES = /^(?:status|show|cat|help|list-[\w-]+)$/;
+/** git's options before the verb that take a value. */
+const GIT_VALUE_FLAGS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
+
+/**
+ * R10, the forms DR-024's amendment adds (BOS-543): a pager the owner gets stuck in ("(END)", ":"), a prompt
+ * the owner would type queries into, and a command that never returns by itself. Each says what to use instead.
+ * A command whose output goes into a pipe or `$(…)` has no terminal, so it never pages.
+ */
+function waitsIn(code: string): string[] {
+  const found: string[] = [];
+  for (const c of shellCommands(code)) {
+    const { env, rest } = commandWords(c.words);
+    if (!rest.length) continue;
+    const exec = execInner(rest);
+    // Inside a container the command has a terminal only with -t; outside, the owner's terminal.
+    const run = exec ? commandWords(exec.inner) : { env, rest };
+    const words = run.rest.map(bare);
+    const tty = exec ? exec.tty : true;
+    const [cmd, ...args] = words;
+    if (!cmd) continue;
+    const name = cmd.replace(/^.*\//, "");
+    const toTerminal = tty && !c.pipedOut;
+    const stdinGiven = c.pipedIn || args.some((a) => a.startsWith("<"));
+    if (name in DB_ONE_SHOT && !stdinGiven && !args.some((a) => DB_ONE_SHOT[name]!.test(a))) {
+      found.push(`opens a ${name} prompt the owner would type queries into (${name} without a query). Give the query in the command: ${name} ${name === "psql" ? '-P pager=off -c "…"' : '-e "…"'}`);
+      continue;
+    }
+    if (exec && exec.tty && SHELLS.has(name) && !args.some((a) => a === "-c" || /^-\w*c$/.test(a)) && !args.some((a) => !a.startsWith("-"))) {
+      found.push(`opens a shell inside the container that the owner would type into (${name}). Run the command itself instead: docker exec <container> ${name} -c "…" or the command directly`);
+      continue;
+    }
+    if (toTerminal) {
+      if (name === "psql" && !psqlPagerOff(run.rest, [...env, ...run.env], code)) {
+        found.push("shows long output in a pager (psql), where the owner is stuck at \"(END)\" or \":\". Add -P pager=off");
+      } else if (name === "git") {
+        let i = 0;
+        let noPager = false;
+        while (i < args.length && args[i]!.startsWith("-")) {
+          if (args[i] === "--no-pager" || args[i] === "-P") noPager = true;
+          i += GIT_VALUE_FLAGS.has(args[i]!) ? 2 : 1;
+        }
+        const verb = args[i];
+        const pagerEnv = [...env, ...run.env].some((e) => /^(?:GIT_)?PAGER=/.test(e));
+        if (verb && ["log", "diff", "show"].includes(verb) && !noPager && !pagerEnv && !args.includes("--quiet")) {
+          found.push(`shows its output in a pager (git ${verb}), where the owner is stuck at "(END)" or ":". Write git --no-pager ${verb} …`);
+        }
+      } else if (name === "systemctl" && !args.includes("--no-pager") && SYSTEMCTL_PAGES.test(args.find((a) => !a.startsWith("-")) ?? "status")) {
+        found.push(`shows its output in a pager (systemctl ${args.find((a) => !a.startsWith("-")) ?? "status"}), where the owner is stuck at "(END)" or ":". Add --no-pager: systemctl --no-pager …`);
+      } else if (name === "journalctl" && !args.includes("--no-pager") && !hasFlag(args, "f", "--follow")) {
+        found.push("shows the log in a pager (journalctl), where the owner is stuck at \"(END)\" or \":\". Add --no-pager, and -n 50 to show only the last lines");
+      }
+    }
+    if (name === "less" || name === "more" || name === "man") {
+      found.push(`is a pager (${name}), where the owner is stuck at "(END)" or ":". Print the text itself (cat, or the command's own output; --help instead of man)`);
+    } else if (name === "journalctl" && hasFlag(args, "f", "--follow")) {
+      found.push("follows the log and never returns by itself (journalctl -f). Show the last lines instead: journalctl --no-pager -n 50 …");
+    } else if (name === "docker" && args[0] === "stats" && !args.includes("--no-stream")) {
+      found.push("keeps updating and never returns by itself (docker stats). Add --no-stream");
+    } else if (((name === "docker" && (args[0] === "logs" || (args[0] === "compose" && args.includes("logs")))) || (name === "docker-compose" && args.includes("logs"))) && hasFlag(args.slice(args.indexOf("logs") + 1), "f", "--follow")) {
+      found.push("follows the log and never returns by itself (logs -f). Drop -f and show the last lines: docker logs --tail 50 …");
+    } else if (name === "tail" && (hasFlag(args, "f", "--follow") || hasFlag(args, "F"))) {
+      found.push("follows the file and never returns by itself (tail -f). Drop -f: tail -n 50 …");
+    } else if (name === "watch") {
+      found.push("repeats until it is stopped and never returns by itself (watch). Run the command once instead");
+    } else if (name === "htop" || (name === "top" && !hasFlag(args, "n"))) {
+      found.push(`keeps updating and never returns by itself (${name}). Use a one-shot command: top -b -n 1 | head -n 20, or docker stats --no-stream`);
+    } else if (name === "ping" && !hasFlag(args, "c") && !hasFlag(args, "w")) {
+      found.push("keeps going and never returns by itself (ping without -c). Add -c 3");
+    }
+  }
+  return found;
+}
+
+/**
+ * R12 (BOS-550 answer, DR-024 amendment): a command block made only of commands that print nothing when they
+ * work looks to the owner as if it failed. Silent commands: assignments, cd, export, and file commands without -v.
+ * The step must say so ("This prints nothing.") or show the result (`D=$(…); echo "$D"`). Overridable: the
+ * wording is a judgement.
+ */
+const SILENT_FILE_COMMANDS = new Set(["cp", "mv", "install", "mkdir", "chmod", "chown", "ln", "touch", "rm"]);
+const SAYS_SILENT = /\b(?:prints?|shows?|outputs?|says?|returns?) nothing\b|\bno output\b|\b(?:doesn'?t|does not|won'?t|will not) (?:print|show|output) anything\b|\bnothing (?:is |will be |gets )?(?:printed|shown)\b|\bsilent(?:ly)?\b/i;
+
+/** What a block is when it prints nothing: "assignment" when one of its commands sets a variable, else "silent"; null when it prints. */
+function silentBlock(code: string): "assignment" | "silent" | null {
+  const cmds = shellCommands(code);
+  if (!cmds.length) return null;
+  let assignment = false;
+  for (const c of cmds) {
+    const { env, rest } = commandWords(c.words);
+    if (!rest.length) {
+      if (!env.length) return null;
+      assignment = true;
+      continue;
+    }
+    const [cmd, ...args] = rest.map(bare);
+    if (cmd === "cd") { if (args[0] === "-") return null; continue; }
+    if (cmd === "export") { if (!args.length || args.some((a) => a.startsWith("-"))) return null; continue; }
+    if (SILENT_FILE_COMMANDS.has(cmd!) && !hasFlag(args, "v", "--verbose")) continue;
+    return null;
+  }
+  return assignment ? "assignment" : "silent";
+}
+
+/**
+ * R11 (DR-024 D): a host command, so the card must say how it was proven. A fixed list: docker and compose,
+ * systemctl, tailscale, chown/chmod, and anything that names the .env file.
+ */
+const HOST_COMMAND = new RegExp(CMD + String.raw`(?:docker(?:-compose)?|systemctl|tailscale|chown|chmod)\b|(?:^|[\s/"'=>])\.env\b`, "m");
+/** A look-only command (DR-024 kind 1): what a "not rehearsed" card ends with, so its answer closes the part that was untried. */
+const LOOK_ONLY = new RegExp(CMD + String.raw`(?:docker(?:-compose)?\s+(?:compose\s+(?:-f\s+\S+\s+)*)?(?:ps|inspect|logs|images|version)|tailscale\s+(?:status|ip|version)|systemctl\s+(?:--no-pager\s+status|is-active|is-enabled)|curl|cat|ls|grep|df|du|ping|getent)\b`, "m");
 
 /** Variables the owner's shell always has; using them unset is not a mistake. */
 const SHELL_ENV = new Set(["HOME", "PATH", "PWD", "OLDPWD", "USER", "SHELL", "HOSTNAME", "UID", "LANG", "TERM"]);
@@ -107,6 +395,16 @@ const DOC_POINTERS: Array<[RegExp, string]> = [
   [/\bwith (?:the |your |some )?changes\b/i, "asks the owner to adapt instructions (\"with changes\")"],
   [/\b(?:same as|as) (?:before|last time|usual)\b/i, "relies on what the owner did before"],
   [/\b(?:previous|earlier|other|last|old) card\b/i, "sends the owner to another card"],
+];
+/**
+ * R15 (BOS-594): a command that recreates or restarts the runners at once cuts off every run in progress, with no
+ * drain and no wake afterwards (6 Nov 16:00: a setting change applied with recreate-all). Setting changes go through
+ * `scripts/update-runner.sh --settings`, new images through Build and update runners; both drain first.
+ */
+const RUNNER_RECREATE: Array<[RegExp, string]> = [
+  [/\brecreate-all\b/, "recreates every runner at once"],
+  [/\bupdate-runner\.sh\b[^\n|;&]*\s--now\b/, "recreates every runner at once (--now)"],
+  [/\bdocker\s+(?:restart|stop|rm(?:\s+-f)?)\s+[^\n|;&]*\bboss-man-runner-/, "restarts or removes a runner container directly"],
 ];
 const HEDGES = /\b(?:probably|should be|if it'?s still|i think|maybe|hopefully|might need)\b/i;
 const LINK = /\[\[|#\/(?:wiki|tickets)\/|\b[A-Z]{2,6}-\d+\b/;
@@ -138,6 +436,98 @@ function usesIn(code: string): string[] {
   return out;
 }
 
+/** Keys on the keyboard: "press Enter" is not a button. */
+const KEYS = new Set(["enter", "return", "esc", "escape", "tab", "space", "spacebar", "ctrl", "control", "cmd", "command", "shift", "alt", "option", "delete", "backspace", "f5", "y", "n", "q"]);
+/** Words that end a button's name in a sentence: "press Approve on the card", "click Save again". */
+const AFTER_LABEL = /^(?:on|in|at|to|for|from|under|next|below|above|beside|near|again|and|then|when|once|if|so|or|until|button|link|tab|there|here|now|first|twice)\b/;
+/**
+ * Every control, normalised; a label ending in "…" is kept as its start and matches anything after it. A label
+ * with a bracketed note ("Update runners (finish runs first)") also matches without it, as cards name it that way.
+ */
+const CONTROLS = (() => {
+  const exact = new Set<string>(); // not state: local to the CONTROLS lookup-table builder
+  const prefix = new Set<string>(); // not state: local to the CONTROLS lookup-table builder
+  for (const labels of Object.values(OWNER_CONTROLS) as ReadonlyArray<readonly string[]>) {
+    for (const l of labels) {
+      if (l.endsWith("…")) { prefix.add(norm(l)); continue; }
+      exact.add(norm(l));
+      const bare = l.replace(/\s*\([^)]*\)$/, "");
+      if (bare && bare !== l) exact.add(norm(bare));
+    }
+  }
+  return { exact, prefix };
+})();
+const SCREENS = (Object.keys(OWNER_CONTROLS) as OwnerScreen[]).filter((k) => k !== "Any screen");
+
+/**
+ * Whether `name` is a control: a key, an exact label or card option, the start of a "…" label, or, when it wasn't
+ * quoted (so the sentence may run on), a label followed by a word that ends it ("Approve on the card").
+ */
+/**
+ * Which control `name` is: the listed label it names (normalised), "" for a key or one of the card's own options
+ * (real, but not on any screen's list), or null when it isn't a control. A "…" label matches anything after its
+ * start; when the name wasn't quoted (so the sentence may run on), a label followed by a word that ends it
+ * ("Approve on the card") counts too.
+ */
+function controlLabel(name: string, quoted: boolean, options: Set<string>): string | null {
+  const n = norm(name);
+  if (!n || KEYS.has(n.split(" ")[0]!) || options.has(n)) return "";
+  if (CONTROLS.exact.has(n)) return n;
+  for (const p of CONTROLS.prefix) if (n === p || n.startsWith(`${p} `)) return p;
+  if (quoted) return null;
+  for (const l of [...CONTROLS.exact, ...options]) if (n.startsWith(`${l} `) && AFTER_LABEL.test(n.slice(l.length + 1))) return options.has(l) ? "" : l;
+  return null;
+}
+
+/**
+ * The controls a step tells the owner to press: `missing` are names the app doesn't have (R7), `pressed` the listed
+ * buttons it names, with where (for R8). A name counts when it follows press/click/tap/hit and is quoted, bold or
+ * starts with a capital ("press Overrule and merge"), or when it is "the X button". Lower-case words after the verb
+ * ("click the link", "press it") aren't taken as names: refusing those would stop good cards, and a made-up button
+ * is written the way the screen would show it.
+ */
+function controlsIn(prose: string, options: Set<string>): { missing: string[]; pressed: Pressed[] } {
+  const missing: string[] = [];
+  const pressed: Pressed[] = [];
+  const named = (raw: string, quoted: boolean, at: number) => {
+    const n = raw.replace(/\s+/g, " ").trim();
+    if (!n) return;
+    const label = controlLabel(n, quoted, options);
+    if (label === null) { if (!missing.includes(n)) missing.push(n); }
+    else if (label) pressed.push({ label, at });
+  };
+  for (const m of prose.matchAll(/\b(?:press|click|tap|hit)\s+(?:on\s+)?(?:the\s+)?/gi)) {
+    const rest = prose.slice(m.index + m[0].length);
+    const q = /^(?:"([^"\n]+)"|“([^”\n]+)”|\*\*([^*\n]+)\*\*|`([^`\n]+)`|'([^'\n]+)'(?!\w))/.exec(rest);
+    if (q) named(q[1] ?? q[2] ?? q[3] ?? q[4] ?? q[5]!, true, m.index);
+    else if (/^\p{Lu}/u.test(rest)) {
+      // Widest reading first: an option can hold a comma ("Yes, move it") or a bracket that is part of the label
+      // ("Update runners (finish runs first)"). Only if none of those is a control, cut at a comma or bracket
+      // ("Save (top right)", "Approve, then close") and judge the shorter name.
+      const cut = (re: RegExp) => rest.split(re)[0]!;
+      const end = String.raw`\s+(?:button|link|tab)\b`;
+      const readings = [`[.;:!?\\n→>]|${end}`, `[.,;:!?\\n→>]|${end}`, `[.,;:!?()\\n→>]|${end}`].map((re) => cut(new RegExp(re)));
+      const label = readings.map((r) => controlLabel(r, false, options)).find((l) => l !== null);
+      if (label === undefined) named(readings[2]!, false, m.index);
+      else if (label) pressed.push({ label, at: m.index });
+    }
+  }
+  for (const m of prose.matchAll(/(?:"([^"\n]+)"|“([^”\n]+)”|\*\*([^*\n]+)\*\*)\s+button\b/g)) named(m[1] ?? m[2] ?? m[3]!, true, m.index);
+  for (const m of prose.matchAll(/\bthe\s+(\p{Lu}[^.,;:!?()\n"“”*]*?)\s+button\b/gu)) named(m[1]!, false, m.index);
+  return { missing, pressed };
+}
+
+/** The first screen a step names, for the list in a refusal; a ticket reference or the word "ticket" is Ticket. */
+function screenIn(prose: string): OwnerScreen | null {
+  let best: { at: number; s: OwnerScreen } | null = null;
+  const consider = (at: number, s: OwnerScreen) => {
+    if (at >= 0 && (!best || at < best.at)) best = { at, s };
+  };
+  for (const s of SCREENS) consider(prose.search(new RegExp(`\\b${s}\\b`)), s);
+  consider(prose.search(/\b[A-Z]{2,6}-\d+\b|\bticket\b/i), "Ticket");
+  return (best as { s: OwnerScreen } | null)?.s ?? null;
+}
+
 /** A `{{host.network.port.web}}`-style token: a recorded host fact (host-facts.ts) to fill in when a card is raised. */
 const HOST_TOKEN = /\{\{\s*host\.([A-Za-z0-9_.]{1,80})\s*\}\}/g;
 
@@ -150,8 +540,7 @@ export function hostTokensIn(steps: readonly string[]): string[] {
  * a value that would break a command block: a newline or a backtick); those tokens are left as they are, so the lint
  * and the card can't go out with a hole in it. */
 export function fillHostTokens(steps: readonly string[], values: Readonly<Record<string, string>>): { steps: string[]; missing: string[] } {
-  // not state: collects this one call's missing keys and is returned, nothing outlives the call.
-  const missing = new Set<string>();
+  const missing = new Set<string>(); // not state: local to fillHostTokens
   const filled = steps.map((s) =>
     s.replace(HOST_TOKEN, (token, key: string) => {
       const v = Object.hasOwn(values, key) ? values[key]! : undefined;
@@ -169,6 +558,13 @@ export function fillHostTokens(steps: readonly string[], values: Readonly<Record
  * in inline code, or a ``` that isn't a complete block and would show as raw text (BOS-550); R4 a `{{…}}` token, which Boss Man can't fill in yet. Warnings: a wiki or ticket link, more
  * than one command in a step or more than 12 steps, and hedging next to a command.
  *
+ * R7 (BOS-421, DR-009 L6): a step that tells the owner to press a button the app doesn't have
+ * (`OWNER_CONTROLS`) is refused; `options` (the card's own buttons, which the owner can press too) count as real.
+ *
+ * R8 and R13 (BOS-442, owner-screens.ts): a path ("Settings → Secrets") must follow the app's menus and tabs, and a
+ * button or field it names must be on the screen the path reaches (`OWNER_FIELDS` lists the fields); a step that
+ * tells the owner to fill in a field must give the value or say that any value works. Both can be overridden.
+ *
  * R6 (BOS-427) is the host and account check: every command block says where it runs and as whom, and a block
  * run by the owner's login may not read a recorded folder that login can't read unless an earlier block on the
  * card stages a readable copy for it. Pass `hosts` (the host facts Boss Man recorded) to check the paths;
@@ -183,18 +579,29 @@ export function fillHostTokens(steps: readonly string[], values: Readonly<Record
  * subshell (`gitUmaskFindings`), and a `umask` outside a subshell is refused, since it stays set in the owner's terminal.
  * A CEO override can't let it through.
  *
+ * R15 (DR-036), only when `selfDeploy` is given and the host deployer is installed: an agent card may not bring
+ * the machine that runs Boss Man to a commit (`updateCardFindings`). That job belongs to Boss Man's own "Main has
+ * moved" card, which is pinned, kept current and cleared by itself; the refusal points the agent to it.
+ *
  * `facts` is either the host facts array (R6 alone, the older call shape) or a `LintFacts` object carrying
- * `hosts`, `addons` and `setsUp`. Each rule runs only when its facts are there.
+ * `hosts`, `addons`, `setsUp` and `selfDeploy`. Each rule runs only when its facts are there.
+ *
+ * R10 (DR-024): a command that waits for typed input (INTERACTIVE), and since BOS-543 one that opens a pager, a
+ * database or container-shell prompt, or never returns by itself (`waitsIn`). R11 (DR-024): steps with a host command
+ * (HOST_COMMAND) need `proof`; a "not rehearsed" proof also needs the last step to be a look-only check.
+ * R12 (BOS-543): a command block that prints nothing when it works must say so or show its result (`silentBlock`).
  */
-export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[]): { refuse: LintFinding[]; warn: LintFinding[] } {
+export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[], proof?: Proof): { refuse: LintFinding[]; warn: LintFinding[] } {
   const given: LintFacts = Array.isArray(facts) ? { hosts: facts } : facts ?? {};
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
   // not state: scratch for one call over one card; nothing is kept between calls.
   const set = new Set<string>();
+  const own = new Set((given.options ?? []).map(norm));
   /** What earlier blocks on this card made readable for the login (BOS-427), per host and folder. */
   // not state: scratch for one call over one card; nothing is kept between calls.
   const staged = new Map<string, Set<string>>();
+  let hostStep = 0;
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
     const step = i + 1;
@@ -221,19 +628,56 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[])
       if (p) refuse.push({ step, rule: "R3", problem: `has a command that ${p}: ${b.slice(0, 120)}` });
     }
     for (const c of inline) if (PLACEHOLDER.test(c)) refuse.push({ step, rule: "R3", problem: `has a placeholder the owner would have to edit: ${c.slice(0, 120)}` });
+    for (const c of code)
+      for (const [re, what] of RUNNER_RECREATE)
+        if (re.test(c)) {
+          refuse.push({ step, rule: "R15", problem: `${what}, which cuts off every agent run in progress with no drain and no wake afterwards. For a runner setting change use \`scripts/update-runner.sh --settings\` (it waits for runs to finish, then wakes the agents); for a new runner image use Settings → Server and runner → Updates → Build and update runners. In a real emergency only the CEO can raise it, with lintOverride saying why` });
+          break;
+        }
     // A `{{host.…}}` token is filled in by `fillHostTokens` before this lint runs (checkAsk), so one left here had no
     // recorded fact behind it, or the caller has no host facts; any other token never has a value.
     for (const m of text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) refuse.push({ step, rule: "R4", problem: `has {{${m[1]}}}, which Boss Man has no value for. Write the value itself` });
+    const { missing, pressed } = controlsIn(prose, own);
+    const screens = screenFindings(prose, pressed);
+    for (const name of missing) {
+      const screen = screens.screen ?? screenIn(prose);
+      const there = screen ? ` The buttons on ${screen} are: ${OWNER_CONTROLS[screen].join(", ")}.` : "";
+      refuse.push({ step, rule: "R7", problem: `tells the owner to press "${name}", which isn't a button in the app.${there} Name a button exactly as the screen shows it, or one of this card's options` });
+    }
+    for (const problem of screens.r8) refuse.push({ step, rule: "R8", problem });
+    for (const problem of screens.r13) refuse.push({ step, rule: "R13", problem });
     const host = lintHost(blockPieces, step, given.hosts, staged, step === 1);
     refuse.push(...host.refuse);
     warn.push(...host.warn);
     for (const c of code) refuse.push(...gitUmaskFindings(step, c));
+    if (given.selfDeploy) updateCardFindings(step, code, given.selfDeploy, refuse);
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
+    for (const c of code) {
+      const hit = INTERACTIVE.find(([re]) => re.test(c));
+      if (hit) refuse.push({ step, rule: "R10", problem: `has a command that ${hit[1]}, which the owner would have to answer by typing: ${c.slice(0, 120)}. Give the value in the command, or for a secret an editor step naming the exact line (TS_AUTHKEY= in .env) or Boss Man's Secrets screen` });
+      for (const w of new Set(waitsIn(c))) refuse.push({ step, rule: "R10", problem: `has a command that ${w}: ${c.slice(0, 120)}` });
+    }
+    // R12: only command blocks (what the owner runs), and the step's own sentences.
+    if (!SAYS_SILENT.test(prose)) {
+      for (const b of blocks) {
+        const kind = silentBlock(b);
+        if (kind) refuse.push({ step, rule: "R12", problem: `has a command that prints nothing when it works, so the owner may think it failed: ${b.slice(0, 120)}. Say so in the sentence ("This prints nothing.")${kind === "assignment" ? ', or show the value: D=$(…); echo "$D"' : ", or show the result (cp -v, mv -v…, or an ls or pwd after it)"}` });
+      }
+    }
+    if (!hostStep && code.some((c) => HOST_COMMAND.test(c))) hostStep = step;
     if (LINK.test(prose)) warn.push({ step, rule: "warn", problem: "links to a wiki page or ticket; fine as background, but the step itself must be complete" });
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
     const hedge = code.length ? HEDGES.exec(prose) : null;
     if (hedge) warn.push({ step, rule: "warn", problem: `hedges ("${hedge[0]}") next to a command` });
   });
+  if (hostStep && !proof) {
+    refuse.push({ step: hostStep, rule: "R11", problem: `has a host command, so the card needs proof: "rehearsed <script> @ <commit>" once a CI rehearsal passed, or "not rehearsed: <what and why>" with a look-only check as the last step` });
+  } else if (proof && !proof.rehearsed) {
+    const last = steps.length ? pieces(steps[steps.length - 1]!) : null;
+    if (!last || ![...last.blocks, ...last.inline].some((c) => LOOK_ONLY.test(c))) {
+      refuse.push({ step: steps.length, rule: "R11", problem: "is the last step of a card that is the first time on a real machine, so it must be a check that only looks (docker compose ps, docker logs, tailscale status, curl…) and say what to paste back" });
+    }
+  }
   return { refuse, warn };
 }
 
@@ -659,9 +1103,126 @@ export function gitUmaskFindings(step: number, command: string): LintFinding[] {
   return out;
 }
 
-/** Rules a CEO override can't let through: a command the owner can't paste as it is, or a value Boss Man doesn't have. */
+// ---------------------------------------------------------------------------------------------------
+// R15 (DR-036, the 7 Nov duplicate update cards). The machine's own update, pinning it to a commit,
+// rebuilding it and rolling it back are Boss Man's job: its "Main has moved" card is pinned, kept current
+// and cleared by itself. An agent card that also does it has no commit behind it, so nothing supersedes
+// it, and the owner is asked twice. So that card is refused here, pointed at Boss Man's own.
+// ---------------------------------------------------------------------------------------------------
+
+/** What the machine's own update card is, as far as this rule needs it: whether the host deployer is
+ * installed at all (an install without one only ever gets an agent's card), the install folder the host
+ * reported (so a git there is recognised, never guessed), and the open card's commit for the refusal to name. */
+export type SelfDeployFacts = {
+  /** The deployer folder is set, so Boss Man raises its own update card. */
+  enabled: boolean;
+  /** The install folder the host reported (`paths.src`, where the checkout lives). */
+  installDir?: string;
+  /** The commit that card offers, for the refusal to name; absent when none is open. */
+  openCommit?: string;
+};
+
+/** The scripts that bring the machine up to a commit or roll it back: they run from the install folder. */
+const UPDATE_SCRIPTS = /(?:^|\/)(?:rebuild-live|deploy|update-runner|host-deployer)\.sh$/;
+/** git's own options that take the next word as their value (`git -C <dir> checkout`). */
+const GIT_SELF_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+
+/** The program's name as it was written, folder dropped (`/mnt/bm/src/scripts/deploy.sh` → `deploy.sh`). */
+const progName = (words: string[], p: Prog) => words.find((w) => (w.split("/").pop() ?? "") === p.name) ?? p.name;
+
+/**
+ * How a program names an update script: its own name, or the first argument that is one (`sh scripts/deploy.sh`).
+ * The argument has to be a word, not an option (`--rollback` isn't a script), and the folder in front is kept
+ * so `…/rebuild-live.sh` is recognised wherever the install lives.
+ */
+const updateScriptOf = (p: Prog): string | null => {
+  if (UPDATE_SCRIPTS.test(`/${p.name}`)) return p.name;
+  return p.args.find((a) => !a.startsWith("-") && UPDATE_SCRIPTS.test(`/${a}`)) ?? null;
+};
+
+/**
+ * Where a `git` in this word list would write the checkout: the `-C` path if it names one, else the `cd` the
+ * command runs after. Both are made absolute against `/` only when they are paths; a bare word is `null`, so the
+ * rule falls back to the install folder the host reported.
+ */
+function gitAt(words: string[], p: Prog): string | null {
+  const rest = words.slice(words.indexOf(progName(words, p)) + 1);
+  let j = 0;
+  while (j < rest.length && rest[j]!.startsWith("-")) {
+    if (rest[j] === "-C" && rest[j + 1]) return normPath(rest[j + 1]!);
+    j += GIT_SELF_OPTS.has(rest[j]!) ? 2 : 1;
+  }
+  return null;
+}
+
+/** The folder a command's own `cd`/`pushd` goes to before a git runs there, or null when it doesn't go anywhere. */
+function commandCd(command: string): string | null {
+  for (const words of simpleCommands(unparen(command))) {
+    const p = readCommand(words).prog;
+    if (p?.name === "cd" || p?.name === "pushd") {
+      const target = p.args.at(-1);
+      if (target) return normPath(target);
+    }
+  }
+  return null;
+}
+
+/** A subshell's parentheses as command separators, so `(cd X && git …)` is read as `cd X` and `git …` (R15 reads through them). */
+const unparen = (command: string) => command.replace(/[()]/g, " ; ");
+
+/**
+ * R15 (DR-036): refuse an agent card whose steps bring this machine's Boss Man to a commit or rebuild it, when
+ * the host deployer is installed. Two things count: a step that runs an update script (rebuild-live.sh,
+ * deploy.sh, update-runner.sh, host-deployer.sh — directly, or as `sh scripts/deploy.sh`), and a git write
+ * (checkout, switch, merge, pull, reset, restore, rebase, …) run on the install folder. The refusals point the
+ * agent at Boss Man's own card instead.
+ *
+ * Where a git runs: a `-C` path, else the step's own `cd`, else the install folder the host reported. Without
+ * an install folder a bare `git checkout` can't be told from one in an agent's own checkout, so only the update
+ * scripts are refused — the rule never guesses a folder. A `sh -c` string is not read, as with R14: it guards
+ * against an agent copying an update card by accident, not against someone hiding one.
+ */
+export function updateCardFindings(step: number, commands: string[], facts: SelfDeployFacts, out: LintFinding[]): void {
+  if (!facts.enabled) return;
+  let reported = false;
+  for (const command of commands) {
+    const cd = commandCd(command);
+    for (const words of simpleCommands(unparen(command))) {
+      const p = readCommand(words).prog;
+      if (!p) continue;
+      const script = updateScriptOf(p);
+      if (script) {
+        if (!reported) out.push({ step, rule: "R15", problem: `runs the machine's own update script (${script}), which brings the machine that runs Boss Man to a commit or rebuilds it. ${updateCardHint(facts)}` });
+        reported = true;
+        continue;
+      }
+      if (p.name !== "git") continue;
+      const rest = words.slice(words.indexOf(progName(words, p)) + 1);
+      let j = 0;
+      while (j < rest.length && rest[j]!.startsWith("-")) j += GIT_SELF_OPTS.has(rest[j]!) ? 2 : 1;
+      const sub = rest[j];
+      if (!sub || !GIT_WRITES.has(sub)) continue;
+      if (["stash", "worktree", "submodule"].includes(sub) && GIT_READ_ONLY.has(rest[j + 1] ?? "")) continue;
+      const at = gitAt(words, p) ?? cd ?? facts.installDir ?? null;
+      if (!at) continue; // no folder to go by: can't tell an agent's checkout from the install, so leave it
+      if (!facts.installDir || normPath(at) !== facts.installDir) continue; // a git in another folder is the agent's own work
+      if (!reported) out.push({ step, rule: "R15", problem: `runs git ${sub} in the install folder (${at}), which would bring the machine that runs Boss Man to a commit. ${updateCardHint(facts)}` });
+      reported = true;
+    }
+  }
+}
+
+/** Where an agent's update work goes instead: Boss Man's own card, named when one is open. */
+function updateCardHint(facts: SelfDeployFacts): string {
+  const open = facts.openCommit ? `the open "Main has moved to ${facts.openCommit.slice(0, 8)}" card` : `Boss Man's own "Main has moved" card (one is raised when main moves past what runs)`;
+  return `Updating the machine that runs Boss Man is Boss Man's own job: approve ${open}, which is pinned to the commit and clears itself once applied. Fix the steps to leave the update out, and raise this card again${facts.openCommit ? "" : " if it has another purpose"}. If the update card's steps are missing something, have the change make it into the server's step builder (self-deploy.ts) rather than around it.`;
+}
+
 // R14 too (DR-028): its fix is always the same subshell, so there is never a reason to let a bare git step through.
-export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R14"]);
+// R15 too (DR-036): the fix is to leave the update to Boss Man's own card, never to hand-write it.
+// R10 too (DR-024 D and its amendment): an override can't bypass a command that waits for typed input, pages
+// or never returns. R12 (prints nothing) stays overridable: whether a sentence says enough is a judgement.
+export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R10", "R14", "R15"]);
 
 /** One line per finding, for the agent's refusal or the CEO's list. */
 export const lintLines = (fs: LintFinding[]) => fs.map((f) => `- Step ${f.step}: ${f.problem}.`).join("\n");

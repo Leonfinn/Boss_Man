@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
-import { api, ApiError, type Agent, type Company, type FundingSource, type Project } from "../api";
+import { RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, tallestReading, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
+import { api, ApiError, type Agent, type Company, type DeviceProfile, type FundingSource, type Project } from "../api";
+import { collect } from "../devices";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
@@ -11,7 +12,7 @@ import { StarButton } from "./Agents";
 import { toBase64 } from "./Skills";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
-type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
+type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
 type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
 type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; report?: CompanyReport | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
@@ -100,6 +101,31 @@ function Since({ connected, at }: { connected: boolean; at: string | null }) {
   return <span className="muted">{connected ? `since ${when(at)}` : `last connected ${when(at)}`}</span>;
 }
 
+/**
+ * The network guard keeps the runner off private addresses (BOS-324). It is only "on" when its rules are loaded
+ * (or the host is known to be able to load them); "off", "unavailable" and "down" mean the runner can reach the
+ * home network, so say so plainly and how to fix it (BOS-335, BOS-709).
+ */
+function GuardWarning({ guard }: { guard: "off" | "unavailable" | "down" }) {
+  const what =
+    guard === "off"
+      ? "The network guard is turned off, so this runner can reach private addresses (your home network and the database)."
+      : guard === "down"
+        ? "The network guard is down for this runner: it is missing, stopped or out of date, so this runner can reach private addresses (your home network and the database)."
+        : "The network guard is unavailable on this host, which can't load firewall rules, so this runner can reach private addresses (your home network and the database).";
+  const fix =
+    guard === "off"
+      ? "Ask your admin to turn the network guard back on for the launcher, then restart the runner."
+      : guard === "down"
+        ? "The launcher repairs the guard by itself; if this is still shown after a minute, tell your admin."
+        : "Ask your admin to make the launcher refuse runners on hosts that can't run the guard.";
+  return (
+    <p className="error" role="alert" data-testid="guard-warning">
+      {what} {fix}
+    </p>
+  );
+}
+
 export function Runner({ company, onChanged }: { company: Company; onChanged?: () => void }) {
   const status = usePoll((signal) => api<RunnerStatus>(`/api/companies/${company.id}/runner`, { signal }), 10_000, company.id);
   const [token, setToken] = useState<string | null>(null);
@@ -164,6 +190,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </dl>
+        {c && (c.guard === "off" || c.guard === "unavailable" || c.guard === "down") && <GuardWarning guard={c.guard} />}
         {s?.report?.last && (
           <div data-testid="company-update-history">
             <UpdateHistory r={s.report.last} />
@@ -1127,6 +1154,8 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "silentSteerMinutes", label: "Ask a silent run for a status after", unit: "minutes" },
   { key: "silentFlagMinutes", label: "Flag a silent run to the Scrum Master after", unit: "minutes" },
   { key: "unprovenHours", label: "Flag an unproven cause ('likely') after", unit: "hours" },
+  { key: "idleAgentMinutes", label: "Re-wake an agent whose in-progress work has no run for", unit: "minutes" },
+  { key: "spareCapacityMinutes", label: "Tell the CEO the company is under-used after", unit: "minutes" },
 ];
 
 /** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */
@@ -1532,6 +1561,62 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
           <option value="off">Off: use the older text rules</option>
         </select>
       </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null } | null; sandboxCheckedAt?: string | null };
+
+/** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
+function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const act = useAction();
+  const status = usePoll((signal) => api<FenceStatus>(`/api/companies/${company.id}/runner`, { signal }), 30_000, `fence-${company.id}`);
+  const mode = company.fenceMode ?? "off";
+  const sb = status.data?.sandbox ?? null;
+  const hostLine = !status.data?.registered
+    ? "This company has no runner yet."
+    : !sb
+      ? "This host hasn't reported its fence level yet. It reports each time the runner starts."
+      : sb.level === "unavailable"
+        ? "This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). Agents run as before."
+        : `This host fences agents ${sb.level === "full" ? "fully" : "partly"}${sb.missing.length ? ` (not covered: ${sb.missing.join(", ")})` : ""}.${sb.probe === false ? " Its self-test did not see a write outside the agent's folders refused." : ""} Last checked ${status.data?.sandboxCheckedAt ? when(status.data.sandboxCheckedAt) : "never"}.`;
+  return (
+    <Section id="fence-h" title="Agent fence">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
+      </p>
+      <p style={{ fontSize: 14 }}>{hostLine}</p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="fence-mode">Fence</label>
+        <select
+          id="fence-mode"
+          value={mode}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { fenceMode: e.target.value } });
+              onChanged();
+              return "Saved. It applies to runs that start from now on.";
+            })
+          }
+        >
+          <option value="off">Off: agents run as before</option>
+          <option value="watch">Watch: agents run inside the fence and every refusal is logged</option>
+          <option value="enforce" disabled>
+            Enforce: not available yet (waiting for a security fix, BOS-323)
+          </option>
+        </select>
+      </div>
+      <details style={{ marginTop: 10 }}>
+        <summary>Setting up a host</summary>
+        <ul style={{ fontSize: 14 }}>
+          <li>The fence needs a Linux kernel with Landlock (5.13 or newer, and 6.x for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
+          <li>The runner tests the fence each time it starts. If this page says "can't fence", update the host's kernel, or check that the container's security profile doesn't block Landlock, then restart the runner.</li>
+          <li>A fenced agent has its own temporary folder for each run and can't write to the shared /tmp. A skill that hard-codes /tmp needs to use the folder in $TMPDIR instead.</li>
+          <li>Start with Watch on one company, look at the permission log after a few days, and fix what it shows before anything stricter.</li>
+        </ul>
+      </details>
       {act.view}
     </Section>
   );
@@ -2163,6 +2248,7 @@ type ImportPreview = {
   agents: Array<{ name: string; role: string; title: string | null; agentKind: string; model: string | null; instructions: string | null }>;
   skills: Array<{ name: string; renamedFrom: string | null; description: string; scripts: string[] }>;
   secrets: Array<{ name: string; envName: string; agents: string[] }>;
+  toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
   warnings: string[];
 };
 
@@ -2199,12 +2285,14 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [name, setName] = useState("");
   const [funding, setFunding] = useState("");
+  const [allowStack, setAllowStack] = useState(false);
   const [done, setDone] = useState<{ companyId: string; name: string; checklist: string[] } | null>(null);
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 60_000, "sources");
   const act = useAction();
   const look = async (z: string, n?: string) => {
     const p = await api<ImportPreview>("/api/companies/import/preview", { method: "POST", body: { zip: z, ...(n ? { name: n } : {}) } });
     setPreview(p);
+    setAllowStack(false);
     setName(p.company.name);
   };
   const pick = (f: File | undefined) => {
@@ -2220,6 +2308,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
   // A new name is checked again before Import is offered, so a clash is caught here, not by the server.
   const nameChanged = !!preview && name.trim() !== preview.company.name;
   const scripts = preview?.skills.filter((s) => s.scripts.length) ?? [];
+  const stackTools = preview?.toolServers.filter((t) => t.stackService) ?? [];
   return (
     <Section id="import-h" title="Import a company">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -2277,6 +2366,24 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
               </ul>
             </div>
           )}
+          {preview.toolServers.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Tool servers.</strong> Each address below is opened past the runner's network guard for this company:
+              <ul>
+                {preview.toolServers.map((t) => (
+                  <li key={t.name}>
+                    {t.name}: <code>{t.opens ?? "nothing (no address the guard can allow)"}</code> ({t.url})
+                    {t.stackService && <span className="error"> This is one of Boss Man's own services or a private-network address.</span>}
+                  </li>
+                ))}
+              </ul>
+              {stackTools.length > 0 && (
+                <label>
+                  <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
+                </label>
+              )}
+            </div>
+          )}
           {preview.secrets.length > 0 && (
             <div style={{ fontSize: 14 }}>
               <strong>Secrets to add afterwards</strong>
@@ -2305,10 +2412,10 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
             <button
               type="button"
               className="btn primary"
-              disabled={act.busy || !zip || !name.trim() || nameChanged || preview.company.nameTaken}
+              disabled={act.busy || !zip || !name.trim() || nameChanged || preview.company.nameTaken || (stackTools.length > 0 && !allowStack)}
               onClick={() =>
                 void act.run(async () => {
-                  const r = await api<{ companyId: string; name: string; checklist: string[] }>("/api/companies/import", { method: "POST", body: { zip, name: name.trim(), fundingSourceId: funding || null } });
+                  const r = await api<{ companyId: string; name: string; checklist: string[] }>("/api/companies/import", { method: "POST", body: { zip, name: name.trim(), fundingSourceId: funding || null, allowStackServices: allowStack } });
                   setDone(r);
                   onChanged();
                 })
@@ -2333,6 +2440,68 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
         </div>
       )}
       {act.view}
+    </Section>
+  );
+}
+
+export function Devices() {
+  const list = usePoll((signal) => api<DeviceProfile[]>("/api/devices", { signal }), 60_000, "devices");
+  const act = useAction();
+  const [names, setNames] = useState<Record<string, string>>({});
+  const record = () =>
+    void act.run(async () => {
+      const report = await collect(window, document, navigator);
+      const saved = await api<DeviceProfile>("/api/devices", { method: "POST", body: report });
+      list.reload();
+      return `${saved.label} recorded. Layout tickets that name this device are checked at these figures.`;
+    });
+  const rename = (p: DeviceProfile) =>
+    void act.run(async () => {
+      const label = (names[p.id] ?? p.label).trim();
+      if (!label || label === p.label) return "No change.";
+      const saved = await api<DeviceProfile>(`/api/devices/${p.id}`, { method: "PATCH", body: { label } });
+      list.reload();
+      return `Renamed to ${saved.label}.`;
+    });
+  const remove = (p: DeviceProfile) =>
+    window.confirm(`Forget "${p.label}"? A layout ticket that names it will fall back to the normal phone and desktop checks.`) &&
+    void act.run(async () => {
+      await api(`/api/devices/${p.id}`, { method: "DELETE" });
+      list.reload();
+      return `Forgot ${p.label}.`;
+    });
+  const rows = list.data ?? [];
+  return (
+    <Section id="devices-h" title="Your devices">
+      <p className="muted" style={{ fontSize: 14 }}>
+        This browser can measure its own screen so a layout fix is checked at the real thing, not a guessed size. Open this page on each device you use, press Record, and the figures are kept here: width and height, pixel ratio, touch, standalone mode, and the real 100vh, 100dvh, 100svh and 100lvh heights. Only screen facts are stored; your devices are listed under Server and runner.
+      </p>
+      <button type="button" className="btn primary" onClick={record} disabled={act.busy} style={{ alignSelf: "flex-start" }}>
+        {act.busy ? "Measuring…" : "Record this device"}
+      </button>
+      {act.view}
+      {list.error ? <p className="error" style={{ fontSize: 14 }}>{list.error.message}</p> : null}
+      {rows.length === 0 ? (
+        <p className="muted" style={{ fontSize: 14 }}>No devices recorded yet. Record this one, then the others you use.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {rows.map((p) => {
+            const t = tallestReading(p);
+            return (
+              <div key={p.id} style={{ border: "1px solid var(--line, #333)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <input value={names[p.id] ?? p.label} onChange={(e) => setNames((n) => ({ ...n, [p.id]: e.target.value }))} style={{ flex: "1 1 220px" }} aria-label={`Name for ${p.label}`} />
+                  <button type="button" className="btn" onClick={() => rename(p)} disabled={act.busy}>Rename</button>
+                  <button type="button" className="btn" onClick={() => remove(p)} disabled={act.busy}>Forget</button>
+                </div>
+                <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                  {p.browser} · {t.width}×{t.height} CSS px · pixel ratio {t.pixelRatio} · {t.coarsePointer ? "touch" : "mouse"} · {t.displayMode}. 100vh {t.units.vh}, 100dvh {t.units.dvh}, 100svh {t.units.svh}, 100lvh {t.units.lvh}, visual viewport {t.units.visual} px. Reported {new Date(p.reportedAt).toLocaleString()}.
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </Section>
   );
 }
@@ -2386,6 +2555,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
           <div key={company.id} style={{ display: "contents" }}>
             <Runner company={company} />
             <RunnerUpdate />
+            <Devices />
           </div>
         ) : current.id === "transfer" ? (
           <ExportCompany key={company.id} company={company} />
@@ -2419,6 +2589,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <AdviceTimeout company={company} onChanged={onChanged} />
             <StandingRules company={company} onChanged={onChanged} />
             <PermissionJudgeSetting company={company} onChanged={onChanged} />
+            <FenceSetting company={company} onChanged={onChanged} />
             <SecondOpinionSetting company={company} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />

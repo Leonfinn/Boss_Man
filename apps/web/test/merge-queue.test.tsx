@@ -61,10 +61,30 @@ describe("merge queue screen (BOS-587)", () => {
     expect(waitingLabel(4)).toBe("4 waiting to merge");
     expect(waitingLabel(0)).toBeNull();
     const noop = () => {};
-    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} notifications="unsupported" onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
+    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
     const link = screen.getByRole("link", { name: /Merge queue/ });
     expect(link.getAttribute("href")).toBe("#/merge-queue");
     expect(link.getAttribute("aria-current")).toBe("page");
     expect(within(link).getByLabelText("4 waiting to merge").textContent).toBe("4");
+  });
+});
+
+describe("merge queue screen in server mode (BOS-597)", () => {
+  it("shows a ticket held back by the server queue as waiting for a check slot, with how many are ahead", async () => {
+    const server = {
+      ...data,
+      mode: "server",
+      slots: 1,
+      waitingCount: 1,
+      running: [],
+      waiting: [{ ticketId: "t1", ref: "APP-12", title: "Behind the queue", minutes: 8, state: "waiting_for_check_capacity", label: "waiting for a check slot (2 ahead)", stuck: false, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null, risk: "low", urgent: false, failedCheck: false }],
+      recent: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => json(server)));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Behind the queue")).toBeTruthy();
+    expect(screen.getByText("waiting for a check slot (2 ahead)")).toBeTruthy();
+    expect(screen.getByText(/Next: Boss Man starts it as soon as a slot frees/)).toBeTruthy();
+    expect(screen.getByText("One check slot runs at a time. A check that runs over an hour is flagged.")).toBeTruthy();
   });
 });

@@ -3,12 +3,14 @@
 set -euo pipefail
 # The merge gate runs this with BOSSMAN_MERGE_CHECK set; the cases below set it themselves where they need it.
 unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED
+# Test this branch's slot wait, not the runner's shared check-slot.sh (BOS-614).
+unset BOSSMAN_CHECK_SLOT BOSSMAN_CHECK_SLOT_HELD CHECK_ALL_PRE_DONE
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; holder=""; trap '[ -z "$holder" ] || kill "$holder" 2>/dev/null; rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
-cp "$here/check-quick.sh" "$here/check-all.sh" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$repo/scripts/"
 cat >"$repo/scripts/check-shell.sh" <<'S'
 #!/usr/bin/env bash
 echo "check-shell" >>"$LOG"
@@ -18,6 +20,7 @@ chmod +x "$repo/scripts/check-shell.sh"
 cat >"$t/bin/pnpm" <<'S'
 #!/usr/bin/env bash
 echo "pnpm $*" >>"$LOG"
+echo "threads=${BOSSMAN_CHECK_THREADS:-} go=${GOMAXPROCS:-} rayon=${RAYON_NUM_THREADS:-} tokio=${TOKIO_WORKER_THREADS:-} for $*" >>"$LOG"
 if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "boom"; exit 1; fi
 S
 cat >"$t/bin/node" <<'S'
@@ -31,7 +34,9 @@ if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "boom"; exit 1
 S
 chmod +x "$t/bin/pnpm" "$t/bin/node"
 unset BOSSMAN_MERGE_CHECK CHECK_QUICK_FORCE_RELATED CHECK_QUICK_BROAD_FILES CHECK_ALL_FORCE
-export PATH="$t/bin:$PATH" LOG="$t/log" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_PAIR_PROOF="$t/proof" CHECK_ALL_QUEUE_REPORT=1
+unset CHECK_ALL_SLOT_LOG
+# Most cases re-run one tree with different settings, so they switch off reuse; the reuse cases below set CHECK_QUICK_RERUN= .
+export PATH="$t/bin:$PATH" LOG="$t/log" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_PAIR_PROOF="$t/proof" CHECK_ALL_QUEUE_REPORT=1 CHECK_QUICK_RERUN=1
 
 g() { git -C "$repo" -c user.name=t -c user.email=t@t "$@"; }
 g init -q -b main; echo a >"$repo/README"; g add -A; g commit -q -m init
@@ -62,6 +67,13 @@ logged "pnpm --filter @boss-man/web build" "web"
 notlogged "@boss-man/server" "web"
 notlogged "check-shell" "web"
 grep -q "^PASS  typecheck @boss-man/web" "$t/out" || fail "PASS line"
+# One CPU budget (BOS-674) reaches every step, inside the slot and out: the stub node prints nothing, so the fallback 2 applies;
+# BOSSMAN_CHECK_THREADS sets it.
+logged "threads=2 go=2 rayon=2 tokio=2 for --filter @boss-man/web typecheck" "default budget in the slot"
+logged "threads=2 go=2 rayon=2 tokio=2 for --filter @boss-man/web build" "default budget for the build"
+run 0 "set budget" env BOSSMAN_CHECK_THREADS=3
+logged "threads=3 go=3 rayon=3 tokio=3 for --filter @boss-man/web exec vitest related" "set budget in the slot"
+logged "threads=3 go=3 rayon=3 tokio=3 for --filter @boss-man/web build" "set budget for the build"
 
 commit apps/server/drizzle/0099_x.sql apps/server/src/b.ts
 run 0 "server and migration change" env
@@ -179,9 +191,75 @@ many=(); for i in $(seq 1 15); do many+=("apps/server/src/m$i.ts"); done; commit
 run 0 "15 files is not broad" env
 logged "vitest related" "15 files"
 
+# Reuse (BOS-666): a pass on a clean tree is written to the slot log; the next run of the same tree and base reuses it.
+sl="$t/lock.slotlog"; npass() { grep -c " quick-pass " "$sl" || true; }
+g checkout -q -B reuse origin/main; commit apps/web/src/r.ts
+rm -f "$sl"; tr1="$(g rev-parse 'HEAD^{tree}')"; b1="$(g rev-parse origin/main)"
+run 0 "reuse: first run" CHECK_QUICK_RERUN=
+logged "pnpm --filter @boss-man/web typecheck" "reuse: first run runs"
+grep -Eq "^[0-9TZ:-]+ quick-pass pid=[0-9]+ kind=hand check=quick tree=$tr1 base=$b1 coverage=all folder=" "$sl" || fail "reuse: no quick-pass line: $(cat "$sl" 2>&1)"
+if command -v flock >/dev/null; then
+  grep -Eq " start pid=[0-9]+ kind=hand slot=1 check=quick tree=$tr1 folder=" "$sl" || fail "reuse: slot hold not named check=quick tree=: $(cat "$sl")"
+fi
+run 0 "reuse: same tree" CHECK_QUICK_RERUN=
+notlogged "pnpm" "reuse: same tree ran again"
+grep -q "^PASS  reused: this exact tree ($tr1) already passed" "$t/out" || fail "reuse: no reused line: $(cat "$t/out")"
+grep -q "^check-quick: all steps passed" "$t/out" || fail "reuse: no summary: $(cat "$t/out")"
+grep -Eq " quick-reuse pid=[0-9]+ kind=hand check=quick tree=$tr1 base=$b1 coverage=all " "$sl" || fail "reuse: not counted: $(cat "$sl")"
+[ "$(npass)" = 1 ] || fail "reuse: a reuse wrote a second pass line: $(cat "$sl")"
+# CHECK_QUICK_RERUN=1 runs anyway, and a failure records no pass.
+run 1 "reuse: rerun" FAIL_ON=typecheck
+[ "$(npass)" = 1 ] || fail "reuse: a failed run recorded a pass: $(cat "$sl")"
+# The merge gate never reuses.
+run 0 "reuse: merge gate" CHECK_QUICK_RERUN= BOSSMAN_MERGE_CHECK=1
+logged "pnpm --filter @boss-man/web typecheck" "reuse: merge gate reused a pass"
+# Another base commit runs again, even with the same files (here a second commit with origin/main's tree).
+g update-ref refs/heads/base2 "$(g commit-tree -p origin/main -m same-files 'origin/main^{tree}')"
+run 0 "reuse: other base" CHECK_QUICK_RERUN= BASE=base2
+logged "pnpm --filter @boss-man/web typecheck" "reuse: other base reused"
+# An uncommitted change runs again and records nothing; so does an untracked file.
+echo x >>"$repo/apps/web/src/r.ts"; n0="$(npass)"
+run 0 "reuse: dirty" CHECK_QUICK_RERUN=
+logged "pnpm --filter @boss-man/web typecheck" "reuse: dirty tree reused"
+[ "$(npass)" = "$n0" ] || fail "reuse: a dirty tree recorded a pass: $(cat "$sl")"
+if command -v flock >/dev/null; then tail -n 1 "$sl" | grep -q " check=quick tree=$tr1-dirty folder=" || fail "reuse: dirty hold not marked: $(tail -n 2 "$sl")"; fi
+g checkout -q -- apps/web/src/r.ts; echo y >"$repo/apps/web/src/new.ts"
+run 0 "reuse: untracked" CHECK_QUICK_RERUN=
+logged "pnpm --filter @boss-man/web typecheck" "reuse: untracked file reused"
+rm -f "$repo/apps/web/src/new.ts"
+# A new commit (any change to the tree) runs again.
+commit apps/web/src/r.ts
+run 0 "reuse: changed tree" CHECK_QUICK_RERUN=
+logged "pnpm --filter @boss-man/web typecheck" "reuse: changed tree reused"
+# A pass that skipped a broad test list (coverage=partial) is reused by a plain run, never by CHECK_QUICK_FORCE_RELATED=1.
+g checkout -q -B reuse-broad origin/main; commit apps/server/src/mcp.ts
+run 0 "reuse: broad first" CHECK_QUICK_RERUN=
+grep -q " quick-pass .* tree=$(g rev-parse 'HEAD^{tree}') .* coverage=partial " "$sl" || fail "reuse: partial not recorded: $(cat "$sl")"
+run 0 "reuse: broad again" CHECK_QUICK_RERUN=
+notlogged "pnpm" "reuse: broad pass not reused"
+run 0 "reuse: forced after partial" CHECK_QUICK_RERUN= CHECK_QUICK_FORCE_RELATED=1
+logged "vitest related --run src/mcp.ts" "reuse: forced run reused a partial pass"
+run 0 "reuse: plain after forced" CHECK_QUICK_RERUN=
+notlogged "pnpm" "reuse: full pass not reused"
+run 0 "reuse: forced after forced" CHECK_QUICK_RERUN= CHECK_QUICK_FORCE_RELATED=1
+notlogged "pnpm" "reuse: forced run did not reuse a coverage=all pass"
+
 # A branch that conflicts with the base
 g checkout -q main; echo main >"$repo/README"; g add -A; g commit -q -m m; g update-ref refs/remotes/origin/main HEAD
 g checkout -q feature; echo feature >"$repo/README"; g add -A; g commit -q -m f
 run 1 "merge conflict" env
 grep -q "^FAIL  merge with origin/main" "$t/out" || fail "conflict not reported: $(cat "$t/out")"
+
+# A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): the whole output of the run is kept there, marked with its exit,
+# and the previous run is kept as .previous.
+g checkout -q -B scratch origin/main; commit apps/web/src/q.ts
+scratch="$t/scratch.own"; mkdir -p "$scratch"
+run 0 "scratch: a passing run" env BOSSMAN_SCRATCH="$scratch"
+[ -s "$scratch/check-quick.log" ] || fail "scratch: no log in the scratch: $(cat "$t/out")"
+grep -q "PASS  typecheck @boss-man/web" "$scratch/check-quick.log" || fail "scratch: the log misses the run's output: $(cat "$scratch/check-quick.log")"
+grep -q "check-quick: finished .* (exit 0)" "$scratch/check-quick.log" || fail "scratch: the log is not marked finished"
+run 1 "scratch: a failing run" env BOSSMAN_SCRATCH="$scratch" FAIL_ON=typecheck
+grep -q "(exit 1)" "$scratch/check-quick.log" || fail "scratch: a failure's log is not marked with its exit: $(cat "$scratch/check-quick.log")"
+grep -q "PASS  typecheck @boss-man/web" "$scratch/check-quick.log.previous" || fail "scratch: the previous run's log is not kept: $(ls "$scratch")"
+
 echo "check-quick.test.sh: ok"
