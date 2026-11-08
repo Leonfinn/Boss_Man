@@ -1932,6 +1932,72 @@ describe("rules judge: each heredoc on a line has its own owner and body (BOS-72
   });
 });
 
+describe("rules judge: rules-judge rolling follow-ups (BOS-744)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    // Kind: cat/tee heredoc body run by a command. 1. the rest of the head line feeds the body to an interpreter.
+    // `>` and `> >` before `(` are not `>(`, so the strip's own `[<>]\(` check missed them and the body was dropped.
+    "tee <<'EOF' >(bash)\nrm -rf /etc\nEOF",
+    "tee <<'EOF' > >(bash)\nrm -rf /etc\nEOF",
+    "tee <<'EOF' >(python3)\nrm -rf /etc\nEOF",
+    "cat <<'EOF' >>(bash)\nrm -rf /etc\nEOF",
+    "cat <<'EOF' | tee >(bash) > /tmp/x\nrm -rf /etc\nEOF",
+    "cat <<'EOF' >(bash) >(sh)\nrm -rf /etc\nEOF",
+    // The reader is on the cat line but the `<<` is on a later part of it.
+    "cat x; tee <<'EOF' >(bash)\nrm -rf /etc\nEOF",
+    // `<(` reads the body as data, not code: kept too, so nothing is dropped unseen.
+    "tee <<'EOF' <(cat)\nrm -rf /etc\nEOF",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "cat <<'EOF' > /tmp/x\nrm -rf /etc\nEOF",
+    "tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
+    "cat <<'EOF' > /tmp/x\nhello\nEOF",
+    "echo hi && tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
+    "echo `date`\n",
+    "cat `date` > /tmp/x\n",
+  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  // Item 2 (a backtick substitution on a cat line): already Deny on main from other rules, checked once here so a
+  // regression shows. The true gaps found while checking it closed with BOS-727 and BOS-728, not here.
+  it.each([
+    "cat `bash <<'EOF'`\nrm -rf /etc\nEOF",
+    "cat `bash <<EOF`\nrm -rf /etc\nEOF",
+    "cat x `sh <<'B'; bash`\nrm -rf /etc\nB",
+    "`bash <<'E'`\nrm -rf /etc\nE\n",
+    "echo `bash -c 'rm -rf /etc'`\n",
+  ])("deny, backtick substitution (item 2): %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  // Kind: xargs/parallel option values read as the program (Jane's round-3 review of BOS-730). The scan that decides what
+  // runs under xargs/parallel must not take the value of an option it doesn't know as the program: `echo` is the value of
+  // `--process-slot-var` / `--workdir` / `--env`, and the real program after it is `perl -e 'unlink @ARGV'`. Only a program
+  // reached through options the scan fully understands may get Allow.
+  it.each([
+    "echo / | xargs --process-slot-var echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --workdir echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --env echo perl -e 'unlink @ARGV'",
+    // getopt_long accepts unique prefixes: `--process` is not `--process-slot-var`, so its value is not the program.
+    "echo / | xargs --process echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --tmpdir echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --halt echo perl -e 'unlink @ARGV'",
+    "echo / | parallel --timeout echo perl -e 'unlink @ARGV'",
+  ])("deny: xargs/parallel option value is not the program: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it("reads long hostile input in linear time", () => {
+    const t = Date.now();
+    const inputs = [
+      "cat `bash <<'E'` " + "x ".repeat(2000) + "\nrm -rf /etc\nE",
+      "cat <<'A' " + "((".repeat(1500) + "\n" + "> >(".repeat(800) + "A",
+      "cat x " + "`".repeat(3000) + " <<'A'\n" + "| tee ".repeat(500) + "\nA",
+      // The xargs/parallel option scan (BOS-744) reads each option word once: a long chain of unknown options stays linear.
+      "echo / | xargs " + "--unknown ".repeat(600) + "echo perl",
+      "echo / | parallel " + "-" + "z".repeat(3000) + " echo",
+    ];
+    for (const cmd of inputs) {
+      expect(cmd.length).toBeLessThan(10_000);
+      judge(cmd);
+    }
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+});
+
 // BOS-729 (Jane's round-2 review of BOS-715): the file-tool scan is linear, `shred` is a delete for the target-scope check,
 // and a file tool under `xargs` reads names the judge can't place. Every Deny row got Allow before this fix.
 describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-729)", () => {

@@ -27,6 +27,16 @@ set -euo pipefail
 
 # BOS-562: not affected by unreadable checkout files: the runner image copies with COPY --chown=node and the netguard image runs as root.
 IMAGE=boss-man-runner
+# BOS-69: this script tags boss-man-runner/netguard/launcher:current and talks to the project "boss-man", which are
+# production's. In a staging folder (another project name or a stack) it would put staging code under production's
+# image names, so it refuses; scripts/deploy-staging.sh builds the staging images and starts the staging launcher.
+proj="${COMPOSE_PROJECT_NAME:-$(grep -s '^COMPOSE_PROJECT_NAME=' .env | tail -1 | cut -d= -f2- || true)}"
+stack="${BOSSMAN_STACK:-$(grep -s '^BOSSMAN_STACK=' .env | tail -1 | cut -d= -f2- || true)}"
+if [[ -n $stack || ( -n $proj && $proj != boss-man ) ]]; then
+  echo "This folder is not the production install (project '${proj:-boss-man}', stack '${stack:-none}'). update-runner.sh only handles production's images, so it refuses here." >&2
+  echo "For a staging stack use scripts/deploy-staging.sh, which builds the staging runner image." >&2
+  exit 1
+fi
 # Compose runners follow COMPOSE_PROFILES (from .env); with none set, the "runners" profile as
 # before. Runners the launcher made (R55) are recreated by the launcher itself.
 profiles="${COMPOSE_PROFILES:-$(grep -s '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2- || true)}"

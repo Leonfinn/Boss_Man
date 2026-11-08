@@ -9,8 +9,10 @@
 #                                 previous release), also after the 15-minute window. With --dry-run it only checks.
 #
 # It reads one small request file the server wrote, treats it as data only, checks it, and runs
-# one of two fixed actions: scripts/deploy.sh (target "server") or scripts/update-runner.sh
-# (target "runner"). Nothing from the request is ever executed or put on a command line unchecked.
+# one of three fixed actions: scripts/deploy.sh (target "server"), scripts/update-runner.sh
+# (target "runner"), or a restart of the server at the commit that already runs (target "restart",
+# BOS-647: a blue/green swap to a fresh copy, or deploy.sh --force on a single server; it never
+# fetches or moves the checkout). Nothing from the request is ever executed or put on a command line unchecked.
 #
 # Settings: environment, then the optional config file $BOSSMAN_DEPLOYER/host.conf (shell
 # KEY=value lines; must be owned by the user running this and not writable by anyone else):
@@ -117,7 +119,10 @@ if ((ROLLBACK)); then flock -w 120 9 || { echo "ERROR: another deployer run hold
 else flock -n 9 || exit 0; fi # a run is already going; the next minute tries again
 
 REQ_ID="" TARGET="" COMMIT="" STARTED="" FROM=""
+RESTART=0 # 1 while a "restart" request runs the blue/green swap: same commit, different messages, no rollback record
 HEALTH_KV=() # the latest whole-stack checklist as key=value pairs (stack, check_*), merged into the status file
+REQ_KV=()    # what the request asked for when it differs from what runs (BOS-753): requested_commit, runner_changed
+PICK_NOTE="" # why the commit that runs is not the one the owner approved (BOS-753), added to every message after the pick
 
 write_status() { # result message [backup]
   ((DRY)) && { log "[dry-run] status: $1: $2"; return 0; }
@@ -125,7 +130,7 @@ write_status() { # result message [backup]
   [[ $1 == running ]] || ended="$(now)"
   local soak=0 # the standby window this host really uses (BOS-401): the server holds the runner update for it
   if bluegreen_enabled; then soak="$SOAK_SECONDS"; fi
-  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/status.json.tmp"
+  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${REQ_KV[@]+"${REQ_KV[@]}"} ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/status.json.tmp"
   chmod 644 "$OUTBOX/status.json.tmp"
   mv "$OUTBOX/status.json.tmp" "$OUTBOX/status.json"
   [[ $1 == running ]] || cat "$OUTBOX/status.json" >>"$OUTBOX/history.jsonl"
@@ -140,14 +145,61 @@ post_webhook() { # result message
 }
 
 finish() { # result message [backup]: record the outcome, tell the owner, stop
-  log "$1: $2"
-  write_status "$@"
-  post_webhook "$1" "$2"
+  local msg="$2${PICK_NOTE:+ $PICK_NOTE}"
+  log "$1: $msg"
+  write_status "$1" "$msg" "${3:-}"
+  post_webhook "$1" "$msg"
   exit 0
 }
 
 # The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an SSH remote with a read-only deploy key for a private one; docs/00 step 2). Empty if unreachable.
 remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }' || true; }
+
+# The merge commits Boss Man's merge gate checked (BOS-753), one full hash per line, written by the server into
+# inbox/checked beside each request. Untrusted like the request: only a plain file under 256 KB is read, and only
+# lines that are exactly a 40-character hash are kept. It can only narrow the choice below: every commit picked
+# from it must still be on main, a fast-forward of what runs, and free of deployment files.
+checked_list() {
+  local f="$INBOX/checked"
+  [[ -f $f && ! -L $f && $(stat -c %s "$f") -le 262144 ]] || return 0
+  LC_ALL=C grep -xE '[0-9a-f]{40}' "$f" 2>/dev/null || true
+}
+
+# BOS-753: the owner approved COMMIT, but main has moved on to tip since the offer was written. An approval means
+# "deploy the newest checked version", so walk main's own history (first parents: the merges themselves, never a
+# branch's commits) from the tip back to the approved commit, and take the newest one that the merge gate checked
+# and that needs no hand-apply. None: the approved commit itself, which is still on main and is what was approved.
+# Sets COMMIT and PICK_NOTE. Every later check (fast-forward, deployment files, rate limit) still runs on the result.
+pick_newest_checked() { # head approved tip
+  local head=$1 approved=$2 tip=$3 c checked unchecked=0 hand=0 why="" infra
+  checked="$(checked_list)"
+  # Newest first; never a commit the running version already contains, so whatever is picked is a fast-forward of it.
+  while IFS= read -r c; do
+    [[ -n $c ]] || continue
+    if ! grep -qxF "$c" <<<"$checked"; then unchecked=$((unchecked + 1)); continue; fi
+    infra="$(g diff --name-only "$head" "$c" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } || true)"
+    if [[ -n $infra ]]; then hand=$((hand + 1)); continue; fi
+    COMMIT=$c
+    break
+  done < <(g rev-list --first-parent "$tip" "^$approved" "^$head" 2>/dev/null || true)
+  if [[ $COMMIT != "$approved" ]]; then
+    if [[ $COMMIT == "$tip" ]]; then
+      why="main had moved on to ${tip:0:8} by the time the deployer ran, so the deployer took that newest checked version instead."
+    elif ((unchecked)); then
+      why="main had moved on to ${tip:0:8} by the time the deployer ran, but the newest $unchecked commit(s) have not passed their merge check yet. ${COMMIT:0:8} is the newest one that has, so the deployer took it instead; the rest come in the next update."
+    else
+      why="main had moved on to ${tip:0:8} by the time the deployer ran, but the newer commits change deployment files and have to be applied by hand. ${COMMIT:0:8} is the newest checked one without them, so the deployer took it instead; the rest come in the next update."
+    fi
+    PICK_NOTE="You approved ${approved:0:8}; $why It includes everything you approved."
+    return 0
+  fi
+  if [[ -z $checked ]]; then why="Boss Man did not say which newer commits passed their merge check"
+  elif ((hand && !unchecked)); then why="the newer commits change deployment files and have to be applied by hand"
+  else why="none of the newer commits has passed its merge check yet"; fi
+  # The approved commit is already in what runs (a newer version went live since the card was raised): nothing to add.
+  if g merge-base --is-ancestor "$approved" "$head" 2>/dev/null; then COMMIT=$head; fi
+  PICK_NOTE="Main has moved on to ${tip:0:8} since you approved ${approved:0:8}, but $why, so the deployer kept to ${COMMIT:0:8}; the newer commits come in the next update."
+}
 
 # ---------------------------------------------------------------------------------------------------
 # Which services an update changes (BOS-487, DR-020 B and C). Read from the rendered compose settings of each service,
@@ -499,6 +551,9 @@ host_extra_facts() {
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
 do_deploy_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
+# A restart on a single server (BOS-647): --force rebuilds and recreates what is checked out; --commit pins it to the
+# commit the request named, which main() has already checked is HEAD, so nothing new can come in.
+do_restart_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
 # No --now: update-runner.sh builds and checks the image, then asks Boss Man to drain (inbox/drain.json) and returns,
 # so this lock is not held while runs finish. The swap itself is reported by the server.
 do_update_runner() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/update-runner.sh); }
@@ -862,7 +917,8 @@ do_deploy_bluegreen() {
   unplan_stopped "$BG_IDLE" # it is about to be rebuilt and started on purpose
   take_baseline # the containers as they are before this deploy touches anything (DR-020 D)
 
-  log "Blue/green: $BG_LIVE is live; building $BG_IDLE at ${COMMIT:0:8}."
+  if ((RESTART)); then log "Blue/green restart: $BG_LIVE is live; building a fresh $BG_IDLE at the same commit (${COMMIT:0:8})."
+  else log "Blue/green: $BG_LIVE is live; building $BG_IDLE at ${COMMIT:0:8}."; fi
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
   BOSSMAN_COMMIT="$COMMIT" compose build "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Building $BG_IDLE failed."; return 1; }
@@ -890,10 +946,18 @@ do_deploy_bluegreen() {
   fi
 
   printf 'old=%s new=%s deadline=%s commit=%s prev=%s\n' "$BG_LIVE" "$BG_IDLE" "$(($(date +%s) + SOAK_SECONDS))" "$COMMIT" "$BG_PREV" >"$STATE/soak"
+  BG_RESULT=deployed
+  if ((RESTART)); then
+    # The colour just rebuilt held the release before this one, so no stopped colour holds it any more: without the
+    # record, --rollback refuses with its own clear message instead of "going back" to the code that runs now.
+    # The hold (a release rejected by a rollback) stays: main has not moved, so it must still not be offered.
+    rm -f "$STATE/previous"
+    BG_MSG="Restarted at ${COMMIT:0:8}: a fresh $BG_IDLE is live; $BG_LIVE stays up as a standby for $((SOAK_SECONDS / 60)) minutes, and the deployer switches back by itself if the checks fail. The one-step rollback to the release before this one is no longer available."
+    return 0
+  fi
   # Kept after the soak ends: the only release a manual --rollback may go back to (colour, commit).
   printf '%s %s\n' "$BG_LIVE" "$BG_PREV" >"$STATE/previous"
   rm -f "$STATE/hold"
-  BG_RESULT=deployed
   BG_MSG="Deployed ${BG_PREV:0:8} to ${COMMIT:0:8}: $BG_IDLE is live; $BG_LIVE stays up as a standby for $((SOAK_SECONDS / 60)) minutes, and the deployer switches back by itself if the checks fail."
 }
 
@@ -933,6 +997,12 @@ soak_tick() {
   # The record names the commit that failed (to_commit), as a swap-time rollback does, and the one we are back on (from_commit).
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
   rm -f "$f"
+  # A restart's window (BOS-647) has the same commit on both sides: the old copy runs the same version.
+  if [[ $commit == "$prev" ]]; then
+    TARGET=restart
+    if switch_back; then finish rolled_back "The fresh copy started by the restart was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the copy it ran before (same version, ${commit:0:8}) automatically and is running normally on it."
+    else finish failed "The checks on the restarted $new failed and the automatic switch-back to $old ALSO failed: $(recovery_hint)"; fi
+  fi
   if switch_back; then finish rolled_back "The update to ${commit:0:8} was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the previous version (${prev:0:8}) automatically and is running normally on it."
   else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: $(recovery_hint)"; fi
 }
@@ -1008,7 +1078,7 @@ recover_interrupted() {
   ((DRY)) && { log "[dry-run] the last run was cut off (status still 'running'); a real tick would mark it failed"; return 0; }
   REQ_ID="$(jfield id <<<"$st")" TARGET="$(jfield target <<<"$st")" STARTED="$(jfield started <<<"$st")" FROM="$(jfield from_commit <<<"$st")" COMMIT="$(jfield to_commit <<<"$st")"
   head="$(g rev-parse HEAD 2>/dev/null || true)"
-  if [[ $TARGET == server ]] && bluegreen_enabled; then
+  if [[ $TARGET == server || $TARGET == restart ]] && bluegreen_enabled; then
     live="$(jfield commit <<<"$(probe proxy 3100 /api/ready 2>/dev/null || true)")"
     if [[ $live =~ ^[0-9a-f]{40}$ && $live != "$head" ]] && g cat-file -e "$live^{commit}" 2>/dev/null; then
       g reset --quiet --hard "$live" && reset=" The checkout was put back on ${live:0:8}, which is what answers."
@@ -1072,7 +1142,7 @@ main() {
   done
   id="$(jfield id <<<"$flat")" target="$(jfield target <<<"$flat")" commit="$(jfield commit <<<"$flat")"
   at="$(jfield requestedAt <<<"$flat")" by="$(jfield approvedBy <<<"$flat")"
-  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target =~ ^(server|runner)$ && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] ||
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target =~ ^(server|runner|restart)$ && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] ||
     finish rejected "Rejected: the request file does not match the expected format."
   REQ_ID=$id TARGET=$target COMMIT=$commit
 
@@ -1087,16 +1157,42 @@ main() {
   if [[ $TARGET == server ]]; then
     tip="$(remote_tip)"
     [[ -n $tip ]] || finish rejected "Rejected: could not read main from GitHub. Try again in a few minutes."
-    # The offer the owner approved was stale: drop it, so the next minute writes one for the real tip.
-    [[ $COMMIT == "$tip" ]] || { rm -f "$OUTBOX/available.json"; finish rejected "Rejected: ${COMMIT:0:8} is not the tip of main (${tip:0:8}). Approve the latest deploy instead."; }
+    # BOS-753: main moved on after the offer was written (a merge between the card and the press, or before this
+    # tick). The approval still stands: it deploys the newest checked commit on main, never one off main.
+    if [[ $COMMIT != "$tip" ]]; then
+      local approved=$COMMIT
+      g fetch --quiet origin main || finish rejected "Rejected: git fetch from GitHub failed."
+      if ! g cat-file -e "$COMMIT^{commit}" 2>/dev/null || ! g merge-base --is-ancestor "$COMMIT" "$tip"; then
+        # Main was rewritten under the offer: drop it, so the next minute writes one for the real tip.
+        rm -f "$OUTBOX/available.json"
+        finish rejected "Rejected: ${COMMIT:0:8} is not on main any more (main is at ${tip:0:8}), so it can't be deployed. A new update question for main follows within a few minutes."
+      fi
+      pick_newest_checked "$head" "$COMMIT" "$tip"
+      REQ_KV=(requested_commit="$approved")
+      # The offer no longer says what goes out: the next minute writes a fresh one.
+      rm -f "$OUTBOX/available.json"
+    fi
+  elif [[ $TARGET == restart ]]; then
+    # A restart only ever runs what is checked out: never a fetch, a merge or a move of the checkout (BOS-647).
+    [[ $COMMIT == "$head" ]] || finish rejected "Rejected: nothing was restarted. The version running changed since you asked (it is ${head:0:8} now, the request named ${COMMIT:0:8}), so an update probably ran in between. If the server still needs it, press Restart the server again."
+    # The old colour soaking as a standby is the automatic switch-back for the last update; a restart would rebuild it.
+    if bluegreen_enabled && [[ -e $STATE/soak || -L $STATE/soak ]]; then
+      finish rejected "Rejected: nothing was restarted. The last update is still in its $((SOAK_SECONDS / 60))-minute trial, and a restart now would replace the copy it switches back to. Try again when the trial is over."
+    fi
   else
     # Runners are built from what is checked out, which is what the server deploy put there.
     [[ $COMMIT == "$head" ]] || finish rejected "The runners were not updated. They can only be rebuilt from the version the server runs, which is ${head:0:8}, and you asked for ${COMMIT:0:8} (the server update to it may still be running, or was switched back). Nothing is broken and nothing needs doing now: once the server runs the version you want, use Build and update runners in Settings."
   fi
 
-  last="$(cat "$STATE/last-$TARGET" 2>/dev/null || echo 0)"
+  # A restart shares the server's limit, so it can't come right on top of an update (or another restart).
+  local slot=$TARGET
+  [[ $TARGET != restart ]] || slot=server
+  last="$(cat "$STATE/last-$slot" 2>/dev/null || echo 0)"
   wait=$((last + RATE_LIMIT_SECONDS - $(date +%s)))
-  ((wait <= 0)) || finish rejected "Rejected: only one $TARGET deploy every $((RATE_LIMIT_SECONDS / 60)) minutes. Try again in $(((wait + 59) / 60)) minute(s)."
+  if ((wait > 0)); then
+    [[ $TARGET != restart ]] || finish rejected "Rejected: nothing was restarted. The server was updated or restarted less than $((RATE_LIMIT_SECONDS / 60)) minutes ago. Try again in $(((wait + 59) / 60)) minute(s)."
+    finish rejected "Rejected: only one $TARGET deploy every $((RATE_LIMIT_SECONDS / 60)) minutes. Try again in $(((wait + 59) / 60)) minute(s)."
+  fi
 
   if [[ $TARGET == server ]]; then
     [[ $head != "$COMMIT" ]] || finish nothing_new "Nothing new: ${head:0:8} is already deployed."
@@ -1106,26 +1202,37 @@ main() {
     local infra
     infra="$(g diff --name-only "$head" "$COMMIT" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } | head -5 | paste -sd, - || true)"
     [[ -z $infra ]] || finish rejected "Rejected: this change touches deployment files ($infra). Deploy it by hand on the host: scripts/deploy.sh"
+    # Whether the runners need rebuilding for what really goes out (BOS-753): the card only knew its own range.
+    if ((${#REQ_KV[@]})); then
+      local rp
+      rp="$(g diff --name-only "$head" "$COMMIT" | grep -E "$RUNNER_PATHS" || true)"
+      if [[ -n $rp ]]; then REQ_KV+=(runner_changed=true); else REQ_KV+=(runner_changed=false); fi
+    fi
   fi
 
   if ((DRY)); then
-    if [[ $TARGET == server ]]; then problem="$(readable_problem "$REPO")"; [[ -z $problem ]] || log "[dry-run] the real run would stop: $problem"; fi
-    log "[dry-run] checks passed: would run: $(if [[ $TARGET != server ]]; then echo "scripts/update-runner.sh"; elif bluegreen_enabled; then echo "a blue/green swap to ${COMMIT:0:8}"; else echo "scripts/deploy.sh --yes --no-runner --commit ${COMMIT:0:8}"; fi)"
+    if [[ $TARGET != runner ]]; then problem="$(readable_problem "$REPO")"; [[ -z $problem ]] || log "[dry-run] the real run would stop: $problem"; fi
+    log "[dry-run] checks passed: would run: $(if [[ $TARGET == runner ]]; then echo "scripts/update-runner.sh"; elif [[ $TARGET == restart ]] && bluegreen_enabled; then echo "a blue/green restart (fresh copy) at ${COMMIT:0:8}"; elif [[ $TARGET == restart ]]; then echo "scripts/deploy.sh --yes --no-runner --force --commit ${COMMIT:0:8}"; elif bluegreen_enabled; then echo "a blue/green swap to ${COMMIT:0:8}"; else echo "scripts/deploy.sh --yes --no-runner --commit ${COMMIT:0:8}"; fi)"
     exit 0
   fi
 
-  printf '%s\n' "$(date +%s)" >"$STATE/last-$TARGET"
+  printf '%s\n' "$(date +%s)" >"$STATE/last-$slot"
   if [[ -f $LOG && $(stat -c %s "$LOG") -gt 1000000 ]]; then tail -n 2000 "$LOG" >"$LOG.tmp" && mv "$LOG.tmp" "$LOG"; fi
   write_status running "Running: $TARGET ${COMMIT:0:8}"
   log "Running the $TARGET action for ${COMMIT:0:8} (request $REQ_ID)."
   local rc=0 result msg
-  if [[ $TARGET == server ]] && bluegreen_enabled; then
+  [[ $TARGET != restart ]] || RESTART=1
+  if [[ $TARGET != runner ]] && bluegreen_enabled; then
     do_deploy_bluegreen >>"$LOG" 2>&1 || rc=$?
-    [[ $BG_RESULT == deployed ]] || BG_MSG="${BG_MSG:-The blue/green swap stopped with an error (exit $rc).} See $LOG on the host."
+    [[ $BG_RESULT == deployed ]] || BG_MSG="${BG_MSG:-The blue/green ${TARGET/server/swap} stopped with an error (exit $rc).} See $LOG on the host."
     finish "${BG_RESULT:-failed}" "$BG_MSG" "$BG_BACKUP"
   fi
-  if [[ $TARGET == server ]]; then do_deploy_server >>"$LOG" 2>&1 || rc=$?; else do_update_runner >>"$LOG" 2>&1 || rc=$?; fi
-  if [[ $TARGET == server ]]; then
+  case $TARGET in
+    server) do_deploy_server >>"$LOG" 2>&1 || rc=$? ;;
+    restart) do_restart_server >>"$LOG" 2>&1 || rc=$? ;;
+    *) do_update_runner >>"$LOG" 2>&1 || rc=$? ;;
+  esac
+  if [[ $TARGET != runner ]]; then
     result="$(deploy_status_field result)"; msg="$(deploy_status_field message)"
     [[ $(deploy_status_field to_commit) == "$COMMIT" ]] || { result=""; msg=""; }
   else
@@ -1133,7 +1240,8 @@ main() {
   fi
   if ((rc == 0)); then
     [[ $result == nothing_new ]] || result=deployed
-    if [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="New runner image ready (commit ${COMMIT:0:8}); Boss Man is waiting for runs to finish, then swaps the runners and reports the result."; fi
+    if [[ $TARGET == restart ]]; then msg="Restarted at ${COMMIT:0:8}: the server was rebuilt from what is checked out and is healthy again."
+    elif [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="New runner image ready (commit ${COMMIT:0:8}); Boss Man is waiting for runs to finish, then swaps the runners and reports the result."; fi
   else
     case $result in partial | rolled_back) ;; *) result=failed ;; esac
     msg="${msg:-The $TARGET action stopped with an error (exit $rc).} See $LOG on the host."
