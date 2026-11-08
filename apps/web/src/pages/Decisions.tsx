@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, type StepPiece, type Where } from "@boss-man/shared";
-import { api, ApiError, type AdvisedDecision, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
+import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
@@ -432,7 +432,7 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
   );
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[] }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[] }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -474,6 +474,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // The answer being sent as a .txt file, for one too long to send as a message.
   const [attaching, setAttaching] = useState<string | null>(null);
   const inFlight = useRef(new Set<string>());
+  // (BOS-739) Tell the server the owner has seen a hand-apply card, once per card, so a later system
+  // close knows they may be part-way through its steps and also tells their feed. Best effort: a failed
+  // call changes nothing on the page.
+  const openedSent = useRef(new Set<string>());
+  useEffect(() => {
+    for (const d of decisions) {
+      const c = d.context;
+      const handApply = (c?.type === "self_deploy" && c.handSteps?.length) || (c?.type === "owner_todo" && !!c.steps?.length);
+      if (!handApply || openedSent.current.has(d.id)) continue;
+      openedSent.current.add(d.id);
+      void api(`/api/decisions/${d.id}/opened`, { method: "POST", body: {} }).catch(() => undefined);
+    }
+  }, [decisions]);
   const landingIds = [...new Set(decisions.filter((d) => !answered[d.id] && d.context?.type === "risk_review" && d.context.ticketId).map((d) => d.context!.ticketId!))];
   const landingKey = landingIds.sort().join(",");
   useEffect(() => {
@@ -525,6 +538,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   };
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
+  const shownNotices = closedNotices.filter((n) => !filter || n.companyId === filter);
   // (BOS-551) The server puts waiting cards last and marks them; show them in the "Waiting, nothing to do
   // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
   const queueCards = shown.filter((d) => !d.waiting);
@@ -623,6 +637,44 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         )}
       </header>
       {banner}
+      {shownNotices.length > 0 && (
+        // (BOS-739) A card Boss Man closed by itself while the owner may have been mid-way: the notice
+        // stands where the card was, with its steps kept read-only, for a couple of hours.
+        <section aria-label="Updates closed while you were doing them" style={{ display: "grid", gap: 10, marginBottom: 16 }}>
+          {shownNotices.map((n) => (
+            <article key={n.id} className="banner" data-closed-notice={n.notice.why} style={{ background: "var(--amber-soft)", color: "var(--ink)", border: "1px solid var(--amber)", borderRadius: 10, padding: "12px 14px" }}>
+              <p style={{ fontWeight: 700, margin: 0 }}>
+                <span className="tag amber">Closed for you</span> {n.question.split("\n")[0]}
+              </p>
+              <p style={{ margin: "6px 0 0" }}>{n.notice.text}</p>
+              {n.notice.newer && (
+                <p style={{ margin: "6px 0 0" }}>
+                  <a href="#/decisions">Follow the newer card: {n.notice.newer.label}</a>
+                </p>
+              )}
+              {(() => {
+                // A hand-apply card keeps its steps as `handSteps`; a hand-apply to-do as `steps` (BOS-739).
+                const steps = n.context.handSteps?.length ? n.context.handSteps : n.context.steps;
+                return steps?.length ? (
+                  <details style={{ marginTop: 6 }}>
+                    <summary className="muted">These steps are kept to read; there is nothing to press.</summary>
+                    <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                      {steps.map((s, i) => (
+                        <li key={i}><StepText text={s} /></li>
+                      ))}
+                    </ol>
+                    {n.context.check && (
+                      <p className="muted" style={{ fontSize: 13 }}>
+                        How to check it worked: <StepText text={n.context.check} />
+                      </p>
+                    )}
+                  </details>
+                ) : null;
+              })()}
+            </article>
+          ))}
+        </section>
+      )}
       {withTeam.length > 0 && (
         // Alerts the Scrum Master or CEO still hold: listed so nothing is hidden, but not the owner's to answer yet.
         <details className="sub">

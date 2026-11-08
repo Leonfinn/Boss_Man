@@ -28,6 +28,7 @@ import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/sch
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
+import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
@@ -2698,6 +2699,14 @@ export async function buildApp(opts: AppOptions) {
       }
     });
     owner.get("/api/decisions/advised", async () => decisionsSvc.recentlyAdvised());
+    // Cards Boss Man closed by itself in the last couple of hours, with the notice and steps they showed
+    // (BOS-739): Decisions puts them where the card was, so an owner part-way through the steps knows why.
+    owner.get("/api/decisions/closed-notices", async () => recentClosedNotices(db));
+    // The owner opened a card's steps (BOS-739): a later system close then also tells their feed.
+    owner.post("/api/decisions/:id/opened", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      return { ok: await markOwnerOpened(db, id) };
+    });
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
