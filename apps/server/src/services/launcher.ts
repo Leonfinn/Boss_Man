@@ -179,6 +179,18 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     return now!.value as string;
   }
 
+  /** The company's slug if it has one, else the one it would get; never saves one, so looking doesn't make a company launcher-run (BOS-497). */
+  async function peekSlug(companyId: string): Promise<string> {
+    const [kept] = await db.select().from(settings).where(eq(settings.key, `${SLUG_KEY}${companyId}`));
+    if (kept) return kept.value as string;
+    const [c] = await db.select({ name: companies.name }).from(companies).where(eq(companies.id, companyId));
+    if (!c) throw new LauncherError(404, "No such company.");
+    const taken = new Set((await db.select({ value: settings.value }).from(settings).where(like(settings.key, `${SLUG_KEY}%`))).map((r) => r.value as string));
+    let slug = slugify(c.name);
+    for (let i = 2; taken.has(slug); i++) slug = `${slugify(c.name)}-${i}`;
+    return slug;
+  }
+
   /** The company's tool servers and git remotes as host:port: the runner's network guard keeps these reachable on private addresses. */
   async function allowFor(companyId: string): Promise<string[]> {
     const rows = await db.select({ url: mcpServers.url }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
@@ -213,15 +225,22 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     /**
      * At server start (leader only): sends every launched company's runner its allow list once, so a runner that outlived a deploy gets the git hosts without a restart.
      * A launcher that is still coming up (503/502) is tried again; a company with no runner (404) is skipped. Best effort: never throws.
+     * A slug whose company no longer exists has its runner and token removed instead (and the slug forgotten), so the launcher's
+     * self-heal stops making a runner nobody can use again and again (BOS-497).
      */
     async syncAll(retryMs = 15_000, attempts = 4) {
       if (!opts) return;
       const rows = await db.select().from(settings).where(like(settings.key, `${SLUG_KEY}%`)).catch(() => []);
+      const live = new Set((await db.select({ id: companies.id }).from(companies).catch(() => null))?.map((c) => c.id) ?? rows.map((r) => r.key.slice(SLUG_KEY.length)));
       for (const row of rows) {
         const companyId = row.key.slice(SLUG_KEY.length);
+        const gone = !live.has(companyId);
         for (let i = 0; i < attempts; i++) {
           try {
-            await call("PUT", `/runners/${row.value as string}/allow`, { allow: await allowFor(companyId) });
+            if (gone) {
+              await call("DELETE", `/runners/${row.value as string}`);
+              await db.delete(settings).where(eq(settings.key, row.key));
+            } else await call("PUT", `/runners/${row.value as string}/allow`, { allow: await allowFor(companyId) });
             break;
           } catch (err) {
             if (!(err instanceof LauncherError) || err.status === 404 || i === attempts - 1) break;
@@ -255,6 +274,8 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       await call("DELETE", `/runners/${slug}`);
       // A deliberate stop is not an outage: forget when it was last seen so the runner watch stays quiet.
       await db.update(runners).set({ lastSeenAt: null }).where(eq(runners.companyId, companyId));
+      // Run by the launcher from now on, not by hand (runner-watch.ts HAND_RUN_KEY).
+      await db.delete(settings).where(eq(settings.key, `runner-hand:${companyId}`));
       return { slug };
     },
 
@@ -268,15 +289,18 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
 
     /**
      * The company ids whose runner the launcher means to keep running (a container or a token file),
-     * or null when that can't be known: no launcher (runners are registered by hand), the launcher
-     * is down, or it is older than this server. Null means "treat every runner as wanted".
+     * plus every company the launcher was never given (no slug: its runner, if any, was registered by
+     * hand, so it counts, BOS-497). Null when that can't be known: no launcher (runners are registered
+     * by hand), the launcher is down, or it is older than this server. Null means "treat every runner as wanted".
      */
     async wantedCompanies(): Promise<Set<string> | null> {
       if (!opts) return null;
       try {
         const slugs = new Set(await call<string[]>("GET", "/wanted"));
         const rows = await db.select().from(settings).where(like(settings.key, `${SLUG_KEY}%`));
-        return new Set(rows.filter((r) => slugs.has(r.value as string)).map((r) => r.key.slice(SLUG_KEY.length)));
+        const launched = new Set(rows.map((r) => r.key.slice(SLUG_KEY.length)));
+        const never = (await db.select({ id: companies.id }).from(companies)).map((c) => c.id).filter((id) => !launched.has(id));
+        return new Set([...rows.filter((r) => slugs.has(r.value as string)).map((r) => r.key.slice(SLUG_KEY.length)), ...never]);
       } catch {
         return null;
       }
@@ -289,7 +313,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
 
     async status(companyId: string): Promise<{ slug: string; container: LaunchedRunner | null; error?: string } | null> {
       if (!opts) return null;
-      const slug = await slugFor(companyId);
+      const slug = await peekSlug(companyId);
       try {
         const all = await call<LaunchedRunner[]>("GET", "/runners");
         return { slug, container: all.find((r) => r.slug === slug) ?? null };
