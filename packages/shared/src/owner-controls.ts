@@ -107,6 +107,8 @@ export const OWNER_CONTROLS = {
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
     // This host: confirm a fact only the owner can give.
     "Confirm",
+    // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
+    "Measuring", "Record this device", "Rename", "Forget",
   ],
   // Tool servers and funding sources (a new funding source is added here, not on the Funding tab).
   "Access and funding": ["Remove", "Add tool server", "Edit", "Delete", "Save", "Add", "Cancel"],
