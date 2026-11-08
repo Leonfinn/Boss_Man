@@ -32,6 +32,7 @@ import {
   type OrderLink,
   alwaysChoices,
   explainPermission,
+  ownerWhy,
   formatDate,
   type AlwaysChoice,
   type AlwaysScope,
@@ -1619,8 +1620,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           ladder = { rung: "ceo", since, minutes: CEO_HANDOVER_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why }] };
         } else tier = "owner";
       }
+      // BOS-793: say in one line why the owner has it and not the CEO. Display only; routing is already decided.
+      const ownerReason = tier !== "owner" ? null : outcome === "ceo" ? (agent?.role === "ceo" ? "Sent to you, not the CEO, because it is the CEO's own request." : "Sent to you, not the CEO, because the CEO could not take it first (paused, or the delete has no checkout of its own).") : ownerWhy(commandOf(info.rawInput), rule);
+      if (ownerReason) explain.ownerWhy = ownerReason;
       // Standing rules are the owner's call, never an agent's.
-      const always = tier === "owner" ? alwaysChoices(info, explain) : [];
+      const always =tier === "owner" ? alwaysChoices(info, explain) : [];
       // The rules judge (BOS-337) only picks which button is suggested. The policy above already decided who answers; nothing here answers a card.
       const [company] = await db.select({ mode: companies.permissionJudge }).from(companies).where(eq(companies.id, runner.companyId));
       const judgeMode = company?.mode ?? "watch";
@@ -1641,7 +1645,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           // Which checkout the run started in and which files, on every card the CEO or the owner sees
           // (BOS-120). Boss Man only knows where the shell STARTED (BOS-159): a shell keeps its folder
           // between commands, so the card never claims the paths are inside the checkout now.
-          question: `${explain.title}. ${explain.summary}${workingCopy ? ` Its relative paths delete from the shell's folder; the run started in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}), and Boss Man can't see where it has moved to since: ${fileList(workingCopy.files, 400)}.` : ""}`,
+          question: `${explain.title}. ${explain.summary}${workingCopy ? ` Its relative paths delete from the shell's folder; the run started in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}), and Boss Man can't see where it has moved to since: ${fileList(workingCopy.files, 400)}.` : ""}${ownerReason ? ` ${ownerReason}` : ""}`,
           options: [ALLOW, ...always.map((a) => a.label), DENY],
           // The same allow-list as everywhere else: build output is Allow, source or anything else is
           // Deny, so the CEO is never handed a pre-selected Allow for rm -rf src (adversarial review).

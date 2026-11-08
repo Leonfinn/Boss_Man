@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { evaluatePermission } from "../src/policy.js";
-import { alwaysChoices, explainCommand, explainPermission, readPush } from "../src/explain.js";
+import { alwaysChoices, explainCommand, explainPermission, ownerWhy, readPush } from "../src/explain.js";
+
+describe("ownerWhy (BOS-793)", () => {
+  it("names the part the destructive-command guard caught", () => {
+    const w = ownerWhy("rm -rf $W/old && $W/bin/pg_dump db > $W/out.sql", "Destructive commands go to the owner");
+    expect(w).toMatch(/^Sent to you, not the CEO, because the destructive-command guard caught part of it/);
+    expect(w).toContain("rm -rf");
+  });
+  it("says a push is a push, and names a company rule", () => {
+    expect(ownerWhy("git push origin main", "Pushing and publishing go to the owner")).toMatch(/pushes to a remote/);
+    expect(ownerWhy("ls", "Ask me about ls")).toBe(`Sent to you, not the CEO, because the rule "Ask me about ls" sends it to you.`);
+  });
+});
 
 describe("agent-browser test commands (BOS-752)", () => {
   const S = "/home/node/workspaces/scratch/abc";
