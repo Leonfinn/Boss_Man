@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS } from "@boss-man/shared";
-import { branchFor, gitAuthEnv, safeGitEnv, Workspaces } from "../src/workspace.js";
+import { branchFor, gitAuthEnv, isClone, safeGitEnv, Workspaces } from "../src/workspace.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
 
@@ -79,9 +79,13 @@ describe("git workspaces (R38)", () => {
     const b = await ws.ensure(specB);
     git(a.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work on A");
     await ws.release(specA);
-    // An agent working on B switches B's folder onto A's branch, so A's branch is taken.
-    git(b.path, "switch", "-q", branchFor(ids.a));
-    writeFileSync(path.join(b.path, "b-note.txt"), "uncommitted\n");
+    // An agent working on B switches B's folder onto A's branch, so A's branch is taken. A clone
+    // (BOS-323) has no other ticket's branch to switch to, so only the half-made folder applies.
+    const worktrees = !isClone(b.path);
+    if (worktrees) {
+      git(b.path, "switch", "-q", branchFor(ids.a));
+      writeFileSync(path.join(b.path, "b-note.txt"), "uncommitted\n");
+    }
     // A half-made folder for A is in the way as well.
     mkdirSync(ws.ticketDir(ids.a), { recursive: true });
     writeFileSync(path.join(ws.ticketDir(ids.a), "junk"), "x");
@@ -91,8 +95,10 @@ describe("git workspaces (R38)", () => {
     expect(git(back.path, "log", "-1", "--format=%s")).toBe("work on A");
     expect(git(back.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branchFor(ids.a));
     // B's folder keeps its files and uncommitted work, now on a detached HEAD.
-    expect(git(b.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
-    expect(readFileSync(path.join(b.path, "b-note.txt"), "utf8")).toBe("uncommitted\n");
+    if (worktrees) {
+      expect(git(b.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+      expect(readFileSync(path.join(b.path, "b-note.txt"), "utf8")).toBe("uncommitted\n");
+    }
   });
 
   it("does not run hooks or a filesystem monitor named in the shared repo's config", async () => {
@@ -125,7 +131,8 @@ describe("git workspaces (R38)", () => {
       ws.ensure({ projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" }),
     ]);
     expect(a.created && b.created).toBe(true);
-    expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
+    if (isClone(a.path)) expect([a.path, b.path].map((p) => git(p, "rev-parse", "--abbrev-ref", "HEAD"))).toEqual([branchFor(ids.a), branchFor(ids.b)]);
+    else expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
   });
 
   it("lets seven runs start at once on one repo and all get a workspace", async () => {
@@ -134,7 +141,8 @@ describe("git workspaces (R38)", () => {
     const tickets = Array.from({ length: 7 }, (_, i) => `${i}0000000-0000-4000-8000-000000000000`);
     const made = await Promise.all(tickets.map((ticketId) => ws.ensure({ projectId: ids.project, ticketId, repoUrl: r.dir, baseRef: "main" })));
     expect(made.every((m) => m.created)).toBe(true);
-    expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(8);
+    if (isClone(made[0]!.path)) expect(made.every((m) => isClone(m.path))).toBe(true);
+    else expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(8);
   });
 
   it("passes a git token through the environment only", () => {

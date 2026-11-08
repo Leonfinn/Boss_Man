@@ -1887,6 +1887,51 @@ describe("rules judge: a heredoc belongs to the command that has it (BOS-726)", 
   ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
 });
 
+describe("rules judge: each heredoc on a line has its own owner and body (BOS-727)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    "bash <<'B'; cat <<'A' > /tmp/x\nrm -rf /etc\nB\nfoo\nA",
+    "bash <<'B' && cat <<'A' > /tmp/x\nrm -rf /etc\nB\nfoo\nA",
+    "python3 <<'B'; cat <<'A' > /tmp/x\nimport shutil; shutil.rmtree('/etc')\nB\nfoo\nA",
+    "bash <<B; cat <<'A' > /tmp/x\nrm -rf /etc\nB\nfoo\nA",
+    "cat <<'EOF' > >(bash)\nrm -rf /etc\nEOF",
+    "cat <<'EOF' | xargs rm -rf\n/etc\nEOF",
+    "cat <<'EOF' | tee /tmp/x | xargs rm -rf\n/etc\nEOF",
+    "tee >(bash) <<'EOF'\nrm -rf /etc\nEOF",
+    // A `<<` inside quotes, a comment or arithmetic is not a heredoc: it must not eat the real interpreter's body (Rex).
+    "cat '<<A'; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat \"x<<A\"; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "echo foo > /tmp/x\ncat '<<A'; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat x # <<A\nbash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat \\<<A; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "cat $((1<<A)); bash <<'B'\nrm -rf /etc\nB\nA\nB",
+    "echo \"a\ncat <<A\"; bash <<'B'\nrm -rf /etc\nB\nA\nB",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "cat <<'A' > /tmp/x; cat <<'B' > /tmp/y\nrm -rf /etc\nA\nfoo\nB",
+    "cat <<'EOF' | tee /tmp/x\nrm -rf /etc\nEOF",
+    "cat <<'EOF' | grep foo > /tmp/x\nrm -rf /etc\nEOF",
+    "bash <<'B'; cat <<'A' > /tmp/x\necho hi\nB\nrm -rf /etc\nA",
+    "cat <<'A' > /tmp/x; bash <<'B'\nplain text\nA\nls\nB",
+    "cat /dev/null; cat <<'EOF' > /tmp/x\nrm -rf /etc\nEOF",
+  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  it("reads long hostile input in linear time", () => {
+    const t = Date.now();
+    // Each stays under MAX_JUDGED_COMMAND (10 000), or the judge would answer "too long" before reading it.
+    const inputs = [
+      "cat <<'A' " + "<<'B' ".repeat(800) + "> /tmp/x\n" + "x\n".repeat(2000),
+      "cat <<A; ".repeat(800) + "\n" + "|&;(\n".repeat(400),
+      "cat <<'EOF' " + "| tee ".repeat(800) + "\n" + "y\n".repeat(2000) + "EOF",
+    ];
+    for (const cmd of inputs) {
+      expect(cmd.length).toBeLessThan(10_000);
+      judge(cmd);
+    }
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+});
+
 // BOS-729 (Jane's round-2 review of BOS-715): the file-tool scan is linear, `shred` is a delete for the target-scope check,
 // and a file tool under `xargs` reads names the judge can't place. Every Deny row got Allow before this fix.
 describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-729)", () => {

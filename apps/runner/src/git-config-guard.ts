@@ -40,6 +40,8 @@ const PLAIN = new Set([
 /** Allowed keys with a subsection: section.subsection.name, the subsection matched as given. */
 const SUB: Array<{ section: string; subsection: (s: string) => boolean; names: Set<string> }> = [
   { section: "remote", subsection: (s) => s === "origin", names: new Set(["url", "fetch"]) },
+  // A ticket's clone (BOS-323) reads other tickets' branches through a remote named shared.
+  { section: "remote", subsection: (s) => s === "shared", names: new Set(["url", "fetch"]) },
   { section: "branch", subsection: () => true, names: new Set(["remote", "merge"]) },
   { section: "bossman", subsection: (s) => s.startsWith("ticket-"), names: new Set(["base"]) },
 ];

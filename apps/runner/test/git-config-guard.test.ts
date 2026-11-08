@@ -3,7 +3,7 @@
 // did), pointing it at a program that leaves a marker file. Where cheap, a control row first shows the
 // plant is live (plain git runs the program); then the daemon operation runs and the marker must not appear.
 import { execFileSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -87,6 +87,9 @@ describe("the config allowlist (BOS-332)", () => {
     ["core.repositoryformatversion", true],
     ["remote.origin.url", true],
     ["remote.origin.fetch", true],
+    ["remote.shared.url", true],
+    ["remote.shared.fetch", true],
+    ["remote.shared.pushurl", false],
     ["branch.bossman/x.remote", true],
     ["branch.feature.with.dots.merge", true],
     ["bossman.ticket-aaaa.base", true],
@@ -343,14 +346,80 @@ describe("programs named in the shared repo's config never run in the runner's o
   });
 });
 
-describe("pointers an agent can rewrite are not followed (BOS-332)", () => {
-  function fakeRepo(pass: string) {
-    const fake = tmp("bm332-fake-");
-    agent(fake, "init", "-q", "--bare");
-    agent(fake, "config", "filter.x.clean", pass);
-    return fake;
-  }
+function fakeRepo(pass: string) {
+  const fake = tmp("bm332-fake-");
+  agent(fake, "init", "-q", "--bare");
+  agent(fake, "config", "filter.x.clean", pass);
+  return fake;
+}
 
+// BOS-323's per-ticket clones: the agent owns the clone's whole .git, config included. Unfenced here
+// (fenceCloneGit is off in this suite), which is the `unavailable`-host case the guard has to cover alone.
+describe("programs named in a ticket's own clone's config never run in the runner's own git (BOS-332 with BOS-323)", () => {
+  const cloneFixture = async () => {
+    const f = await fixture({ ...process.env, BOSSMAN_TICKET_COPIES: "clone" });
+    const cloneKeys = () => agent(f.w.path, "config", "--file", path.join(f.w.path, ".git", "config"), "--name-only", "--list").split("\n");
+    return { ...f, cloneKeys };
+  };
+
+  it("filter, diff and signing keys planted in the clone: checkpoint, review copy, diff and release", async () => {
+    const f = await cloneFixture();
+    expect(lstatSync(path.join(f.w.path, ".git")).isDirectory()).toBe(true);
+    f.attributes("* filter=x");
+    writeFileSync(path.join(f.w.path, "work.txt"), "work\n");
+    const plantAll = () => {
+      f.plant("filter.x.clean", f.p.pass);
+      f.plant("diff.external", f.p.noop);
+      f.plant("commit.gpgSign", "true");
+      f.plant("gpg.program", f.p.noop);
+    };
+    plantAll();
+    expect(f.cloneKeys()).toContain("filter.x.clean"); // the plant lands in the clone, not the shared repo
+    tryAgent(f.w.path, "add", "-A");
+    expect(f.p.ran()).toBe(true); // control: live for plain git
+    agent(f.w.path, "reset", "-q");
+    f.p.reset();
+    plantAll();
+    expect(await f.ws.checkpoint(f.spec, "after a turn")).not.toBeNull();
+    plantAll();
+    await f.ws.ensureReview(f.spec);
+    plantAll();
+    expect((await f.ws.diff(f.spec)).files.map((x) => x.path)).toContain("work.txt");
+    plantAll();
+    expect(await f.ws.lastTurnDiff(f.spec)).toBeTruthy();
+    expect(f.cloneKeys().some((k) => /^(filter|diff|gpg|commit)\./.test(k))).toBe(false);
+    expect(f.cloneKeys()).toEqual(expect.arrayContaining(["remote.origin.url", "remote.shared.url", "remote.shared.fetch"]));
+    plantAll();
+    expect(await f.ws.release(f.spec)).toEqual({ savedPatch: true });
+    expect(f.p.ran()).toBe(false);
+  });
+
+  it("a .git/commondir planted in the clone pointing at a repo the agent made is ignored", async () => {
+    const f = await cloneFixture();
+    f.attributes("* filter=x");
+    writeFileSync(path.join(f.w.path, "work.txt"), "work\n");
+    const fake = fakeRepo(f.p.pass);
+    writeFileSync(path.join(f.w.path, ".git", "commondir"), `${fake}\n`);
+    const c = await f.ws.checkpoint(f.spec, "after a turn");
+    expect(c).not.toBeNull();
+    // Synced into the shared repo from the real clone; the agent's repo got nothing.
+    expect(agent(f.repo, "rev-parse", `refs/bossman/checkpoints/${ids.a}/000001`)).toBe(c!.commit);
+    expect(agent(fake, "for-each-ref")).toBe("");
+    expect(f.p.ran()).toBe(false);
+  });
+
+  it("a new clone's origin is the recorded address, not one planted in the shared config", async () => {
+    const o = origin();
+    const ws = new Workspaces(tmp("bm332-root-"), { ...process.env, BOSSMAN_TICKET_COPIES: "clone" });
+    await ws.ensure({ projectId: ids.project, ticketId: ids.a, repoUrl: o.url, baseRef: "main" });
+    const repo = ws.repoDir(ids.project);
+    agent(repo, "config", "remote.origin.url", "https://evil.example/repo.git");
+    const b = await ws.ensure({ projectId: ids.project, ticketId: ids.b, repoUrl: o.url, baseRef: "main" });
+    expect(agent(b.path, "config", "--get", "remote.origin.url")).toBe(o.url);
+  });
+});
+
+describe("pointers an agent can rewrite are not followed (BOS-332)", () => {
   it("a worktree's .git file pointed at a repo the agent made", async () => {
     const f = await fixture();
     f.attributes("* filter=x");
