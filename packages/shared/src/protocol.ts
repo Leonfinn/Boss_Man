@@ -342,10 +342,13 @@ export const MERGE_MISSED_AFTER_MS = VERIFY_TIMEOUT_MS + 60_000 + 5 * 60_000;
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };
 
 /** The outcome of merging a ticket's branch (R46). */
+export type MigrationRenamed = { from: string; to: string };
+
 export type MergeResult =
   /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
-  | { status: "prepared"; commit: string; tree: string; targetSha: string }
-  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number } }
+  | { status: "prepared"; commit: string; tree: string; targetSha: string; renamed?: MigrationRenamed[] }
+  /** `renamed`: the gate renumbered the branch's migrations itself (BOS-690): the SQL is unchanged, only the name and journal line moved. */
+  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
   | { status: "uncommitted"; files: string[] }
