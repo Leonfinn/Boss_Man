@@ -537,6 +537,47 @@ describe("owner chat", () => {
     expect([...TRACED_TOOLS].filter((n) => !names.includes(n))).toEqual([]);
   });
 
+  it("counts reading a diff as a read, not a change (BOS-820)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Have a look at the ticket I just sent you." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Tidy the inbox" })).json() as { id: string };
+    const client = await c.mcp(start.runId);
+    expect(textOf(await client.callTool({ name: "review", arguments: { action: "diff", ticketId: t.id } }))).not.toBe("");
+    await client.close();
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "I read it." } });
+    await c.settle();
+    const saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toBe("I read it.\n\nNo changes made in this reply.");
+    expect(saved.text).not.toContain("read a ticket's diff");
+  });
+
+  it("still succeeds and is named when the ticket-number lookup fails (BOS-820)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Remember that I like short summaries." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    // The lookup reads the company's ticket prefix; give it a form it can't use, so it throws
+    // where a real one might (a busy or failing database) while the tool itself still worked.
+    await c.req("PATCH", `/api/companies/${c.company.id}`, { ticketPrefix: "NOT A PREFIX" });
+    const client = await c.mcp(start.runId);
+    const r = await client.callTool({ name: "create_ticket", arguments: { title: "Tidy the inbox", project: "App" } });
+    await client.close();
+    expect((r as { isError?: boolean }).isError).toBeFalsy();
+    expect(textOf(r)).not.toMatch(/isError|lookup/i);
+    const made = (await c.db.select().from(tickets).where(eq(tickets.companyId, c.company.id))).filter((t) => t.title === "Tidy the inbox");
+    expect(made).toHaveLength(1);
+    // The change was made, so the reply says so (the number is missing, the change is not).
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "Made it." } });
+    await c.settle();
+    const saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toContain("Done in this reply: created a ticket");
+    expect(saved.text).not.toContain("No changes made in this reply.");
+  });
+
   it("needs a CEO and a message", async () => {
     const c = await setup();
     expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "  " })).statusCode).toBe(400);
