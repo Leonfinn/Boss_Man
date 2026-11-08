@@ -3,6 +3,7 @@ import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm"
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { lineEvent } from "./merge-line.js";
 import { liveRuns } from "./runs.js";
 import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.js";
 import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
@@ -607,6 +608,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         .where(eq(tickets.id, ticketId))
         .returning();
       if (updated!.systemState !== t.systemState) await record(db, { companyId: t.companyId, ticketId: t.id, kind: "state", summary: `${t.systemState} -> ${updated!.systemState}`, at: now() });
+      // Out of review without a merge (sent back, cancelled, closed by hand) ends its pass through the merge line (BOS-769).
+      // A merge records "merged" first, and an unapproved ticket was never in the line, so lineEvent writes nothing for either.
+      if (t.systemState === "review" && updated!.systemState !== "review") await lineEvent(db, t, { event: "left", to: updated!.systemState }, now());
       if (dest) {
         const [from] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, t.projectId));
         for (const k of kids) {

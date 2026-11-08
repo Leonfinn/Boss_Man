@@ -1527,7 +1527,11 @@ export const activity = pgTable(
      */
     detail: jsonb("detail").$type<Record<string, unknown> | null>(),
   },
-  (t) => [index("activity_company_at").on(t.companyId, t.at)],
+  (t) => [
+    index("activity_company_at").on(t.companyId, t.at),
+    // A ticket's merge-line timeline (BOS-769): each event reads the ticket's last row to close an open hold.
+    index("activity_merge_line").on(t.ticketId, t.at).where(sql`${t.kind} = 'merge_line'`),
+  ],
 );
 
 // ---------- Scrum Master watchdog (BOS-58) ----------
