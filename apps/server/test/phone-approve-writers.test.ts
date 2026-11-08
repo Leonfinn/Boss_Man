@@ -115,7 +115,7 @@ describe("rule 1: every writer of a decision card is classified", () => {
  * Beyond the reason given, none of them stores an approveSummary (checked below), which rule 1 needs.
  */
 const WRITERS: Record<string, { counts: Record<string, number>; why: string }> = {
-  "src/app.ts": { counts: { raise: 12 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425, the watchdog's alertCeo hook, the server-health hook, the OpenCode VACUUM alert and BOS-595's feature_no_ticket card, one option) and decisionsSvc.raise with agentId null (import checklist; the sign-off merge-failed card moved to startLanding)" },
+  "src/app.ts": { counts: { raise: 13 }, why: "alerts.raise (tier ceo, ladder; incl. the owner-replies hook, BOS-425, the watchdog's alertCeo hook, the server-health hook, the OpenCode VACUUM alert, BOS-595's feature_no_ticket card and the runner watch's runner-offline alert, one option) and decisionsSvc.raise with agentId null (import checklist; the sign-off merge-failed card moved to startLanding)" },
   "src/services/server-health.ts": { counts: { raise: 1 }, why: "deps.raise is app.ts's alerts.raise: alert kinds server_memory / server_freezes, ladder key, no raising agent" },
   "src/mcp.ts": { counts: { raise: 2 }, why: "raise_decision: the one eligible path, when plain and with an approveSummary; submit_plan (BOS-531: blocksTicketId and plan, never eligible)" },
   "src/services/watchdog.ts": { counts: { raise: 1 }, why: "the Scrum Master's raise_decision always blocks its ticket (ticketId, blocker)" },
