@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, formatDate, parkedOnPurpose, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, BUILT_IN_RULES, formatDate, parkedOnPurpose, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
@@ -688,7 +688,8 @@ export function schedulerService(
     // The CEO's notes and waiting note requests (BOS-85) go in this wake prompt, which every run gets,
     // rather than the chapter's frozen directive, so a note saved mid-chapter shows on the next run.
     const notes = agent.role === "ceo" ? await ceoNotesLines(db, agent.companyId, agent.id) : [];
-    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, ...notes, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
+    // The built-in rules sit in the trusted prompt, ahead of the brief whose standing rules add to them (BOS-754).
+    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, ...notes, "", ...BUILT_IN_RULES, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
     const toolServers = await toolServersFor(agent);
     if (toolServers.length)
       lines.push(
