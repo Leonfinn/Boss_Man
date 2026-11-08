@@ -83,12 +83,8 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
   // A quoted word reads as the word it is: quote removal (`"..."`, `'...'`, `$'...'`, `$"..."`, `\-`, backslash-newline)
   // is applied to every plain word before every check below, not only to flags (BOS-715).
-  const base = dequoteWords(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (m: string, head: string, q: string, end: string, body: string) => {
-    // With an unquoted delimiter bash expands the body: `$(…)` and backticks in it run (BOS-725). Keep such a body so the
-    // checks below read it; a body with no substitution is data and is dropped as before.
-    if (q === "" && /\$\(|\x60/.test(body)) return m;
-    return head + end;
-  });
+  const own0 = withoutOwnMemory(command, ownProject);
+  const base = dropCatHeredocBodies(dequoteWords(own0), own0);
   // The command string of each shell `-c` runs too, so `bash -c 'r''m -rf /'`, `bash -c $'\x72m -rf /'` and
   // `sh -c 'echo '$'\x24(cat /tmp/x)'` are all read (BOS-715). It is judged as its own command rather than glued onto the
   // outer line, so its redirects do not change how the outer line is read. A shell nested inside a shell is bounded by
@@ -253,6 +249,8 @@ export function judgePermission(question: string, command: string | null, ownFol
     // An unresolved substitution or variable given to a file tool (`rm -rf $(curl ...)`, `cp $(cat /tmp/l) d`) is a target
     // the judge can't place, so it gets no Allow. `shred` and any file tool under `xargs` read their targets the same way, and a
     // substitution glued to a dash (`rm -$(cat /tmp/x)`) is unseen unless the dash word is tested too (BOS-715).
+    // A heredoc piped into `xargs <file tool>` makes the heredoc body the target list (`cat <<EOF | xargs rm -rf`, BOS-727).
+    for (const m of c.matchAll(/<<-?[ \t]*['"]?\w+['"]?[^\n]*?\|[ \t]*xargs\b([^;&|\n]*)/g)) if (shellWords(m[1]!).some((w) => FILE_TOOLS.has(w))) return result("outside");
     // One greedy, non-overlapping capture per tool keeps the scan linear (BOS-729: re-slicing the rest of the line for every
     // match was O(n²)). `xargs` appends its input to the command, so a file tool under it deletes or overwrites names the judge
     // never sees (`echo /etc | xargs rm -rf`, `find / | xargs shred`): no Allow.
@@ -823,6 +821,34 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
  * system binaries one level under /bin, /usr/bin, /usr/local/bin, /sbin, /usr/sbin (the image's own tools, not agent-writable).
  * Linear: one pass over the shell words of each segment.
  */
+/**
+ * Programs `xargs`/`parallel` may start and still get Allow (BOS-744). They read their names as plain data and never run
+ * code or write by themselves, so a value mistaken for one of them cannot hide a different program. A file tool reads its
+ * targets from the runner's input, so it is never listed; neither is an interpreter or any other program.
+ */
+const XARGS_PROGRAM_SAFE = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf test du df cut tr " +
+  "jq md5sum sha256sum sha1sum realpath dirname basename readlink sort uniq od xxd hexdump column nl tree true false sleep date").split(" "));
+// Options of `xargs`/`parallel` the scan fully understands: short letters that are bare vs take a value, and long names the
+// same way. Any other option gives no Allow: it may take the next word as its value, and that value is not the program
+// (`xargs --process-slot-var echo perl` runs perl, not echo; BOS-744). A list of value options always misses some, so an
+// unknown one fails closed instead of guessing.
+const XARGS_OPTS: Record<string, { bare: string; value: string; bareLong: string[]; valueLong: string[] }> = {
+  xargs: {
+    bare: "0rtpxei",
+    value: "EILPdnsa",
+    bareLong: ["--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit", "--show-limits", "--open-tty", "--help", "--version"],
+    valueLong: ["--eof", "--replace", "--max-lines", "--max-procs", "--delimiter", "--max-args", "--max-chars", "--arg-file", "--process-slot-var"],
+  },
+  parallel: {
+    bare: "kqtsX",
+    value: "jS",
+    bareLong: ["--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--serial", "--interactive", "--help", "--version"],
+    valueLong: ["--workdir", "--env", "--tmpdir", "--halt", "--delay", "--timeout", "--basefile", "--transfer-file", "--joblog", "--sshlogin",
+      "--sshloginfile", "--results", "--colsep", "--rpl", "--max-args", "--max-lines", "--max-procs", "--max-chars", "--number-of-cpus", "--load",
+      "--memfree", "--nice", "--tag", "--block", "--recstart", "--recend", "--pipepart", "--unbuffer", "--template"],
+  },
+};
+
 function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk = true): boolean {
   let relOk = startRelOk;
   let relCd = false;
@@ -833,7 +859,7 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
   }
   // BOS-722: a relative `cd` may follow a symlink the same command made (`ln -s /tmp/p l && cd l`), so it is outside.
   if (relCd && /(?:^|[;&|(\n{]\s*|\b(?:then|do|else)\s+)(?:\S*\/)?ln(?=\s)/.test(c)) relOk = false;
-  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
+  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|parallel|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
   // Wrappers whose first plain words are not the command (`flock l ./foo`, `taskset 1 ./foo`, `chroot dir ./foo`).
   const positional: Record<string, number> = { flock: 1, taskset: 1, chrt: 1, chroot: 1 };
   // Wrappers that run the string after `-c` / `--command` (`flock -c ./foo l`, `script -qc ./foo`) as a shell command.
@@ -873,21 +899,50 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
     let cmdNext = false;
     let lead = "";
     let pos = 0;
+    let xargsOptionsDone = false;
+    // Classify one option of `xargs`/`parallel`: "value" takes the next word, "bare" takes none, "unknown" may take either.
+    const classify = (w: string, s: { bare: string; value: string; bareLong: string[]; valueLong: string[] }): "bare" | "value" | "unknown" => {
+      if (w.startsWith("--")) {
+        const name = w.replace(/=.*$/s, "");
+        if (name !== w) return s.valueLong.includes(name) || s.bareLong.includes(name) ? "bare" : "unknown"; // value attached
+        if (s.valueLong.includes(name)) return "value";
+        if (s.bareLong.includes(name)) return "bare";
+        return "unknown";
+      }
+      for (let k = 1; k < w.length; k++) {
+        const ch = w[k]!;
+        if (s.value.includes(ch)) return k === w.length - 1 ? "value" : "bare"; // an attached value ends the word
+        if (!s.bare.includes(ch)) return "unknown";
+      }
+      return "bare";
+    };
     for (const w of words) {
       if (cmdNext) { if (runsByPathOutside(w, inOwn, relOk)) return true; break; }
       if (skipNext) { skipNext = false; continue; }
       // A system binary that runs its argument counts as that wrapper (`/usr/bin/env ./foo`).
       const base = sysBin.test(w) ? w.replace(/^.*\//, "") : w;
       // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
-      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; continue; }
+      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; xargsOptionsDone = false; continue; }
+      const xopts = lead === "xargs" || lead === "parallel" ? XARGS_OPTS[lead] : null;
       if (/^-/.test(w)) {
         if (cmdOpt.test(lead) && /^-[A-Za-z]*c$|^--command$/.test(w)) cmdNext = true;
         else if (cmdOpt.test(lead) && /^--command=/.test(w)) { if (runsByPathOutside(w.slice(10), inOwn, relOk)) return true; }
-        else if (takesValue[lead]?.test(w)) skipNext = true;
+        else if (xopts && !xargsOptionsDone) {
+          // `--` ends options; the next word is the program. Any option the scan doesn't know gives no Allow (BOS-744).
+          if (w === "--") xargsOptionsDone = true;
+          else {
+            const k = classify(w, xopts);
+            if (k === "unknown") return true;
+            if (k === "value") skipNext = true;
+          }
+        } else if (takesValue[lead]?.test(w)) skipNext = true;
         continue;
       }
       if (pos > 0) { pos--; continue; }
       if (/^\w+=/.test(w) || /^\d+[smhd]?$/.test(w)) continue;
+      // Under `xargs`/`parallel` the first plain word is the program, and only a known-safe reader may be it: otherwise the
+      // value of an option was read as the program in an earlier scan, and the real program got Allow (BOS-744).
+      if (xopts && !XARGS_PROGRAM_SAFE.has(base)) return true;
       if (bad(w)) return true;
       break; // the first real command word of the segment
     }
@@ -1936,6 +1991,111 @@ function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
     if (touchesFiles && /\+|\bjoin\b|%[sdr(]|\bformat\b|\bchr\b|fromCharCode|base64|b64|decode|\\x[0-9a-fA-F]|\\u|environ|\benv\b|HOME|argv|getenv|\$\{/.test(code)) return false;
   }
   return true;
+}
+
+/** Commands a cat/tee heredoc may be piped into without its body becoming code (BOS-727); any other stage keeps the body. */
+const HEREDOC_SINK_SAFE = new Set("cat tee head tail wc sort uniq tr cut grep".split(" "));
+
+/**
+ * True when a `<<` in the original command may not be a real heredoc operator (or may be hidden from the operator
+ * count): inside quotes, after a comment `#`, backslash-escaped, in `((...))` arithmetic, or on a command line that
+ * leaves a quote open. Only command lines are scanned: heredoc bodies are skipped using the real operators found, so an
+ * apostrophe in a file's text does not matter. One pass over the lines, so it is linear. (BOS-727)
+ */
+function hasUnreliableHeredocOps(original: string): boolean {
+  const lines = original.split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i++]!;
+    let quote = "";
+    const ends: { dash: boolean; end: string }[] = [];
+    let ops = 0;
+    for (let k = 0; k < line.length; k++) {
+      const ch = line[k]!;
+      if (quote === "'") { if (ch === "'") quote = ""; else if (ch === "<" && line[k + 1] === "<") return true; continue; }
+      if (ch === "\\") {
+        if (line[k + 1] === "<" && line[k + 2] === "<") return true;
+        k++;
+        continue;
+      }
+      if (quote === '"') { if (ch === '"') quote = ""; else if (ch === "<" && line[k + 1] === "<") return true; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "#" && (k === 0 || /[\s;&|(]/.test(line[k - 1]!))) return /<</.test(line.slice(k));
+      if (ch === "<" && line[k + 1] === "<") {
+        if (line[k + 2] === "<") { k += 2; continue; } // a here-string, no body
+        ops++;
+        const m = /^(-?)[ \t]*(['"]?)(\w+)\2/.exec(line.slice(k + 2, k + 202));
+        if (m) ends.push({ dash: m[1] === "-", end: m[3]! });
+        k++;
+      }
+    }
+    if (quote) return true;
+    if (ops > 0 && /\(\(/.test(line)) return true;
+    for (const e of ends) {
+      while (i < lines.length && (e.dash ? lines[i]!.replace(/^\t+/, "") : lines[i]!) !== e.end) i++;
+      if (i >= lines.length) return false;
+      i++;
+    }
+  }
+  return false;
+}
+
+/**
+ * Drops the bodies of heredocs that belong to cat/tee (text written to a file is data), and nothing else (BOS-727).
+ * Every `<<` on a line is read in order, and the bodies that follow the line are taken in that order, so an earlier
+ * interpreter heredoc keeps its body even when a cat heredoc comes later on the same line. A body is also kept when
+ * the cat/tee output is run: sent to a process substitution (`> >(bash)`) or piped to anything but a plain text tool
+ * (`| xargs rm`, `| python3`). A body whose end is not found, or one with `$(…)`/backticks under an unquoted delimiter
+ * (bash expands those, BOS-725), is kept. One pass over the lines, so linear in the command.
+ */
+function dropCatHeredocBodies(text: string, original: string): string {
+  if (!text.includes("<<")) return text;
+  // `text` has had its quotes removed, so a `<<` that sat inside quotes or a comment looks like a real heredoc there.
+  // Such a fake would pair with the wrong body and swallow a real interpreter's body, so the original is checked first.
+  if (hasUnreliableHeredocOps(original)) return text;
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    out.push(line);
+    i++;
+    const ops = [...line.matchAll(/(?<!<)<<(?!<)(-?)[ \t]*(['"]?)(\w+)\2/g)];
+    if (ops.length === 0) continue;
+    // Read the bodies in order; if any end is missing, keep everything from here on as it is.
+    const bodies: { body: string[]; term: string; drop: boolean }[] = [];
+    let j = i;
+    let ok = true;
+    for (const op of ops) {
+      const [, dash, q, end] = op as unknown as [string, string, string, string];
+      const body: string[] = [];
+      while (j < lines.length && (dash ? lines[j]!.replace(/^\t+/, "") : lines[j]!) !== end) body.push(lines[j++]!);
+      if (j >= lines.length) { ok = false; break; }
+      const k = op.index!;
+      const segStart = Math.max(line.lastIndexOf(";", k), line.lastIndexOf("&", k), line.lastIndexOf("|", k), line.lastIndexOf("(", k)) + 1;
+      let drop = /^[ \t]*(?:cat|tee)\b/.test(line.slice(segStart, k)) && !/[;&|()]/.test(line.slice(segStart, k));
+      if (drop && q === "" && /\$\(|\x60/.test(body.join("\n"))) drop = false;
+      if (drop) {
+        const rest = line.slice(segStart);
+        // A process substitution is found from the `<<` on, not only as `>(`/`<(` after a space: `tee <<'EOF' >(bash)` and
+        // `> >(bash)` put a separate `>` before the `(`, and `>>(bash)` glues it on, so neither matched (BOS-744).
+        if (/[<>]\(/.test(rest.slice(k - segStart))) drop = false;
+        else {
+          const stages = rest.split(/(?<!\|)\|(?!\|)&?/).slice(1);
+          if (stages.some((s) => !HEREDOC_SINK_SAFE.has(/^[ \t]*([\w.-]+)/.exec(s)?.[1] ?? ""))) drop = false;
+        }
+      }
+      bodies.push({ body, term: lines[j]!, drop });
+      j++;
+    }
+    if (!ok) { while (i < lines.length) out.push(lines[i++]!); break; }
+    for (const b of bodies) {
+      if (!b.drop) out.push(...b.body);
+      out.push(b.term);
+    }
+    i = j;
+  }
+  return out.join("\n");
 }
 
 /**

@@ -2,10 +2,10 @@
 // The server never runs anything on the host. It reads what the host script publishes (outbox:
 // available.json, status.json), raises an owner decision when main has moved, and on approval
 // writes one small request file (inbox) that the host script validates and acts on.
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -47,7 +47,8 @@ export type Available = z.infer<typeof Available>;
 
 const Status = z.object({
   id: z.string(),
-  target: z.enum(["server", "runner"]),
+  // "restart": the Settings button (BOS-647), a fresh copy of the commit that already runs.
+  target: z.enum(["server", "runner", "restart"]),
   result: z.enum(["running", "deployed", "nothing_new", "rejected", "failed", "partial", "rolled_back"]),
   message: z.string(),
   from_commit: z.string(),
@@ -57,8 +58,18 @@ const Status = z.object({
   backup: z.string().default(""),
   // The host's own standby window in seconds (BOS-401). The shell writes every value as a string; an older host omits it.
   soak_seconds: z.union([z.number(), z.string()]).optional(),
+  // BOS-753: main had moved on past the approved commit, so the host deployed the newest checked one instead. Both are
+  // written only then: what the owner approved, and whether what really went out changes the runner ("true"/"false").
+  requested_commit: z.string().optional(),
+  runner_changed: z.string().optional(),
 });
 export type DeployStatus = z.infer<typeof Status>;
+
+/** The host deployer runs every minute (cron) and rewrites host.json each time; longer than this without any sign of it, while no deploy holds its lock, is overdue (BOS-753). */
+export const DEPLOYER_LATE_MS = 10 * 60_000;
+/** How many of the newest checked merges the host is told about (BOS-753): far more than can land between a card and its deploy. */
+const CHECKED_LIMIT = 500;
+const HostStamp = z.object({ writtenAt: z.string() });
 
 /** The services only the owner's own step applies: a server update never restarts them (BOS-458, BOS-487). */
 const OWNER_SERVICES = ["db", "proxy"] as const;
@@ -95,6 +106,59 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   const pending = async () => !!inboxFile && (await stat(inboxFile).then(() => true, () => false));
   const availableFile = dir && path.join(dir, "outbox", "available.json");
   const statusFile = dir && path.join(dir, "outbox", "status.json");
+  const checkedFile = dir && path.join(dir, "inbox", "checked");
+
+  /**
+   * BOS-753: the merge commits Boss Man's merge gate checked, newest merges first, one hash per line, for the host. When
+   * main has moved on past an approved commit, the host deploys the newest commit on main that is in this list (and
+   * never one off main). Only checked merges are listed: a merge with no check, or a rider on another ticket's
+   * merge without its own check, is left out. Written beside every request and refreshed while one waits, so a
+   * merge that lands just before the host's tick is known. Only rewritten when the list changed.
+   */
+  let checkedWritten: string | null = null;
+  async function writeChecked() {
+    if (!checkedFile) return;
+    const rows = await db
+      .select({ sha: tickets.mergeCommit })
+      .from(tickets)
+      .where(and(isNotNull(tickets.mergeCommit), isNotNull(tickets.checkedCommit)))
+      .orderBy(desc(tickets.stateChangedAt))
+      .limit(CHECKED_LIMIT);
+    const body = [...new Set(rows.flatMap((r) => (r.sha && /^[0-9a-f]{40}$/.test(r.sha) ? [r.sha] : [])))].map((s) => `${s}\n`).join("");
+    if (body === checkedWritten && (await stat(checkedFile).then(() => true, () => false))) return;
+    const tmp = `${checkedFile}.${randomBytes(4).toString("hex")}.tmp`;
+    await writeFile(tmp, body, { mode: 0o640 });
+    await rename(tmp, checkedFile);
+    checkedWritten = body;
+  }
+
+  /**
+   * When the host deployer last showed it is alive (BOS-753): the newest of host.json's writtenAt (rewritten every
+   * tick), available.json's checkedAt and the last status. `late` only when it never reported, or nothing came for
+   * DEPLOYER_LATE_MS while no deploy is running (a deploy holds the deployer's lock, so its ticks stop until it ends).
+   * available.json alone is no sign of life: the host removes it on purpose after a deploy so the next tick rewrites it.
+   */
+  async function deployerSeen(a: Available | null, s: DeployStatus | null) {
+    const host = dir ? await readJson(path.join(dir, "outbox", "host.json"), HostStamp) : null;
+    const times = [host?.writtenAt, a?.checkedAt, s?.ended || s?.started].map((t) => (t ? Date.parse(t) : NaN)).filter((t) => Number.isFinite(t));
+    const at = times.length ? Math.max(...times) : null;
+    const late = at === null || (Date.now() - at > DEPLOYER_LATE_MS && s?.result !== "running");
+    return { reportedAt: at === null ? null : new Date(at).toISOString(), late };
+  }
+
+  /** Asks the host to look at main on its next tick (only the file's existence is read). True when the ask was written. */
+  const askHostToLook = () => (dir ? writeFile(path.join(dir, "inbox", "check"), "", { mode: 0o640 }).then(() => true, () => false) : Promise.resolve(false));
+
+  /** Why there is no offer to act on, in words that don't send the owner to a cron job that is running fine (BOS-753). */
+  async function noOfferReason(a: Available | null, s: DeployStatus | null): Promise<string> {
+    const seen = await deployerSeen(a, s);
+    if (!seen.reportedAt) return "The host deployer has not reported yet. Check that its cron job is running.";
+    const at = `${seen.reportedAt.slice(0, 10)} ${seen.reportedAt.slice(11, 16)} UTC`;
+    if (seen.late) return `The host deployer last reported at ${at}, more than ${DEPLOYER_LATE_MS / 60_000} minutes ago; it should report every minute. Check that its cron job is running.`;
+    if (a && !a.tip) return `The host deployer reported at ${at}, but main is not a straight continuation of the version that runs (${short(a.deployed)}), so it can't be deployed with one click. Ask us on a ticket.`;
+    const asked = await askHostToLook();
+    return `The host deployer is running (last report at ${at}) and is reading main again after its last deploy.${asked ? " Try again in a minute or two." : ""}`;
+  }
 
   /**
    * When the host last rewritten a file, and how big it was (BOS-414). The host replaces each file by
@@ -402,7 +466,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         ? `Update the runners to ${short(commit)}?\n\nThis rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
           ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue until it's applied or you mark it done.${carries}`
-          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`);
+          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two). If more work merges before the host runs it, the newest version that has passed its checks goes out instead.`);
     // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
     // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).
     const options = infra ? [APPROVE_HAND_APPLY, NOT_NOW] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
@@ -420,7 +484,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       .onConflictDoNothing()
       .returning();
     if (row && target === "server") {
-      // An older, still-open question about an earlier commit can no longer be answered: the host only deploys the tip.
+      // One card per update: an older, still-open question about an earlier commit is replaced by this one. (Since BOS-753 an
+      // approval of an older card would still deploy the newest checked commit, but two cards for one update only confuse.)
       // Free each one's dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped (Freddy).
       // BOS-739: each leaves a notice where it was, naming this card to follow instead.
       const label = infra ? `Main has moved to ${short(commit)}` : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}`;
@@ -464,6 +529,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const handApply = !!steps?.length || !!ctx?.ownerOpenedAt;
     const n = handApply ? (typeof notice === "function" ? notice(steps) : notice) : undefined;
     if (n) await leaveClosedNotice(db, id, n, { notify: deps.notify });
+  }
+
+  /** One request for the host: written beside its final name, then renamed, so the host never reads half a file. */
+  async function writeRequest(id: string, target: "server" | "runner" | "restart", commit: string) {
+    const [o] = await db.select({ id: owners.id }).from(owners).limit(1);
+    const body = { id, target, commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner" };
+    const tmp = `${inboxFile}.${randomBytes(4).toString("hex")}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(body)}\n`, { mode: 0o640 });
+    await rename(tmp, inboxFile!);
   }
 
   async function saveSeen(key: string) {
@@ -542,9 +616,21 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // A runner "deploy" now only builds the image and asks for the drain; the swap's own result is reported by the drain (maintenance.ts).
     // A refused runner update is not a failure and needs nothing from the owner (the message says why): a quiet note, not a flag.
     const runnerRefused = s.target === "runner" && s.result === "rejected";
-    const title = runnerRefused ? `Runner update not started (${short(s.to_commit)})` : s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
+    const restart = s.target === "restart";
+    const title = restart
+      ? s.result === "deployed"
+        ? `Boss Man restarted (${short(s.to_commit)})`
+        : s.result === "rejected"
+          ? "Restart refused"
+          : s.result === "rolled_back"
+            ? `Restart switched back (${short(s.to_commit)})`
+            : `Restart failed (${short(s.to_commit)})`
+      : runnerRefused ?`Runner update not started (${short(s.to_commit)})` : s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
     const changes = s.result === "deployed" && ctx?.type === "self_deploy" ? (ctx.changes ?? []) : [];
-    await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: changes.length ? `${s.message}\n\nWhat changed:\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
+    // BOS-753: a newer checked commit than the card's went out, so the card's list is only part of what changed.
+    const newer = ctx?.type === "self_deploy" && s.target === "server" && !!s.to_commit && s.to_commit !== ctx.commit;
+    const changedHead = newer ? `What changed, up to the approved ${short(ctx.commit)} (the newer merges up to ${short(s.to_commit)} went out too):` : "What changed:";
+    await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: changes.length ? `${s.message}\n\n${changedHead}\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
     // BOS-364 withdrew only cards for the commit it never reached; BOS-368 withdraws every open runner card, whichever way round the host names the commits.
     if (s.target === "server") {
       await putSetting(LAST_SERVER, { result: s.result, from: s.from_commit, to: s.to_commit, ended: s.ended } satisfies LastServer);
@@ -559,7 +645,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (s.target === "server" && s.result === "deployed") {
       const ended = Date.parse(s.ended);
       const old = await getSetting<RunnerDue>(RUNNER_DUE);
-      const wants = ctx?.type === "self_deploy" && !!ctx.runnerChanged;
+      // BOS-753: when the host deployed a newer commit than the card's, it says whether that range changed the runner.
+      const wants = s.runner_changed === "true" || s.runner_changed === "false" ? s.runner_changed === "true" : ctx?.type === "self_deploy" && !!ctx.runnerChanged;
       // A newer server update inside the window must not drop the older commit's runner change: keep its range and its offer.
       const held = old && old.offer !== false;
       await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held } satisfies RunnerDue);
@@ -687,6 +774,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     /** One pass of the poller. Skips the pass when the host's files haven't changed (BOS-414). // leader-only: phase 3 runs this on the leader alone. */
     async sync() {
       if (!dir) return;
+      // BOS-753: while a request waits for the host's next tick, keep its list of checked merges current, so a merge
+      // that lands in that minute can still be the one that goes out. Nothing is queried while no request waits.
+      if (await pending()) await writeChecked().catch((err: Error) => deps.log?.(`self-deploy: could not write the checked list: ${err.message}`));
       if (await unchanged()) return;
       const s = await status();
       const a = await available();
@@ -733,10 +823,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     async deployLatest() {
       const a = await available();
       if (!dir) return { error: "Self-deploy is not set up on this install." } as const;
-      if (!a || !a.tip) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
+      // BOS-753: no offer is not the same as no deployer: after a deploy the host removes its offer and rewrites it next tick.
+      if (!a || !a.tip) return { error: await noOfferReason(a, await status()) } as const;
       if (a.tip === a.deployed) {
         // The host looks at main every few minutes; this file asks it to look on its next tick. Only its existence is read.
-        const asked = await writeFile(path.join(dir, "inbox", "check"), "", { mode: 0o640 }).then(() => true, () => false);
+        const asked = await askHostToLook();
         return { error: `Already up to date (${short(a.deployed)}), checked ${a.checkedAt}.${asked ? " Looking at main again now: if something has just merged, the deploy question appears in Decisions within a minute or two." : ""}` } as const;
       }
       const open = (await openFor("server")).find((d) => (d.context as SelfDeployContext).commit === a.tip);
@@ -748,7 +839,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     async updateRunners() {
       if (!dir) return { error: "Self-deploy is not set up on this install." } as const;
       const a = await available();
-      if (!a?.deployed) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
+      if (!a?.deployed) return { error: await noOfferReason(a, await status()) } as const;
       if (await inTrial()) return { error: trialMessage(soakSeconds(a)) } as const;
       const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
       const d = open ?? (await raise("runner", a.deployed, a.deployed, a, true));
@@ -757,7 +848,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
 
     /** What Settings shows. */
     async overview() {
-      return { enabled: !!dir, status: await status(), available: await available(), pending: await pending() };
+      const [s, a] = [await status(), await available()];
+      // BOS-753: when the host deployer last showed it is alive, so Settings only says "not reported" when it really is overdue.
+      return { enabled: !!dir, status: s, available: a, pending: await pending(), deployer: await deployerSeen(a, s), lateAfterMinutes: DEPLOYER_LATE_MS / 60_000 };
     },
 
     /**
@@ -785,13 +878,29 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed" && s.to_commit === ctx.commit) throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
     },
 
-    /** Hands the approved request to the host: written beside its final name, then renamed, so the host never reads half a file. // leader-only */
+    /** Hands the approved request to the host. // leader-only */
     async send(ctx: SelfDeployContext, decisionId: string) {
-      const [o] = await db.select({ id: owners.id }).from(owners).limit(1);
-      const body = { id: decisionId, target: ctx.target, commit: ctx.commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner" };
-      const tmp = `${inboxFile}.${randomBytes(4).toString("hex")}.tmp`;
-      await writeFile(tmp, `${JSON.stringify(body)}\n`, { mode: 0o640 });
-      await rename(tmp, inboxFile!);
+      // BOS-753: the checked merges go first, so the host can deploy the newest of them if main moves on before its tick.
+      // A failure here never blocks the deploy: without the list the host deploys the approved commit (still on main).
+      if (ctx.target === "server") await writeChecked().catch((err: Error) => deps.log?.(`self-deploy: could not write the checked list: ${err.message}`));
+      await writeRequest(decisionId, ctx.target, ctx.commit);
+    },
+
+    /**
+     * The "Restart the server" button (BOS-647): asks the host for a fresh copy of the commit that runs now. The
+     * owner's click is the approval (like the other owner-only Settings actions), so no decision card is raised.
+     * The host checks the commit is still what runs, shares the server's rate limit and, with blue/green, refuses
+     * during a trial window; the checks here only stop a request that could never be acted on. // leader-only
+     */
+    async restartServer() {
+      if (!inboxFile) return { error: "Self-deploy is not set up on this install." } as const;
+      const a = await available();
+      if (!a?.deployed || !/^[0-9a-f]{40}$/.test(a.deployed)) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
+      if ((await status())?.result === "running") return { error: "A deploy is running now. Wait for it to finish." } as const;
+      if (await pending()) return { error: "A request is already waiting for the host. Try again in a minute." } as const;
+      const id = randomUUID();
+      await writeRequest(id, "restart", a.deployed);
+      return { requestId: id, commit: a.deployed, bluegreen: a.bluegreen === true } as const;
     },
   };
 }

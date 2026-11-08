@@ -599,6 +599,64 @@ describe("scheduler", () => {
       expect(await stateOf(held.id)).toBe("backlog");
       expect(await unblockedWakes(held.id)).toHaveLength(0);
     });
+
+    it("a backlog ticket parked with a 'blocked until' time ahead is not started; its assignee is told once (BOS-742)", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const waiting = await mk("Waiting", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: x.id });
+      // Parked on purpose, then left blocked until a date still ahead: a blocked ticket waiting on a blocker is right there.
+      await ctx.db.update(tickets).set({ systemState: "blocked", blockedUntil: new Date(Date.now() + 86_400_000), blockedUntilReason: "after the release" }).where(eq(tickets.id, waiting.id));
+      await ctx.db.delete(wakes);
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(waiting.id)).toBe("blocked");
+      const told = await unblockedWakes(waiting.id);
+      expect(told).toHaveLength(1);
+      expect(told[0]!.note).toContain("parked on purpose");
+      // Sweeps leave it alone and don't tell the assignee a second time for the same blocker.
+      await ctx.req("POST", "/api/sweep");
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(waiting.id)).toBe("blocked");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(1);
+    });
+
+    it("a backlog ticket whose note says parked is not started; its assignee is told the blocker finished (BOS-742)", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${held.id}/dependencies`, { ticketId: x.id });
+      await ctx.db.update(tickets).set({ stateNote: "Parked until the pricing change lands; do not start." }).where(eq(tickets.id, held.id));
+      await ctx.db.delete(wakes);
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+      await ctx.req("POST", "/api/sweep");
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+    });
+
+    it("the catch-up sweep counts a parked ticket it told the assignee about, and does not start it (BOS-742)", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${held.id}/dependencies`, { ticketId: x.id });
+      await ctx.db.update(tickets).set({ blockedUntil: new Date(Date.now() + 86_400_000), stateNote: "Parked: wait for the release." }).where(eq(tickets.id, held.id));
+      // The blocker finished while the sweep was not looking: set it done directly.
+      await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, x.id));
+      await ctx.db.delete(wakes);
+      const pass = (await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number; parked: number } };
+      expect(pass.releasedUnblocked).toMatchObject({ released: 0, parked: 1 });
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+      const again = (await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number; parked: number } };
+      expect(again.releasedUnblocked).toMatchObject({ released: 0, parked: 0 });
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+      expect((await ctx.db.select().from(decisions)).filter((d) => d.dedupeKey === `unblocked-catchup:${ctx.company.id}`)).toHaveLength(0);
+    });
   });
 
   it("ignores an unknown agent", async () => {

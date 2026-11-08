@@ -4,7 +4,7 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -16,7 +16,7 @@ import { probeModels } from "./models-probe.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { gitAuthorEnv, RepoLockTimeout, type Workspaces } from "./workspace.js";
+import { gitAuthorEnv, isClone, RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -67,9 +67,10 @@ export type SessionManagerOptions = {
   /**
    * The agent fence (DR-004, BOS-321), for runs started with fence: this runner's level from its
    * self-test, where each agent's own home goes, and the shared pnpm store. Without it, or on an
-   * unavailable level, such runs start unfenced, as before.
+   * unavailable level, such runs start unfenced, as before. Each run's temp folder goes under runTmpRoot
+   * (default: run-tmp beside agentsRoot), outside every agent's home, so it is granted to that run alone (BOS-555).
    */
-  fence?: { level: FenceLevel; agentsRoot: string; pnpmStore?: string };
+  fence?: { level: FenceLevel; agentsRoot: string; runTmpRoot?: string; pnpmStore?: string };
   /** The folder check-all.sh's queue and results share across sessions and the merge check (checkQueueEnv). */
   coordDir?: string;
   /** Runs and stops server-queued check jobs (BOS-316). */
@@ -170,6 +171,20 @@ export const stderrTail = (stderr: string) =>
 export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
 
 /**
+ * Claude Code keeps a project's auto-memory under its config folder, keyed by the git repo's
+ * root. A worktree's root is the shared repo, so a project's tickets share one memory; a
+ * ticket's own clone (BOS-323) is its own root, so its memory folder is linked to the shared one.
+ * A real folder already there is left alone.
+ */
+export function linkSharedMemory(configDir: string, cwd: string, bare: string) {
+  const shared = path.join(configDir, "projects", claudeProjectSlug(bare), "memory");
+  const link = path.join(configDir, "projects", claudeProjectSlug(cwd), "memory");
+  mkdirSync(shared, { recursive: true });
+  mkdirSync(path.dirname(link), { recursive: true });
+  if (!lstatSync(link, { throwIfNoEntry: false })) symlinkSync(shared, link);
+}
+
+/**
  * Secrets only the daemon may hold: git authentication, in any of the ways git reads it from the
  * environment (a token or credentials, an askpass helper, an ssh command, or the config variables
  * that build a header), plus the forge and package-manager tokens git, Claude Code and other tools push
@@ -177,6 +192,19 @@ export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP
  * the suffix says which repo or registry, so the whole family is withheld (BOS-396).
  */
 const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|(GH_TOKEN|GH_PAT|GITHUB_TOKEN|GITHUB_PAT|GITLAB_TOKEN|GL_TOKEN|GITEA_TOKEN|CI_JOB_TOKEN|BITBUCKET_TOKEN|ATLASSIAN_API_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|YARN_NPM_AUTH_TOKEN|VERCEL_TOKEN)(_[A-Z0-9_]+)?)$/;
+
+/**
+ * The MCP servers as Claude Code's own config file (BOS-553). Handed over in session/new they would end up in the
+ * command line of Claude Code (`--mcp-config {...Bearer bm_run_...}`), which every agent on the runner can read
+ * from /proc. The adapter is told to pass this file's path instead.
+ */
+export function claudeMcpConfig(servers: McpServer[]): string {
+  const mcpServers: Record<string, unknown> = {};
+  for (const s of servers) {
+    if ("type" in s && (s.type === "http" || s.type === "sse")) mcpServers[s.name] = { type: s.type, url: s.url, headers: Object.fromEntries(s.headers.map((h) => [h.name, h.value])) };
+  }
+  return JSON.stringify({ mcpServers });
+}
 
 /** A run's granted secrets without the git credential, for the agent's own environment. */
 export function withoutGitCredentials(secrets: Record<string, string>): Record<string, string> {
@@ -205,6 +233,11 @@ function realDirsUnder(base: string, rel: string): boolean {
     else if (!st.isDirectory()) return false;
   }
   return true;
+}
+
+/** Where fenced runs' temp folders go: one per run, outside every agent's home (BOS-555). */
+function runTmpRoot(fence: { agentsRoot: string; runTmpRoot?: string }): string {
+  return fence.runTmpRoot ?? path.join(path.dirname(fence.agentsRoot), "run-tmp");
 }
 
 type RunState = {
@@ -244,6 +277,24 @@ export class SessionManager {
    * so the server can start a recovery run (R42). Call once, before handling commands.
    */
   recoverInterrupted() {
+    // A crash can leave a run's token file behind (BOS-553). Only folders older than 10 minutes go:
+    // the file is deleted seconds after the session opens, and another process sharing this tmp
+    // folder (parallel test files) may own a younger one that is still being read.
+    try {
+      for (const name of readdirSync(tmpdir())) {
+        if (!name.startsWith("bossman-mcp-")) continue;
+        const dir = path.join(tmpdir(), name);
+        try {
+          if (Date.now() - statSync(dir).mtimeMs < 600_000) continue;
+        } catch {
+          continue;
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    } catch {
+      /* best effort */
+    }
+    this.sweepRunTmp();
     const file = this.opts.stateFile;
     if (!file || !existsSync(file)) return [];
     let leftover: string[] = [];
@@ -257,6 +308,49 @@ export class SessionManager {
     }
     this.saveState();
     return leftover;
+  }
+
+  /**
+   * Fenced runs' temp folders a crash left behind (BOS-555): each one under the run-tmp root, and the per-run folders
+   * the older layout made in each agent's home (`<home>/tmp/<runId>`). The same 10-minute guard as the token folders
+   * above. rmSync removes a link an agent planted, never what it points at.
+   */
+  private sweepRunTmp() {
+    const fence = this.opts.fence;
+    if (!fence) return;
+    const isRun = (name: string) => /^[0-9a-f-]{36}$/i.test(name);
+    const dropOld = (parent: string) => {
+      let names: string[] = [];
+      try {
+        names = readdirSync(parent);
+      } catch {
+        return;
+      }
+      for (const name of names.filter(isRun)) {
+        const dir = path.join(parent, name);
+        try {
+          if (Date.now() - lstatSync(dir).mtimeMs < 600_000) continue;
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          /* best effort */
+        }
+      }
+    };
+    dropOld(runTmpRoot(fence));
+    let agents: string[] = [];
+    try {
+      agents = readdirSync(fence.agentsRoot).filter(isRun);
+    } catch {
+      /* no agents yet */
+    }
+    for (const agent of agents) {
+      const old = path.join(fence.agentsRoot, agent, "tmp");
+      try {
+        if (lstatSync(old, { throwIfNoEntry: false })?.isDirectory()) dropOld(old);
+      } catch {
+        /* best effort */
+      }
+    }
   }
 
   private saveState() {
@@ -448,6 +542,21 @@ export class SessionManager {
           );
         return;
       }
+      case "workspace.covers": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.signoffCovers({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.signed, secrets, command.head))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
       case "workspace.verify":
       case "workspace.merge":
       case "workspace.push":
@@ -461,7 +570,7 @@ export class SessionManager {
         }
         const work =
           command.type === "workspace.verify"
-            ? ws.verify({ projectId: command.projectId, ticketId: command.ticketId }, command.command)
+            ? ws.verify({ projectId: command.projectId, ticketId: command.ticketId }, command.command, undefined, undefined, command.fence)
             : (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({})).then((secrets): Promise<unknown> =>
                 command.type === "workspace.detect"
                   ? ws.detect({ projectId: command.projectId, repoUrl: command.repoUrl, baseRef: command.baseRef }, secrets)
@@ -586,12 +695,21 @@ export class SessionManager {
     const base = this.opts.baseEnv ?? process.env;
     if (!/^[0-9a-f-]{36}$/i.test(cmd.agentId) || !/^[0-9a-f-]{36}$/i.test(cmd.runId)) throw new Error("the agent or run id isn't a UUID");
     const home = path.join(fence.agentsRoot, cmd.agentId);
-    const tmp = path.join(home, "tmp", cmd.runId);
+    // The run's temp folder (it holds the run's mcp.json while the session opens) sits outside the agent's home:
+    // the home is granted to every run of that agent, so two runs of one agent at once could read each other's (BOS-555 G1).
+    const tmpRoot = runTmpRoot(fence);
+    const tmp = path.join(tmpRoot, cmd.runId);
     const dirs = { CLAUDE_CONFIG_DIR: path.join(home, ".claude"), CODEX_HOME: path.join(home, ".codex"), XDG_CONFIG_HOME: path.join(home, ".config"), XDG_CACHE_HOME: path.join(home, ".cache"), XDG_DATA_HOME: path.join(home, ".local", "share"), XDG_STATE_HOME: path.join(home, ".local", "state") };
     mkdirSync(home, { recursive: true });
-    for (const d of [tmp, ...Object.values(dirs)]) {
+    for (const d of Object.values(dirs)) {
       if (!realDirsUnder(home, path.relative(home, d))) throw new Error(`${path.relative(home, d)} in the agent's home isn't a folder`);
     }
+    // No agent is granted the root, but its parts are still made only through real folders, as the home's are.
+    mkdirSync(tmpRoot, { recursive: true, mode: 0o700 });
+    // A leftover with this run's id (a crash mid-start) goes first; rmSync removes a link, never what it points at.
+    rmSync(tmp, { recursive: true, force: true });
+    if (!realDirsUnder(tmpRoot, cmd.runId)) throw new Error(`the run's temp folder ${tmp} isn't a folder`);
+    chmodSync(tmp, 0o700);
     Object.assign(env, { HOME: home, TMPDIR: tmp }, dirs);
     // The shared repo's root is read-only to the agent, where auto-gc and pack-refs would write.
     addGitConfig(env, "gc.auto", "0");
@@ -612,16 +730,16 @@ export class SessionManager {
       readWrite.push(grant.readWrite);
       readOnlyExtra.push(grant.readOnly);
     }
-    let repo: { bare: string; admin: string | null } | undefined;
+    let repo: ReturnType<typeof repoGrant> | undefined;
     if (cmd.workspace && this.opts.workspaces) {
       repo = repoGrant(this.opts.workspaces.repoDir(cmd.workspace.projectId), cmd.cwd);
-      // Claude Code keeps a project's auto-memory under its config folder, keyed by the shared repo.
-      // Agents share it today, so the agent's own folder links to the shared one, granted alone.
+      // Claude Code keeps a project's auto-memory under its config folder, keyed by the git root: the
+      // shared repo for a worktree, the clone itself for a clone. Agents share the project's, so the
+      // agent's own folder links that key to the shared one, granted alone.
       const shared = base.CLAUDE_CONFIG_DIR;
       if (shared && cmd.agentKind === "claude") {
-        const slug = claudeProjectSlug(repo.bare);
-        const memory = path.join(shared, "projects", slug, "memory");
-        const link = path.join(dirs.CLAUDE_CONFIG_DIR, "projects", slug, "memory");
+        const memory = path.join(shared, "projects", claudeProjectSlug(repo.bare), "memory");
+        const link = path.join(dirs.CLAUDE_CONFIG_DIR, "projects", claudeProjectSlug(repo.clone ? cmd.cwd : repo.bare), "memory");
         mkdirSync(memory, { recursive: true });
         // The agent owns its folder and could swap a parent for a link elsewhere, so the runner
         // makes folders and its link only through real folders. The grant is the shared folder either way.
@@ -672,8 +790,8 @@ export class SessionManager {
         emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: "This runner has no workspace directory configured." });
         return;
       }
+      const spec = cmd.workspace;
       try {
-        const spec = cmd.workspace;
         const workspaces = this.opts.workspaces;
         // Many runs start together after a restart and the repo lock is shared with merge checks, so a
         // wait that only timed out on the lock is tried again (BOS-331) until the run is cancelled or
@@ -704,6 +822,16 @@ export class SessionManager {
       } catch (err) {
         emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't prepare the git workspace: ${String((err as Error)?.message ?? err).slice(0, 500)}` });
         return;
+      }
+      // A fenced run links it in the agent's own home instead (fenceRun).
+      const fencing = cmd.fence && (this.opts.fence?.level ?? "unavailable") !== "unavailable";
+      if (cmd.agentKind === "claude" && isClone(cmd.cwd) && !fencing) {
+        const configDir = env.CLAUDE_CONFIG_DIR ?? path.join(env.HOME ?? "", ".claude");
+        try {
+          linkSharedMemory(configDir, cmd.cwd, this.opts.workspaces.repoDir(spec.projectId));
+        } catch (err) {
+          emit({ type: "runner.log", level: "warn", message: `Couldn't link ticket ${spec.ticketId}'s copy to the project's shared Claude memory: ${String((err as Error)?.message ?? err).slice(0, 300)}` });
+        }
       }
     }
 
@@ -759,6 +887,9 @@ export class SessionManager {
     // and the tmp sweep leave alone: /tmp is gone at the next restart, and so is the session's own temp folder.
     if (cmd.workspace) this.rescueTmp(cmd.workspace.ticketId, [tmpdir(), ...(runTmp ? [runTmp] : [])]);
     const dropTmp = () => runTmp && rmSync(runTmp, { recursive: true, force: true });
+    // Where this run's MCP config file lives (Claude only): its own 0700 folder, removed when the run ends.
+    let mcpDir: string | null = null;
+    const dropMcp = () => mcpDir && rmSync(mcpDir, { recursive: true, force: true });
     // OpenCode's database is being vacuumed (BOS-616): wait, since OpenCode gives up on its lock after 5 s.
     if (cmd.agentKind === "opencode" && this.opencodeHeld) {
       emit({ type: "runner.log", level: "info", message: `Run ${cmd.runId} waits a few minutes while OpenCode's database is compacted.` });
@@ -914,6 +1045,7 @@ export class SessionManager {
       killGroup(child);
       dropSkills();
       dropTmp();
+      dropMcp();
     };
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
@@ -990,7 +1122,19 @@ export class SessionManager {
       }
       // Board tools only (owner chat): Claude's built-in tools are switched off through the
       // adapter's session options, so only the Boss Man MCP tools remain.
-      const sessionMeta = cmd.boardToolsOnly && cmd.agentKind === "claude" ? { _meta: { claudeCode: { options: { tools: [] } } } } : {};
+      // Claude: the servers go in a 0600 file in a folder of this run's own, not in session/new (BOS-553).
+      let sentServers = mcpServers;
+      let claudeOptions: Record<string, unknown> | null = cmd.boardToolsOnly && cmd.agentKind === "claude" ? { tools: [] } : null;
+      if (cmd.agentKind === "claude") {
+        dropMcp(); // a second pass must not leak the first folder
+        mcpDir = runTmp ? path.join(runTmp, "mcp") : mkdtempSync(path.join(tmpdir(), "bossman-mcp-"));
+        mkdirSync(mcpDir, { recursive: true, mode: 0o700 });
+        const file = path.join(mcpDir, "mcp.json");
+        writeFileSync(file, claudeMcpConfig(mcpServers), { mode: 0o600 });
+        sentServers = [];
+        claudeOptions = { ...claudeOptions, extraArgs: { "mcp-config": file } };
+      }
+      const sessionMeta = claudeOptions ? { _meta: { claudeCode: { options: claudeOptions } } } : {};
       const extraDirs = skillsDir ? { additionalDirectories: [skillsDir] } : {};
       // Recovery (R42): reopen the interrupted session if the agent can, else start fresh.
       // A crash before Claude Code flushes its transcript leaves nothing to load (spike S4).
@@ -998,18 +1142,20 @@ export class SessionManager {
         if (cmd.resumeSessionId && (init.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession) {
           try {
             replaying = true;
-            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta }).finally(() => (replaying = false));
+            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers: sentServers, ...extraDirs, ...sessionMeta }).finally(() => (replaying = false));
             emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "load" } });
             return { sessionId: cmd.resumeSessionId, configOptions: (loaded as { configOptions?: unknown[] | null } | null)?.configOptions ?? null, resumed: true };
           } catch (err) {
             this.opts.log?.(`couldn't reopen session ${cmd.resumeSessionId}: ${String((err as Error)?.message ?? err)}; starting fresh`);
           }
         }
-        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta });
+        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers: sentServers, ...extraDirs, ...sessionMeta });
         if (cmd.resumeSessionId) emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "fresh" } });
         return { ...(fresh as { sessionId: string; configOptions?: unknown[] | null }), resumed: false };
       };
       const session = await openSession();
+      // Claude Code has read the file by now. Production runs are unfenced and share one user, so don't leave the token readable for the whole run (BOS-553 review).
+      if (cmd.agentKind === "claude") dropMcp();
       state.sessionId = session.sessionId;
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
 

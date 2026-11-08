@@ -13,8 +13,8 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
-import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard } from "./signoff.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard, signoffState, type SignoffCover } from "./signoff.js";
 import { checkGate, checkPriority } from "./check-gate.js";
 import { checkQueue } from "./check-queue.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
@@ -739,6 +739,11 @@ export function reviewService(
         // The owner signs off a commit, not a ticket (DR-013). A runner that can't say the head never reuses a sign-off.
         const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
         const prior = await priorSignoff(db, t, head);
+        // A standing sign-off on an earlier commit also counts when only clean main merges came in since (BOS-734).
+        if (!prior.reuse && head && prior.current && prior.current.head !== head && (await this.signoffCovers(ticketId, prior.current.head, head))?.covers) {
+          prior.reuse = prior.current;
+          await record(db, { companyId: t.companyId, agentId: o.reviewerAgentId, ticketId, kind: "signoff_carried", summary: `The owner's sign-off on ${prior.current.head.slice(0, 8)} still covers ${head.slice(0, 8)}: since then main was only merged in automatically, with no clashes and no new code from the ticket.` });
+        }
         if (prior.reuse) {
           await record(db, { companyId: t.companyId, agentId: o.reviewerAgentId, ticketId, kind: "signoff_reused", summary: `The owner's sign-off from ${when(prior.reuse.at)} was reused: ${o.reviewer} approved the same commit ${head!.slice(0, 8)}, so it merges without asking again.` });
           if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
@@ -926,6 +931,50 @@ export function reviewService(
       } catch {
         return null;
       }
+    },
+
+    /**
+     * Whether the owner's sign-off on `signed` still covers the branch head: only clean automatic merges of the
+     * default branch came in since (BOS-734, DR-038). The runner works it out from git; null when it can't say,
+     * which every caller reads as "does not cover".
+     */
+    async signoffCovers(ticketId: string, signed: string, head?: string): Promise<SignoffCover | null> {
+      try {
+        const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
+        if (!repoUrl || !t.branch) return null;
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+        if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "signoff-covers")) return null;
+        const r = await deps.runners.request<Partial<SignoffCover>>(runner.id, (requestId) => ({ type: "workspace.covers", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch, signed, ...(head && /^[0-9a-f]{7,64}$/.test(head) ? { head } : {}) }), 20_000);
+        if (typeof r?.covers !== "boolean") return null;
+        return { covers: r.covers, reason: r.reason ?? "", newCommits: r.newCommits ?? 0, handMerges: r.handMerges ?? 0 };
+      } catch {
+        return null;
+      }
+    },
+
+    /**
+     * Before an owner's "Approve and merge" press: null when the card's commit still stands (it is the branch head,
+     * or only clean main merges came in), otherwise the plain reason it can't, after replacing the card with one for
+     * the current head. The owner is never left holding a card that is bound to fail (BOS-734).
+     */
+    async signoffStale(ticketId: string, cardHead: string): Promise<string | null> {
+      const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
+      if (!head || head === cardHead) return null;
+      const c = await this.signoffCovers(ticketId, cardHead, head);
+      if (c?.covers) return null;
+      // The runner couldn't say: keep the card, refuse the press, nothing is replaced or merged.
+      if (!c) return `The branch changed after this card was raised (${cardHead.slice(0, 8)} is now ${head.slice(0, 8)}) and Boss Man couldn't check what came in right now, so nothing was merged. Try again in a few minutes.`;
+      // New code of the ticket's own: the reviewers haven't seen it, so no new card until they pass it again (security review, BOS-734).
+      return this.withdrawStaleSignoff(ticketId, cardHead, head, c.reason || "new code came in");
+    },
+
+    /** Withdraws a sign-off card for older code and sends the ticket back for a new review round; the next round raises the new card. */
+    async withdrawStaleSignoff(ticketId: string, cardHead: string, head: string, why: string): Promise<string> {
+      const { t } = await ticketWithRepo(ticketId);
+      await supersedeSignoffs(db, t.id, { by: "system", note: `The branch changed after the card was raised (${why}).`, at: new Date().toISOString() });
+      await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_card_moved", summary: `The sign-off card was for ${cardHead.slice(0, 8)} but the branch is at ${head.slice(0, 8)} (${why}), so it was withdrawn and the ticket sent back for a new review.` });
+      await this.sendBack(t.id, `The owner's sign-off card was for ${cardHead.slice(0, 8)}, but the branch is now at ${head.slice(0, 8)} (${why}). The card was withdrawn. Make sure the work is committed, then move the ticket back to review for a new review round and sign-off.`, "Boss Man");
+      return `The branch changed after this card was raised (${why}), so it can't be merged as it stands. The card was withdrawn and the ticket sent back for a new review; a new card comes once the reviewers have passed the current code.`;
     },
 
     /** Claims the ticket's merge marker, so the page shows the merge from its first moment. */
@@ -1198,6 +1247,14 @@ export function reviewService(
         // Signed off for another commit, with no new review since: the code changed under the sign-off, and nobody
         // reviewed what would merge now. Refuse in plain sight (the merge card that follows lets the owner send it back).
         const was = await derivedSignoff(db, t, null);
+        if (was.state === "signed_off" && was.head && was.head !== head) {
+          // Only clean automatic merges of the default branch since: the sign-off still covers it (BOS-734, DR-038).
+          const c = await this.signoffCovers(t.id, was.head, head);
+          if (c?.covers) {
+            await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_carried", summary: `The owner's sign-off on ${was.head.slice(0, 8)} still covers ${head.slice(0, 8)}: since then main was only merged in automatically, with no clashes and no new code from the ticket.` });
+            return;
+          }
+        }
         if (was.state === "signed_off" && was.head && was.head !== head) throw new ReviewError(409, `The owner signed off commit ${was.head.slice(0, 8)}, but the branch is now at ${head.slice(0, 8)}, so nothing was merged. Send it back for a new review and sign-off.`);
       }
       if (d.state === "waiting") {

@@ -12,9 +12,13 @@ export type PermissionInfo = {
   /** ACP tool kind: read, edit, delete, move, search, execute, think, fetch, other. */
   kind: string | null;
   rawInput: unknown;
+  /** The agent asking, for rules limited to certain agents (PolicyMatch.agentIds). */
+  agentId?: string | null;
 };
 
 export type PolicyMatch = {
+  /** Only matches a request from one of these agents. A rule without it covers every agent. */
+  agentIds?: string[];
   kinds?: string[];
   /** Regular expression tested against the shell command, when there is one. */
   commandPattern?: string;
@@ -101,6 +105,8 @@ function carriesPath(rawInput: unknown): boolean {
 }
 
 export const UNKNOWN_TOOL_RULE = "Unrecognised tools go to the CEO first";
+/** Row 8 for everything else no rule decided (BOS-752): built in, so a company needs no catch-all rule of its own. */
+export const UNMATCHED_RULE = "Requests no rule covers go to the CEO first";
 
 /** True when a request is for a tool Boss Man doesn't recognise: no command, no path-like input key, and an unknown or "other" kind. These go to the CEO first (BOS-295), unless a rule above decides. */
 export function isUnrecognisedTool(info: PermissionInfo): boolean {
@@ -140,7 +146,7 @@ export const PERMISSION_TABLE: ReadonlyArray<{ row: number; name: string; why: s
   { row: 5, name: "Company allow rules", why: "In the owner's order, shared with row 7: the first matching allow or routing rule decides. They cannot lift a guard." },
   { row: 6, name: "Built-in allows", why: "Boss Man's tools, reading, editing, plain shell." },
   { row: 7, name: "Company routing rules", why: "To the CEO or owner. Only for requests the rows above leave asking, plus guarded ones; never for what is allowed." },
-  { row: 8, name: "Default", why: "Nothing matched: the owner is asked." },
+  { row: 8, name: "Default", why: "Nothing matched: a command or unrecognised tool goes to the CEO first, in every company; delete, move and path requests go to the owner." },
   { row: 9, name: "Tier adjustments", why: "The CEO's own request goes to the owner (server, after this table)." },
 ];
 
@@ -151,6 +157,7 @@ export const TOOL_KINDS = ["read", "edit", "delete", "move", "search", "execute"
 export function ruleProblems(match: PolicyMatch): string[] {
   const problems: string[] = [];
   if (!match.kinds?.length && !match.commandPattern && !match.titlePattern && !match.scratchOnly && !match.destructive && !match.pushing) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
+  if (match.agentIds && (!Array.isArray(match.agentIds) || !match.agentIds.length || match.agentIds.length > 50 || !match.agentIds.every((a) => typeof a === "string" && a.length > 0 && a.length <= 64))) problems.push("An agent condition needs between 1 and 50 agent ids.");
   for (const k of match.kinds ?? []) if (!(TOOL_KINDS as readonly string[]).includes(k)) problems.push(`"${k}" isn't a tool kind. Use: ${TOOL_KINDS.join(", ")}.`);
   for (const [label, p] of [["command pattern", match.commandPattern], ["title pattern", match.titlePattern]] as const) {
     if (p == null) continue;
@@ -236,6 +243,7 @@ function safeRegex(pattern: string): RegExp | null {
 export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
   // OpenCode asks about some shell commands (e.g. outside its folder) with kind "other"; a command is still a command.
   const kind = (!info.kind || info.kind === "other") && commandOf(info.rawInput) ? "execute" : info.kind;
+  if (rule.agentIds && !(info.agentId && rule.agentIds.includes(info.agentId))) return false;
   if (rule.kinds && !(kind && rule.kinds.includes(kind))) return false;
   if (rule.commandPattern) {
     const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null);
@@ -337,8 +345,11 @@ export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[]):
   const builtin = BUILTIN_ALLOWS.find((r) => matches(r.match, info));
   if (builtin) return { outcome: builtin.outcome, rule: builtin.name, row: 6 };
   if (first) return { outcome: first.outcome, rule: first.name, row: 7 };
-  // Row 8: a tool Boss Man doesn't recognise is the CEO's call first (BOS-295); anything else is the owner's.
-  return isUnrecognisedTool(info) ? { outcome: "ceo", rule: UNKNOWN_TOOL_RULE, row: 8 } : { outcome: "owner", rule: "No rule matched", row: 8 };
+  // Row 8: nothing above decided, so the CEO is asked first in every company, with no rule needed (BOS-295, BOS-752). The real owner-only cases are the guards in row 3.
+  if (isUnrecognisedTool(info)) return { outcome: "ceo", rule: UNKNOWN_TOOL_RULE, row: 8 };
+  // A command no rule covers is the CEO's call too. Delete, move and path-carrying requests stay with the owner (BOS-295 security review).
+  if (commandOf(info.rawInput) != null) return { outcome: "ceo", rule: UNMATCHED_RULE, row: 8 };
+  return { outcome: "owner", rule: "No rule matched", row: 8 };
 }
 
 /** Routing rules the built-in allows cover: they only fire for guarded requests now (BOS-307). Judged from the tool kinds alone: listed when it names no kinds, or when any kind it names is a built-in allow. */

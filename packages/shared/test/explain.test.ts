@@ -2,6 +2,30 @@ import { describe, expect, it } from "vitest";
 import { evaluatePermission } from "../src/policy.js";
 import { alwaysChoices, explainCommand, explainPermission, readPush } from "../src/explain.js";
 
+describe("agent-browser test commands (BOS-752)", () => {
+  const S = "/home/node/workspaces/scratch/abc";
+  const shapes = [
+    `cd ${S} && A=t1 && agent-browser --session $A open http://web:3000`,
+    `agent-browser --session "$A" eval "document.querySelector('h1').innerText"`,
+    `agent-browser \\\n  --session $A \\\n  get text "heading Hello world"`,
+    `agent-browser --session $A snapshot -i\nagent-browser --session $A click "heading Sign in"`,
+    `agent-browser --session $A eval "JSON.stringify(document.querySelector(\\"h1\\").textContent) // heading"`,
+    `A=t1; agent-browser --session=$A screenshot ${S}/shot.png`,
+  ];
+  it("never reads a flag, a variable or quoted text as a program, and knows agent-browser", () => {
+    for (const c of shapes) {
+      const e = explainCommand(c);
+      expect(e.summary, c).not.toMatch(/doesn't recognise/);
+      expect(e.effect, c).toBe("network");
+    }
+  });
+  it("a continuation fragment that starts with a flag or variable is not a program name", () => {
+    for (const c of ["--session $A", "$A open x", 'heading"']) {
+      expect(explainCommand(c).summary, c).not.toMatch(/\((?:[^)]*[$"-])/);
+    }
+  });
+});
+
 describe("readPush", () => {
   const ticket = "11111111-2222-4333-8444-555555555555";
 
@@ -176,10 +200,10 @@ describe("alwaysChoices", () => {
     const info = { title, kind, rawInput };
     return alwaysChoices(info, explainPermission(info, "A"));
   };
-  it("offers the exact tool or the whole server for an MCP tool, never Boss Man's own", () => {
+  it("offers only the exact tool for an MCP tool, never Boss Man's own", () => {
     const c = choices("mcp__crawl4ai__md", "other", null);
-    expect(c.map((x) => x.label)).toEqual(["Always allow crawl4ai's md tool", "Always allow every crawl4ai tool"]);
-    expect(c.map((x) => x.match.titlePattern)).toEqual(["^mcp__crawl4ai__md$", "^mcp__crawl4ai__"]);
+    expect(c.map((x) => x.label)).toEqual(["Always allow crawl4ai's md tool"]);
+    expect(c.map((x) => x.match.titlePattern)).toEqual(["^mcp__crawl4ai__md$"]);
     expect(choices("mcp__bossman__create_ticket", "other", null)).toEqual([]);
   });
   it("escapes regex characters in what it saves", () => {
@@ -198,9 +222,11 @@ describe("alwaysChoices", () => {
     expect(ask("ls '(a|b).txt'; rm -rf /")).not.toBe("r");
     expect(ask("ls aXb.txt")).not.toBe("r");
   });
-  it("offers a company-wide kind rule for plain tools, and no rule can lift the destructive gate", () => {
-    const [c] = choices("Read", "read", { file_path: "a" });
-    expect(c!.label).toBe("Always allow every agent in this company to read files");
+  it("offers no Always choice for file reads or edits (any path, secrets included), and no rule can lift the destructive gate", () => {
+    expect(choices("Read", "read", { file_path: "a" })).toEqual([]);
+    expect(choices("Read", "read", { file_path: "/root/.ssh/id_rsa" })).toEqual([]);
+    expect(choices("Edit", "edit", { file_path: "/etc/passwd" })).toEqual([]);
+    expect(choices("WebFetch", "fetch", { url: "https://x.dev" })).toEqual([]);
     const rule = [{ name: "all", match: { kinds: ["execute"], safeOnly: true }, outcome: "allow" as const }];
     const run = (command: string) => evaluatePermission({ title: command, kind: "execute", rawInput: { command } }, rule);
     expect(run("rm -rf /srv/dist").outcome).toBe("owner");
