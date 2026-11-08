@@ -103,6 +103,13 @@ const guardWatch = watchGuardEvents({
   log: (level, entry) => console[level](JSON.stringify({ at: new Date().toISOString(), ...entry })),
 });
 setInterval(() => reconcile("timer"), 5_000).unref();
+// Self-heal (BOS-467): a runner removed because its guard failed is made again, with a growing wait between tries.
+const heal = () =>
+  api.healMissing().then(
+    (healed) => healed.length && console.log(JSON.stringify({ at: new Date().toISOString(), msg: "runner made again after it was removed", companies: healed })),
+    (err: unknown) => console.error(JSON.stringify({ at: new Date().toISOString(), msg: "could not make runner again; will retry", error: String((err as Error)?.message ?? err) })),
+  );
+setInterval(() => void heal(), 5_000).unref();
 const stop = () => {
   guardWatch.stop();
   server.close(() => process.exit(0));

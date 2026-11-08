@@ -14,6 +14,8 @@ import { record } from "./activity.js";
 
 type Ticket = typeof tickets.$inferSelect;
 export type SignedOff = { head: string; risk: string | null; at: string };
+/** The runner's answer to "does the owner's sign-off on an earlier commit still cover the branch head?" (BOS-734, DR-038). */
+export type SignoffCover = { covers: boolean; reason: string; newCommits: number; handMerges: number };
 
 /** From the facts alone, with no regard to cards that are open. */
 export type DerivedSignoff =
@@ -166,8 +168,8 @@ export async function signoffHistory(db: Db, ticketId: string, limit = 5): Promi
  * transaction, so a crash can't leave a card without its hold or a hold without its card. The card closes
  * itself once the ticket stops waiting on the sign-off (`signoffNotWaiting`, DR-021).
  */
-export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string; reviewerAgentId: string | null; head?: string | null; earlier?: SignedOff | null }): Promise<string> {
-  const earlier = o.earlier ? `\n\nYou approved an earlier version (${o.earlier.head.slice(0, 8)}) on ${hhmm(new Date(o.earlier.at))}; the code has changed since.` : "";
+export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string; reviewerAgentId: string | null; head?: string | null; earlier?: SignedOff | null; /** Why this replaces an earlier card for older code (BOS-734). */ changed?: string }): Promise<string> {
+  const earlier = o.earlier ? `\n\nYou approved an earlier version (${o.earlier.head.slice(0, 8)}) on ${hhmm(new Date(o.earlier.at))}; the code has changed since.` : o.changed ? `\n\nThis replaces an earlier card: since then the branch changed (${o.changed}).` : "";
   return db.transaction(async (txn) => {
     const tx = txn as unknown as Db;
     await supersedeSignoffs(tx, t.id, { by: "system", note: "Replaced by a newer sign-off card after a new review round.", at: new Date().toISOString() });
@@ -202,6 +204,45 @@ export async function restoreSignoffCard(db: Db, t: Ticket, why: string, head?: 
   const id = await raiseSignoffCard(db, t, { reviewer: s.reviewer, reviewerAgentId: s.reviewerAgentId, head });
   await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_restored", summary: `Every review passed but no sign-off card was open, so Boss Man raised one (${why}).` });
   return id;
+}
+
+/**
+ * Keeps open sign-off cards honest when a ticket's head moves after the card was raised (BOS-734). A card whose
+ * commit is still covered (only clean main merges came in) is moved to the new head; any other change replaces
+ * it with a card for the current head that says what changed. Heads or the runner that can't be read leave the
+ * card alone until the next pass. Returns how many cards it moved or replaced.
+ */
+export async function refreshSignoffCards(
+  db: Db,
+  deps: { headOf: (ticketId: string) => Promise<string | null>; covers: (ticketId: string, signed: string, head?: string) => Promise<SignoffCover | null>; withdraw: (ticketId: string, cardHead: string, head: string, why: string) => Promise<unknown> },
+): Promise<number> {
+  const open = await db
+    .select({ id: decisions.id, context: decisions.context, question: decisions.question })
+    .from(decisions)
+    .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'head' is not null`));
+  let changed = 0;
+  for (const card of open) {
+    const ctx = card.context as { ticketId: string; head: string; reviewer: string };
+    const [t] = await db.select().from(tickets).where(eq(tickets.id, ctx.ticketId));
+    if (!t || t.systemState !== "review") continue;
+    const head = await deps.headOf(t.id).catch(() => null);
+    if (!head || head === ctx.head) continue;
+    const c = await deps.covers(t.id, ctx.head, head).catch(() => null);
+    if (c?.covers) {
+      const line = `\n\nUpdated: the branch moved to ${head.slice(0, 8)} since this card was raised, but only main was merged in automatically, with no clashes and no new code from the ticket.`;
+      await db.update(decisions).set({ question: card.question + line, context: sql`${decisions.context} || ${JSON.stringify({ head })}::jsonb` }).where(and(eq(decisions.id, card.id), eq(decisions.status, "open")));
+    } else if (!c) {
+      continue; // the runner couldn't say: leave the card, try again next pass
+    } else {
+      // New code the reviewers haven't seen: withdraw the card and send the ticket back for a new review (security review).
+      await deps.withdraw(t.id, ctx.head, head, c.reason || "new code came in");
+      changed++;
+      continue;
+    }
+    await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_card_moved", summary: `The sign-off card was for ${ctx.head.slice(0, 8)} but the branch is at ${head.slice(0, 8)}, so it was moved to the new commit.` });
+    changed++;
+  }
+  return changed;
 }
 
 /** Two raises that raced (an approval and the sweep, say) can leave two open cards: keep the newest. */

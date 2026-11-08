@@ -4,8 +4,8 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, formatDate, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
+import { agentIdentity, formatDate, parkedOnPurpose, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
@@ -1840,8 +1840,10 @@ export function schedulerService(
     /**
      * A ticket in backlog or blocked whose blockers are all resolved moves to ready and its assignee is woken
      * (BOS-603: a backlog ticket was never released). With no assignee there is nobody to wake, so the CEO gets
-     * one notice instead and the ticket stays put. Safe to call again: a released ticket no longer matches,
-     * and the notice is keyed on the ticket. Returns whether it released or noticed.
+     * one notice instead and the ticket stays put. A ticket parked on purpose (a "blocked until" time still
+     * ahead, or a note that says parked) keeps its state, and its assignee is told the blocker finished but the
+     * ticket is left where it is (BOS-742). Safe to call again: a released ticket no longer matches, and the
+     * notice is keyed on the ticket. Returns whether it released, noticed or told a parked ticket's assignee.
      */
     async releaseIfUnblocked(ticketId: string, causedByRunId?: string | null): Promise<boolean> {
       const [cur] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
@@ -1854,6 +1856,29 @@ export function schedulerService(
         .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
         .where(eq(ticketDependencies.blockedTicketId, ticketId));
       if (deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) return false;
+      // Parked on purpose (BOS-742): hold it back, but tell the assignee, once per freeing event. The activity
+      // row is keyed on the newest blocker's finish, so the next sweep doesn't tell them again for the same
+      // blocker; a later blocker that frees has a newer time and is news.
+      if (parkedOnPurpose(cur, now())) {
+        if (!cur.assigneeAgentId) return false;
+        const [newest] = await db
+          .select({ at: max(tickets.stateChangedAt) })
+          .from(ticketDependencies)
+          .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+          .where(eq(ticketDependencies.blockedTicketId, ticketId));
+        const key = `unblocked-parked:${ticketId}:${newest?.at ? newest.at.toISOString() : "none"}`;
+        const [told] = await db.select({ id: activity.id }).from(activity).where(and(eq(activity.companyId, cur.companyId), eq(activity.kind, "watchdog"), sql`${activity.detail}->>'key' = ${key}`)).limit(1);
+        if (told) return false;
+        const note = await unblockedNote(db, cur.id);
+        await this.notify(cur.assigneeAgentId, {
+          ticketId: cur.id,
+          reason: "unblocked",
+          causedByRunId,
+          note: `What this ticket was waiting on has finished, but the ticket is parked on purpose${cur.blockedUntil ? ` until ${cur.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC` : ""}, so it is left where it is. Move it when you mean to start it.${note ? `\n${note}` : ""}`,
+        });
+        await db.insert(activity).values({ companyId: cur.companyId, ticketId: cur.id, kind: "watchdog", summary: `Told ${cur.assigneeAgentId === null ? "nobody" : "the assignee"} that this ticket is free: it is parked on purpose, so it stays put.`, detail: { key } });
+        return true;
+      }
       if (!cur.assigneeAgentId) {
         if (!deps.length) return false;
         // A blocked ticket has always gone to ready here, assignee or not; keep that.

@@ -151,6 +151,7 @@ export const OWNER_FIELDS = {
     "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for the agent (if you send it back)",
     "Why (shown on the Changes table, required)", "Wiki page that explains it (optional)",
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
+    "Every agent in this company",
   ],
   Notifications: [
     "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
