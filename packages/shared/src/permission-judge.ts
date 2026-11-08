@@ -100,7 +100,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Allow-list: a git command passes only as a subcommand in GIT_TABLE with flags listed for it (checked below, once the own
   // folder is known) or the read-only config forms; everything else that uses git is Deny.
   if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
-  if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn|yarnpkg)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn|yarnpkg)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
+  if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn|yarnpkg)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn|yarnpkg)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b|\byarn(?:pkg)?(?:\.\w+)?\b[^;&|\n]*\sglobal(?=\s|$)/.test(c)) return result("outside");
   // Editors take commands (`vim -c "w! /file"`); an agent has no use for one.
   if (/(?:^|[;&|(\n]\s*)(?:vi|vim|nvim|ex|ed|view|vimdiff|emacs|nano|pico)\s/.test(c)) return result("outside");
   const rootRe = workspaceRoot ? workspaceRoot.replace(/\/+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "(?:/[\\w.@+-]+)*/workspaces";
@@ -1114,7 +1114,8 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     }
     // BOS-717: `yarnpkg` is yarn 1 under another name (same yarn-path rule), so it is judged as `yarn`.
     const head0 = (words[k] ?? "").replace(/^.*\//, "");
-    const head = head0 === "yarnpkg" ? "yarn" : head0;
+    // BOS-718: so is yarn 1 under its file names (`yarn.js`, `yarn.cmd`, `yarnpkg.cmd`, ...), run by path or from PATH.
+    const head = /^(?:yarn|yarnpkg)(?:\.(?:c?js|mjs|cmd|ps1|exe))?$/.test(head0) ? "yarn" : head0;
     const args = words.slice(k + 1);
     // A launcher that could not be read, or a flag standing where the program should be (`sudo -u x git`), hides the program.
     if (away && (unreadable || head === "corepack" || (head.startsWith("-") && head.length > 1) || /^(?:sh|bash|dash|zsh|ksh|ash)$/.test(head))) return true;
@@ -1131,7 +1132,8 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     // BOS-717: an unknown option before the verb may take the next word as its value (`npm --loglevel info init x`), so the verb
     // is the first word that is not an option or an option's value; `init` anywhere there counts.
     if (/^(?:pnpm|npm|bun)$/.test(head)) {
-      const initAt = args.indexOf("init");
+      // BOS-718: `create` and `innit` are npm's aliases of `init` (pnpm and bun have `create` too), same verdict.
+      const initAt = args.findIndex((a) => a === "init" || a === "create" || a === "innit");
       const before = initAt < 0 ? [] : args.slice(0, initAt);
       const onlyOpts = before.every((a, i) => a.startsWith("-") || (a !== "" && (before[i - 1] ?? "").startsWith("-") && (before[i - 1] ?? "") !== "--" && !(before[i - 1] ?? "").includes("=")));
       if (initAt >= 0 && onlyOpts && args.slice(initAt + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
