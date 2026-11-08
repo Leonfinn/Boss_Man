@@ -839,6 +839,30 @@ function setsUnknownEnvironment(assigns: string[], sh: string, args: string[]): 
 }
 
 /**
+ * The command string a shell runs for `sh|bash|zsh|dash|ksh -c`, given the words after `-c` (BOS-695). The shell still reads
+ * options after `-c`, so skip `--`, option words (`-x`, `+x`, `-eu`, `-e`, `-o pipefail`, `+o errexit`, `-O extglob`) and the
+ * argument an `-o`/`+o`/`-O`/`+O` word takes, then take the first plain word. `ok: false` means an option word we can't place,
+ * or no command string at all: the caller must give no Allow.
+ */
+function shellDashCString(words: string[]): { word: string; ok: boolean } {
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === "--") continue;
+    if (!/^[-+]/.test(w)) return { word: w, ok: true };
+    // `-o pipefail` / `+o errexit` / bash's `-O extglob` / `+O nullglob`, and a cluster ending in o/O (`-eo pipefail`,
+    // `-euo pipefail`, `-eO extglob`): the option name is the next word.
+    if (/^[-+][A-Za-z]*[oO]$/.test(w)) { i++; continue; }
+    // A bare `-` is a word, not an option.
+    if (w === "-") return { word: w, ok: true };
+    // Only plain short-option words (`-e`, `-ex`, `+e`, `-x`) are recognised, along with an `-o<name>`/`-O<name>` without a
+    // separate name (`-opipefail`); anything else (an option form the judge can't place) gives no Allow.
+    if (/^[-+][A-Za-z]+$/.test(w)) continue;
+    return { word: "", ok: false };
+  }
+  return { word: "", ok: false }; // `-c` with no command string: nothing to read, so no Allow
+}
+
+/**
  * Deny-by-default for scratch paths. In a command that names a /tmp path or a path the command itself writes (redirect, tee,
  * cp, mv, curl -o ...), the only commands allowed to mention that path are readers and file tools (cat, grep, ls, cp, rm,
  * tee ...). Any other command word (an interpreter however it is spelled or wrapped, `./w.js`, flock, strace, npx, `FOO=/tmp/x
@@ -1294,10 +1318,20 @@ function usesScratchUnsafely(c: string): boolean {
       if (mentionsWritten(code) || named(flag.replace(/^-[A-Za-z]*?[mMr]/, ""))) return true;
       if (/^-[A-Za-z]*[mMr]$|^--(?:require|import)$/.test(flag) && named(args[codeAt + 1] ?? "")) return true; // `-m c`, `-r ./c.js`
     }
-    const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
+    const dashC = args.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
-      // `bash -c -- 'cmd'`: the command string is the first word after -c that is not `--`.
-      const inner = args.slice(dashC + 1).find((a) => a !== "--") ?? "";
+      // `bash -c -ex -- 'cmd'`: the shell still reads options after -c, so the command string is the first word after -c
+      // that is not `--` and not an option (BOS-695). An option word we can't place gives no Allow.
+      // `bash -ce 'cmd'` / `bash -co pipefail 'cmd'` (BOS-700): `c` may sit inside a cluster, so the letters after it are
+      // still options to place (`-ce` -> `-e`, `-co` -> `-o pipefail`) before the command string.
+      const tail = args[dashC]!.replace(/^-[A-Za-z]*?c(?=[A-Za-z]*$)/, "-");
+      const rest = tail.length > 1 ? [tail, ...args.slice(dashC + 1)] : args.slice(dashC + 1);
+      const at = shellDashCString(rest);
+      if (at.ok === false) return true;
+      const inner = at.word;
+      // `bash -c -e`: no command string to read, but with a written or scratch path anywhere in the command, give no Allow.
+      if (inner === "" && (written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) return true;
+      if (inner === "") continue;
       if (written.size > 0 && named(inner)) return true; // the inner command may run what the outer one wrote
       if (usesScratchUnsafely(inner)) return true;
       continue;

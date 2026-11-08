@@ -901,6 +901,59 @@ describe("rules judge: unknown environment and git global options (BOS-630)", ()
   ]);
 });
 
+// BOS-695 (Kit, from Jane's BOS-630 round 2): bash/sh still read options after `-c`, so an option word between `-c` and the
+// command string must not hide the string from the judge. Every row here got Allow before this fix.
+describe("rules judge: shell options after -c (BOS-695)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  const denies = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  denies([
+    "bash -c -e 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -x 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -v 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c +e 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "sh -c -e 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -o pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c +o errexit 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    // BOS-700 part 1 (Jane): an option cluster ending in o/O takes the option name as the next word (`-eo pipefail`).
+    "bash -c -eo pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -eO extglob 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -euo pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    // BOS-700 part 2 (Jane): `-c` in an option group that does not end in c (`-ce`, `-co pipefail`).
+    "bash -ce 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -co pipefail 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -O extglob 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -ex 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -c -e -- 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "echo x > c.sh; bash -c -e './c.sh'",
+    "echo x > c.sh; bash -c -o pipefail './c.sh'",
+    "echo x > c.sh; bash -c -eo pipefail './c.sh'",
+    "bash -c -e 'node /tmp/x.js'",
+    // An option form the judge can't place: no Allow.
+    "bash -c --posix 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    // Options before `-c` (the other side of the same gap): separate word, joined `-ec`, and joined `+e`.
+    "bash -e -c 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash -ec 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+    "bash +e -c 'TAR_OPTIONS=--to-command=/tmp/x.sh tar xf a.tar'",
+  ]);
+  allows([
+    "bash -c 'pnpm test'",
+    "bash -c -e 'pnpm test'",
+    "bash -c -o pipefail 'pnpm test'",
+    "bash -c -e -- 'pnpm test'",
+    // BOS-700: the option clusters and joined -c forms still allow an ordinary command.
+    "bash -c -eo pipefail 'pnpm test'",
+    "bash -c -euo pipefail 'pnpm test'",
+    "bash -ce 'pnpm test'",
+    "bash -co pipefail 'pnpm test'",
+    "sh -c 'ls -la'",
+    // Options before `-c` don't hide an ordinary command either.
+    "bash -e -c 'pnpm test'",
+    "bash -ec 'pnpm test'",
+  ]);
+});
+
 // BOS-696 (Jane, BOS-631 review): a quoted flag is the same flag, and a command substitution inside a `bash -c` string is unknown.
 describe("rules judge: quoted flags and $(...) inside bash -c (BOS-696)", () => {
   const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
