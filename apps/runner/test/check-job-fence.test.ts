@@ -3,10 +3,10 @@
 // BOS-655: the job's HOME is removed when it ends, and a runner that can't fence still gives the job its own
 // HOME/TMPDIR and the pnpm store on the workspaces volume, so an install doesn't fill the root disk.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { levelFor, probeLandlock, type FenceLevel } from "../src/fence.js";
 import { Workspaces } from "../src/workspace.js";
 
@@ -15,18 +15,28 @@ const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: ENV }).trim();
 const projectId = "11111111-1111-4111-8111-111111111111";
 
+const dirs: string[] = [];
+const tmp = (prefix: string, base = tmpdir()) => {
+  const d = mkdtempSync(path.join(base, prefix));
+  dirs.push(d);
+  return d;
+};
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 /** A workspaces root with a bare copy of a one-commit repo, and that commit. */
-function setup(jobFence: { level: FenceLevel; pnpmStore?: string }) {
-  const bare = mkdtempSync(path.join(tmpdir(), "bm-fj-origin-"));
+function setup(jobFence: { level: FenceLevel; pnpmStore?: string }, prefix = "bm-fj") {
+  const bare = tmp(`${prefix}-origin-`);
   git(bare, "init", "-q", "--bare", "-b", "main");
-  const seed = mkdtempSync(path.join(tmpdir(), "bm-fj-seed-"));
+  const seed = tmp(`${prefix}-seed-`);
   git(seed, "clone", "-q", bare, ".");
   writeFileSync(path.join(seed, "a.txt"), "a\n");
   git(seed, "add", ".");
   git(seed, "commit", "-qm", "init");
   git(seed, "push", "-q", "origin", "HEAD:main");
   const commit = git(seed, "rev-parse", "HEAD");
-  const root = mkdtempSync(path.join(tmpdir(), "bm-fj-root-"));
+  const root = tmp(`${prefix}-root-`);
   mkdirSync(path.join(root, "repos"), { recursive: true });
   git(root, "clone", "-q", "--bare", bare, path.join(root, "repos", `${projectId}.git`));
   return { root, commit, ws: new Workspaces(root, process.env, undefined, undefined, jobFence) };
@@ -34,7 +44,7 @@ function setup(jobFence: { level: FenceLevel; pnpmStore?: string }) {
 
 describe.skipIf(level === "unavailable")("fenced check job", () => {
   it("can't read a secret outside its folder, gets its own HOME, and leaves no HOME behind", async () => {
-    const secretDir = mkdtempSync(path.join(process.env.HOME ?? tmpdir(), ".bm-fj-secret-"));
+    const secretDir = tmp(".bm-fj-secret-", process.env.HOME ?? tmpdir());
     writeFileSync(path.join(secretDir, "token"), "TOPSECRET");
     const { root, commit, ws } = setup({ level });
     const jobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -69,16 +79,16 @@ describe("unfenced check job (BOS-655)", () => {
 // A fenced job, and one on a runner that can't fence, both use the agents' shared store instead.
 describe("a job's pnpm store (BOS-568 review)", () => {
   function setup() {
-    const bare = mkdtempSync(path.join(tmpdir(), "bm-fjs-origin-"));
+    const bare = tmp("bm-fjs-origin-");
     git(bare, "init", "-q", "--bare", "-b", "main");
-    const seed = mkdtempSync(path.join(tmpdir(), "bm-fjs-seed-"));
+    const seed = tmp("bm-fjs-seed-");
     git(seed, "clone", "-q", bare, ".");
     writeFileSync(path.join(seed, "a.txt"), "a\n");
     git(seed, "add", ".");
     git(seed, "commit", "-qm", "init");
     git(seed, "push", "-q", "origin", "HEAD:main");
     const commit = git(seed, "rev-parse", "HEAD");
-    const root = mkdtempSync(path.join(tmpdir(), "bm-fjs-root-"));
+    const root = tmp("bm-fjs-root-");
     const projectId = "11111111-1111-4111-8111-111111111111";
     mkdirSync(path.join(root, "repos"), { recursive: true });
     git(root, "clone", "-q", "--bare", bare, path.join(root, "repos", `${projectId}.git`));
