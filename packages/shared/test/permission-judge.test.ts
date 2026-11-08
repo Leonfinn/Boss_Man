@@ -1183,7 +1183,7 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
       "env -u X -C /tmp/p pnpm run evil",
     ]);
     allows([
-      "cd /tmp/p && pnpm -w install --ignore-scripts",
+      "cd /tmp/p && pnpm -w install --ignore-scripts --ignore-pnpmfile",
       "env -0u X -C packages/shared pnpm run build",
       "env -iP /bin -C packages/shared pnpm run build",
       "env -0u X pnpm run build",
@@ -1198,8 +1198,62 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     ]);
     allows([
       "cd /tmp/p && npm --production install --ignore-scripts",
-      "cd /tmp/p && pnpm --prod install --ignore-scripts",
-      "cd /tmp/p && yarn install --production --ignore-scripts",
+      "cd /tmp/p && pnpm --prod install --ignore-scripts --ignore-pnpmfile",
+    ]);
+  });
+
+  // BOS-711 (Jane's review of BOS-706): the flag undone later, other verbs that run scripts, and the corepack launcher.
+  describe("A5. outside install: flag undone, other verbs, corepack (BOS-711)", () => {
+    deny([
+      "cd /tmp/p && npm install --ignore-scripts --no-ignore-scripts",
+      "cd /tmp/p && npm install --ignore-scripts --ignore-scripts=false",
+      "cd /tmp/p && npm i --ignore-scripts=true --ignore-scripts=false",
+      "cd /tmp/p && npm install --ignore-scripts false",
+      "cd /tmp/p && npm --ignore-scripts install --no-ignore-scripts",
+      "cd /tmp/p && pnpm install --ignore-scripts --no-ignore-scripts",
+      "cd /tmp/p && npm install -- --ignore-scripts",
+      "cd /tmp/p && npm install --Ignore-Scripts=false --ignore-scripts",
+      "cd /tmp/p && npm install --no-ignore-scripts --ignore-scripts", // unreadable order: fail closed
+      "cd /tmp/p && npm version patch",
+      "cd /tmp/p && npm link",
+      "cd /tmp/p && npm update",
+      "cd /tmp/p && pnpm update",
+      "cd /tmp/p && npm dedupe",
+      "cd /tmp/p && npm remove x",
+      "cd /tmp/p && corepack pnpm install",
+      "cd /tmp/p && corepack pnpm run evil",
+      "cd /tmp/p && corepack use pnpm@9",
+    ]);
+    allows([
+      "cd /tmp/p && npm update --ignore-scripts",
+      "cd /tmp/p && npm remove x --ignore-scripts",
+      "cd /tmp/p && npm version patch --ignore-scripts",
+      "cd /tmp/p && corepack pnpm install --ignore-scripts --ignore-pnpmfile",
+      "cd /tmp/p && npm ls",
+      "cd packages/shared && npm update",
+    ]);
+  });
+
+  // BOS-711 group 4 (CEO decision): .pnpmfile.cjs and yarn-path run code even with --ignore-scripts.
+  describe("A6. outside install: pnpmfile and yarn-path (BOS-711)", () => {
+    deny([
+      "cd /tmp/p && pnpm install --ignore-scripts",
+      "cd /tmp/p && pnpm add x --ignore-scripts",
+      "cd /tmp/p && pnpm install --ignore-scripts --ignore-pnpmfile --no-ignore-pnpmfile",
+      "cd /tmp/p && pnpm install --ignore-scripts --ignore-pnpmfile=false",
+      "cd /tmp/p && corepack pnpm install --ignore-scripts",
+      "cd /tmp/p && yarn install --ignore-scripts",
+      "cd /tmp/p && yarn add x --ignore-scripts",
+      "cd /tmp/p && yarn upgrade --ignore-scripts",
+      "cd /tmp/p && yarn --ignore-scripts install",
+      "cd /tmp/p && yarn",
+    ]);
+    allows([
+      "cd /tmp/p && pnpm install --ignore-scripts --ignore-pnpmfile",
+      "cd /tmp/p && corepack pnpm install --ignore-scripts --ignore-pnpmfile",
+      "cd /tmp/p && yarn list",
+      "cd packages/shared && pnpm install",
+      "cd packages/shared && yarn install",
     ]);
   });
 
