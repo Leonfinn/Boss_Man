@@ -1889,7 +1889,19 @@ type SelfDeployView = {
   pending: boolean;
   status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
   available: { tip: string; deployed: string; checkedAt: string; commits: unknown[]; bluegreen?: boolean } | null;
+  /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
+  deployer?: { reportedAt: string | null; late: boolean };
+  lateAfterMinutes?: number;
 };
+
+/** The line under "Last deploy" when the host has no offer to show (BOS-753): "not reported" only when it really is overdue. */
+function deployerLine(v: SelfDeployView): string {
+  const d = v.deployer;
+  if (!d) return "The host deployer has not reported yet.";
+  if (!d.reportedAt) return "The host deployer has not reported yet. Check that its cron job is running.";
+  if (d.late) return `The host deployer last reported ${when(d.reportedAt)}, more than ${v.lateAfterMinutes ?? 10} minutes ago; it should report every minute. Check that its cron job is running.`;
+  return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
+}
 
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 function SelfDeploy({ go }: { go: (to: string) => void }) {
@@ -1906,7 +1918,7 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
         {s ? `Last deploy: ${s.result.replace(/_/g, " ")}, ${s.target} ${s.to_commit.slice(0, 8)}, ${when(s.ended || s.started)}. ${s.message}` : "No deploy yet."}
       </p>
       <p className="muted" style={{ fontSize: 14 }}>
-        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : "The host deployer has not reported yet."}
+        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
       <div>
         <button
