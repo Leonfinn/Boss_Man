@@ -1122,8 +1122,9 @@ function peelWrapper(head: string, args: string[]): { head: string; args: string
       i += takesNext ? 2 : 1;
       continue;
     }
+    // timeout reads its duration with strtod (`inf`, `+1`, `1e3`, `infinity`): the first operand is always the duration, never the command.
+    if (durationLeft) { durationLeft = false; i++; continue; }
     if (/^\w+=/.test(a)) { assigns.push(a); i++; continue; }
-    if (durationLeft && /^[\d.][\w.]*$/.test(a)) { durationLeft = false; i++; continue; }
     if (lockLeft) { lockLeft = false; i++; continue; }
     break;
   }
