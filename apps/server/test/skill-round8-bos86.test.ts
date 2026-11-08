@@ -106,12 +106,11 @@ describe("R8-2: the review ticket makes no claim about which files are scripts",
     expect(p).toMatchObject({ status: "in_review" });
   });
 
-  // Known open gap (BOS-146): the owner's card still reports hasScripts=false for this draft, which is a false
-  // negative. This pins the current behaviour so it goes red when the card is fixed; then assert not.toBe(false).
-  it("known gap: the owner's card still counts no scripts", async () => {
+  // Fixed in BOS-177: the owner's card counts "cat ~/.aws/credentials" as a script, so it no longer reports false.
+  it("the owner's card counts the credentials-reading command as a script", async () => {
     const c = (ctx = await setup());
     const p = await draft(c, evil);
-    expect(p.hasScripts).toBe(false);
+    expect(p.hasScripts).not.toBe(false);
   });
 
   it("a draft with no scripts is still reviewed", async () => {

@@ -91,10 +91,11 @@ jobs:
     needs: changes
     if: ${{ !startsWith(github.ref, 'refs/heads/bossman/') && needs.changes.outputs.check == 'true' }}
     runs-on: ubuntu-latest
-    # A real Postgres for the leader-lock and migrate-lock tests (PGlite cannot share locks across connections).
+    # A real Postgres for the leader-lock, migrate-lock and db-restart tests (PGlite cannot share locks across connections).
+    # Same image as docker-compose.yml: the migrations need pgvector (0036_semantic_wiki.sql).
     services:
       postgres:
-        image: postgres:17
+        image: pgvector/pgvector:0.8.7-pg17-bookworm
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]

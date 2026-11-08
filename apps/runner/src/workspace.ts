@@ -11,6 +11,7 @@
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
@@ -21,6 +22,45 @@ import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
 
 const run = promisify(execFile);
 const VERIFY_KILL_GRACE_MS = 2000;
+/** A review copy's install (BOS-693): seconds from a warm store; a cold one on a slow link can take a few minutes. */
+export const REVIEW_INSTALL_TIMEOUT_MS = 5 * 60_000;
+
+/** Runs a command in its own process group, killed whole at the timeout; output kept to the last 4 KB. Never rejects on exit. */
+function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; timedOut: boolean; output: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    let timedOut = false;
+    const onData = (d: Buffer) => {
+      output = (output + String(d)).slice(-4096);
+    };
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", onData);
+    const kill = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        // group already gone
+      }
+    };
+    let hard: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill("SIGTERM");
+      hard = setTimeout(() => kill("SIGKILL"), VERIFY_KILL_GRACE_MS);
+    }, timeoutMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      clearTimeout(hard);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      clearTimeout(hard);
+      resolve({ code, timedOut, output: output.trim() });
+    });
+  });
+}
 
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
@@ -98,6 +138,16 @@ export function safeGitEnv(extra: Record<string, string> = {}): Record<string, s
   return env;
 }
 
+/**
+ * The git author and committer for a name. An agent's session gets this in its environment (BOS-255):
+ * the worktrees share the repo's own config, where an agent's `git config user.name` lands for every
+ * later run, and environment variables beat any config file.
+ */
+export function gitAuthorEnv(by?: string) {
+  const name = by?.trim().slice(0, 200) || "Boss Man";
+  return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
+}
+
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>();
 
@@ -126,8 +176,7 @@ export class Workspaces {
    * merge) are always Boss Man, since they aren't the agent's work.
    */
   private authorEnv(by?: string) {
-    const name = by?.trim().slice(0, 200) || "Boss Man";
-    return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
+    return gitAuthorEnv(by);
   }
 
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
@@ -308,6 +357,52 @@ export class Workspaces {
     });
   }
 
+  /** One install at a time per review copy: a ticket's code and security reviewers share the folder. */
+  private readonly reviewInstalls = new Map<string, Promise<unknown>>();
+
+  /**
+   * Installs a review copy's packages (BOS-693), so its reviewer can run the ticket's tests in place instead of building a
+   * /tmp clone. Only for a pnpm project, and only from the shared store (BOS-568): with no shared store it does nothing
+   * rather than start a store of its own. The install follows the branch's lockfile and runs its packages' scripts, which
+   * nobody has reviewed yet, so it runs as a server-queued check job does: fenced where the runner can fence, with a HOME
+   * of its own under check-jobs-home that goes afterwards (and that the start-up sweep takes if the runner dies mid-install).
+   * Never throws: the review starts either way, and what happened is in `detail`.
+   */
+  async installReviewDeps(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, timeoutMs = REVIEW_INSTALL_TIMEOUT_MS): Promise<{ installed: boolean; detail: string }> {
+    const dir = this.reviewDir(spec.ticketId);
+    const prev = this.reviewInstalls.get(spec.ticketId) ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(async (): Promise<{ installed: boolean; detail: string }> => {
+      if (!existsSync(path.join(dir, "pnpm-lock.yaml"))) return { installed: false, detail: "not a pnpm project" };
+      if (!this.jobFence?.pnpmStore) return { installed: false, detail: "this runner has no shared pnpm store" };
+      const pnpm = (this.baseEnv.PATH ?? "").split(":").map((d) => d && path.join(d, "pnpm")).find((p) => p && existsSync(p));
+      if (!pnpm) return { installed: false, detail: "pnpm isn't on this runner's PATH" };
+      const id = randomUUID();
+      const home = path.join(this.root, "check-jobs-home", id);
+      this.activeJobs.add(id);
+      try {
+        const fence = this.jobFenceFor(this.repoDir(spec.projectId), dir, home);
+        // CI: no prompts (and pnpm purges a node_modules made from another store without asking).
+        const args = ["install", "--frozen-lockfile", "--prefer-offline", "--config.confirmModulesPurge=false"];
+        const launch = fence.wrap ? fence.wrap(pnpm, args) : { bin: pnpm, args };
+        const env = { PATH: this.baseEnv.PATH, CI: "1", ...fence.env } as NodeJS.ProcessEnv;
+        const r = await runGroup(launch.bin, launch.args, dir, env, timeoutMs);
+        if (r.code === 0) return { installed: true, detail: "installed" };
+        return { installed: false, detail: `${r.timedOut ? `timed out after ${Math.round(timeoutMs / 1000)} s` : `exit ${r.code}`}: ${r.output.slice(-500)}` };
+      } catch (err) {
+        return { installed: false, detail: String((err as Error)?.message ?? err).slice(0, 500) };
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+        this.activeJobs.delete(id);
+      }
+    });
+    this.reviewInstalls.set(spec.ticketId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.reviewInstalls.get(spec.ticketId) === next) this.reviewInstalls.delete(spec.ticketId);
+    }
+  }
+
   /** The worktree as it is now, as a commit no ref points at; its branch, index and files are untouched. */
   private async snapshot(dir: string): Promise<string> {
     const index = path.join(this.root, "tmp", `${path.basename(dir)}.review.index`);
@@ -411,15 +506,37 @@ export class Workspaces {
     throw new Error(`There's no ${file} in this ticket's working folder. Save the image there (a path relative to where you work) and try again.`);
   }
 
-  async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024): Promise<WorkspaceDiff> {
+  /**
+   * The base a review should be measured from (BOS-694): the merge-base of the ticket's head and a
+   * freshly fetched origin/<baseRef>, the same split `git diff origin/<baseRef>...HEAD` uses, so a
+   * branch that has merged main since it started shows only its own changes. Without a baseRef, or
+   * when origin can't be reached, the recorded base stands: a stale diff's better than none.
+   */
+  private async reviewBase(repo: string, head: string, recorded: string, baseRef: string | undefined, secrets: Record<string, string | undefined>): Promise<{ base: string; tip?: string }> {
+    if (!baseRef) return { base: recorded };
+    try {
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: gitAuthEnv(secrets) });
+      const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${baseRef}^{commit}`], { cwd: repo });
+      // Where the branch split from main's current tip, however far main has moved since.
+      return { base: (await this.git(["merge-base", head, tip], { cwd: repo })) || recorded, tip };
+    } catch {
+      return { base: recorded };
+    }
+  }
+
+  async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024, baseRef?: string, secrets: Record<string, string | undefined> = {}): Promise<WorkspaceDiff> {
     const repo = this.repoDir(spec.projectId);
     const dir = await this.reopen(spec);
-    const baseCommit = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
+    const recorded = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
+    // Fetches under the repo lock, like every other git call that touches the shared refs.
+    const { base: baseCommit, tip } = await this.withRepoLock(spec.projectId, () => this.reviewBase(repo, head, recorded, baseRef, secrets));
     // The tree is read from the same commit as head, before the slow steps: a commit landing
     // mid-diff must not leave head A tagged with B's tree (the check queue reuses passes by tree).
     const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: dir });
-    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`], { cwd: dir });
+    // A fresh base can be far ahead of the recorded one; main's own commits aren't the ticket's work, so with a fetched
+    // tip they are left out of its commit list.
+    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`, ...(tip ? ["--not", tip] : [])], { cwd: dir });
     const commits = log ? log.split("\n").map((l) => ({ sha: l.slice(0, 40), subject: l.slice(41) })) : [];
     const index = path.join(this.root, "tmp", `${spec.ticketId}.index`);
     mkdirSync(path.dirname(index), { recursive: true });
@@ -923,6 +1040,14 @@ export class Workspaces {
     for (const line of log.stdout.split("\n").filter(Boolean).reverse()) {
       const [sha, ...msg] = line.split(" ");
       const text = msg.join(" ");
+      // A fast-forward merge before the branch's first commit moves it just as a reset does (BOS-733: BOS-726
+      // was made from main, then `git merge` fast-forwarded it onto BOS-725's tip). It has no commit of its own
+      // yet, so everything it moved onto came from elsewhere; the guards below still apply. git writes this
+      // reflog text untranslated.
+      if (/^merge [^:]+: Fast-forward$/.test(text) && sha) {
+        start = sha;
+        continue;
+      }
       if (/^commit|^merge|^rebase|^cherry-pick/.test(text)) break;
       if (/^reset: moving to|^branch: Reset to|^checkout: moving/.test(text) && sha) start = sha;
     }
@@ -979,7 +1104,8 @@ export class Workspaces {
         const bLine = await refs(b.branch, true);
         if (bLine.some((sha) => mine.has(sha))) {
           // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
-          // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
+          // server may allow when B is approved (BOS-372). From the graph alone a fast-forward can't be told from a hole; B's
+          // reflog can, when the fast-forward was B's first move (realBase, BOS-733).
           const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
           // B stacked on this ticket (BOS-629): B was created from a commit this branch holds. The graph alone can't say who
           // wrote a shared commit, but the base the runner recorded when it created B's branch can: a shared commit that is

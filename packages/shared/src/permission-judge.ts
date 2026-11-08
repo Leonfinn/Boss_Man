@@ -37,6 +37,33 @@ const LEADING_CD = /^\s*(?:cd|git\s+-C)\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:ticke
 export const MAX_JUDGED_COMMAND = 10_000;
 export const isJudgeable = (command: string | null): boolean => !command || command.length <= MAX_JUDGED_COMMAND;
 
+/**
+ * The shells whose `-c` runs a command string and whose script file runs as code (BOS-715). One list, used by the `-c` scan,
+ * the interpreter checks and the `xargs <shell> -c` check, so a shell is never caught in one place and missed in another.
+ * `busybox sh` reaches the same list through the `busybox` launcher (`busybox sh -c ...`).
+ */
+export const SHELL_NAMES = "sh bash zsh dash ksh ash mksh fish tcsh csh";
+/** A regex alternation of the shell names, longest-first so `ash`/`mksh` are not partly read as `sh`/`ksh`. */
+const SHELL_ALT = SHELL_NAMES.split(" ").sort((a, b) => b.length - a.length).join("|");
+
+/**
+ * Tools that create, move or delete a file named by their arguments (BOS-715). Given a target the judge can't place, or
+ * reading their targets from `xargs` input, they are unread code. `shred` overwrites in place, so it counts as a delete.
+ */
+const FILE_TOOLS = new Set("rm rmdir shred unlink cp mv ln install touch truncate tee mkdir mkfifo mknod".split(" "));
+
+/**
+ * One work budget for the whole `-c` scan of a command, shared by every nesting level (BOS-715, Dougal's timing finding): each
+ * shell word found costs the characters from it to the end of the string, so nested or repeated `sh -c` can't multiply the
+ * work per level. When it runs out the line can't be placed and gets no Allow (opaque).
+ */
+type ScanBudget = { left: number };
+const SCAN_BUDGET = 250_000;
+function chargeScan(budget: ScanBudget, cost: number): boolean {
+  budget.left -= cost;
+  return budget.left >= 0;
+}
+
 const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allow" : "deny", row, reasonLabel: JUDGE_LABELS[row] });
 
 /**
@@ -49,19 +76,35 @@ const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allo
  * @param workspaceRoot the folder that holds `tickets/` and `reviews/`; the own folder is `<root>/(tickets|reviews)/<id>`
  *   and nothing else counts as it. Without it any `.../workspaces/(tickets|reviews)/<id>` path counts.
  */
-export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string, workspaceRoot?: string): JudgeReading {
+export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string, workspaceRoot?: string, depth = 0, budget: ScanBudget = { left: SCAN_BUDGET }): JudgeReading {
   if (!command) return judgeWithoutCommand(question, ownFolder, ownProject);
   // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
-  const c = withoutOwnMemory(command, ownProject).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  // A quoted word reads as the word it is: quote removal (`"..."`, `'...'`, `$'...'`, `$"..."`, `\-`, backslash-newline)
+  // is applied to every plain word before every check below, not only to flags (BOS-715).
+  const base = dequoteWords(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  // The command string of each shell `-c` runs too, so `bash -c 'r''m -rf /'`, `bash -c $'\x72m -rf /'` and
+  // `sh -c 'echo '$'\x24(cat /tmp/x)'` are all read (BOS-715). It is judged as its own command rather than glued onto the
+  // outer line, so its redirects do not change how the outer line is read. A shell nested inside a shell is bounded by
+  // `depth`; an unresolved inner string is already caught as opaque, so it is skipped here.
+  if (depth < 8) {
+    for (const innerCmd of shellDashCInner(base, budget)) {
+      const r = judgePermission(question, innerCmd, ownFolder, ownProject, workspaceRoot, depth + 1, budget);
+      if (r.verdict === "deny") return r;
+    }
+  }
+  const c = base;
+  // Opaque: the command string a shell runs for `-c` (in any combined flag, with all of its joined quoted pieces) is
+  // unknown when it holds a substitution or a variable the judge can't resolve.
+  if (shellDashCOpaque(c, budget)) return result("opaque");
   const ids = [...c.matchAll(WORKSPACE)].map((m) => m[1]!);
   const own = ownFolder ?? LEADING_CD.exec(c)?.[1] ?? [...ids].sort((a, b) => ids.filter((x) => x === b).length - ids.filter((x) => x === a).length)[0];
 
   // Outward actions.
   if (readPush(c)?.dangerous) return result("outward");
   if (/\bgit\s+push\b[^;&|\n]*(\s-f\b|--force|\s\+\S|:main\b|:master\b|--delete|\s:\S)/.test(c)) return result("outward");
-  if (/\b(npm|pnpm|yarn)\s+publish\b|\bdocker\s+(push|restart|stop|kill|rm|compose|run)\b|\bsystemctl\b|\bservice\s+\w+\s+(restart|stop)|\bgh\s+pr\s+merge\b|\bdeploy(\.sh)?\b[^\n]*\b(prod|production)\b|\bcrontab\b/.test(c)) return result("outward");
+  if (/\b(npm|pnpm|yarn|yarnpkg)\s+publish\b|\bdocker\s+(push|restart|stop|kill|rm|compose|run)\b|\bsystemctl\b|\bservice\s+\w+\s+(restart|stop)|\bgh\s+pr\s+merge\b|\bdeploy(\.sh)?\b[^\n]*\b(prod|production)\b|\bcrontab\b/.test(c)) return result("outward");
   if (/os\.system\([^)]*git\s+push|execSync\([^)]*git\s+push/.test(c)) return result("outward");
   // Secrets.
   if (/\/run\/secrets|\.git-credentials|\.netrc|\/\.ssh\/|\/\.aws\/|(^|[\s/"'=<>])\.env(\.\w+)?(?=$|[\s"';|&)])|\/environ\b|\bprintenv\b|(^|[;&|(]\s*)(set|export\s+-p|declare\s+-[px])\s*($|[|;&>)])|process\.env\b|os\.environ\b|\/api\/secrets\b|\.config\/(gh|gcloud|hub)\b|\.docker\/config\.json|\.npmrc\b|\.pgpass\b|\.kube\/config|\.git\/config\b[^\n]*\btoken/.test(c)) return result("secret");
@@ -96,7 +139,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Allow-list: a git command passes only as a subcommand in GIT_TABLE with flags listed for it (checked below, once the own
   // folder is known) or the read-only config forms; everything else that uses git is Deny.
   if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
-  if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
+  if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn|yarnpkg)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn|yarnpkg)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b|\byarn(?:pkg)?(?:\.\w+)?\b[^;&|\n]*\sglobal(?=\s|$)/.test(c)) return result("outside");
   // Editors take commands (`vim -c "w! /file"`); an agent has no use for one.
   if (/(?:^|[;&|(\n]\s*)(?:vi|vim|nvim|ex|ed|view|vimdiff|emacs|nano|pico)\s/.test(c)) return result("outside");
   const rootRe = workspaceRoot ? workspaceRoot.replace(/\/+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "(?:/[\\w.@+-]+)*/workspaces";
@@ -173,7 +216,11 @@ export function judgePermission(question: string, command: string | null, ownFol
   // tar and unzip, must be placed too.
   for (const t of toolTargets(forTargets)) addTarget(t);
   // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
-  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || usesScratchUnsafely(c)) return result("outside");
+  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || runsByPathOutside(cs2, inOwn) || usesScratchUnsafely(c)) return result("outside");
+  // A tool run through pnpm/npm/yarn/npx, or a find -exec program, that names a path leaving the checkout runs code or reads
+  // config the judge can't see (BOS-638, Jane's round-5 findings for BOS-378): the program word and any folder flag are
+  // judged wherever they appear among the flags.
+  if (toolingOrExecLeaves(c, inOwn)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
@@ -182,10 +229,32 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (writes) {
     for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
     for (const m of c.matchAll(/\bcd\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/g)) if (own && m[1] !== own) return result("outside");
-    const targets = [...c.matchAll(/(?:\brm\b|rmSync\(|rmtree\(|unlinkSync\()\s*(?:-\S+\s+)*['"]?((?:~|\$HOME|\/)[^\s'";|&)]*)/g)].map((m) => m[1]!);
-    for (const t of targets) if (!/^\/tmp\//.test(t) && !inOwn(t) && t !== "/dev/null") return result("outside");
+    // Every target a delete tool names must be in /tmp or the checkout, not only the first: `rm -rf /tmp/a /etc` is as bad
+    // as `rm -rf /etc` (BOS-715). The text is already dequoted, so `$'/etc'`, `\/etc` and `/e"tc"` read as `/etc`.
+    for (const m of c.matchAll(/(?:\b(?:rm|shred)\b|rmSync\(|rmtree\(|unlinkSync\()([^;&|\n]*)/g)) {
+      for (const tok of shellWords(m[1]!)) {
+        if (tok === "" || tok.startsWith("-")) continue;
+        const p = tok.replace(/^['"]|['"]$/g, "");
+        if (p.startsWith("~") || p.startsWith("$HOME") || p.startsWith("/")) {
+          if (!/^\/tmp\//.test(p) && !inOwn(p) && p !== "/dev/null") return result("outside");
+        }
+      }
+    }
     // A relative target can climb out of the folder (`rm -rf ..`), and a `cd` somewhere else makes every relative target land there.
     for (const m of c.matchAll(/\brm\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
+    // An unresolved substitution or variable given to a file tool (`rm -rf $(curl ...)`, `cp $(cat /tmp/l) d`) is a target
+    // the judge can't place, so it gets no Allow. `shred` and any file tool under `xargs` read their targets the same way, and a
+    // substitution glued to a dash (`rm -$(cat /tmp/x)`) is unseen unless the dash word is tested too (BOS-715).
+    // One greedy, non-overlapping capture per tool keeps the scan linear (BOS-729: re-slicing the rest of the line for every
+    // match was O(n²)). `xargs` appends its input to the command, so a file tool under it deletes or overwrites names the judge
+    // never sees (`echo /etc | xargs rm -rf`, `find / | xargs shred`): no Allow.
+    for (const m of c.matchAll(/\b(?:rm|cp|mv|install|ln|shred|xargs)\b([^;&|\n]*)/g)) {
+      const rest = m[1]!;
+      if (/<\(/.test(rest)) return result("outside"); // a process substitution is a path the judge can't place
+      const words = shellWords(rest);
+      if (m[0].startsWith("xargs") && words.some((w) => FILE_TOOLS.has(w.replace(/^.*\//, "")))) return result("outside");
+      for (const tok of words) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
+    }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
     for (const m of c.matchAll(/\bfind\s+((?:-[HLP]\s+)*)([^\s-][^\s]*|)[^\n;&|]*?(-delete\b|-exec\s+rm\b)/g)) {
@@ -280,6 +349,120 @@ function shellWords(s: string): string[] {
   return out;
 }
 
+/**
+ * The escapes bash decodes inside `$'...'` (ANSI-C quoting): `\xHH`, `\NNN`, `\uHHHH`, `\UHHHHHHHH`, the single-letter
+ * escapes (`\n`, `\t`, ...) and a backslash before anything else, which bash leaves in place. `\cX` follows bash in stopping
+ * the rest of the string; here the two characters are kept so a caller that only wants the word's shape still sees them.
+ */
+function decodeAnsiC(s: string): string {
+  const simple: Record<string, string> = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch !== "\\" || i + 1 >= s.length) { out += ch; continue; }
+    const n = s[i + 1]!;
+    if (n in simple) { out += simple[n]!; i++; continue; }
+    if (/[0-7]/.test(n)) { let m = s.slice(i + 1, i + 4); m = m.slice(0, m.match(/^[0-7]+/)![0].length); out += String.fromCharCode(parseInt(m, 8) & 0xff); i += m.length; continue; }
+    if (n === "x") { const m = (s.slice(i + 2).match(/^[0-9a-fA-F]{1,2}/) ?? [""])[0]; out += m ? String.fromCharCode(parseInt(m, 16)) : "\\x"; i += 1 + m.length; continue; }
+    if (n === "u" || n === "U") { const len = n === "u" ? 4 : 8; const m = (s.slice(i + 2).match(new RegExp(`^[0-9a-fA-F]{1,${len}}`)) ?? [""])[0]; if (m) { out += String.fromCodePoint(parseInt(m, 16)); i += 1 + m.length; } else { out += "\\" + n; i++; } continue; }
+    if (n === "c") { out += s.slice(i + 2); break; }
+    out += "\\" + n; i++;
+  }
+  return out;
+}
+
+/**
+ * Bash's quote removal for one word: `"..."`, `'...'`, `$'...'` and backslash escapes all go. Returns null when the word
+ * holds a substitution (`$(`, a backtick) or a variable the judge can't resolve, so its value is not a plain literal.
+ */
+function dequoteWord(w: string): string | null {
+  let out = "";
+  for (let i = 0; i < w.length; i++) {
+    const ch = w[i]!;
+    // A backslash before a newline is a line continuation: bash drops both, joining the text either side (BOS-715).
+    if (ch === "\\" && w[i + 1] === "\n") { i++; continue; }
+    if (ch === "\\" && i + 1 < w.length) { out += w[++i]!; continue; }
+    if (ch === "$" && w[i + 1] === "'") {
+      const e = w.indexOf("'", i + 2);
+      if (e < 0) return null;
+      out += decodeAnsiC(w.slice(i + 2, e));
+      i = e;
+      continue;
+    }
+    if (ch === "'") { const e = w.indexOf("'", i + 1); if (e < 0) return null; out += w.slice(i + 1, e); i = e; continue; }
+    // `$"..."` is bash's locale quoting: after quote removal it is the same as `"..."` (BOS-715, Jane). Read it as a
+    // double-quoted piece from its opening quote, so the closing quote pairs with it.
+    if (ch === "$" && w[i + 1] === '"') {
+      let j = i + 2;
+      for (; j < w.length && w[j] !== '"'; j++) { if (w[j] === "\\" && j + 1 < w.length) out += w[++j]!; else out += w[j]!; }
+      if (j >= w.length) return null;
+      i = j;
+      continue;
+    }
+    if (ch === '"') {
+      let j = i + 1;
+      for (; j < w.length && w[j] !== '"'; j++) { if (w[j] === "\\" && j + 1 < w.length) out += w[++j]!; else out += w[j]!; }
+      if (j >= w.length) return null;
+      i = j;
+      continue;
+    }
+    if (ch === "$" || ch === "\x60") return null; // a substitution or a variable: not a plain literal
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * Drops the quoting from every word the shell reads as a plain literal, so an option or a target reads as it really is
+ * (`rm "-rf" /`, `rm $'-rf' /`, `rm \-rf /` are all `rm -rf /`; `rm /e"tc"`, `rm \/etc` and `rm $'/'` are `rm /etc` and
+ * `rm /`). A word is rewritten only when quote removal leaves a plain literal with no space or shell metacharacter, so data
+ * such as `echo 'a b'` is left alone. Each word keeps its place among the others.
+ *
+ * A word starts at the beginning of the string or after a space, `;`, `&`, `|` or `(`, and ends at the end of the string or
+ * before a space, `;`, `&`, `|` or `)`. The scan is linear (BOS-697): an overlapping regex here backtracked exponentially on
+ * a run of backslash-escaped or `$'...'` atoms that never closes, and the server runs the judge synchronously.
+ */
+function dequoteWords(s: string): string {
+  // A word character is anything but whitespace, a shell word separator (`;`, `&`, `|`, `(`, `)`) or a quote; a quote
+  // opens a quoted piece of the current word, so it is read together with the word.
+  const separator = (ch: string): boolean => /[\s;&|()]/.test(ch);
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i]!;
+    // Copy a separator or whitespace as it is; a quote begins a word.
+    if (ch !== "'" && ch !== '"' && separator(ch)) { out += ch; i++; continue; }
+    // Read one word: a run of plain characters and quoted/escaped pieces, stopping at a separator.
+    const start = i;
+    while (i < s.length) {
+      const c = s[i]!;
+      if (c === "'") { const e = s.indexOf("'", i + 1); i = e < 0 ? s.length : e + 1; continue; }
+      if (c === '"') { let j = i + 1; while (j < s.length && s[j] !== '"') { if (s[j] === "\\" && j + 1 < s.length) j++; j++; } i = j < s.length ? j + 1 : s.length; continue; }
+      if (c === "\\" && i + 1 < s.length) { i += 2; continue; }
+      if (separator(c)) break;
+      i++;
+    }
+    const w = s.slice(start, i);
+    const d = /["'\\]/.test(w) ? dequoteWord(w) : null; // no quoting to remove: keep the word as it is
+    // A word that quote removal turns into a plain literal (no space, no shell metacharacter, no variable) is rewritten to
+    // what the shell reads: an option is the same option, and a target (`\/etc`, `/e"tc"`, `$'/'`) is the same path
+    // (BOS-715). A word with a space or a metacharacter stays quoted, so data is not split or joined, and a `#` stays
+    // quoted so `echo '#!...'` does not turn into a mid-line shell comment that hides the commands after it.
+    out += d !== null && !/[\s;&|()<>"'\x60$*?[{#]/.test(d) ? d : w;
+  }
+  return out;
+}
+
+/**
+ * True when a word holds a shell expansion that can carry text the judge can't read: a substitution (`$(`, a backtick), a
+ * named variable (any `$name` or `${...}`), a positional parameter (`$0`-`$9`), or `$@` / `$*`. Plain data and status
+ * expansions are not counted: `$'...'` is a literal after quote removal, and `$?`, `$#`, `$$`, `$!`, `$-` are numbers or
+ * flags that can never hold a command string (BOS-697 round 2).
+ */
+function hasUnresolvedExpansion(w: string): boolean {
+  return w.includes("\x60") || /\$(?!['?#$!-])/.test(w);
+}
+
 /** True when the arguments of one git command (words after `git`) are not on the allow-list. `dirOk` places a folder git is pointed at. */
 function gitArgsDenied(args: string[], dirOk: (p: string) => boolean, pathOk: (p: string) => boolean): boolean {
   let i = 0;
@@ -321,8 +504,11 @@ function gitArgsDenied(args: string[], dirOk: (p: string) => boolean, pathOk: (p
   }
   if (spec.none && plain.length > 0) return true;
   if (spec.first && !(plain[0] !== undefined && spec.first.test(plain[0]))) return true;
+  // A `::` transport (`ext::sh -c ...`, `fd::3`) runs an arbitrary program whatever the subcommand: BOS-701 restored this for
+  // every remote-taking subcommand, not just `clone` (BOS-378 checked only `clone`, so `fetch`/`ls-remote`/`pull` slipped).
+  const REMOTE_SUB = /^(?:clone|fetch|pull|push|ls-remote|remote|submodule|archive|bundle|ls-tree|cat-file|show|diff)$/;
   for (const p of plain) {
-    if (/::/.test(p) && sub === "clone") return true;
+    if (/::/.test(p) && sub !== undefined && REMOTE_SUB.test(sub)) return true;
     if (/\{[^}]*(?:,|\.\.)[^}]*\}/.test(p)) return true; // brace expansion
     if (!spec.w) continue;
     if (/(?:^|\/)\.\.(?:\/|$)/.test(p)) return true;
@@ -586,6 +772,106 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
 }
 
 /**
+ * BOS-721 (CEO decision on BOS-720 item 4): a program run by its own path (`./foo.js`, `.yarn/releases/yarn-1.22.22.cjs`,
+ * `/tmp/x/run.sh`, `cd /tmp/p && ./foo`) is code the judge hasn't read. When the file resolves outside the agent's own checkout
+ * the command gets no Allow, whatever the file is called. Inside the checkout nothing changes (`scripts/check-quick.sh`,
+ * `./node_modules/.bin/vitest`). Allow-list: the path counts as inside only when it is absolute under the own folder, or relative
+ * with every `cd` staying inside it; `$`, `~` and `..` are unknown, so they are outside. The only outside paths let through are
+ * system binaries one level under /bin, /usr/bin, /usr/local/bin, /sbin, /usr/sbin (the image's own tools, not agent-writable).
+ * Linear: one pass over the shell words of each segment.
+ */
+function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk = true): boolean {
+  let relOk = startRelOk;
+  let relCd = false;
+  for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) {
+    const d = m[1] ?? "";
+    if (!dirOk(d, inOwn) || (/^[/~$]/.test(d) && !inOwn(d))) relOk = false;
+    if (d !== "" && !/^[/~$]/.test(d)) relCd = true;
+  }
+  // BOS-722: a relative `cd` may follow a symlink the same command made (`ln -s /tmp/p l && cd l`), so it is outside.
+  if (relCd && /(?:^|[;&|(\n{]\s*|\b(?:then|do|else)\s+)(?:\S*\/)?ln(?=\s)/.test(c)) relOk = false;
+  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
+  // Wrappers whose first plain words are not the command (`flock l ./foo`, `taskset 1 ./foo`, `chroot dir ./foo`).
+  const positional: Record<string, number> = { flock: 1, taskset: 1, chrt: 1, chroot: 1 };
+  // Wrappers that run the string after `-c` / `--command` (`flock -c ./foo l`, `script -qc ./foo`) as a shell command.
+  const cmdOpt = /^(?:flock|script)$/;
+  const sysBin = /^\/(?:usr\/(?:local\/)?)?s?bin\/[\w.+-]+$/;
+  // Short options of each wrapper that take a value in the next word (`env -P /bin`, `timeout -s KILL`, `nice -n 5`). Any other
+  // option is value-less, so the word after it is still the command.
+  const takesValue: Record<string, RegExp> = {
+    env: /^-[A-Za-z]*[CPSua]$|^--(?:chdir|split-string|unset|argv0)$/,
+    timeout: /^-[A-Za-z]*[sk]$|^--(?:signal|kill-after)$/,
+    nice: /^-[A-Za-z]*n$|^--adjustment$/,
+    stdbuf: /^-[A-Za-z]*[ioe]$|^--(?:input|output|error)$/,
+    sudo: /^-[A-Za-z]*[ugCDhprRTU]$/,
+    xargs: /^-[A-Za-z]*[nIdPLEsa]$/,
+    exec: /^-[A-Za-z]*a$/,
+    ionice: /^-[A-Za-z]*[cnp]$|^--(?:class|classdata|pid)$/,
+    flock: /^-[A-Za-z]*[wE]$|^--(?:timeout|conflict-exit-code)$/,
+    watch: /^-[A-Za-z]*n$|^--interval$/,
+    strace: /^-[A-Za-z]*[oeEpsuabIOPSXyYZ]$/,
+    ltrace: /^-[A-Za-z]*[oeEpsuabnlLxAF]$/,
+    chrt: /^-[A-Za-z]*[p]$/,
+    script: /^-[A-Za-z]*[TIOBEt]$|^--(?:timing|log-in|log-out|log-io|logging-format|echo|output-limit)$/,
+    unshare: /^-[A-Za-z]*[R]$|^--(?:root|wd|map-user|map-group|setgroups|propagation)$/,
+    setpriv: /^--(?:reuid|regid|ruid|rgid|euid|egid|groups|inh-caps|bounding-set|ambient-caps|securebits|selinux-label|apparmor-profile)$/,
+    nsenter: /^-[A-Za-z]*[tSGrw]$/,
+    doas: /^-[A-Za-z]*[uC]$/,
+  };
+  // The first real command word of each segment, plus the program after `find -exec`, is checked.
+  const bad = (w: string): boolean => {
+    if (!w.includes("/") || sysBin.test(w)) return false;
+    if (/\$|\x60|^~|\.\./.test(w) || /^\/tmp(\/|$)/.test(w)) return true;
+    return w.startsWith("/") ? !inOwn(w) : !relOk;
+  };
+  // The first real command word of a word list, after wrappers, their options and assignments, is checked.
+  const firstWordBad = (words: string[]): boolean => {
+    let skipNext = false;
+    let cmdNext = false;
+    let lead = "";
+    let pos = 0;
+    for (const w of words) {
+      if (cmdNext) { if (runsByPathOutside(w, inOwn, relOk)) return true; break; }
+      if (skipNext) { skipNext = false; continue; }
+      // A system binary that runs its argument counts as that wrapper (`/usr/bin/env ./foo`).
+      const base = sysBin.test(w) ? w.replace(/^.*\//, "") : w;
+      // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
+      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; continue; }
+      if (/^-/.test(w)) {
+        if (cmdOpt.test(lead) && /^-[A-Za-z]*c$|^--command$/.test(w)) cmdNext = true;
+        else if (cmdOpt.test(lead) && /^--command=/.test(w)) { if (runsByPathOutside(w.slice(10), inOwn, relOk)) return true; }
+        else if (takesValue[lead]?.test(w)) skipNext = true;
+        continue;
+      }
+      if (pos > 0) { pos--; continue; }
+      if (/^\w+=/.test(w) || /^\d+[smhd]?$/.test(w)) continue;
+      if (bad(w)) return true;
+      break; // the first real command word of the segment
+    }
+    return false;
+  };
+  for (const seg of shellSegments(c)) {
+    // BOS-723: the program after `find -exec` may sit behind a wrapper (`-exec env ./foo`, `-exec timeout 5 ./foo`): scan the words
+    // up to the `;` / `+` that ends the -exec with the same wrapper-aware scan. Each word is visited once per scan.
+    for (let i = 0; i < seg.words.length; i++) {
+      const w = seg.words[i]!;
+      if (w !== "-exec" && w !== "-execdir" && w !== "-ok" && w !== "-okdir") continue;
+      let end = i + 1;
+      // A following -exec starts its own slice, so the slices never overlap and the total work stays linear.
+      // BOS-724: find ends -exec at `+` only when the word right before it is `{}`; any other `+` is a plain argument (`env -u +`).
+      while (
+        end < seg.words.length &&
+        !/^(?:;|-exec|-execdir|-ok|-okdir)$/.test(seg.words[end]!) &&
+        !(seg.words[end] === "+" && seg.words[end - 1] === "{}" && end - 1 > i)
+      ) end++;
+      if (firstWordBad(seg.words.slice(i + 1, end))) return true;
+    }
+    if (firstWordBad(seg.words)) return true;
+  }
+  return false;
+}
+
+/**
  * Splits a command into segments of words the way a shell would (quotes, backslashes, `$(`, backticks, `(`, `;&|`, newlines,
  * heredoc bodies and comments), so a quoted or escaped command word (`"node"`, `n\ode`) reads as the word it runs.
  * Redirects are lifted out: `out` holds output targets, and input targets stay as plain words. Over-splitting is fine.
@@ -638,7 +924,8 @@ function shellSegments(c: string, bad?: { v: boolean }): { words: string[]; out:
       if (depth !== 0 && bad) bad.v = true;
     }
     if (ch === "$" && c[i + 1] === "(") { endSeg(); modes.push("sub"); i++; continue; }
-    if (dq) { if (/\s/.test(ch)) endWord(); else { cur += ch; has = true; } continue; }
+    // Inside double quotes a space or newline belongs to the word (`bash -c "python3 c.py"` is one inner command, not two words).
+    if (dq) { cur += ch; has = true; continue; }
     if (ch === "#" && !has) { while (i < c.length && c[i] !== "\n") i++; i--; continue; }
     if (ch === ")") { endSeg(); if (modes[modes.length - 1] === "sub") modes.pop(); continue; }
     if (ch === "(" || ch === ";" || ch === "|" || ch === "\n" || (ch === "&" && c[i + 1] !== ">")) {
@@ -824,23 +1111,429 @@ function setsUnknownEnvironment(assigns: string[], sh: string, args: string[]): 
 }
 
 /**
+ * True when a shell's `-c` command string is unknown: a substitution (`$(...)`, a backtick) or a variable the judge
+ * can't resolve. The string is assembled the way bash joins adjacent quoted pieces (`bash -c 'echo '"$(cat /tmp/x)"`),
+ * and only the word the shell actually runs (after any option words, BOS-695) is read.
+ */
+function shellDashCOpaque(c: string, budget: ScanBudget): boolean {
+  for (const m of c.matchAll(new RegExp(`\\b(?:${SHELL_ALT})\\b`, "g"))) {
+    if (!chargeScan(budget, c.length - m.index!)) return true; // out of work: can't place it, so no Allow
+    const words = shellWords(c.slice(m.index! + m[0].length).split(/\n/)[0]!);
+    const at = words.findIndex((w) => /^[-+][A-Za-z]*c/.test(w));
+    if (at < 0) continue;
+    const { word, ok } = shellDashCString(words.slice(at + 1));
+    if (ok === false || (word !== "" && hasUnresolvedExpansion(word))) return true;
+  }
+  return false;
+}
+
+/**
+ * The command strings every shell `-c` runs, with quote removal applied so `bash -c 'r''m -rf /'` and
+ * `bash -c $'\x72m -rf /'` both read as `rm -rf /` (BOS-715). A string the judge can't resolve is left out; it is already
+ * caught as opaque. The inner command genuinely runs, so the judge reads each one as an extra command in the same line.
+ */
+function shellDashCInner(c: string, budget: ScanBudget): string[] {
+  const out: string[] = [];
+  for (const m of c.matchAll(new RegExp(`\\b(?:${SHELL_ALT})\\b`, "g"))) {
+    if (!chargeScan(budget, c.length - m.index!)) break; // shellDashCOpaque then reports the line as opaque
+    const words = shellWords(c.slice(m.index! + m[0].length).split(/\n/)[0]!);
+    const at = words.findIndex((w) => /^[-+][A-Za-z]*c/.test(w));
+    if (at < 0) continue;
+    const { word, ok } = shellDashCString(words.slice(at + 1));
+    if (ok === false || word === "" || hasUnresolvedExpansion(word)) continue;
+    // shellWords already dropped `'...'` / `"..."`; decode a `$'...'` string and any backslash by the same quote removal.
+    const d = dequoteWord(word);
+    if (d !== null && d.trim() !== "") out.push(d);
+  }
+  return out;
+}
+
+/**
+ * The command string a shell runs for `sh|bash|zsh|dash|ksh -c`, given the words after `-c` (BOS-695). The shell still reads
+ * options after `-c`, so skip `--`, option words (`-x`, `+x`, `-eu`, `-e`, `-o pipefail`, `+o errexit`, `-O extglob`) and the
+ * argument an `-o`/`+o`/`-O`/`+O` word takes, then take the first plain word. `ok: false` means an option word we can't place,
+ * or no command string at all: the caller must give no Allow.
+ */
+function shellDashCString(words: string[]): { word: string; ok: boolean } {
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === "--") continue;
+    if (!/^[-+]/.test(w)) return { word: w, ok: true };
+    // `-o pipefail` / `+o errexit` / bash's `-O extglob` / `+O nullglob`, and a cluster ending in o/O (`-eo pipefail`,
+    // `-euo pipefail`, `-eO extglob`): the option name is the next word.
+    if (/^[-+][A-Za-z]*[oO]$/.test(w)) { i++; continue; }
+    // A second `-c` word: bash runs the first command string and never reads this one as the shell's own option, so the
+    // words after it are not where the judge places them (BOS-707).
+    if (/^[-+][A-Za-z]*c/.test(w)) return { word: "", ok: false };
+    // A bare `-` is a word, not an option.
+    if (w === "-") return { word: w, ok: true };
+    // Only plain short-option words (`-e`, `-ex`, `+e`, `-x`) are recognised, along with an `-o<name>`/`-O<name>` without a
+    // separate name (`-opipefail`); anything else (an option form the judge can't place) gives no Allow.
+    if (/^[-+][A-Za-z]+$/.test(w)) continue;
+    return { word: "", ok: false };
+  }
+  return { word: "", ok: false }; // `-c` with no command string: nothing to read, so no Allow
+}
+
+/**
  * Deny-by-default for scratch paths. In a command that names a /tmp path or a path the command itself writes (redirect, tee,
  * cp, mv, curl -o ...), the only commands allowed to mention that path are readers and file tools (cat, grep, ls, cp, rm,
  * tee ...). Any other command word (an interpreter however it is spelled or wrapped, `./w.js`, flock, strace, npx, `FOO=/tmp/x
  * cmd`) is code the judge can't read. pnpm/npm/yarn/git may name a /tmp path but not a path the command wrote, and not with an
  * exec-style word. Over-denial (generate a file, then feed it to a checked-in script) is accepted.
  */
+const TOOL_RUNNER = /^(?:pnpm|npm|yarn|yarnpkg|npx|pnpx|bunx)$/;
+// Options whose value names a file or folder a package manager runs from or reads config from. Judged wherever they stand
+// (`--silent -C /tmp/p`, `--script-shell=/tmp/x.sh`), with the value attached (`-C/tmp`, `--prefix=/tmp`) or in the next word.
+const TOOL_PATH_OPT = /^(?:-C|--dir|--prefix|--cwd|--config|--git-dir|--work-tree|--workspace-dir|--userconfig|--globalconfig|--use-yarnrc|--require|-r|--loglevel-file|--root|--script-shell)$/;
+// BOS-701 (allow-list, not a deny-list): the package-manager options whose value only names where output is written, so an
+// absolute /tmp path there is fine (`pnpm run build --outDir /tmp/out`). Any other `--key=/abs/path` value gets no Allow.
+const OUTPUT_OPT = /^--(?:outDir|out-dir|output-dir|outputDir|dist-dir|distDir|report-dir|reportDir|coverage-dir|coverageDir)$/;
+/** True when `w` is a relative path that climbs out of the checkout with `..` (`../x.ts`, `../../x.test.ts`). */
+function climbsOut(w: string): boolean {
+  const p = w.replace(/^['"]+|['"]+$/g, "");
+  if (p.startsWith("/") || /\$|\x60|^~/.test(p)) return false; // absolute or unknown: judged elsewhere
+  return /(?:^|\/)\.\.(?:\/|$)/.test(p);
+}
+/** True when `w` names a file or folder outside the checkout: an absolute path (a /tmp shell or config included) or a climb. */
+function pathLeaves(w: string, inOwn: (p: string) => boolean): boolean {
+  const p = w.replace(/^['"]+|['"]+$/g, "");
+  if (p === "" || p === "-" || /\$|\x60|^~/.test(p)) return false; // unknown value: left to the other checks
+  if (p.startsWith("/")) return !inOwn(p); // /tmp is outside: a shell, config or script there is code the judge can't read
+  return climbsOut(p);
+}
+/**
+ * BOS-638 (split from BOS-378 by the CEO): a package-manager run or a `find -exec` that names a path leaving the checkout gets
+ * no Allow. Jane's round-5 review found a folder flag after another flag, an npm setting that names a file, a tool argument
+ * from outside the checkout, and a `find -exec` script there. The judge is only in "watch"; this closes the four before any
+ * company switches it to "advise". Over-denial of a tool argument that climbs out is accepted.
+ */
+function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean {
+  const bad = { v: false };
+  const segs = shellSegments(c, bad);
+  if (bad.v) return true; // the parser can't tell where a heredoc or arithmetic ends: fail closed
+  const wrappers = /^(?:env|nohup|time|sudo|command|nice|setsid|stdbuf|exec|timeout|-exec|-execdir|-ok|-okdir|then|do|else|if|while|until|!|\{)$/;
+  // BOS-701 (lost BOS-378 check): a folder a `cd`/`pushd`/`chdir` or a wrapper's folder flag (`env -C`) moves to that is
+  // outside the checkout. `/tmp` is outside here even though `cd /tmp` itself is fine: running repo code there is code the
+  // judge can't read. A relative sub-folder and the own folder keep it inside.
+  const repoDirOk = (dir: string): boolean => dir !== "" && dir !== "-" && (inOwn(dir) || /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(dir)) && !dir.includes("..");
+  // A program that runs repo code from the checkout once the working folder is outside it gets no Allow. git always counts (it
+  // runs hooks and aliases). A package manager counts when it runs a script (`run`, `test`, a bare script name); a plain
+  // `npm init`/`install` in a fresh /tmp folder only sets up or installs packages there, which the CEO allowed (BOS-329 eval).
+  const RUNS_REPO_CODE = /^(?:git|make|gmake|cmake|gradle|mvn|ant|cargo|dotnet|rake|bundle|mix|stack)$/;
+  const PM = /^(?:pnpm|npm|yarn|npx|pnpx|bunx|bun)$/;
+  const PM_SCRIPT = /^(?:run|run-script|test|t|start|dev|restart|rebuild|pack|publish|exec|dlx|create)$/;
+  // BOS-710: which options take no value differs per package manager (npm `-w` is `--workspace <name>`, pnpm `-w` is the workspace
+  // root; bun `-r` is `--preload <file>` and `-d` is `--define <k:v>`), so the allow-list is per program. An option missing from
+  // a program's list gets "runs a script" (over-deny, never Allow).
+  const PM_FLAGS_COMMON = "-s|--silent|-q|--quiet|--no-color|--ignore-scripts|-D|-g|--global|--save-dev|--offline|--prefer-offline|--no-progress|--force|-f|--verbose";
+  // BOS-712: yarn 1 declares `--prod, --production [prod]` (an optional value), so `yarn --production install` reads production=install;
+  // the flag is value-less only for the others, and so is not in the common list. Every other yarn entry was run against yarn 1.22.22.
+  const PM_FLAGS: Record<string, RegExp> = {
+    npm: new RegExp(`^(?:${PM_FLAGS_COMMON}|--production|--if-present|-ws|--workspaces|-y|--yes|--prod|--legacy-peer-deps|--no-audit|--no-fund|-d)$`),
+    pnpm: new RegExp(`^(?:${PM_FLAGS_COMMON}|--production|--if-present|-w|--workspace-root|-r|--recursive|--frozen-lockfile|--no-frozen-lockfile|--prod|--no-audit)$`),
+    yarn: new RegExp(`^(?:${PM_FLAGS_COMMON}|--frozen-lockfile|--no-audit|-W|--ignore-workspace-root-check)$`),
+    bun: new RegExp(`^(?:${PM_FLAGS_COMMON}|--production|--frozen-lockfile|--no-frozen-lockfile|--prod|--dry-run)$`),
+    npx: /^(?:-y|--yes|-q|--quiet|-s|--silent|--no)$/,
+  };
+  const pmRunsScript = (head: string, args: string[]): boolean => {
+    // BOS-706 (allow-list): an option the judge does not know may take the next word as its value (`npm --cache install run evil`),
+    // so the verb cannot be told. Only known value-less options may stand before the verb; any other gets "runs a script".
+    const known = PM_FLAGS[head] ?? PM_FLAGS[head === "pnpx" || head === "bunx" ? "npx" : head] ?? /^$/;
+    const verbAt = args.findIndex((a) => !a.startsWith("-") && a !== "");
+    for (const a of verbAt < 0 ? args : args.slice(0, verbAt)) {
+      if (a !== "--" && !a.includes("=") && !known.test(a)) return true;
+    }
+    const first = verbAt < 0 ? undefined : args[verbAt];
+    // No verb (`pnpm` alone) or a script-run verb, or a word that is not a known non-script verb (a bare script name).
+    if (first === undefined) return true;
+    if (PM_SCRIPT.test(first)) return true;
+    // BOS-716: `npm init <name>` is `npm exec create-<name>` (downloads and runs a package), like `npm exec`; a bare `init`
+    // (or one with only flags) writes a package.json and stays readable. Any word after init is a name, so no Allow.
+    if (first === "init" && args.slice(verbAt + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
+    return !/^(?:install|i|ci|add|remove|rm|update|up|init|prune|audit|list|ls|outdated|why|licenses|dedupe|fetch|prefetch|store|config|c|set|link|unlink|patch|version)$/.test(first);
+  };
+  let away = false;
+  for (const s of segs) {
+    let words = s.words;
+    let k = 0;
+    let unreadable = false;
+    // Peel launchers and their own flags: `env -C /tmp/p cmd`, `timeout -s KILL 60 cmd`, `nice -n 5 cmd`, `sudo cmd`, `A=b cmd`.
+    // BOS-706: the wrappers in WRAPPER_OPTS are peeled by peelWrapper, which knows each one's value-taking flags (short, attached,
+    // long and GNU-abbreviated); one it cannot read leaves the program unknown, which is no Allow once the folder is outside.
+    while (k < words.length) {
+      const w = words[k]!;
+      if (/^\w+\+?=/.test(w)) { k++; continue; }
+      const base = w.replace(/^.*\//, "");
+      if (base === "env" || base === "chdir") {
+        // A wrapper that can change the working folder: `-C /tmp/p`, `-C/tmp/p`, `--chdir /tmp/p`, `--ch=/tmp/p` (any GNU prefix).
+        for (let j = k + 1; j < words.length; j++) {
+          const f = words[j]!;
+          if (/^\w+\+?=/.test(f)) continue;
+          if (!f.startsWith("-") || f === "-") break;
+          if (f === "--") break;
+          const long = f.startsWith("--") ? f.replace(/=.*$/s, "") : "";
+          if (long.length > 2 && "--chdir".startsWith(long)) {
+            const v = f.includes("=") ? f.slice(f.indexOf("=") + 1) : (words[j + 1] ?? "");
+            if (!repoDirOk(v)) away = true;
+          } else if (long.length > 2 && !f.includes("=") && ("--unset".startsWith(long) || "--argv0".startsWith(long))) {
+            j++; // takes the next word as its value: `env --unset X -C /tmp/p cmd`
+          } else if (!long && f.length > 1) {
+            // BOS-710: a group of short options (`-0u X`, `-iP /bin`, `-uC`): the first value letter (u, C, P) ends the group, and its
+            // value is the rest of the word or the next word, the same rule as peelWrapper.
+            const at = [...f.slice(1)].findIndex((ch) => "uCP".includes(ch)) + 1;
+            if (at > 0) {
+              const attached = at < f.length - 1;
+              const v = attached ? f.slice(at + 1) : (words[j + 1] ?? "");
+              if (f[at] === "C" && !repoDirOk(v)) away = true;
+              if (!attached) j++;
+            }
+          }
+        }
+      }
+      if (Object.hasOwn(WRAPPER_OPTS, base)) {
+        const peeled = peelWrapper(w, words.slice(k + 1));
+        if (peeled === null || peeled === "split") { unreadable = true; break; }
+        words = [peeled.head, ...peeled.args];
+        k = 0;
+        if (peeled.head === "") break;
+        continue;
+      }
+      if (base === "chdir") { k++; continue; }
+      // BOS-711: `corepack pnpm install` runs the package manager; judge it as that program.
+      if (base === "corepack" && /^(?:pnpm|npm|yarn|yarnpkg|npx|pnpx)$/.test(words[k + 1] ?? "")) { k++; continue; }
+      if (wrappers.test(w)) { k++; continue; }
+      break;
+    }
+    // BOS-717: `yarnpkg` is yarn 1 under another name (same yarn-path rule), so it is judged as `yarn`.
+    const head0 = (words[k] ?? "").replace(/^.*\//, "");
+    // BOS-718: so is yarn 1 under its file names (`yarn.js`, `yarn.cmd`, `yarnpkg.cmd`, ...), run by path or from PATH.
+    const head = /^(?:yarn|yarnpkg)(?:\.(?:c?js|mjs|cmd|ps1|exe))?$/.test(head0) ? "yarn" : head0;
+    const args = words.slice(k + 1);
+    // A launcher that could not be read, or a flag standing where the program should be (`sudo -u x git`), hides the program.
+    if (away && (unreadable || head === "corepack" || (head.startsWith("-") && head.length > 1) || /^(?:sh|bash|dash|zsh|ksh|ash)$/.test(head))) return true;
+    // A `cd`/`pushd`/`chdir` moves the working folder for the segments that follow; a bare `popd`/`cd -` can't be read.
+    if (/^(?:cd|pushd|chdir)$/.test(head)) {
+      // cd's own flags (`-P`, `-L`, `-e`, `-@`, `-n`) are skipped: the first word that is not a flag is the target.
+      const target = args.find((a) => a !== "--" && !(a.startsWith("-") && a.length > 1))?.replace(/^['"]+|['"]+$/g, "") ?? "";
+      if (target === "" || target === "-" || /^\/tmp(\/|$)/.test(target) || target.includes("..") || !repoDirOk(target)) away = true;
+      continue;
+    }
+    if (head === "popd") { away = true; continue; }
+    if (away && (RUNS_REPO_CODE.test(head) || (PM.test(head) && pmRunsScript(head, args)))) return true;
+    // BOS-716: `npm init <name>` downloads and runs a package wherever it is run, so it is no Allow inside the checkout too.
+    // BOS-717: an unknown option before the verb may take the next word as its value (`npm --loglevel info init x`), so the verb
+    // is the first word that is not an option or an option's value; `init` anywhere there counts.
+    // BOS-720: only options (and their values) stand before word `at`, so it is the verb. Same reading as the init check.
+    const onlyOptsBefore = (at: number): boolean => {
+      const before = args.slice(0, at);
+      return before.every((a, i) => a.startsWith("-") || (a !== "" && (before[i - 1] ?? "").startsWith("-") && (before[i - 1] ?? "") !== "--" && !(before[i - 1] ?? "").includes("=")));
+    };
+    // BOS-720: npm expands any unique prefix of a command name, so `crea`, `ini` and `inn` are init (`in` is ambiguous). A prefix
+    // that is too short to be unique is an error in npm, so over-matching here only denies, never allows. pnpm and bun need the word.
+    const isInitWord = (a: string): boolean => head === "npm"
+      ? (a.length >= 2 && "create".startsWith(a)) || (a.length >= 3 && ("init".startsWith(a) || "innit".startsWith(a)))
+      : a === "init" || a === "create" || a === "innit";
+    if (/^(?:pnpm|npm|bun)$/.test(head)) {
+      // BOS-718: `create` and `innit` are npm's aliases of `init` (pnpm and bun have `create` too), same verdict.
+      const initAt = args.findIndex(isInitWord);
+      if (initAt >= 0 && onlyOptsBefore(initAt) && args.slice(initAt + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
+    }
+    // BOS-720: yarn 1 `global` works on the unquoted word (the shell strips quotes), and `yarn create x` installs create-x globally
+    // then runs it: both put packages and bins outside the checkout, like `yarn global add`.
+    if (head === "yarn") {
+      const gAt = args.findIndex((a) => a === "global" || a === "create");
+      if (gAt >= 0 && onlyOptsBefore(gAt)) return true;
+    }
+    // BOS-717: npm reads `init-module=<file>` from the folder's `.npmrc` and runs that file on `npm init`, so outside the checkout
+    // any `npm init` gets no Allow (pnpm and bun do not read init-module). Inside the checkout the .npmrc is ours.
+    if (away && head === "npm" && args.some((a) => a === "init" || isInitWord(a))) return true;
+    // BOS-706 (CEO decision): outside the checkout an install runs that folder's own preinstall/install/postinstall/prepare
+    // scripts, which the judge can't read. It gets no Allow unless `--ignore-scripts` (or `=true`) is given. Inside the checkout
+    // and its workspaces installs stay Allow (BOS-329).
+    // BOS-711 (allow-list): only a verb known to run no folder or dependency script stays Allow without the flag; every other verb
+    // (update, dedupe, remove, link, version, prune, ...) reifies the tree or runs lifecycle scripts, so it needs the flag too. The
+    // flags are read in order up to `--`; the flag counts only when nothing undoes it (`--no-ignore-scripts`, `=false`, a following
+    // `false`) and any other spelling of the setting is unreadable, which is no Allow.
+    // BOS-711 group 4 (CEO decision): code the judge can't read also loads from config files even with --ignore-scripts.
+    // pnpm loads the folder's `.pnpmfile.cjs` on install/add/update, so outside the checkout pnpm also needs `--ignore-pnpmfile`
+    // (read in order like the first flag). yarn 1 runs the file named by `yarn-path` in the folder's `.yarnrc` and no flag turns
+    // that off, so outside the checkout a yarn install/add/upgrade (or bare `yarn`) gets no Allow: a person decides. Inside the
+    // checkout nothing changes: that is our own repo's reviewed config.
+    // BOS-716 (extends group 4): yarn reads `yarn-path` from the folder's `.yarnrc` at start-up for every command, not just
+    // installs, so outside the checkout no yarn command gets an Allow. `npm audit fix` rebuilds the tree like `npm update` and runs
+    // dependency install scripts, so an `audit` with a `fix` word needs `--ignore-scripts` too (`pnpm audit --fix` only edits
+    // overrides in package.json, so a flag spelling stays Allow).
+    if (away && head === "yarn") return true;
+    if (away && /^(?:pnpm|npm|bun)$/.test(head)) {
+      const verb = args.find((a) => !a.startsWith("-") && a !== "");
+      const auditFix = verb === "audit" && args.slice(args.indexOf(verb) + 1).some((a) => a === "fix");
+      if (auditFix || (verb !== undefined && !/^(?:init|audit|list|ls|outdated|why|licenses|fetch|prefetch|store|config|c|set)$/.test(verb))) {
+        const end = args.indexOf("--");
+        const flags = end < 0 ? args : args.slice(0, end);
+        // True when the setting `name` ends up on: read in order, undone or oddly spelled means off.
+        const flagOn = (name: string): boolean => {
+          let on = false;
+          let bad = false;
+          const loose = new RegExp(name.replace(/-/g, "-?"), "i");
+          for (let i = 0; i < flags.length; i++) {
+            const a = flags[i]!;
+            if (!loose.test(a)) continue;
+            if (a === `--${name}` || a === `--${name}=true`) {
+              on = true;
+              const nextWord = flags[i + 1];
+              if (a === `--${name}` && (nextWord === "true" || nextWord === "false")) { if (nextWord === "false") bad = true; i++; }
+            } else {
+              bad = true; // --no-<name>, =false, =0, odd case or spelling
+            }
+          }
+          return on && !bad;
+        };
+        if (!flagOn("ignore-scripts")) return true;
+        if (head === "pnpm" && !flagOn("ignore-pnpmfile")) return true;
+      }
+    }
+    // find's `-exec`/`-execdir`/`-ok`/`-okdir` program: a path that leaves the checkout is code from elsewhere.
+    if (head === "find") {
+      for (let i = 0; i < args.length; i++) {
+        if (!/^-(?:exec|execdir|ok|okdir)$/.test(args[i]!)) continue;
+        // The -exec program may sit behind a wrapper (`env ../x.sh`): peel env/nohup/nice/... and its assigns to reach it.
+        let j = i + 1;
+        while (j < args.length && (wrappers.test(args[j]!) || /^\w+\+?=/.test(args[j]!))) j++;
+        const prog = args[j] ?? "";
+        // A bare name (`grep`, `rm`) runs from PATH; only a word naming a path (`../x.sh`, `/tmp/x.sh`, `./x.sh`) is judged.
+        if (prog.includes("/") && (climbsOut(prog) || pathLeaves(prog, inOwn))) return true;
+      }
+      continue;
+    }
+    if (!TOOL_RUNNER.test(head)) continue;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!;
+      const eq = a.indexOf("=");
+      // A folder/config/shell option: its value (`--opt=v`, `-C/v`, or the next word) must stay inside the checkout or /tmp,
+      // wherever the option stands among the flags.
+      const opt = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+      if (TOOL_PATH_OPT.test(opt)) {
+        const val = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : /^-[A-Za-z]./.test(a) ? a.slice(2) : args[i + 1];
+        if (val !== undefined && pathLeaves(val, inOwn)) return true;
+        continue;
+      }
+      // A tool argument that is a relative path climbing out of the checkout (`npx vitest run ../../x.test.ts`,
+      // `pnpm dlx tsx ../x.ts`). An absolute /tmp output (`--outDir /tmp/out`) is allowed as before; a /tmp input to run is
+      // already denied by usesScratchUnsafely. A package name (`@scope/pkg`) has no `..`, so it is not caught.
+      const val = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : a;
+      if (!val.startsWith("-") && climbsOut(val)) return true;
+      // BOS-701 (lost BOS-378 check, part B): npm and pnpm read any `--key=value` as a config setting, so BOS-638's fixed list of
+      // option names misses some (`--node-options=--require=/tmp/x.js`, `--config.script-shell=/tmp/x.sh`). Allow-list, not one
+      // more name on the deny-list: any option value naming an absolute path outside the checkout gets no Allow, unless the option
+      // is a known output option that only writes there (`--outDir`).
+      if (a.startsWith("--")) {
+        const name = eq > 0 ? a.slice(0, eq) : a;
+        const v = eq > 0 ? a.slice(eq + 1) : args[i + 1];
+        // BOS-706 (allow-list): node-options is NODE_OPTIONS by flag, so a `--require`, `--import` or `--loader` in it runs code the
+        // judge can't read, however the path is spelled (`-r/tmp/x.js`, `../x.js`, `$HOME/x.js`, `data:` URL). npm accepts any
+        // unambiguous prefix of a config name and `_` for `-`. Only known harmless node flags may stand in the value.
+        const cfg = name.replace(/^--(?:config\.)?/, "").replace(/_/g, "-");
+        if (cfg.length >= 3 && "node-options".startsWith(cfg)) {
+          const toks = (v ?? "").replace(/['"]/g, "").split(/\s+/).filter((t) => t !== "");
+          if (toks.length === 0 || !toks.every((t) => /^--(?:max[-_]old[-_]space[-_]size|stack[-_]trace[-_]limit)=\d+$|^--(?:no-warnings|trace-warnings|enable-source-maps|no-deprecation)$/.test(t))) return true;
+        }
+        // Any absolute path token inside the value that leaves the checkout (`--require=/tmp/x.js`, `--node-options` value).
+        if (!OUTPUT_OPT.test(name) && v !== undefined) {
+          for (const tok of v.split(/[\s=,'"]+/)) if (/^\//.test(tok) && pathLeaves(tok, inOwn)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Wrappers that only start the real command, with the options that take a value (BOS-703): `short` lists the letters (`-k 2`,
+ * `-oL`), `long` the options whose value is the next word (`--signal KILL`; `--signal=KILL` is one word and needs no entry).
+ * One table for the main command path and the pipe-segment parser, so they cannot drift apart.
+ */
+const WRAPPER_OPTS: Record<string, { short: string; long: string[]; bare: string[] }> = {
+  setsid: { short: "", long: [], bare: ["--ctty", "--fork", "--wait", "--help", "--version"] },
+  nohup: { short: "", long: [], bare: ["--help", "--version"] },
+  command: { short: "", long: [], bare: [] },
+  exec: { short: "a", long: [], bare: [] },
+  time: { short: "fo", long: ["--format", "--output"], bare: ["--append", "--verbose", "--portability", "--quiet", "--help", "--version"] },
+  nice: { short: "n", long: ["--adjustment"], bare: ["--help", "--version"] },
+  timeout: { short: "sk", long: ["--signal", "--kill-after"], bare: ["--foreground", "--preserve-status", "--verbose", "--help", "--version"] },
+  env: { short: "uCP", long: ["--unset", "--chdir", "--argv0"], bare: ["--ignore-environment", "--null", "--debug", "--list-signal-handling", "--block-signal", "--default-signal", "--ignore-signal", "--help", "--version"] },
+  flock: { short: "wE", long: ["--timeout", "--wait", "--conflict-exit-code"], bare: ["--shared", "--exclusive", "--unlock", "--nonblock", "--nb", "--no-fork", "--close", "--verbose", "--fcntl", "--help", "--version"] },
+  stdbuf: { short: "ioe", long: ["--input", "--output", "--error"], bare: ["--help", "--version"] },
+};
+
+/**
+ * Peel one wrapper (`head` may carry a path: `/usr/bin/time`). Returns null when `head` is no wrapper or cannot be peeled
+ * (`flock -c 'cmd'`), "split" for `env -S` (a command string the judge can't read), else the command behind it.
+ */
+function peelWrapper(head: string, args: string[]): { head: string; args: string[]; assigns: string[] } | "split" | null {
+  const name = head.replace(/^.*\//, "");
+  const spec = Object.hasOwn(WRAPPER_OPTS, name) ? WRAPPER_OPTS[name]! : null;
+  if (!spec) return null;
+  const assigns: string[] = [];
+  let durationLeft = name === "timeout"; // timeout DURATION command
+  let lockLeft = name === "flock"; // flock LOCKFILE command
+  let optionsDone = false;
+  let i = 0;
+  while (i < args.length) {
+    const a = args[i]!;
+    if (!optionsDone && a === "--") { optionsDone = true; i++; continue; }
+    if (!optionsDone && a.startsWith("--")) {
+      // GNU getopt_long takes any unambiguous prefix (`nice --adj 5`, `env --sp 'cmd'`): match by prefix, fail closed when it is ambiguous.
+      const opt = a.replace(/=.*$/s, "");
+      const hasEq = opt !== a;
+      const hit = (n: string) => n === opt || (opt.length > 2 && n.startsWith(opt));
+      const unreadable = name === "env" ? "--split-string" : name === "flock" ? "--command" : "";
+      const all = [...spec.long, ...spec.bare, ...(unreadable ? [unreadable] : [])];
+      const exact = all.includes(opt);
+      const matches = exact ? [opt] : all.filter(hit);
+      if (unreadable && matches.includes(unreadable)) return name === "env" ? "split" : null;
+      if (matches.length > 1 && matches.some((m) => spec.long.includes(m))) return "split"; // ambiguous prefix with a value option: unreadable
+      i += !hasEq && matches.length === 1 && spec.long.includes(matches[0]!) ? 2 : 1;
+      continue;
+    }
+    if (!optionsDone && a.startsWith("-") && a.length > 1) {
+      if (name === "env" && /^-[A-Za-z]*S/.test(a)) return "split";
+      if (name === "flock" && /^-[A-Za-z]*c$/.test(a)) return null;
+      // The first letter that takes a value: the rest of the word is the value (`-oL`), or the next word when it ends the word.
+      let takesNext = false;
+      for (let k = 1; k < a.length; k++) if (spec.short.includes(a[k]!)) { takesNext = k === a.length - 1; break; }
+      i += takesNext ? 2 : 1;
+      continue;
+    }
+    // timeout reads its duration with strtod (`inf`, `+1`, `1e3`, `infinity`): the first operand is always the duration, never the command.
+    if (durationLeft) { durationLeft = false; i++; continue; }
+    if (/^\w+=/.test(a)) { assigns.push(a); i++; continue; }
+    if (lockLeft) { lockLeft = false; i++; continue; }
+    break;
+  }
+  return { head: args[i] ?? "", args: args.slice(i + 1), assigns };
+}
+
+/** Flags of an interpreter that take the next word as their value (`python3 -W ignore::x.Warning`, `perl -I lib.d`), by interpreter. */
+const INTERP_VALUE_FLAGS: [RegExp, string][] = [
+  [/^python[\d.]*$|^pypy[\d.]*$|^ipython[\d.]*$/, "WXQ"],
+  [/^perl$/, "I"],
+  [/^ruby$/, "IC"],
+  [/^php$/, "d"],
+];
+
 function usesScratchUnsafely(c: string): boolean {
   const bad = { v: false };
   const segs = shellSegments(c, bad);
   if (bad.v) return true; // the parser can't tell where a heredoc or arithmetic ends: fail closed
-  const safe = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf rm rmdir mkdir cp mv ln tee touch cd pushd popd " +
+  const safe = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf rm rmdir shred mkdir cp mv ln tee touch cd pushd popd " +
     "test [ [[ realpath dirname basename readlink du df sort uniq cut tr jq md5sum sha256sum sha1sum mktemp export local unset set read for " +
     "true false sleep chmod date tar unzip gzip gunzip zip curl wget sed less more tree nl od xxd hexdump column").split(" "));
-  const tooling = new Set(["pnpm", "npm", "yarn", "git"]);
+  const tooling = new Set(["pnpm", "npm", "yarn", "yarnpkg", "git"]);
   const keywords = new Set(["if", "then", "do", "else", "elif", "while", "until", "!", "time", "{", "}", "fi", "done", "esac", "in"]);
   const clean = (w: string): string => w.replace(/^\.\//, "").replace(/\/+$/, "");
   const written = new Set<string>();
+  let unknownWrite = false; // a write whose file name the judge can't be sure of: plain static imports are not harmless then
   const scratchVars = new Set<string>();
   const scratchWord = /\/tmp(?:\/|$|:)|\$\{?TMPDIR|mktemp/;
   const parsed = segs.map((s) => {
@@ -851,15 +1544,46 @@ function usesScratchUnsafely(c: string): boolean {
     const args = s.words.slice(k + 1);
     for (const o of s.out) if (o !== "/dev/null" && !/^\d+$|^-$/.test(o)) written.add(clean(o));
     const flagless = args.filter((a) => !a.startsWith("-"));
-    if (/^(?:cp|mv|install|ln)$/.test(head) && flagless.length) written.add(clean(flagless[flagless.length - 1]!));
+    if (/^(?:cp|mv|install|ln)$/.test(head) && flagless.length) {
+      written.add(clean(flagless[flagless.length - 1]!));
+      // Into a folder (`cp /tmp/c.py .`, `-t DIR`) the new file keeps the source's name: count that name as written too.
+      for (const a of flagless) written.add(clean(a.replace(/^.*\//, "")));
+    }
+    // A download that names its own file (`curl -O URL`, `-J`, `wget URL` without -O) writes a name the URL decides.
+    if (head === "curl" || head === "wget") {
+      const saves = head === "wget" ? !args.some((a) => /^(?:-O|--output-document)/.test(a)) : args.some((a) => /^-[A-Za-z]*[OJ]|^--remote-name|^--remote-header-name/.test(a));
+      if (saves) {
+        unknownWrite = true;
+        for (const a of args) if (/^[a-z][\w+.-]*:\/\//i.test(a)) written.add(clean(a.replace(/[?#].*$/, "").replace(/^.*\//, "")));
+      }
+    }
     if (head === "tee") for (const a of flagless) written.add(clean(a));
     // Readers on the safe list that still write a file: `sort -o OUT`, `uniq IN OUT`, `xxd -r IN OUT`.
-    if (head === "sort") for (let i = 0; i < args.length; i++) {
-      if (/^(?:-o|--output)$/.test(args[i]!)) written.add(clean(args[i + 1] ?? ""));
+    // Output options of the other readers on the list (`sort -o`, `tree -o`), also at the end of a flag cluster (`sort -uo OUT`).
+    if (head === "sort" || head === "tree") for (let i = 0; i < args.length; i++) {
+      if (/^-[A-Za-z]*o$|^--output$/.test(args[i]!)) written.add(clean(args[i + 1] ?? ""));
       else if (/^--output=/.test(args[i]!)) written.add(clean(args[i]!.slice(9)));
       else if (/^-[A-Za-z]*o./.test(args[i]!) && !args[i]!.startsWith("--")) written.add(clean(args[i]!.replace(/^-[A-Za-z]*?o/, "")));
     }
-    if ((head === "uniq" || (head === "xxd" && args.includes("-r"))) && flagless.length >= 2) written.add(clean(flagless[flagless.length - 1]!));
+    if ((head === "uniq" || head === "xxd") && flagless.length >= 2) written.add(clean(flagless[flagless.length - 1]!));
+    // zip OUT.zip files; tar -c/-r/-u -f OUT; sed -i FILE and sed's `w FILE`: archive or file output the command names.
+    if (head === "zip" && flagless.length) written.add(clean(flagless[0]!));
+    if (head === "tar") {
+      const mode = (args[0] ?? "").replace(/^-/, "");
+      const makes = /^[A-Za-z]*[cru]/.test(mode) || args.some((a) => /^--(?:create|append|update)$/.test(a));
+      for (let i = 0; i < args.length; i++) {
+        if (makes && /^-?[A-Za-z]*f$/.test(args[i]!) && !args[i]!.startsWith("--")) written.add(clean(args[i + 1] ?? ""));
+        else if (makes && /^--file=/.test(args[i]!)) written.add(clean(args[i]!.slice(7)));
+        else if (makes && args[i] === "--file") written.add(clean(args[i + 1] ?? ""));
+      }
+    }
+    if (head === "sed") {
+      // `sed -n 'w OUT'`, `sed 's/a/b/w OUT'`. (`sed -i` edits a file that already exists, so it is not counted here.)
+      for (const a of args) {
+        const m = /(?:^|[;{}\n])\s*[wW]\s+(\S+)\s*$/.exec(a) ?? /^s(.).*\1.*\1[gpiImMe0-9]*[wW]\s+(\S+)\s*$/s.exec(a);
+        if (m) written.add(clean(m[m.length - 1]!));
+      }
+    }
     for (let i = 0; i < args.length; i++) {
       if ((head === "curl" && /^(?:-o|--output)$/.test(args[i]!)) || (head === "wget" && /^(?:-O|--output-document)$/.test(args[i]!))) written.add(clean(args[i + 1] ?? ""));
       const of = /^of=(.+)$/.exec(args[i]!);
@@ -901,31 +1625,106 @@ function usesScratchUnsafely(c: string): boolean {
     for (const m of text.matchAll(/(?:^|[^\w.])import\s+([\w., ]+)/g)) if (named(m[1]!)) return true; // `import os, c`
     return false;
   };
+  // A write by the shell, or a /tmp path somewhere other than in the inline code itself: self-contained inline code that names
+  // its own /tmp file is placed by inlineCodeOk, as before.
+  const playOutside = (code: string): boolean => written.size > 0 || scratchVars.size > 0 || scratchWord.test(code === "" ? c : c.split(code).join(""));
+  const inScratchPlay = written.size > 0 || scratchVars.size > 0 || scratchWord.test(c);
+  const interpWords = "python[\\d.]*|pypy[\\d.]*|ipython[\\d.]*|node(?:js)?|tsx|ts-node|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh";
+  const interpreters = new RegExp(`^(?:${interpWords})$`);
+  // Any word by which inline code can bring in or run other code, a dotted one too (`runpy.run_path`, `os.system`), or the
+  // shell's `source` / `.`. Reading a file as data (`readFileSync`) is not a loader; feeding it to exec / eval / Function is.
+  // A static import of a plain module name (`import json`, `from os import path`, `require('fs')`) can only load a module
+  // that `named` checks against the files the command wrote, so it is taken out first; a path or built name is not.
+  const loadsCode = (text: string): boolean => {
+    if (unknownWrite) return /\b(?:import|from|require\w*|include\w*|source|load\w*|use|do|exec\w*|eval\w*)\b|__import__|\w*Context\b|(?:^|[;&|(\s])\.\s+\S/.test(text) || loadsCodeStripped(text);
+    return loadsCodeStripped(text);
+  };
+  const loadsCodeStripped = (text: string): boolean => {
+    const rest = text
+      .replace(/\bfrom\s+[\w.]+\s+import\s+[\w*, ]+/g, " ")
+      .replace(/\bimport\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*/g, " ")
+      .replace(/\brequire\(\s*['"][^'"./][^'"]*['"]\s*\)/g, " ");
+    return /\b(?:\w*exec\w*|\w*eval\w*|require\w*|import\w*|__import__|source|load\w*|dofile|include\w*|use|do|run_path|runpy|system|spawn\w*|popen|fork|Function|compile|subprocess|child_process|\w*Context)\b|(?:^|[;&|(\s])\.\s+\S/.test(rest);
+  };
+  // A heredoc fed to an interpreter is inline code too (the parser skips its body).
+  if (inScratchPlay) {
+    const heredoc = new RegExp(`\\b(?:${interpWords})\\b[^\\n;|&]*<<-?\\s*['"]?\\w+['"]?[^\\n]*\\n([\\s\\S]*)`, "g");
+    for (const m of c.matchAll(heredoc)) if (playOutside(m[1]!) && (loadsCode(m[1]!) || mentionsWritten(m[1]!))) return true;
+    // Code piped to an interpreter that has no script argument (`echo "import c" | python3 -`, `cat c.py | node`) is read from stdin:
+    // the text before the pipe is checked like a heredoc body, and a pipe from `cat` of a written or scratch file is code too.
+    // A here-string is code on stdin too: the rest of the line is checked like a heredoc body.
+    const hereStr = new RegExp(`\\b(?:${interpWords})\\b[^\\n;|&]*<<<[ \\t]*([^\\n]*)`, "g");
+    for (const m of c.matchAll(hereStr)) if (playOutside(m[1]!) && (loadsCode(m[1]!) || mentionsWritten(m[1]!))) return true;
+    // The segment after each pipe is parsed: redirects dropped, runners looked through, then an interpreter with no script
+    // operand (no word with a dot or slash) and no -c/-e code reads its program from stdin; a lone `-` is stdin too.
+    const pipeSeg = /(?<!\|)\|(?!\|)((?:(?!&&)[^;\n|)])*)/g;
+    const piped: { index: number }[] = [];
+    // Whether one command after a pipe (its text up to the next separator) is an interpreter that reads its program from stdin.
+    const readsStdin = (text: string): boolean => {
+      let words = text
+        .replace(/\d*>&\d+|&>>?\s*\S+|\d*>>?\s*\S+|\d*<\s*\S+/g, " ")
+        .split(/\s+/)
+        .filter((w) => w !== "" && w !== "&");
+      // A subshell's opening bracket and the wrappers the main command path peels, with their options and values (BOS-698, BOS-703).
+      for (let guard = 0; guard < 8 && words.length; guard++) {
+        if (/^[({]/.test(words[0]!)) { words[0] = words[0]!.replace(/^[({]+/, ""); if (words[0] === "") words.shift(); continue; }
+        const peeled = peelWrapper(words[0]!, words.slice(1));
+        if (peeled === null) break;
+        if (peeled === "split") return true; // `env -S 'cmd'`: unreadable, fail closed
+        words = [peeled.head, ...peeled.args].filter((w) => w !== "");
+      }
+      let ai = 0;
+      if (words.length && /^(?:pnpm|npx|bunx|uvx|yarn|yarnpkg|npm|uv|poetry|pipx)$/.test(words[0]!)) {
+        ai = words.findIndex((w) => interpreters.test(w.replace(/^.*\//, "")));
+        if (ai < 0) return false;
+      }
+      const interpName = (words[ai] ?? "").replace(/^.*\//, "");
+      if (!interpreters.test(interpName)) return false;
+      // Flags that take a value (`-W ignore::x.Warning`, `-Wignore::x.Warning`, `-X utf8`) are dropped with that value: it is
+      // neither inline code nor a script operand.
+      const valueLetters = INTERP_VALUE_FLAGS.find(([re]) => re.test(interpName))?.[1] ?? "";
+      const rest: string[] = [];
+      const afterInterp = words.slice(ai + 1);
+      for (let k = 0; k < afterInterp.length; k++) {
+        const a = afterInterp[k]!;
+        const at = /^-[A-Za-z]/.test(a) && valueLetters !== "" ? [...a.slice(1)].findIndex((ch) => valueLetters.includes(ch)) : -1;
+        if (at < 0) { rest.push(a); continue; }
+        if (at === a.length - 2) k++; // the value letter ends the word: the next word is its value
+      }
+      // Only a flag that carries inline code (one with an operand after it) means the program is not on stdin; for shells
+      // only a cluster ending in `c` does (`bash -e` is errexit, `python3 -E` ignores the environment, `node -p` has no code).
+      const shellInterp = /^(?:sh|bash|zsh|dash|ksh)$/.test((words[ai] ?? "").replace(/^.*\//, ""));
+      const codeFlag = shellInterp ? /^-[A-Za-z]*c$/ : /^-[A-Za-z]*[cermEpM]|^--(?:eval|print|require|import|exec)\b/;
+      // The word after the flag must be code: a following `-` (stdin) or another flag means the flag carried none (`python3 -E -`).
+      if (rest.some((a, k) => codeFlag.test(a) && k + 1 < rest.length && !rest[k + 1]!.startsWith("-"))) return false;
+      // A script operand comes before the stdin marker: words after `-`, or after `-s` for a shell, are arguments to the stdin program.
+      const marker = rest.findIndex((a) => a === "-" || (shellInterp && /^-[A-Za-z]*s[A-Za-z]*$/.test(a)));
+      return !(marker < 0 ? rest : rest.slice(0, marker)).some((a) => /[./]/.test(a));
+    };
+    for (const m of c.matchAll(pipeSeg)) if (readsStdin(m[1]!)) piped.push({ index: m.index! });
+    // `| (cd x && python3)`, `| { cd x; python3; }`: every command in the group inherits the pipe.
+    const pipeGroup = /(?<!\|)\|(?!\|)\s*[({]([^)}\n]*)/g;
+    for (const m of c.matchAll(pipeGroup)) if (m[1]!.split(/&&|\|\||;/).some(readsStdin)) piped.push({ index: m.index! });
+    for (const m of piped) {
+      const before = c.slice(0, m.index);
+      if (loadsCode(before) || mentionsWritten(before)) return true;
+      const last = before.split(/[;&|\n]/).pop() ?? "";
+      if (/^\s*cat\b/.test(last) && last.split(/\s+/).some((w) => w !== "cat" && !w.startsWith("-") && w !== "" && (isWritten(w) || isScratch(w)))) return true;
+    }
+  }
   let extracted = false;
   for (const p of parsed) {
     let { head, args } = p;
     const assigns = [...p.assigns];
     // Peel plain wrappers that only start the real command: `setsid nohup`, `env A=b`, `timeout 120`, `nice -n 5`, `time`.
-    for (let guard = 0; guard < 8 && /^(?:setsid|nohup|nice|time|command|exec|env|timeout|flock)$/.test(head); guard++) {
-      // `env -S 'A=b cmd'` splits a string into assignments and a command: not readable here.
-      if (head === "env" && args.some((a) => /^-[A-Za-z]*S|^--split-string/.test(a))) return true;
-      let i = 0;
-      if (head === "flock") {
-        // flock [-nx..] <lock file> <command...>: the lock file is not the command's code (no -c form is peeled).
-        while (args[i]?.startsWith("-")) i++;
-        if (args.slice(0, i).some((a) => /^-[A-Za-z]*c$|^--command/.test(a))) break;
-        head = args[i + 1] ?? "";
-        args = args.slice(i + 2);
-        continue;
-      }
-      while (i < args.length && (args[i]!.startsWith("-") || /^\w+=/.test(args[i]!) || (head === "timeout" && /^\d[\w.]*$/.test(args[i]!)) || (head === "nice" && /^-?\d+$/.test(args[i]!)))) {
-        if (/^\w+=/.test(args[i]!)) assigns.push(args[i]!);
-        else if (head === "env" ? /^(?:-u|-C|-P|--unset|--chdir)$/.test(args[i]!) : /^(?:-n|-u|-C|-S|-s|-k)$/.test(args[i]!)) i++;
-        i++;
-      }
-      if (head === "timeout" && /^\d[\w.]*$/.test(args[i] ?? "")) i++;
-      head = args[i] ?? "";
-      args = args.slice(i + 1);
+    // The same helper peels them in the pipe-segment parser above (WRAPPER_OPTS); `env -S 'A=b cmd'` and `flock -c` are not readable.
+    for (let guard = 0; guard < 8; guard++) {
+      const peeled = peelWrapper(head, args);
+      if (peeled === null) break;
+      if (peeled === "split") return true;
+      assigns.push(...peeled.assigns);
+      head = peeled.head;
+      args = peeled.args;
     }
     if (head === "") continue; // a plain `X=1` is a shell variable, not environment
     if (setsUnknownEnvironment(assigns, head.replace(/^.*\//, ""), args)) return true;
@@ -940,22 +1739,59 @@ function usesScratchUnsafely(c: string): boolean {
     if (extractsFiles(sh, args, written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) extracted = true;
     // F2: options that make an otherwise harmless tool run a program.
     if (runsProgramOption(sh, args)) return true;
-    // F3: xargs builds a command from its input; with a scratch or written path anywhere it is unread code.
+    // F3: xargs builds a command from its input; with a scratch or written path anywhere it is unread code. A file tool under
+    // xargs (`cat /tmp/x | xargs rm -rf`, `... | xargs shred`) acts on names the judge never sees, so it is not exempt
+    // (BOS-715).
     if (sh === "xargs") {
       const cmdWord = args.find((a, i) => !a.startsWith("-") && !/^-[IiLnPsdE]$/.test(args[i - 1] ?? ""));
-      if ((written.size || scratchWord.test(c) || scratchVars.size) && !(cmdWord !== undefined && safe.has(cmdWord) && cmdWord !== "tar")) return true;
+      if ((written.size || scratchWord.test(c) || scratchVars.size) && !(cmdWord !== undefined && safe.has(cmdWord) && cmdWord !== "tar" && !FILE_TOOLS.has(cmdWord))) return true;
     }
     // git's own config, hooks and -C are BOS-378 (Kit); only pnpm/npm/yarn are handled here.
     if (tooling.has(sh) && sh !== "git" && toolingRunsScratch(sh, args, isScratch, isWritten)) return true;
     if (tooling.has(sh) && sh !== "git" && [...written].some((p) => /(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.yml)?|\.pnpmfile\.cjs|package\.json)$/.test(p))) return true;
     // Only the inline code or module name (the words after -c/-e/-r/-m) is checked here; a written file given as plain data
     // to a checked-in script (`node scripts/use.js out.json`) is judged below as before.
-    const codeAt = args.findIndex((a) => /^-[A-Za-z]*[cermE]$/.test(a) || a === "--eval");
-    if (written.size > 0 && codeAt >= 0 && /^(?:python[\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|sh|bash|zsh|dash|ksh|tclsh)$/.test(sh) && (mentionsWritten(args.slice(codeAt + 1).join(" ")) || (/^-[A-Za-z]*m$/.test(args[codeAt]!) && named(args[codeAt + 1] ?? "")))) return true;
-    const dashC = args.findIndex((a) => /^-[A-Za-z]*c$/.test(a));
+    // Any single-dash flag cluster holding c/e/E/r/m/M/p (`-c`, `-pe`, `-mc`, `-MC`, `-ec`), or --eval / --print / --require.
+    // An interpreter behind a runner (`pnpm exec node -e`, `pnpm tsx -e`, `npx tsx -e`, `uv run python -c`, `poetry run python -c`).
+    let ish = sh;
+    let iargs = args;
+    if (/^(?:pnpm|npx|bunx|uvx|yarn|yarnpkg|npm|uv|poetry|pipx)$/.test(sh)) {
+      // The first interpreter word anywhere in the arguments (`pnpm --filter x exec node`, `uv run --with y python`).
+      const j = iargs.findIndex((a) => interpreters.test(a.replace(/^.*\//, "")));
+      if (j >= 0) { ish = iargs[j]!.replace(/^.*\//, ""); iargs = iargs.slice(j + 1); }
+    }
+    const codeAt = iargs.findIndex((a) => /^-[A-Za-z]*[cermEpM]/.test(a) || /^--(?:eval|print|require|import|exec)\b/.test(a));
+    if (codeAt >= 0 && interpreters.test(ish) && playOutside(iargs.slice(codeAt + 1).join(" "))) {
+      const args = iargs;
+      const flag = args[codeAt]!;
+      const code = args.slice(codeAt + 1).join(" ");
+      // After a write or with a /tmp path anywhere, inline code that loads, requires, sources, imports or executes anything gets
+      // no Allow, whatever it names: it can build the file name at run time. A module named by a joined flag (`-mc`, `-MC`) counts.
+      if (loadsCode(code) || loadsCode(flag.replace(/^-[A-Za-z]*?[mMr]/, "import "))) return true;
+      if (mentionsWritten(code) || named(flag.replace(/^-[A-Za-z]*?[mMr]/, ""))) return true;
+      if (/^-[A-Za-z]*[mMr]$|^--(?:require|import)$/.test(flag) && named(args[codeAt + 1] ?? "")) return true; // `-m c`, `-r ./c.js`
+    }
+    const dashC = args.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(sh) && dashC >= 0 && !assigns.some(isScratch)) {
-      // `bash -c -- 'cmd'`: the command string is the first word after -c that is not `--`.
-      const inner = args.slice(dashC + 1).find((a) => a !== "--") ?? "";
+      // `bash -c -ex -- 'cmd'`: the shell still reads options after -c, so the command string is the first word after -c
+      // that is not `--` and not an option (BOS-695). An option word we can't place gives no Allow.
+      // `bash -ce 'cmd'` / `bash -co pipefail 'cmd'` (BOS-700): `c` may sit inside a cluster, so the letters after it are
+      // still options to place (`-ce` -> `-e`, `-co` -> `-o pipefail`) before the command string.
+      // `bash -oc pipefail 'cmd'` (BOS-707): an `o`/`O` anywhere in the same option word as the `c`, before or after it,
+      // takes the next word as its option name (`-oc`, `-Oc`, `-eoc`, `-oeOc`; `-oec` reads the command string itself as an
+      // "invalid option name" and aborts). Because the command string then sits one or more words on and the count is easy to
+      // misplace, the judge does not try to place it: a cluster with `c` and any `o`/`O` gives no Allow. Over-denial is
+      // accepted (write `-o pipefail -c 'cmd'` or `-c -o pipefail 'cmd'` instead). A `-c`-only cluster with other letters is
+      // still placed by `shellDashCString` as before.
+      const word = args[dashC]!;
+      if (/[oO]/.test(word.slice(1))) return true;
+      const rest = args.slice(dashC + 1);
+      const at = shellDashCString(rest);
+      if (at.ok === false) return true;
+      const inner = at.word;
+      // `bash -c -e`: no command string to read, but with a written or scratch path anywhere in the command, give no Allow.
+      if (inner === "" && (written.size > 0 || scratchVars.size > 0 || scratchWord.test(c))) return true;
+      if (inner === "") continue;
       if (written.size > 0 && named(inner)) return true; // the inner command may run what the outer one wrote
       if (usesScratchUnsafely(inner)) return true;
       continue;

@@ -23,6 +23,8 @@ export function fileType(bytes: Buffer): string {
   const picture = pictureType(bytes);
   if (picture) return picture;
   if (bytes.subarray(0, 5).toString("latin1") === "%PDF-") return "application/pdf";
+  // A zip (BOS-228): its entries are read by attachment-zip.ts, never stored as one big opaque blob.
+  if (bytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) return "application/zip";
   const sample = bytes.subarray(0, 64 * 1024);
   if (!sample.includes(0) && Buffer.from(sample.toString("utf8"), "utf8").equals(sample)) return "text/plain";
   return "application/octet-stream";

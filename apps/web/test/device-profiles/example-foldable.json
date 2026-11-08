@@ -1,0 +1,25 @@
+{
+  "label": "Example foldable (unfolded) · Brave",
+  "browser": "Brave",
+  "fingerprint": "example-foldable",
+  "readings": [
+    {
+      "width": 840,
+      "height": 900,
+      "pixelRatio": 2.6,
+      "coarsePointer": true,
+      "displayMode": "standalone",
+      "units": { "vh": 900, "dvh": 780, "svh": 780, "lvh": 900, "visual": 780 },
+      "afterScroll": false
+    },
+    {
+      "width": 840,
+      "height": 900,
+      "pixelRatio": 2.6,
+      "coarsePointer": true,
+      "displayMode": "standalone",
+      "units": { "vh": 900, "dvh": 900, "svh": 780, "lvh": 900, "visual": 900 },
+      "afterScroll": true
+    }
+  ]
+}

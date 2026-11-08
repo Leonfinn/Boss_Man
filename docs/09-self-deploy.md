@@ -180,14 +180,15 @@ Before, a runner update recreated every runner at once and killed the agent runs
 ```
 owner approves "Update runners" (or runs scripts/update-runner.sh)
   1. update-runner.sh builds the new image, runs the canary, tags :current     (nothing running is touched)
-  2. it writes inbox/drain.json and returns                                    (the host lock is free again)
-  3. the server turns the maintenance hold on: banner, no new runs anywhere
-  4. every few seconds the drain step looks at each runner:
+  2. it rebuilds and recreates the launcher when one is running               (only the launcher restarts; BOS-335)
+  3. it writes inbox/drain.json and returns                                    (the host lock is free again)
+  4. the server turns the maintenance hold on: banner, no new runs anywhere
+  5. every few seconds the drain step looks at each runner:
        its company has no active run  ->  launcher recreates that runner on :current
        its company is still busy      ->  wait
-  5. deadline (30 min) with runs still going -> ONE owner decision:
+  6. deadline (30 min) with runs still going -> ONE owner decision:
        Stop the remaining runs and update now / Keep waiting another 30 min / Cancel the update
-  6. every runner is on :current (and has reconnected) -> the hold lifts, the owner is notified, the queue runs
+  7. every runner is on :current (and has reconnected) -> the hold lifts, the owner is notified, the queue runs
 ```
 
 ### Decisions made
@@ -206,12 +207,14 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
 
 ### How the script asks the server, and the host lock
 
-`scripts/update-runner.sh` (default) builds, canaries and tags `:current`, then writes `$BOSSMAN_DEPLOYER/inbox/drain.json` (temp file and rename) and **returns**. The server's drain step (every 5 s, `BOSSMAN_DRAIN_MS`) takes the file, deletes it and starts the hold. The file's existence is the whole request: nothing in it is read. The host deployer exports `BOSSMAN_DEPLOYER` for its "runner" action and runs it without `--now`, so the host holds its `flock` for the build and canary only, never while runs finish, and server deploys are not blocked. The host's `status.json` for a runner request therefore says "New runner image ready; Boss Man is waiting for runs to finish", and the server's notification for that says the same. **The swap's own result (done, or the problems) comes from the drain as a Boss Man notification**, not from the host script, so the failure webhook does not fire for a swap that goes wrong; the page notification (ntfy if configured) does.
+`scripts/update-runner.sh` (default) builds, canaries and tags `:current`, then writes `$BOSSMAN_DEPLOYER/inbox/drain.json` (temp file and rename) and **returns**. The server's drain step (every 5 s, `BOSSMAN_DRAIN_MS`) takes the file, deletes it and starts the hold. The file's existence is the request. Its only field read is `reason`: `"setting change"` (from `--settings`) makes the drain recreate every runner once, whatever its image; anything else is an image update (BOS-594). The host deployer exports `BOSSMAN_DEPLOYER` for its "runner" action and runs it without `--now`, so the host holds its `flock` for the build and canary only, never while runs finish, and server deploys are not blocked. The host's `status.json` for a runner request therefore says "New runner image ready; Boss Man is waiting for runs to finish", and the server's notification for that says the same. **The swap's own result (done, or the problems) comes from the drain as a Boss Man notification**, not from the host script, so the failure webhook does not fire for a swap that goes wrong; the page notification (ntfy if configured) does.
 
 - `--now`: the old behaviour for emergencies on the host: `compose up -d` and `recreate-all`, runs cut off, no drain. It combines with `--rollback`.
+- `--settings`: no build. For a change to the runner settings in `.env` (`BOSSMAN_RUNNER_MEMORY`, `BOSSMAN_CHECK_SLOTS`, `BOSSMAN_RUNNER_CPUS`, ...): recreates the launcher so it reads them, then asks for a drain marked "setting change". Runs finish, each runner is recreated as its company goes idle, and the agents told to wrap up are woken afterwards. It refuses without a launcher or a deployer folder (use `--settings --now` there). Owner cards must use this, not `recreate-all`: the card lint refuses a bare recreate (R15, BOS-594).
 - `--rollback` retags `:previous` as `:current` and then drains onto it.
 - With no deployer folder (a manual run without self-deploy) the script prints where to start the drain: Settings > Server and runner > Runner update > **Update runners**.
 - `deploy.sh --runner` calls `update-runner.sh`, so it drains too.
+- **Why each runner restarted (BOS-594).** Before Boss Man recreates or restarts a runner (an update drain, a setting-change drain, the owner's Restart or Reconnect) it records why. The runner's hello says whether its last process was stopped from outside (SIGTERM) or ended without being told (crash or out of memory), and when the host booted. The server turns that into one reason (update, setting change, owner restart, host, crash or out of memory, unknown), puts it in the owner's feed (a crash is a flag) and the activity log, and shows the latest in `server_status` under `runner.lastRestart`.
 
 ### Not covered
 

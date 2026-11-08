@@ -14,6 +14,18 @@ import { agents, decisions, engagements, features, keyResults, milestones, objec
 
 export { WorkError };
 
+/**
+ * Once a ticket is merged, its owner setup steps are the ones review saw: an agent may no longer change
+ * them, because the "Ready to use" card is raised at go-live from whatever is stored and nothing checks it
+ * again (BOS-443). The owner's own web edit is unaffected (it passes no actor), and an empty patch changes nothing.
+ */
+function setupFrozenRefusal(mergeCommit: string | null, current: string | null, patch: { byAgentId?: string | null; ownerSetup?: string | null }): string | null {
+  if (!mergeCommit || !patch.byAgentId || patch.ownerSetup === undefined) return null;
+  const next = patch.ownerSetup?.trim() || null;
+  if (next === (current?.trim() || null)) return null;
+  return 'This ticket is merged, so its setup steps are frozen: they are the ones review saw, and Boss Man raises the owner\'s "Ready to use" card from them when it goes live. An agent can\'t change them now. If they are wrong, ask the owner to fix them on the ticket page, or open a follow-up ticket with the right steps.';
+}
+
 /** Ticket ids a wake's note or a nudge's reason names, the way those notes write them. */
 const NOTE_TICKET_IDS = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 
@@ -562,7 +574,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         if (refusal) throw new WorkError(409, refusal);
       }
       // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
-      if (patch.ownerSetup !== undefined) fields.ownerSetup = patch.ownerSetup?.trim() || null;
+      // A merged ticket's steps are frozen against agents (BOS-443); the owner's web edit still works.
+      if (patch.ownerSetup !== undefined) {
+        const frozen = setupFrozenRefusal(t.mergeCommit, t.ownerSetup, patch);
+        if (frozen) throw new WorkError(409, frozen);
+        fields.ownerSetup = patch.ownerSetup?.trim() || null;
+      }
       if (patch.fixesLive !== undefined) {
         const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;
         if (bad) throw new WorkError(400, bad);
@@ -609,6 +626,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", agentId: patch.byAgentId ?? undefined, summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });
       }
       if (updated!.assigneeAgentId && updated!.assigneeAgentId !== t.assigneeAgentId && updated!.systemState !== "done") await hooks.onAssigned?.(updated!);
+      if ((updated!.ownerSetup ?? null) !== (t.ownerSetup ?? null))
+        await record(db, { companyId: t.companyId, ticketId: t.id, kind: "reorganised", agentId: patch.byAgentId ?? undefined, summary: `${patch.byAgentId ? ((await db.select({ name: agents.name }).from(agents).where(eq(agents.id, patch.byAgentId)))[0]?.name ?? "An agent") : "The owner"} changed the owner's setup steps`, at: now() });
       if (updated!.systemState === "done" && t.systemState !== "done") await hooks.onDone?.(updated!);
       for (const fid of new Set([t.featureId, updated!.featureId])) if (fid) await hooks.onFeature?.(fid);
       return updated!;
