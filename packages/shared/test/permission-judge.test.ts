@@ -1095,3 +1095,53 @@ describe("rules judge: BOS-378 checks lost in the merges (BOS-701)", () => {
     allows(["pnpm run build --outDir /tmp/out", "npm --silent run build"]);
   });
 });
+
+// BOS-706 (Jane's variants of the BOS-701 checks): the same checks, reached through a wrapper's own flag, a cd flag, an attached or
+// abbreviated env folder flag, `sh -c`, an option value taken for the verb, and node-options spelled around the absolute-path test.
+describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+
+  describe("A. repo code from a folder outside the checkout", () => {
+    deny([
+      "cd /tmp/p && nice -n 5 git status",
+      "cd /tmp/p && stdbuf -oL pnpm run evil",
+      "cd /tmp/p && timeout -s KILL 60 npm test",
+      "cd /tmp/p && command -p git status",
+      "cd /tmp/p && nohup nice -n 5 git status",
+      "cd -P /tmp/p && git status",
+      "cd -L /tmp/p && git status",
+      "cd -e -P /tmp/p && git status",
+      "pushd -n /tmp/p && git status",
+      "env -C/tmp/p pnpm run evil",
+      "env --ch=/tmp/p pnpm run evil",
+      "env --chd /tmp/p pnpm run evil",
+      "cd /tmp/p && sh -c 'pnpm run evil'",
+      "cd /tmp/p && npm --cache install run evil",
+      "cd /tmp/p && pnpm --reporter install run evil",
+    ]);
+    allows([
+      "cd packages/shared && nice -n 5 git status",
+      "cd -P packages/shared && git status",
+      "env -C packages/shared pnpm run build",
+      "cd /tmp/p && npm install",
+      "cd /tmp/p && ls",
+    ]);
+  });
+
+  describe("B. node-options by flag", () => {
+    deny([
+      "npm --node-options=--require=../x.js run build",
+      "npm --node-options='--require ../../../tmp/x.js' run build",
+      "npm --node-options=-r/tmp/x.js run build",
+      "npm --node-options=--require=$HOME/x.js run build",
+      "npm --node-options=--import=data:text/javascript,import('x') run build",
+      "pnpm --config.node-options=--loader=./x.mjs run build",
+      "npm --node-options --experimental-loader=./x.mjs run build",
+    ]);
+    allows(["npm --node-options=--max-old-space-size=4096 run build"]);
+  });
+});

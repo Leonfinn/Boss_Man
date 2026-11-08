@@ -911,7 +911,13 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
   const PM = /^(?:pnpm|npm|yarn|npx|pnpx|bunx|bun)$/;
   const PM_SCRIPT = /^(?:run|run-script|test|t|start|dev|restart|rebuild|pack|publish|exec|dlx|create)$/;
   const pmRunsScript = (args: string[]): boolean => {
-    const first = args.find((a) => !a.startsWith("-") && a !== "");
+    // BOS-706 (allow-list): an option the judge does not know may take the next word as its value (`npm --cache install run evil`),
+    // so the verb cannot be told. Only known value-less options may stand before the verb; any other gets "runs a script".
+    const verbAt = args.findIndex((a) => !a.startsWith("-") && a !== "");
+    for (const a of verbAt < 0 ? args : args.slice(0, verbAt)) {
+      if (a !== "--" && !a.includes("=") && !/^(?:-s|--silent|-q|--quiet|--no-color|--if-present|-w|-ws|--workspaces|-r|--recursive|--ignore-scripts|-D|-g|--global|--save-dev|--frozen-lockfile|--no-frozen-lockfile|--offline|--prefer-offline|-y|--yes|--no-progress|--production|--prod|--force|-f|--legacy-peer-deps|--no-audit|--no-fund|--verbose|-d)$/.test(a)) return true;
+    }
+    const first = verbAt < 0 ? undefined : args[verbAt];
     // No verb (`pnpm` alone) or a script-run verb, or a word that is not a known non-script verb (a bare script name).
     if (first === undefined) return true;
     if (PM_SCRIPT.test(first)) return true;
@@ -919,33 +925,56 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
   };
   let away = false;
   for (const s of segs) {
+    let words = s.words;
     let k = 0;
-    // Peel launchers and their own flags: `env -C /tmp/p cmd`, `env -u X cmd`, `timeout 120 cmd`, `sudo cmd`, `A=b cmd`.
-    while (k < s.words.length) {
-      const w = s.words[k]!;
+    let unreadable = false;
+    // Peel launchers and their own flags: `env -C /tmp/p cmd`, `timeout -s KILL 60 cmd`, `nice -n 5 cmd`, `sudo cmd`, `A=b cmd`.
+    // BOS-706: the wrappers in WRAPPER_OPTS are peeled by peelWrapper, which knows each one's value-taking flags (short, attached,
+    // long and GNU-abbreviated); one it cannot read leaves the program unknown, which is no Allow once the folder is outside.
+    while (k < words.length) {
+      const w = words[k]!;
       if (/^\w+\+?=/.test(w)) { k++; continue; }
-      if (w === "timeout") { k++; if (/^\d[\w.]*$/.test(s.words[k] ?? "")) k++; continue; }
-      if (w === "env" || w === "chdir") {
-        // A wrapper that can change the working folder: `-C /tmp/p` / `--chdir /tmp/p`.
-        k++;
-        while (k < s.words.length) {
-          const f = s.words[k]!;
-          if (f === "-C" || f === "--chdir") { if (!repoDirOk(s.words[k + 1] ?? "")) away = true; k += 2; continue; }
-          if (/^(?:--chdir)=/.test(f)) { if (!repoDirOk(f.slice(f.indexOf("=") + 1))) away = true; k++; continue; }
-          if (/^(?:-u|--unset|-S|--split-string)$/.test(f)) { k += 2; continue; } // takes a value
-          if (f.startsWith("-") && f !== "-") { k++; continue; }
-          break;
+      const base = w.replace(/^.*\//, "");
+      if (base === "env" || base === "chdir") {
+        // A wrapper that can change the working folder: `-C /tmp/p`, `-C/tmp/p`, `--chdir /tmp/p`, `--ch=/tmp/p` (any GNU prefix).
+        for (let j = k + 1; j < words.length; j++) {
+          const f = words[j]!;
+          if (/^\w+\+?=/.test(f)) continue;
+          if (!f.startsWith("-") || f === "-") break;
+          if (f === "--") break;
+          const long = f.startsWith("--") ? f.replace(/=.*$/s, "") : "";
+          if (long.length > 2 && "--chdir".startsWith(long)) {
+            const v = f.includes("=") ? f.slice(f.indexOf("=") + 1) : (words[j + 1] ?? "");
+            if (!repoDirOk(v)) away = true;
+          } else if (/^(?:-u|-P|--unset|--argv0)$/.test(f) || (long.length > 2 && !f.includes("=") && ("--unset".startsWith(long) || "--argv0".startsWith(long)))) {
+            j++; // takes the next word as its value: `env -u X -C /tmp/p cmd`
+          } else if (!long && /^-[A-Za-z]*C/.test(f)) {
+            const at = f.indexOf("C");
+            const v = at < f.length - 1 ? f.slice(at + 1) : (words[j + 1] ?? "");
+            if (!repoDirOk(v)) away = true;
+          }
         }
+      }
+      if (Object.hasOwn(WRAPPER_OPTS, base)) {
+        const peeled = peelWrapper(w, words.slice(k + 1));
+        if (peeled === null || peeled === "split") { unreadable = true; break; }
+        words = [peeled.head, ...peeled.args];
+        k = 0;
+        if (peeled.head === "") break;
         continue;
       }
+      if (base === "chdir") { k++; continue; }
       if (wrappers.test(w)) { k++; continue; }
       break;
     }
-    const head = (s.words[k] ?? "").replace(/^.*\//, "");
-    const args = s.words.slice(k + 1);
+    const head = (words[k] ?? "").replace(/^.*\//, "");
+    const args = words.slice(k + 1);
+    // A launcher that could not be read, or a flag standing where the program should be (`sudo -u x git`), hides the program.
+    if (away && (unreadable || (head.startsWith("-") && head.length > 1) || /^(?:sh|bash|dash|zsh|ksh|ash)$/.test(head))) return true;
     // A `cd`/`pushd`/`chdir` moves the working folder for the segments that follow; a bare `popd`/`cd -` can't be read.
     if (/^(?:cd|pushd|chdir)$/.test(head)) {
-      const target = args.find((a) => a !== "--")?.replace(/^['"]+|['"]+$/g, "") ?? "";
+      // cd's own flags (`-P`, `-L`, `-e`, `-@`, `-n`) are skipped: the first word that is not a flag is the target.
+      const target = args.find((a) => a !== "--" && !(a.startsWith("-") && a.length > 1))?.replace(/^['"]+|['"]+$/g, "") ?? "";
       if (target === "" || target === "-" || /^\/tmp(\/|$)/.test(target) || target.includes("..") || !repoDirOk(target)) away = true;
       continue;
     }
@@ -988,6 +1017,14 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
       if (a.startsWith("--")) {
         const name = eq > 0 ? a.slice(0, eq) : a;
         const v = eq > 0 ? a.slice(eq + 1) : args[i + 1];
+        // BOS-706 (allow-list): node-options is NODE_OPTIONS by flag, so a `--require`, `--import` or `--loader` in it runs code the
+        // judge can't read, however the path is spelled (`-r/tmp/x.js`, `../x.js`, `$HOME/x.js`, `data:` URL). npm accepts any
+        // unambiguous prefix of a config name and `_` for `-`. Only known harmless node flags may stand in the value.
+        const cfg = name.replace(/^--(?:config\.)?/, "").replace(/_/g, "-");
+        if (cfg.length >= 3 && "node-options".startsWith(cfg)) {
+          const toks = (v ?? "").replace(/['"]/g, "").split(/\s+/).filter((t) => t !== "");
+          if (toks.length === 0 || !toks.every((t) => /^--(?:max[-_]old[-_]space[-_]size|stack[-_]trace[-_]limit)=\d+$|^--(?:no-warnings|trace-warnings|enable-source-maps|no-deprecation)$/.test(t))) return true;
+        }
         // Any absolute path token inside the value that leaves the checkout (`--require=/tmp/x.js`, `--node-options` value).
         if (!OUTPUT_OPT.test(name) && v !== undefined) {
           for (const tok of v.split(/[\s=,'"]+/)) if (/^\//.test(tok) && pathLeaves(tok, inOwn)) return true;
