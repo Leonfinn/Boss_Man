@@ -1188,6 +1188,21 @@ describe("rules judge: quoted targets, obfuscated -c strings, more shells, shred
       expect(Date.now() - t).toBeLessThan(100);
     }
   });
+
+  it("stays fast on nested -c shells: the work is capped across every level (Dougal's three shapes)", () => {
+    const shapes = [
+      ('bash -c "' + "sh -c ".repeat(1600) + '"').slice(0, 10000),
+      ("bash -c '" + "sh -c ls; ".repeat(900) + "'").slice(0, 10000),
+      ('bash -c "'.repeat(9) + "sh -c sh -c ".repeat(500) + "ls" + '"'.repeat(9)).slice(0, 10000),
+    ];
+    for (const cmd of shapes) {
+      const t = performance.now();
+      const r = judge(cmd);
+      const ms = performance.now() - t;
+      expect(ms).toBeLessThan(250);
+      expect(r.verdict).not.toBe("allow"); // out of budget or unplaceable: never Allow
+    }
+  });
 });
 
 // BOS-638 (split from BOS-378 by the CEO): Jane's round-5 security review of BOS-378 found four commands that got an automatic
@@ -1906,5 +1921,26 @@ describe("rules judge: each heredoc on a line has its own owner and body (BOS-72
       judge(cmd);
     }
     expect(Date.now() - t).toBeLessThan(3000);
+  });
+});
+
+// BOS-729 (Jane's round-2 review of BOS-715): the file-tool scan is linear, `shred` is a delete for the target-scope check,
+// and a file tool under `xargs` reads names the judge can't place. Every Deny row got Allow before this fix.
+describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-729)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    "shred -u /etc/passwd",
+    "shred /etc/hosts",
+    "echo /etc | xargs rm -rf",
+    "find / -name '*.conf' | xargs rm -f",
+    "ls ~ | xargs rm -rf",
+    "echo / | xargs shred",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each(["shred -u /tmp/a", "rm -rf /tmp/a /tmp/b"])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  it.each(["rm ".repeat(3333), "cp a ".repeat(2000), "shred ".repeat(1666)])("stays fast on a 10,000-char line", (cmd) => {
+    const t = performance.now();
+    judge(cmd);
+    expect(performance.now() - t).toBeLessThan(150);
   });
 });
