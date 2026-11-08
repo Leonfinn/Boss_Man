@@ -1870,6 +1870,23 @@ describe("rules judge: heredoc substitutions, escaped backslash, braces, shred/u
   ]);
 });
 
+describe("rules judge: a heredoc belongs to the command that has it (BOS-726)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    "cat /dev/null; bash <<'EOF'\nrm -rf /etc\nEOF",
+    "echo cat | bash <<'EOF'\nrm -rf /etc\nEOF",
+    "cat /dev/null; python3 <<'EOF'\nimport shutil; shutil.rmtree('/etc')\nEOF",
+    "cat x && sh <<'EOF'\nrm -rf /etc\nEOF",
+    "cat x | node <<'EOF'\nrequire('fs').rmSync('/etc',{recursive:true})\nEOF",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "cat <<'EOF' > /tmp/x\n$(rm -rf /)\nEOF",
+    "cat /dev/null; cat <<'EOF' > /tmp/x\nrm -rf /etc\nEOF",
+    "echo hi && tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
+  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+});
+
 // BOS-729 (Jane's round-2 review of BOS-715): the file-tool scan is linear, `shred` is a delete for the target-scope check,
 // and a file tool under `xargs` reads names the judge can't place. Every Deny row got Allow before this fix.
 describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-729)", () => {
