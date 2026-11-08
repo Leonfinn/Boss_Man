@@ -320,6 +320,7 @@ describe("runner watch: stopping a runner withdraws its offline card (BOS-735)",
     expect(after!.dedupeKey).toBeNull();
     // Quiet: no "is back" note, and no page or new card for a deliberate stop.
     expect(s.notes.slice(before).filter((n) => n.level === "page")).toHaveLength(0);
+    expect(s.notes.slice(before).some((n) => n.title === "Alpha's runner is back")).toBe(false);
     expect(s.alertsRaised).toHaveLength(1);
     expect(await s.db.select().from(settings).where(eq(settings.key, runnerPagedKey(s.rows[0]!.id)))).toHaveLength(0);
     // A fresh watch (a restart) that only ever sees the stopped runner makes no note at all.
