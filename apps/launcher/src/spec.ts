@@ -72,6 +72,15 @@ export function parseAllow(v: string | string[] | undefined): string[] {
   return [...new Set(list)];
 }
 
+/**
+ * The host:ports the owner trusted for private addresses (BOS-708): each is checked as an allow entry.
+ * The guard keeps their private addresses, and drops any other entry's.
+ */
+export function parseTrusted(v: string[] | undefined): Set<string> {
+  const list = parseAllow(v ?? []);
+  return new Set(list);
+}
+
 export const containerName = (slug: string) => `boss-man-runner-${slug}`;
 export const netguardName = (slug: string) => `boss-man-netguard-${slug}`;
 export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.dataRoot, "companies", slug);

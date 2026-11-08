@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DockerError } from "../src/docker.js";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, serverAddress, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseTrusted, serverAddress, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
@@ -451,6 +451,23 @@ describe("the runner launcher (R55)", () => {
     expect(parseAllow("a:1, b:2 a:1")).toEqual(["a:1", "b:2"]);
     expect(parseGuardMode(undefined)).toBe("auto");
     expect(() => parseGuardMode("maybe")).toThrow();
+  });
+
+  it("marks the allow-file entries the owner trusted for private addresses (BOS-708)", async () => {
+    const s = await serve();
+    const file = path.join(s.cfg.dataRoot, "companies/app-co/netguard/allow");
+    // An entry in `private` is written with the marker; an entry not in it stays plain.
+    expect((await s.call("PUT", "/runners/app-co/allow", { allow: ["lan.local:8080", "evil.example.org:5432"], private: ["lan.local:8080"] })).status).toBe(200);
+    expect(readFileSync(file, "utf8")).toBe("lan.local:8080 private\nevil.example.org:5432\n");
+    // A trusted entry that isn't in the allow list does nothing (it can't open a port on its own).
+    expect((await s.call("PUT", "/runners/app-co/allow", { allow: ["a.lan:1"], private: ["ghost.lan:2"] })).status).toBe(200);
+    expect(readFileSync(file, "utf8")).toBe("a.lan:1\n");
+    // The token PUT takes the same marker body.
+    await s.call("PUT", "/runners/app-co", { token: TOKEN, allow: ["lan.local:8080"], private: ["lan.local:8080"] });
+    expect(readFileSync(file, "utf8")).toBe("lan.local:8080 private\n");
+    // A bad `private` body is refused, like a bad `allow`.
+    expect((await s.call("PUT", "/runners/app-co/allow", { allow: ["a.lan:1"], private: ["x:99999"] })).status).toBe(400);
+    expect(parseTrusted(["a:1"]).has("a:1")).toBe(true);
   });
 
   it("treats a removal racing another ('already in progress') as success once the container is gone, and a problem only if it is still there", async () => {

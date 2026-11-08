@@ -59,7 +59,7 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
     const put = c.fake.calls.find((x) => x.method === "PUT")!;
     expect(put).toMatchObject({ path: "/runners/app-co", auth: `Bearer ${KEY}` });
-    expect(Object.keys(put.body as object)).toEqual(["token", "allow"]);
+    expect(Object.keys(put.body as object)).toEqual(["token", "allow", "private"]);
     // The token the launcher got is the runner's real one.
     expect(await c.runners.authenticate((put.body as { token: string }).token)).toMatchObject({ companyId: company.id });
 
@@ -107,9 +107,10 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
     const added = await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "crawl", url: "http://192.168.68.20:11235/mcp", transport: "http" });
     expect(added.statusCode).toBe(201);
-    await vi.waitFor(() => expect(c.fake.calls.find((x) => x.path === "/runners/app-co/allow")?.body).toEqual({ allow: ["192.168.68.20:11235"] }));
+    // A private literal the owner typed in is trusted for private, so the guard keeps it (BOS-708).
+    await vi.waitFor(() => expect(c.fake.calls.find((x) => x.path === "/runners/app-co/allow")?.body).toEqual({ allow: ["192.168.68.20:11235"], private: ["192.168.68.20:11235"] }));
     await c.req("DELETE", `/api/mcp-servers/${(added.json() as { id: string }).id}`);
-    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [] }));
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [], private: [] }));
     expect(toolServerAddress("https://tools.lan/mcp")).toBe("tools.lan:443");
     expect(toolServerAddress("http://[fd00::1]/mcp")).toBeNull();
   });
@@ -121,9 +122,10 @@ describe("runners through the launcher (R55)", () => {
     const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
     const last = () => c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body;
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
-    await vi.waitFor(() => expect(last()).toEqual({ allow: ["192.168.68.67:3003"] }));
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] }));
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "https://github.com/o/r.git" });
-    await vi.waitFor(() => expect(last()).toEqual({ allow: ["github.com:443"] }));
+    // A git host is the owner's own setting, so it is trusted for private however its name resolves now.
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["github.com:443"], private: ["github.com:443"] }));
     expect(gitHostAddress("http://192.168.68.67:3003/o/r.git")).toBe("192.168.68.67:3003");
     expect(gitHostAddress("git@git.lan:o/r.git")).toBe("git.lan:22");
     expect(gitHostAddress("ssh://git@h.lan:2222/o/r")).toBe("h.lan:2222");
@@ -147,7 +149,7 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").length).toBeGreaterThan(0));
     c.fake.calls.length = 0;
     await c.launcher.syncAll(1);
-    expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow")).toEqual([expect.objectContaining({ method: "PUT", body: { allow: ["192.168.68.67:3003"] } })]);
+    expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow")).toEqual([expect.objectContaining({ method: "PUT", body: { allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] } })]);
   });
 
   it("start-up sync tries again while the launcher is coming up, and never throws", async () => {

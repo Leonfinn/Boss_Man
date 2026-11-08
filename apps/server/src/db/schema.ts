@@ -1705,6 +1705,8 @@ export const mcpServers = pgTable(
     /** {secret} is replaced by the runner with the value of secret_env. */
     headerValue: text("header_value").notNull().default("Bearer {secret}"),
     secretEnv: text("secret_env"),
+    /** The owner let this entry resolve to a private address on purpose (an import tick, or a host they added that lives on the LAN), so the network guard keeps it (BOS-708). */
+    allowPrivate: boolean("allow_private").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("mcp_servers_company_name").on(t.companyId, t.name)],

@@ -383,7 +383,9 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       featureId.set(f.ref, row!.id);
     }
 
-    if (pkg.toolServers.length) await tx.insert(mcpServers).values(pkg.toolServers.map((t) => ({ companyId, ...t, secretEnv: t.secretEnv ?? null })));
+    // The import tick lets a packaged tool server point at a private address, so trust it for private from then on
+    // (BOS-708): the guard keeps its private addresses instead of dropping them when its name is re-pointed.
+    if (pkg.toolServers.length) await tx.insert(mcpServers).values(pkg.toolServers.map((t) => ({ companyId, ...t, secretEnv: t.secretEnv ?? null, allowPrivate: opts.allowStackServices === true })));
 
     for (const t of pkg.tickets) {
       const project = projectId.get(t.project);

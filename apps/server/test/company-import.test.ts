@@ -139,6 +139,12 @@ describe("company import (docs/11, step 2)", () => {
     }
     const ticked = await req("POST", "/api/companies/import", { zip: pack([server("db", "http://db:5432/")]), name: "Ticked", allowStackServices: true });
     expect(ticked.statusCode).toBe(201);
+    // The import tick trusts the packaged servers for private addresses from then on, so the guard keeps them (BOS-708);
+    // a normal import (no tick) does not.
+    const serversOf = async (companyId: string) => (await req("GET", `/api/companies/${companyId}/mcp-servers`)).json() as Array<{ url: string; allowPrivate: boolean }>;
+    expect((await serversOf(ticked.json().companyId)).map((s) => s.allowPrivate)).toEqual([true]);
+    const plain = await req("POST", "/api/companies/import", { zip: pack([server("pub", "https://tools.example.org/mcp")]), name: "Plain" });
+    expect((await serversOf(plain.json().companyId)).map((s) => s.allowPrivate)).toEqual([false]);
     const names = ((await req("GET", "/api/companies")).json() as Array<{ name: string }>).map((c) => c.name);
     expect(names).not.toContain("Bad");
   });

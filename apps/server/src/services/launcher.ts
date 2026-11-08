@@ -113,6 +113,12 @@ export async function reachesStack(url: string, lookup: HostLookup = systemLooku
 const LAUNCHER_ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
 /** The host:port the guard would be told to allow for a tool server's URL, or null. */
 export const sendableAddress = (url: string): string | null => sendable(toolServerAddress(url));
+
+/**
+ * One host:port the guard may open. `private` means the owner let it resolve to private addresses on purpose (an import tick,
+ * a tool server they added on the LAN, or a git host they set), so the guard keeps private addresses for it (BOS-708).
+ */
+export type AllowEntry = { addr: string; private: boolean };
 function sendable(addr: string | null): string | null {
   if (!addr || !LAUNCHER_ALLOW_ENTRY.test(addr)) return null;
   const [host, port] = [addr.slice(0, addr.lastIndexOf(":")), Number(addr.slice(addr.lastIndexOf(":") + 1))];
@@ -179,12 +185,33 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     return now!.value as string;
   }
 
-  /** The company's tool servers and git remotes as host:port: the runner's network guard keeps these reachable on private addresses. */
-  async function allowFor(companyId: string): Promise<string[]> {
-    const rows = await db.select({ url: mcpServers.url }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
+  /**
+   * The company's tool servers and git remotes as host:port, each saying whether the owner allowed it on a private address.
+   * A tool server the owner marked (import tick or a LAN host they added) and every git host they set are trusted for private;
+   * anything else is not, so the guard drops a private address a name may resolve to later (BOS-708).
+   */
+  async function allowFor(companyId: string): Promise<AllowEntry[]> {
+    const rows = await db.select({ url: mcpServers.url, allowPrivate: mcpServers.allowPrivate }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
     // The company's own git remotes: each project's host and port only, so its runner can clone and fetch from a LAN git server.
     const repos = await db.select({ url: projects.repoUrl }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
-    return [...new Set([...rows.map((r) => sendable(toolServerAddress(r.url))), ...repos.map((r) => gitHostAddress(r.url!))].filter((a): a is string => !!a))];
+    const entries = [
+      ...rows.map((r) => ({ addr: sendable(toolServerAddress(r.url)), private: r.allowPrivate })),
+      // A git host is the owner's own setting, so its private address is meant (a LAN git server).
+      ...repos.map((r) => ({ addr: gitHostAddress(r.url!), private: true })),
+    ];
+    // Same host:port twice: keep it trusted if either source trusts it.
+    const byAddr = new Map<string, boolean>();
+    for (const e of entries) if (e.addr) byAddr.set(e.addr, (byAddr.get(e.addr) ?? false) || e.private);
+    return [...byAddr].map(([addr, priv]) => ({ addr, private: priv }));
+  }
+
+  /**
+   * The launcher body for a company's allow list: `allow` is plain host:port (an older launcher reads only that), `private`
+   * names the entries the owner trusted for private addresses, so the guard keeps their private addresses (BOS-708).
+   */
+  async function allowBody(companyId: string): Promise<{ allow: string[]; private: string[] }> {
+    const entries = await allowFor(companyId);
+    return { allow: entries.map((e) => e.addr), private: entries.filter((e) => e.private).map((e) => e.addr) };
   }
 
   return {
@@ -204,7 +231,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     async syncAllow(companyId: string) {
       if (!opts) return;
       try {
-        await call("PUT", `/runners/${await slugFor(companyId)}/allow`, { allow: await allowFor(companyId) });
+        await call("PUT", `/runners/${await slugFor(companyId)}/allow`, await allowBody(companyId));
       } catch {
         /* the next runner start sends the list again */
       }
@@ -221,7 +248,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
         const companyId = row.key.slice(SLUG_KEY.length);
         for (let i = 0; i < attempts; i++) {
           try {
-            await call("PUT", `/runners/${row.value as string}/allow`, { allow: await allowFor(companyId) });
+            await call("PUT", `/runners/${row.value as string}/allow`, await allowBody(companyId));
             break;
           } catch (err) {
             if (!(err instanceof LauncherError) || err.status === 404 || i === attempts - 1) break;
@@ -238,7 +265,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       await call("GET", "/runners");
       await expectRestart(db, companyId, "owner restart");
       const { token } = await deps.runners.register(companyId);
-      await call("PUT", `/runners/${slug}`, { token, allow: await allowFor(companyId) });
+      await call("PUT", `/runners/${slug}`, { token, ...(await allowBody(companyId)) });
       return { slug };
     },
 
