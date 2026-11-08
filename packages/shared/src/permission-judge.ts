@@ -1131,16 +1131,30 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     // BOS-716: `npm init <name>` downloads and runs a package wherever it is run, so it is no Allow inside the checkout too.
     // BOS-717: an unknown option before the verb may take the next word as its value (`npm --loglevel info init x`), so the verb
     // is the first word that is not an option or an option's value; `init` anywhere there counts.
+    // BOS-720: only options (and their values) stand before word `at`, so it is the verb. Same reading as the init check.
+    const onlyOptsBefore = (at: number): boolean => {
+      const before = args.slice(0, at);
+      return before.every((a, i) => a.startsWith("-") || (a !== "" && (before[i - 1] ?? "").startsWith("-") && (before[i - 1] ?? "") !== "--" && !(before[i - 1] ?? "").includes("=")));
+    };
+    // BOS-720: npm expands any unique prefix of a command name, so `crea`, `ini` and `inn` are init (`in` is ambiguous). A prefix
+    // that is too short to be unique is an error in npm, so over-matching here only denies, never allows. pnpm and bun need the word.
+    const isInitWord = (a: string): boolean => head === "npm"
+      ? (a.length >= 2 && "create".startsWith(a)) || (a.length >= 3 && ("init".startsWith(a) || "innit".startsWith(a)))
+      : a === "init" || a === "create" || a === "innit";
     if (/^(?:pnpm|npm|bun)$/.test(head)) {
       // BOS-718: `create` and `innit` are npm's aliases of `init` (pnpm and bun have `create` too), same verdict.
-      const initAt = args.findIndex((a) => a === "init" || a === "create" || a === "innit");
-      const before = initAt < 0 ? [] : args.slice(0, initAt);
-      const onlyOpts = before.every((a, i) => a.startsWith("-") || (a !== "" && (before[i - 1] ?? "").startsWith("-") && (before[i - 1] ?? "") !== "--" && !(before[i - 1] ?? "").includes("=")));
-      if (initAt >= 0 && onlyOpts && args.slice(initAt + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
+      const initAt = args.findIndex(isInitWord);
+      if (initAt >= 0 && onlyOptsBefore(initAt) && args.slice(initAt + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
+    }
+    // BOS-720: yarn 1 `global` works on the unquoted word (the shell strips quotes), and `yarn create x` installs create-x globally
+    // then runs it: both put packages and bins outside the checkout, like `yarn global add`.
+    if (head === "yarn") {
+      const gAt = args.findIndex((a) => a === "global" || a === "create");
+      if (gAt >= 0 && onlyOptsBefore(gAt)) return true;
     }
     // BOS-717: npm reads `init-module=<file>` from the folder's `.npmrc` and runs that file on `npm init`, so outside the checkout
     // any `npm init` gets no Allow (pnpm and bun do not read init-module). Inside the checkout the .npmrc is ours.
-    if (away && head === "npm" && args.includes("init")) return true;
+    if (away && head === "npm" && args.some((a) => a === "init" || isInitWord(a))) return true;
     // BOS-706 (CEO decision): outside the checkout an install runs that folder's own preinstall/install/postinstall/prepare
     // scripts, which the judge can't read. It gets no Allow unless `--ignore-scripts` (or `=true`) is given. Inside the checkout
     // and its workspaces installs stay Allow (BOS-329).

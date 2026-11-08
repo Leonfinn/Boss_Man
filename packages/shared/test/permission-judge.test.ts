@@ -1466,6 +1466,35 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     ]);
   });
 
+  // BOS-720 (Jane's review of BOS-718): quoted yarn global, yarn create, npm command abbreviations.
+  describe("A10. quoted yarn global, yarn create, npm abbreviations (BOS-720)", () => {
+    deny([
+      "yarn 'global' add x",
+      'yarn "global" add x',
+      "yarn --silent 'global' add x",
+      "yarn create x",
+      "yarnpkg create x",
+      "yarn.js create x",
+      "yarn 'create' x",
+      "npm crea x",
+      "npm creat x",
+      "npm cr x",
+      "npm ini x",
+      "npm inn x",
+      "npm inni x",
+      "npm --loglevel info crea x",
+    ]);
+    allows([
+      "npm crea",
+      "npm ini -y",
+      "npm in",
+      "npm run crea x",
+      "yarn add create-react-app",
+      "yarn run create",
+      "yarn add global-agent",
+    ]);
+  });
+
   describe("B. node-options by flag", () => {
     deny([
       "npm --node-options=--require=../x.js run build",
