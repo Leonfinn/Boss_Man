@@ -327,12 +327,13 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // keeps its default (on), and each review policy keeps the default's owner sign-offs and plan approvals.
     // The checklist says what the package asked for, so the owner can loosen it on purpose.
     const tightened: string[] = [];
-    if (pkg.company.ownerApprovesEngagements === false) tightened.push("The package had other companies' requests for work go ahead without you. Boss Man kept your approval on.");
+    if (pkg.company.ownerApprovesEngagements === false) tightened.push("Kept on: your approval before this company takes on work for another company. The package had it switched off.");
+    const listed = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]!);
     const floored = (policy: ReviewPolicy, project?: string) => {
       const r = noLooserThan(policy);
       if (r.tightened.length)
         tightened.push(
-          `The package's review policy${project ? ` for project ${project}` : ""} turned off ${r.tightened.join(", ")}. Boss Man kept ${r.tightened.length > 1 ? "them" : "it"} on; change ${project ? "the project's review settings" : "Settings → Reviews"} if you want ${r.tightened.length > 1 ? "them" : "it"} off.`,
+          `Kept on${project ? ` in project ${project}` : ""}: ${listed(r.tightened)}. The package had ${r.tightened.length > 1 ? "them" : "it"} switched off. To change ${r.tightened.length > 1 ? "them" : "it"}, use ${project ? "the project's review settings" : "Settings → Reviews"}.`,
         );
       return r.policy;
     };
