@@ -1167,8 +1167,10 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async (): Promise<MergeResult> => {
       const ticketDir = this.ticketDir(spec.ticketId);
       if (existsSync(path.join(ticketDir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir });
+        const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir, repo });
         if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+        // Both phases sync, like mergeChecked: finish then sees a commit made since prepare as a changed tree (main_moved).
+        if (isClone(ticketDir)) await this.syncBranch(repo, ticketDir, spec.ticketId);
       }
       const tried = await this.tryMerge(repo, branch, target, auth);
       if (tried.status !== "clean") return tried;

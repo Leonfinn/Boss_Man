@@ -83,6 +83,27 @@ describe("merging a ticket's branch (R46)", () => {
     expect(await ws.merge(spec, "main", "Merge")).toEqual({ status: "uncommitted", files: ["draft.txt"] });
     expect(git(w.path, "status", "--porcelain")).toBe("?? draft.txt");
   });
+
+  it("server-queued merge: prepare builds the ticket's latest commit, finish pushes it, and a commit made in between is checked again (DR-003)", async () => {
+    const o = origin();
+    const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const prepared = await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" });
+    expect(prepared.status).toBe("prepared");
+    const { commit, tree } = prepared as { commit: string; tree: string };
+    expect(git(o.url, "rev-parse", "main")).not.toBe(commit); // prepare pushes nothing
+    // A commit after prepare changes the tree: finish refuses to push the old check.
+    writeFileSync(path.join(w.path, "late.txt"), "late\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "late work");
+    expect(await ws.merge(spec, "main", "Merge", {}, null, { phase: "finish", commit, tree })).toEqual({ status: "main_moved" });
+    const again = await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" });
+    const next = again as { commit: string; tree: string };
+    const done = await ws.merge(spec, "main", "Merge", {}, null, { phase: "finish", commit: next.commit, tree: next.tree });
+    expect(done.status).toBe("merged");
+    expect(o.mainSha()).toBe(next.commit);
+    expect(git(o.url, "show", "main:feature.txt")).toBe("new");
+    expect(git(o.url, "show", "main:late.txt")).toBe("late");
+  });
 });
 
 describe("pushing a ticket's branch for a pull request (R59)", () => {
