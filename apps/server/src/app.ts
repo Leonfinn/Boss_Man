@@ -662,7 +662,7 @@ export async function buildApp(opts: AppOptions) {
     releaseUnblocked: (ticketId) => scheduler.releaseIfUnblocked(ticketId),
     landingActive: (ticketId) => review.landingActive(ticketId),
     branchClash: (ticketId) => review.branchClash(ticketId),
-    signoffCovers: (ticketId, signed) => review.signoffCovers(ticketId, signed),
+    signoffCovers: (ticketId, signed, head) => review.signoffCovers(ticketId, signed, head),
     signoffWithdraw: (ticketId, cardHead, head, why) => review.withdrawStaleSignoff(ticketId, cardHead, head, why),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.

@@ -214,7 +214,7 @@ export async function restoreSignoffCard(db: Db, t: Ticket, why: string, head?: 
  */
 export async function refreshSignoffCards(
   db: Db,
-  deps: { headOf: (ticketId: string) => Promise<string | null>; covers: (ticketId: string, signed: string) => Promise<SignoffCover | null>; withdraw: (ticketId: string, cardHead: string, head: string, why: string) => Promise<unknown> },
+  deps: { headOf: (ticketId: string) => Promise<string | null>; covers: (ticketId: string, signed: string, head?: string) => Promise<SignoffCover | null>; withdraw: (ticketId: string, cardHead: string, head: string, why: string) => Promise<unknown> },
 ): Promise<number> {
   const open = await db
     .select({ id: decisions.id, context: decisions.context, question: decisions.question })
@@ -227,7 +227,7 @@ export async function refreshSignoffCards(
     if (!t || t.systemState !== "review") continue;
     const head = await deps.headOf(t.id).catch(() => null);
     if (!head || head === ctx.head) continue;
-    const c = await deps.covers(t.id, ctx.head).catch(() => null);
+    const c = await deps.covers(t.id, ctx.head, head).catch(() => null);
     if (c?.covers) {
       const line = `\n\nUpdated: the branch moved to ${head.slice(0, 8)} since this card was raised, but only main was merged in automatically, with no clashes and no new code from the ticket.`;
       await db.update(decisions).set({ question: card.question + line, context: sql`${decisions.context} || ${JSON.stringify({ head })}::jsonb` }).where(and(eq(decisions.id, card.id), eq(decisions.status, "open")));

@@ -179,7 +179,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the ticket's branch still merges into the target, without merging it (BOS-426). */
   z.object({ type: z.literal("workspace.clash"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1) }),
   /** Whether the owner's sign-off on commit `signed` still covers the branch head: only clean automatic merges of the target came in since (BOS-734, DR-038). */
-  z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/) }),
+  z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/), head: z.string().regex(/^[0-9a-f]{7,64}$/).optional() }),
   /** Merges the ticket's branch into a named target (R46). */
   z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */

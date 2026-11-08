@@ -1024,13 +1024,17 @@ export class Workspaces {
    * Whether the owner's sign-off on `signed` still covers the ticket's branch head (BOS-734, DR-038): only
    * clean automatic merges of the target came in since. Fails closed: any git doubt says "does not cover".
    */
-  async signoffCovers(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, signed: string, secrets: Record<string, string | undefined> = {}): Promise<SignoffCover> {
+  async signoffCovers(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, signed: string, secrets: Record<string, string | undefined> = {}, expectHead?: string): Promise<SignoffCover> {
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
       await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
       const head = await this.git(["rev-parse", "--verify", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
+      // The caller checked this head; if the branch ref says otherwise, the answer would be about different code (BOS-734).
+      if (expectHead && !head.startsWith(expectHead) && !expectHead.startsWith(head)) {
+        return { covers: false, reason: "the branch moved while this was being checked", newCommits: 0, handMerges: 0 };
+      }
       return checkSignoffCovers((args) => this.gitCode(args, { cwd: repo }), signed, head, `refs/remotes/origin/${target}`);
     });
   }

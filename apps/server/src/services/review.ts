@@ -740,7 +740,7 @@ export function reviewService(
         const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
         const prior = await priorSignoff(db, t, head);
         // A standing sign-off on an earlier commit also counts when only clean main merges came in since (BOS-734).
-        if (!prior.reuse && head && prior.current && prior.current.head !== head && (await this.signoffCovers(ticketId, prior.current.head))?.covers) {
+        if (!prior.reuse && head && prior.current && prior.current.head !== head && (await this.signoffCovers(ticketId, prior.current.head, head))?.covers) {
           prior.reuse = prior.current;
           await record(db, { companyId: t.companyId, agentId: o.reviewerAgentId, ticketId, kind: "signoff_carried", summary: `The owner's sign-off on ${prior.current.head.slice(0, 8)} still covers ${head.slice(0, 8)}: since then main was only merged in automatically, with no clashes and no new code from the ticket.` });
         }
@@ -938,13 +938,13 @@ export function reviewService(
      * default branch came in since (BOS-734, DR-038). The runner works it out from git; null when it can't say,
      * which every caller reads as "does not cover".
      */
-    async signoffCovers(ticketId: string, signed: string): Promise<SignoffCover | null> {
+    async signoffCovers(ticketId: string, signed: string, head?: string): Promise<SignoffCover | null> {
       try {
         const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
         if (!repoUrl || !t.branch) return null;
         const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
         if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "signoff-covers")) return null;
-        const r = await deps.runners.request<Partial<SignoffCover>>(runner.id, (requestId) => ({ type: "workspace.covers", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch, signed }), 20_000);
+        const r = await deps.runners.request<Partial<SignoffCover>>(runner.id, (requestId) => ({ type: "workspace.covers", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch, signed, ...(head && /^[0-9a-f]{7,64}$/.test(head) ? { head } : {}) }), 20_000);
         if (typeof r?.covers !== "boolean") return null;
         return { covers: r.covers, reason: r.reason ?? "", newCommits: r.newCommits ?? 0, handMerges: r.handMerges ?? 0 };
       } catch {
@@ -960,7 +960,7 @@ export function reviewService(
     async signoffStale(ticketId: string, cardHead: string): Promise<string | null> {
       const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
       if (!head || head === cardHead) return null;
-      const c = await this.signoffCovers(ticketId, cardHead);
+      const c = await this.signoffCovers(ticketId, cardHead, head);
       if (c?.covers) return null;
       // The runner couldn't say: keep the card, refuse the press, nothing is replaced or merged.
       if (!c) return `The branch changed after this card was raised (${cardHead.slice(0, 8)} is now ${head.slice(0, 8)}) and Boss Man couldn't check what came in right now, so nothing was merged. Try again in a few minutes.`;
@@ -1249,7 +1249,7 @@ export function reviewService(
         const was = await derivedSignoff(db, t, null);
         if (was.state === "signed_off" && was.head && was.head !== head) {
           // Only clean automatic merges of the default branch since: the sign-off still covers it (BOS-734, DR-038).
-          const c = await this.signoffCovers(t.id, was.head);
+          const c = await this.signoffCovers(t.id, was.head, head);
           if (c?.covers) {
             await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_carried", summary: `The owner's sign-off on ${was.head.slice(0, 8)} still covers ${head.slice(0, 8)}: since then main was only merged in automatically, with no clashes and no new code from the ticket.` });
             return;

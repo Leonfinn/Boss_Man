@@ -456,7 +456,7 @@ export class SessionManager {
           return;
         }
         (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
-          .then((secrets) => ws.signoffCovers({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.signed, secrets))
+          .then((secrets) => ws.signoffCovers({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.signed, secrets, command.head))
           .then(
             (data) => reply(command.requestId, { ok: true, data }),
             (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
