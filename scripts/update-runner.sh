@@ -6,6 +6,11 @@
 #   scripts/update-runner.sh             build with the latest Claude Code, check, promote, ask for the drain
 #   scripts/update-runner.sh 2.1.50      pin a Claude Code version instead of "latest"
 #   scripts/update-runner.sh --rollback  tag the image that was running before as current, then drain onto it
+#   scripts/update-runner.sh --settings  no new image: apply changed runner settings in .env (BOSSMAN_RUNNER_MEMORY,
+#                                        BOSSMAN_CHECK_SLOTS, BOSSMAN_RUNNER_CPUS...). Recreates the launcher so it reads
+#                                        them, then asks Boss Man to drain and recreate every runner as its company
+#                                        goes idle, and to wake the agents afterwards (BOS-594). Use this, never a bare
+#                                        "recreate-all", for a setting change.
 #   scripts/update-runner.sh --now       emergencies: recreate every runner at once (runs in progress are
 #                                        cut off, crash recovery restarts them). Works with the others.
 #
@@ -39,16 +44,17 @@ restart_runners() { # everything at once: the old behaviour
   if [[ -n "$launcher" ]]; then docker exec "$launcher" node dist/main.js recreate-all; fi
 }
 
-# Asks the server to start the drain. The file's existence is the whole request (written, then renamed).
+# Asks the server to start the drain. The file's existence is the request (written, then renamed); an optional
+# reason "setting change" makes the drain recreate every runner, not only those on an old image.
 request_drain() {
-  local d="${BOSSMAN_DEPLOYER:-}"
+  local d="${BOSSMAN_DEPLOYER:-}" reason="${1:-}"
   if [[ -n $d && -d $d/inbox ]]; then
     # Written in the root-only state folder, then renamed in: the server can write to inbox, so writing
     # there directly would follow a symlink it planted. A rename replaces whatever is at the name instead.
     mkdir -p "$d/state" && chmod 700 "$d/state"
     local tmp
     tmp="$(mktemp "$d/state/drain.XXXXXX")"
-    printf '{"requestedAt":"%s","by":"update-runner.sh"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$tmp"
+    printf '{"requestedAt":"%s","by":"update-runner.sh"%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${reason:+,\"reason\":\"$reason\"}" >"$tmp"
     chmod 644 "$tmp"; chown 1000:1000 "$tmp" 2>/dev/null || true
     mv -fT "$tmp" "$d/inbox/drain.json"
     echo "Asked Boss Man to drain: nothing new starts, runs finish, each runner is swapped when its company is idle."
@@ -69,15 +75,40 @@ move_runners() {
   request_drain
 }
 
-NOW=0 ROLLBACK=0 version=
+NOW=0 ROLLBACK=0 SETTINGS=0 version=
 for a in "$@"; do
   case $a in
     --now) NOW=1 ;;
     --rollback) ROLLBACK=1 ;;
-    -*) echo "Usage: $0 [--now] [--rollback | CLAUDE_CODE_VERSION]" >&2; exit 2 ;;
+    --settings) SETTINGS=1 ;;
+    -*) echo "Usage: $0 [--now] [--settings | --rollback | CLAUDE_CODE_VERSION]" >&2; exit 2 ;;
     *) version="$a" ;;
   esac
 done
+
+if ((SETTINGS)); then
+  if ((NOW)); then
+    # Emergencies only: the launcher re-reads .env, then every runner is recreated at once (runs are cut off).
+    compose up -d --no-deps launcher
+    restart_runners
+    echo "Runners recreated now with the new settings."
+    exit 0
+  fi
+  if [[ -z "$(launcher_id)" ]]; then
+    echo "No launcher is running, so the runners can't be drained: they are compose services. Rerun with --settings --now to recreate them at once (this cuts off runs in progress)." >&2
+    exit 1
+  fi
+  if [[ -z ${BOSSMAN_DEPLOYER:-} || ! -d $BOSSMAN_DEPLOYER/inbox ]]; then
+    echo "No deployer folder (BOSSMAN_DEPLOYER in .env), so Boss Man can't be asked to drain. Nothing was changed." >&2
+    echo "Set up self-deploy, or rerun with --settings --now to recreate the runners at once (this cuts off runs in progress)." >&2
+    exit 1
+  fi
+  # The launcher reads the runner settings from its environment at start; runners keep running meanwhile.
+  compose up -d --no-deps launcher
+  request_drain "setting change"
+  echo "The runners get the new settings as each company goes idle; agents are woken again afterwards."
+  exit 0
+fi
 
 if ((ROLLBACK)); then
   docker image inspect "$IMAGE:previous" >/dev/null 2>&1 || { echo "No previous image to roll back to." >&2; exit 1; }

@@ -19,7 +19,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { CANCEL_RUN, checkAsk } from "./decisions.js";
+import { adviceOf, CANCEL_RUN, checkAsk } from "./decisions.js";
 import type { HostFacts } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { type AlertCause, type AlertKind, type AlertRung, isAlertKind, kindCeiling, kindRow, kindStart } from "./alert-kinds.js";
@@ -613,21 +613,25 @@ export function alertLadder(
     },
 
     /** The CEO can't settle it: it goes to the owner with what was tried and the steps (the raise_decision rules). */
-    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; steps?: string[]; ownerMustDo?: boolean; lintOverride?: string; setsUp?: Addon; adviceNeeded?: string; adviceDeny?: string }) {
+    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; steps?: string[]; ownerMustDo?: boolean; lintOverride?: string; setsUp?: Addon; proof?: string; adviceNeeded?: string; adviceDeny?: string }) {
       const [ceo] = await db.select().from(agents).where(and(eq(agents.id, ceoId), eq(agents.companyId, companyId), eq(agents.role, "ceo")));
       if (!ceo) throw new WatchdogError(403, "Only the CEO passes alerts to the owner.");
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
-      const ask = checkAsk({ ...input, byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      // The card's own options are buttons the owner sees, so R7 accepts "press <option>" (BOS-421).
+      const ask = checkAsk({ ...input, options: d.options as string[], byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Every permission card that reaches the owner carries the CEO's advice (BOS-233 item 2): what it's
-      // needed for and what wouldn't get done if the owner denies it.
+      // needed for and what wouldn't get done if the owner denies it. Start from any advice the CEO already
+      // added (BOS-636), so the recommendation and why given earlier aren't lost when the card is escalated;
+      // the fields passed here win over the earlier ones.
       let advice: Record<string, unknown> | null = null;
       if (d.kind === "permission") {
         const neededFor = (input.adviceNeeded ?? "").trim();
         const denyStops = (input.adviceDeny ?? "").trim();
         if (neededFor.length < 10 || denyStops.length < 10) throw new WatchdogError(422, "A permission card needs the CEO's advice before it goes to the owner: adviceNeeded (what it's needed for: which ticket, what step) and adviceDeny (what wouldn't get done if the owner denies it).");
-        advice = { state: "advised", at: now().toISOString(), what: neededFor, denyStops };
+        const earlier = adviceOf(d.context);
+        advice = { ...earlier, state: "advised", at: now().toISOString(), what: neededFor, denyStops };
       }
       // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
       // card may reach the owner (DR-017 A), so the ceiling doesn't apply to a deliberate escalation.

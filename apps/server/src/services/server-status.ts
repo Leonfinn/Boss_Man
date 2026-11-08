@@ -15,6 +15,7 @@ import type { BlueGreen } from "./bluegreen.js";
 import { checkQueue } from "./check-queue.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
+import { lastRestart } from "./runner-restarts.js";
 import type { StallSummary } from "./stall-monitor.js";
 
 export type ServerStatusDeps = {
@@ -35,6 +36,8 @@ export type ServerStatusDeps = {
   errors: ErrorBuffer;
   /** Event-loop stalls, GC pauses and memory (stall-monitor.ts, BOS-432). Server-wide; route patterns only, no ids. */
   stalls?: () => StallSummary;
+  /** Whether runners keep a core back for the server, database and proxy, and which threads (launcher GET /cpu, BOS-586). Absent or null: no launcher. */
+  cpuReserve?: () => Promise<unknown>;
   /** The last hour of permission decisions for one company (permission-log.ts, BOS-306). */
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
@@ -207,6 +210,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         },
         // Freezes over 1 s with memory, GC and requests in flight (BOS-432), plus the memory reading now.
         stalls: deps.stalls?.() ?? null,
+        // Reserved CPU threads (BOS-586): on or off, which threads, and why.
+        cpuReserve: (await deps.cpuReserve?.()) ?? null,
         deploy: {
           enabled: !!deploy?.enabled,
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),
@@ -230,6 +235,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
               connectedSince: deps.connectedSince?.(runner.id)?.toISOString() ?? null,
               swapping,
               lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null,
+              // When and why the runner last restarted (BOS-594): update, setting change, owner restart, host, crash or out of memory.
+              lastRestart: await lastRestart(db, runner.id),
             }
           : null,
         wakes: {

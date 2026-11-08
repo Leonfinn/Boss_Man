@@ -4,9 +4,9 @@
 // its own card, not overruling a person. Agent-raised questions have no conditions and are left to
 // a person, except an add-on's setup card (raise_decision with setsUp, DR-023 D, BOS-522), which goes
 // once that add-on is seen working.
-import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { decisions, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
@@ -17,6 +17,12 @@ export type ClearWhen =
   | { kind: "agentRanOk"; agentId: string }
   | { kind: "ticketDone"; ticketId: string }
   | { kind: "ticketLeft"; ticketId: string; state: string }
+  /**
+   * A roadmap feature that had no open ticket now has one (BOS-595): the work for it is underway, so
+   * the CEO's card has done its job. A sub-task alone doesn't count: it belongs to a parent already
+   * counted, so this looks at top-level tickets only.
+   */
+  | { kind: "featureHasTicket"; featureId: string }
   /** Start-failure cards name the wake that failed: the runner must be connected and that wake must have started (BOS-475 E). */
   | { kind: "runnerConnected"; companyId: string; wakeId?: string }
   /** Usage-limit cards: the account has room again (the same test as the scheduler's account pick). */
@@ -39,6 +45,8 @@ export type ClearWhen =
    * reading (the BOS-469 lesson). A request through the edge or a push that went through since then proves it.
    */
   | { kind: "addonRunning"; addon: Addon }
+  /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
+  | { kind: "companyRanOk"; companyId: string }
   /** A server-health card (BOS-640): its rule (memory or freezes) has stayed under its level for 30 minutes. */
   | { kind: "serverCalm"; rule: "memory" | "freezes" };
 
@@ -65,6 +73,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "ticketLeft":
         if (typeof c.ticketId === "string" && typeof c.state === "string") out.push({ kind: "ticketLeft", ticketId: c.ticketId, state: c.state });
         break;
+      case "featureHasTicket":
+        if (typeof c.featureId === "string") out.push({ kind: "featureHasTicket", featureId: c.featureId });
+        break;
       case "runnerConnected":
         if (typeof c.companyId === "string") out.push({ kind: "runnerConnected", companyId: c.companyId, ...(typeof c.wakeId === "string" ? { wakeId: c.wakeId } : {}) });
         break;
@@ -73,6 +84,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "accountRanOk":
         if (typeof c.fundingSourceId === "string") out.push({ kind: "accountRanOk", fundingSourceId: c.fundingSourceId });
+        break;
+      case "companyRanOk":
+        if (typeof c.companyId === "string") out.push({ kind: "companyRanOk", companyId: c.companyId });
         break;
       case "signoffNotWaiting":
         if (typeof c.ticketId === "string") out.push({ kind: "signoffNotWaiting", ticketId: c.ticketId });
@@ -142,6 +156,16 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         if (!t) return "the ticket is no longer on record";
         return t.state !== c.state ? `the ticket "${t.title}" is ${t.state === "done" ? "finished" : `now ${t.state.replace("_", " ")}`}` : null;
       }
+      case "featureHasTicket": {
+        const [f] = await db.select({ title: features.title }).from(features).where(eq(features.id, c.featureId));
+        if (!f) return "the feature is no longer on record";
+        const [t] = await db
+          .select({ id: tickets.id })
+          .from(tickets)
+          .where(and(eq(tickets.featureId, c.featureId), isNull(tickets.parentTicketId), ne(tickets.systemState, "done")))
+          .limit(1);
+        return t ? `"${f.title}" now has an open ticket` : null;
+      }
       case "runnerConnected": {
         const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, c.companyId));
         if (!runner || !deps.isConnected(runner.id)) return null;
@@ -164,6 +188,18 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
           .orderBy(runs.endedAt)
           .limit(1);
         return clean?.endedAt ? `a run on the account succeeded at ${hhmm(clean.endedAt)}` : null;
+      }
+      case "companyRanOk": {
+        // Ended after the card, not started after it: a long run that was going all along and then finishes
+        // cleanly is the company moving again. Chat runs, stopped or cancelled runs, and the CEO run that
+        // only read the card (origin "decision") are not progress: the last would close the card at once.
+        const [clean] = await db
+          .select({ endedAt: runs.endedAt })
+          .from(runs)
+          .where(and(eq(runs.companyId, c.companyId), gt(runs.endedAt, card.createdAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.origin} is distinct from 'decision'`, sql`coalesce(${runs.outcome}, '') not like 'error:%'`, sql`coalesce(${runs.outcome}, '') not like 'lost:%'`, sql`coalesce(${runs.outcome}, '') not in ('interrupted', 'cancelled')`, sql`coalesce(${runs.outcome}, '') not like 'stopped%'`))
+          .orderBy(runs.endedAt)
+          .limit(1);
+        return clean?.endedAt ? `a run there finished cleanly at ${hhmm(clean.endedAt)}` : null;
       }
       case "signoffNotWaiting":
         return signoffClearedReason(db, c.ticketId);

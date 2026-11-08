@@ -1,20 +1,30 @@
 // R46 and R47 against a real bare "origin": merge without a working tree, conflicts,
 // uncommitted work, a moving target, and verify commands.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { Workspaces } from "../src/workspace.js";
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: ENV }).trim();
 
+const dirs: string[] = [];
+const tmp = (prefix: string) => {
+  const d = mkdtempSync(path.join(tmpdir(), prefix));
+  dirs.push(d);
+  return d;
+};
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 /** A bare origin plus a scratch clone for pushing "other people's" commits to it. */
 function origin() {
-  const bare = mkdtempSync(path.join(tmpdir(), "bm-origin-"));
+  const bare = tmp("bm-origin-");
   git(bare, "init", "-q", "--bare", "-b", "main");
-  const seed = mkdtempSync(path.join(tmpdir(), "bm-seed-"));
+  const seed = tmp("bm-seed-");
   git(seed, "clone", "-q", bare, ".");
   writeFileSync(path.join(seed, "app.txt"), "line 1\nline 2\nline 3\n");
   git(seed, "add", ".");
@@ -33,7 +43,7 @@ function origin() {
 const ids = { project: "11111111-1111-4111-8111-111111111111", t: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
 
 async function ticketWithCommit(o: ReturnType<typeof origin>, file: string, content: string) {
-  const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+  const ws = new Workspaces(tmp("bm-ws-root-"));
   const spec = { projectId: ids.project, ticketId: ids.t, repoUrl: o.url, baseRef: "main" };
   const w = await ws.ensure(spec);
   writeFileSync(path.join(w.path, file), content);
@@ -101,14 +111,14 @@ describe("pushing a ticket's branch for a pull request (R59)", () => {
 describe("proposing merge checks (R57)", () => {
   it("reads the default branch's files from the clone, without a worktree, and reports the runner's tools", async () => {
     const o = origin();
-    const seed = mkdtempSync(path.join(tmpdir(), "bm-detect-"));
+    const seed = tmp("bm-detect-");
     git(seed, "clone", "-q", o.url, ".");
     writeFileSync(path.join(seed, "package.json"), JSON.stringify({ scripts: { typecheck: "tsc", test: "vitest run" } }));
     writeFileSync(path.join(seed, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
     git(seed, "add", ".");
     git(seed, "commit", "-qm", "node project");
     git(seed, "push", "-q", "origin", "HEAD:main");
-    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const ws = new Workspaces(tmp("bm-ws-root-"));
     const r = await ws.detect({ projectId: ids.project, repoUrl: o.url, baseRef: "main" });
     expect(r.checks.map((c) => c.command)).toEqual(["pnpm install --frozen-lockfile && pnpm typecheck && pnpm test"]);
     expect(r.tools.node).toBe(true);
@@ -132,14 +142,55 @@ describe("verify before done (R47)", () => {
   it("shares check-all's queue folder with the agents' checks, when the runner has one (BOS-321)", async () => {
     const o = origin();
     const { spec } = await ticketWithCommit(o, "feature.txt", "new\n");
-    const plain = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const plain = new Workspaces(tmp("bm-ws-root-"));
     await plain.ensure(spec);
     expect((await plain.verify(spec, 'echo "lock=${CHECK_ALL_LOCK:-unset}"')).output).toContain("lock=unset");
-    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const root = tmp("bm-ws-root-");
     const ws = new Workspaces(root, process.env, path.join(root, ".bossman-coord"));
     await ws.ensure(spec);
     const res = await ws.verify(spec, 'echo "lock=$CHECK_ALL_LOCK store=$BOSSMAN_CHECK_STORE"');
     expect(res.output).toContain(`lock=${path.join(root, ".bossman-coord", "queue", "check-all")} store=${path.join(root, ".bossman-coord", "gate", "check-results")}`);
+  });
+
+  it("runs a check's installs against the shared pnpm store, not a new one in HOME (BOS-568)", async () => {
+    const o = origin();
+    const { spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const root = tmp("bm-ws-root-");
+    const store = path.join(root, "store");
+    const ws = new Workspaces(root, process.env, undefined, store);
+    await ws.ensure(spec);
+    expect((await ws.verify(spec, 'echo "store=${npm_config_store_dir:-unset}"')).output).toContain(`store=${store}`);
+    // A runner without one gives pnpm nothing, as before.
+    const plain = new Workspaces(tmp("bm-ws-root-"));
+    await plain.ensure(spec);
+    expect((await plain.verify(spec, 'echo "store=${npm_config_store_dir:-unset}"')).output).toContain("store=unset");
+  });
+
+  it("waits for the slot through the runner's own check-slot.sh, not the branch's queue rules, when the tree takes part in the check line (BOS-614)", async () => {
+    const o = origin();
+    const { spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const root = tmp("bm-ws-root-");
+    const slot = path.join(root, "check-slot.sh");
+    writeFileSync(slot, 'echo "shared slot for: $*"; exec "$@"\n');
+    const ws = new Workspaces(root, { ...process.env, BOSSMAN_CHECK_SLOT: slot }, path.join(root, ".bossman-coord"));
+    const w = await ws.ensure(spec);
+    // No scripts/check-all.sh in the tree: the check is not in the line, so it runs as before.
+    const plain = await ws.verify(spec, "echo plain");
+    expect(plain.output).toContain("plain");
+    expect(plain.output).not.toContain("shared slot");
+    mkdirSync(path.join(w.path, "scripts"));
+    writeFileSync(path.join(w.path, "scripts", "check-all.sh"), "# the branch's own copy\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "check script");
+    const res = await ws.verify(spec, 'echo "ran with slot=$BOSSMAN_CHECK_SLOT"; exit 4');
+    expect(res.output).toContain("shared slot for: sh -c");
+    expect(res.output).toContain(`ran with slot=${slot}`);
+    expect(res).toMatchObject({ ok: false, exitCode: 4 });
+    // A runner without the file (an image from before BOS-614): nothing is passed on and nothing is wrapped.
+    const old = new Workspaces(root, { ...process.env, BOSSMAN_CHECK_SLOT: path.join(root, "missing.sh") }, path.join(root, ".bossman-coord"));
+    const before = await old.verify(spec, 'echo "slot=${BOSSMAN_CHECK_SLOT:-unset}"');
+    expect(before.output).toContain("slot=unset");
+    expect(before.output).not.toContain("shared slot");
   });
 
   it("counts the timeout from when a queued check starts, not from when it was queued", async () => {
@@ -272,6 +323,90 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     expect(await ws.carried(spec, "main", [{ ticketId: bId, branch: `bossman/${bId}` }])).toEqual({ carried: [] });
   });
 
+  it("lets a three-ticket stack land bottom first, with the base recorded as moved and no hand edits (BOS-687)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const repo = ws.repoDir(ids.project);
+    const commitIn = (dir: string, file: string) => {
+      writeFileSync(path.join(dir, file), `${file}\n`);
+      git(dir, "add", ".");
+      git(dir, "commit", "-qm", file);
+    };
+    // B and C are created from main by the runner; the agent then moves each onto the one below (as BOS-378 did).
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const cId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    git(b.path, "reset", "-q", "--hard", `bossman/${ids.t}`);
+    commitIn(b.path, "b.txt");
+    const c = await ws.ensure({ ...spec, ticketId: cId });
+    git(c.path, "reset", "-q", "--hard", `bossman/${bId}`);
+    commitIn(c.path, "c.txt");
+    const A = { ticketId: ids.t, branch: `bossman/${ids.t}` };
+    const B = { ticketId: bId, branch: `bossman/${bId}` };
+    const C = { ticketId: cId, branch: `bossman/${cId}` };
+    // A merges first: neither descendant makes A look like it carries them.
+    expect(await ws.carried(spec, "main", [B, C])).toEqual({ carried: [] });
+    git(repo, "push", "-q", "origin", `refs/heads/${A.branch}:refs/heads/main`);
+    // B next (its A commit is on main now); C does not make B look like a carrier.
+    expect(await ws.carried({ ...spec, ticketId: bId }, "main", [A, C])).toEqual({ carried: [] });
+    git(repo, "push", "-q", "origin", `refs/heads/${B.branch}:refs/heads/main`);
+    // C last.
+    expect(await ws.carried({ ...spec, ticketId: cId }, "main", [A, B])).toEqual({ carried: [] });
+    // The recorded base (which the review diff reads) is never rewritten: it stays where the runner made the branch.
+    expect(git(repo, "config", "--get", `bossman.ticket-${bId}.base`)).not.toBe(git(repo, "rev-parse", `bossman/${ids.t}`));
+  });
+
+  it("is not fooled by a branch moved onto a hidden commit the checked ticket doesn't hold (BOS-687, security)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const repo = ws.repoDir(ids.project);
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    const recordedBefore = git(repo, "config", "--get", `bossman.ticket-${bId}.base`);
+    // Hidden commit X on top of A's tip, built off the branch, then the branch is moved onto it, then one harmless commit.
+    git(b.path, "checkout", "-q", "--detach", `bossman/${ids.t}`);
+    writeFileSync(path.join(b.path, "payload.txt"), "unreviewed\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "hidden");
+    const x = git(b.path, "rev-parse", "HEAD");
+    git(b.path, "checkout", "-q", `bossman/${bId}`);
+    git(b.path, "reset", "-q", "--hard", x);
+    writeFileSync(path.join(b.path, "b.txt"), "b\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "harmless");
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    // A's check still reports B, and B's base (the review diff's start) did not move.
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [{ ...hit }] });
+    expect(git(repo, "config", "--get", `bossman.ticket-${bId}.base`)).toBe(recordedBefore);
+  });
+
+  it("leaves a plain ticket off main with its main base (BOS-687)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    const start = git(b.path, "rev-parse", "HEAD");
+    writeFileSync(path.join(b.path, "b.txt"), "b\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b");
+    expect(await ws.carried(spec, "main", [{ ticketId: bId, branch: `bossman/${bId}` }])).toEqual({ carried: [] });
+    expect(git(ws.repoDir(ids.project), "config", "--get", `bossman.ticket-${bId}.base`)).toBe(start);
+  });
+
+  it("still refuses a branch that really carries unapproved work after the move (BOS-687)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    git(b.path, "reset", "-q", "--hard", `bossman/${ids.t}`);
+    writeFileSync(path.join(b.path, "b.txt"), "b\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b");
+    // B holds all of A's unmerged commit: asked from B's side, A is carried.
+    const hit = { ticketId: ids.t, branch: `bossman/${ids.t}` };
+    expect(await ws.carried({ ...spec, ticketId: bId }, "main", [hit])).toMatchObject({ carried: [{ ...hit, contained: true }] });
+  });
+
   it("still counts a stacked branch's own commit once this ticket takes it in (BOS-629)", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
@@ -380,7 +515,7 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
 describe("a ticket with no branch on this runner (BOS-130)", () => {
   it("has nothing to compare, so nothing is reported as carried", async () => {
     const o = origin();
-    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const ws = new Workspaces(tmp("bm-ws-root-"));
     await ws.ensure({ projectId: ids.project, ticketId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", repoUrl: o.url, baseRef: "main" });
     expect(await ws.carried({ projectId: ids.project, ticketId: ids.t }, "main", [{ ticketId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", branch: "bossman/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }])).toEqual({ carried: [] });
   });

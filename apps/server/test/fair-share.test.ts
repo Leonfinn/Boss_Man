@@ -157,6 +157,27 @@ describe("fair share at the all-companies run limit (BOS-582)", () => {
     await c.queued(c.B, "B CEO", "engagement", 1);
     expect(await c.scheduler.freeSlots(c.B)).toBe(0);
   });
+
+  it("counts only wakes that could start now: not one whose agent is already running, held until later, or held by the quota (BOS-667)", async () => {
+    const c = (ctx = await setup({ instance: 10, company: 10 }));
+    const busy: string[] = [];
+    for (const n of ["A1", "A2", "A3"]) busy.push(await c.running(c.A, n));
+    await c.clearWakes();
+    const [first] = await c.db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, busy[0]!));
+    const later = new Date(Date.now() + 60 * MIN);
+    // A review wake for a reviewer who is mid-run: it starts in the slot that run frees, not a new one.
+    await c.db.insert(wakes).values({ companyId: c.A, agentId: first!.agentId!, reason: "review requested", note: "review" });
+    await c.db.insert(wakes).values({ companyId: c.A, agentId: first!.agentId!, reason: "nudge", note: "and a nudge" });
+    // Held until later (quiet hours), and held by the quota: neither can start now.
+    const quiet = await c.queued(c.A, "A quiet", "check due", 5);
+    await c.db.update(wakes).set({ status: "deferred", statusReason: "quiet hours", notBefore: later }).where(eq(wakes.id, quiet.id));
+    const quota = await c.queued(c.A, "A quota", "missed work", 5);
+    await c.db.update(wakes).set({ status: "deferred", statusReason: "subscription 5-hour window nearly used up", notBefore: later }).where(eq(wakes.id, quota.id));
+    // One wake that really will take a slot: an idle agent's.
+    await c.queued(c.A, "A next", "nudge", 1);
+    // 10, less the one kept for cards, less 3 runs and the one startable wake. Before, every queued or held wake took a slot (1).
+    expect(await c.scheduler.freeSlots(c.A)).toBe(5);
+  });
 });
 
 describe("fairOrder", () => {

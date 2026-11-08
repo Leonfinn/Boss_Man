@@ -61,7 +61,7 @@ describe("merge queue screen (BOS-587)", () => {
     expect(waitingLabel(4)).toBe("4 waiting to merge");
     expect(waitingLabel(0)).toBeNull();
     const noop = () => {};
-    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} notifications="unsupported" onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
+    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
     const link = screen.getByRole("link", { name: /Merge queue/ });
     expect(link.getAttribute("href")).toBe("#/merge-queue");
     expect(link.getAttribute("aria-current")).toBe("page");
