@@ -32,13 +32,13 @@ async function setup() {
 }
 
 /** A zip whose central directory can declare any name, size and method, whatever the data says. */
-function crafted(entries: Array<{ name: string; data?: Buffer; declaredSize?: number }>): Buffer {
+function crafted(entries: Array<{ name: string; data?: Uint8Array; declaredSize?: number }>): Buffer {
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];
   let offset = 0;
   for (const e of entries) {
     const name = Buffer.from(e.name, "utf8");
-    const data = e.data ?? Buffer.alloc(0);
+    const data = e.data ? Buffer.from(e.data) : Buffer.alloc(0);
     const size = e.declaredSize ?? data.length;
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
