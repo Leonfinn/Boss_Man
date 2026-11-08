@@ -43,7 +43,7 @@ import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
 import { REVIEW_REASON } from "./review-kinds.js";
-import { type CardLint, type HostFacts, NOT_OVERRIDABLE, fillHostTokens, lintLines, lintOwnerSteps } from "./steps.js";
+import { type CardLint, type HostFacts, type SelfDeployFacts, NOT_OVERRIDABLE, fillHostTokens, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -565,13 +565,15 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * and its steps must work as written (BOS-417: `lintOwnerSteps`). `error` is the refusal; otherwise `lint` is what
  * the card keeps (warnings, and a CEO override). Every route that raises an agent card calls this, so the lint
  * can't be skipped: raise_decision, the CEO's reissue and escalate, and the Scrum Master's raise_decision.
- * `lintOverride` lets a refusal through with a reason; only the CEO may pass one (`byCeo`), and never past R3/R4.
+ * `lintOverride` lets a refusal through with a reason; only the CEO may pass one (`byCeo`), and never past R3/R4/R10 (`NOT_OVERRIDABLE`).
  * `hosts` are the host facts Boss Man recorded (BOS-427): when given, R6 checks a login-run block against what the
  * host says it can read; without them it only checks that every block names a host and an account.
  * `addons` are the add-on facts for R9 (DR-023); a route that has them passes them, and `setsUp` names the
  * add-on this card sets up, so its own setup steps aren't refused for it not running yet.
+ * `proof` says how host commands were proven (R11, DR-024); a malformed one is refused before the lint runs,
+ * and a good one is kept on the card for its banner.
  */
-export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -583,6 +585,8 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
   if (override !== undefined && !a.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the steps instead, or ask the CEO to raise the card." };
   if (override !== undefined && override.length < 10) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
   if (!a.steps?.length) return { error: null };
+  const proof = a.proof?.trim() ? parseProof(a.proof) : undefined;
+  if (typeof proof === "string") return { error: `The ${proof}.` };
   // `{{host.…}}` tokens (DR-008): filled from the recorded host facts before the lint, so the lint reads what the owner
   // will. A fact that isn't recorded stops the card; a caller with no facts leaves the token, which R4 refuses.
   let steps = a.steps;
@@ -593,14 +597,14 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
     }
     steps = filled.steps;
   }
-  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}) });
+  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}) }, proof);
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
   const soft = refuse.filter((f) => !NOT_OVERRIDABLE.has(f.rule));
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
-  if (hard.length) return { error: `These steps can't go to the owner as written:\n${lintLines(refuse)}\n${tail}${override ? " lintOverride can't let through a command that isn't copy-safe or a value Boss Man doesn't have." : ""}` };
+  if (hard.length) return { error: `These steps can't go to the owner as written:\n${lintLines(refuse)}\n${tail}${override ? " lintOverride can't let through a command that isn't copy-safe, a value Boss Man doesn't have, or a command that waits for typed input, opens a pager or never returns." : ""}` };
   if (soft.length && !override) return { error: `These steps can't go to the owner as written:\n${lintLines(soft)}\n${tail}${a.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
-  const lint: CardLint = { warn, ...(soft.length && override ? { override: { reason: override, findings: soft } } : {}) };
-  return { error: null, steps, ...(lint.warn.length || lint.override ? { lint } : {}) };
+  const lint: CardLint = { warn, ...(soft.length && override ? { override: { reason: override, findings: soft } } : {}), ...(proof ? { proof } : {}) };
+  return { error: null, steps, ...(lint.warn.length || lint.override || lint.proof ? { lint } : {}) };
 }
 
 /**
@@ -1737,6 +1741,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     async onRefusedCall(runner: { companyId: string }, runId: string, title: string | null) {
       const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
       permLog.refusedCall({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
+    },
+
+    /** A fenced run's tool call failed with a kernel refusal (BOS-325): logged with the run, agent and ticket. Wording only, never a decision. */
+    async onFenceDenied(runner: { companyId: string }, runId: string, title: string | null) {
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
+      permLog.fenceDenied({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
     },
 
     setMaintenanceHook(hook: MaintenanceHook) {

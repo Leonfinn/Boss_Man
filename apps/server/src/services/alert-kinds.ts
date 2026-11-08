@@ -23,6 +23,8 @@ export type ClearWhen =
    * clean run proves the credential is fixed.
    */
   | { kind: "accountRanOk"; fundingSourceId: string }
+  /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
+  | { kind: "companyRanOk"; companyId: string }
   /** A roadmap feature that had no open ticket now has one (BOS-595, closer in alert-clearing.ts). */
   | { kind: "featureHasTicket"; featureId: string }
   /** Server-health cards (BOS-640): the rule has stayed under its level for 30 minutes. */
@@ -160,6 +162,16 @@ export const ALERT_KINDS = {
   quota_held: {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
+  },
+  // no-progress.ts (BOS-593, N4): a company with work waiting and no clean run for an hour, or one error
+  // hitting several agents. One card per company. It may reach the owner: a stopped company usually can't
+  // run its own CEO either (HolidayHours went two days unseen that way). Closes on the company's next clean run.
+  no_progress: {
+    topRung: "owner",
+  },
+  // opencode-vacuum.ts (BOS-622): the runner killed the OpenCode prune's one-off VACUUM at its cap. One card per runner per day.
+  opencode_vacuum_cut: {
+    topRung: "ceo",
   },
   // watchdog.ts spareCapacity (BOS-659): the company is under-used while work waits, and picking the
   // next ticket is a judgement call. Stops at the CEO; one card per company folds the stretches together.

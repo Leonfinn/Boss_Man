@@ -691,7 +691,11 @@ export function schedulerService(
         if (brief)
           lines.push("", `The project has a brief in the wiki, a map of its code: wiki read slug="${brief.slug}" section="Code map" (sections: ${brief.headings.join(", ")}).${brief.commit ? ` It describes commit ${brief.commit} on ${brief.branch}.` : ""} It is a map, not the source of truth: check the code before you change it, and if the brief is wrong, say so in your ticket.`);
         lines.push("", planningGuidance(t.t.risk));
-        lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
+        lines.push(
+          "",
+          "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.",
+          "Keep proofs and check logs (a recording, a screenshot, a long test output, a check log) in $BOSSMAN_SCRATCH, this ticket's folder on the runner's kept disk: it survives runner restarts, where /tmp is wiped. scripts/check-quick.sh and scripts/check-all.sh write their logs there by themselves when it is set. If it isn't set on this run, /tmp is all you have; say where you put the proof in your state note. Never commit proofs or logs to the repo.",
+        );
         if (t.repoUrl) lines.push("", "Commit your work on the ticket's branch but never git push: Boss Man merges or pushes it once it passes review.");
         if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {
           const team = await db
@@ -932,6 +936,8 @@ export function schedulerService(
       ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
       ...(skillSet.length ? { skills: skillSet } : {}),
       ...(toolServers.length ? { mcpServers: toolServers } : {}),
+      // The company's fence setting (BOS-325); a runner that can't fence is not asked, and its run goes on unfenced.
+      ...(company.fenceMode !== "off" && deps.runners.can(runner.id, "fence") ? { fence: true } : {}),
     });
     if (!sent) {
       if (w.deployId) await deps.deploys?.unbindRun(w.deployId);

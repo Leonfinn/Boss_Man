@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 
 type Stats = { done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null; ownCostPerDoneMicros: number | null; watchdogFlags: number; overrideShare: number | null; answered: number };
 type Role = Stats & { role: string; agents: number };
@@ -180,7 +181,7 @@ export function Workflow({ company }: { company: Company | undefined }) {
           ))}
         </select>
       </header>
-      {data.error ? (
+      {data.error && !away(data.error) ? (
         <p role="alert" className="error">{data.error.message}</p>
       ) : !d ? (
         <p className="muted">Loading…</p>

@@ -1,10 +1,11 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, getTableName, inArray, ne, sql } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
-import { openPglite, type Db } from "../src/db/client.js";
+import type { Db } from "../src/db/client.js";
+import { sharedDatabase } from "./helpers/shared-server.js";
 import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
 import { HELD_AGENT } from "../src/services/fair-share.js";
@@ -13,10 +14,7 @@ import { activity, agents, companies, decisions, keyResults, milestones, notific
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
-afterEach(async () => {
-  await ctx.app.close();
-  await ctx.close();
-});
+afterEach(() => ctx?.offline());
 
 type Row = { id: string; kind: string; question: string; recommendedOption: string; score: number; reasons: string[]; blocks: Array<{ ticketId: string; depth: number }>; dueDate: string | null };
 
@@ -49,12 +47,29 @@ function countReads(inner: Db) {
   return { db, reads };
 }
 
+// One database and one app for the file, the database emptied before each test (BOS-686). Every test makes
+// its own company, owner, runner and agents, and reads only within them. The app's clock is `offset`, which
+// each test sets back to 0.
+let offset = 0;
+const clock = () => new Date(Date.now() + offset);
+let shared: Awaited<ReturnType<typeof sharedDatabase>>;
+let counted: { db: Db; rawDb: Db; reads: ReturnType<typeof countReads>["reads"] };
+let app: ReturnType<typeof buildApp> | undefined;
+beforeAll(async () => {
+  shared = await sharedDatabase();
+  counted = { rawDb: shared.db, ...countReads(shared.db) };
+});
+afterAll(async () => {
+  await (await app)?.app.close();
+  await shared.close();
+});
+
 async function setup() {
-  const { db: rawDb, close } = await openPglite();
-  const { db, reads } = countReads(rawDb);
-  let offset = 0;
-  const clock = () => new Date(Date.now() + offset);
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: clock });
+  await shared.reset();
+  const { db, rawDb, reads } = counted;
+  Object.assign(reads, { on: false, queries: 0, rows: 0, byTable: {} });
+  offset = 0;
+  const built = await (app ??= buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: clock }));
   const cookie = await signedInOwner(rawDb);
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
@@ -76,7 +91,7 @@ async function setup() {
   const alerts = async () => (await built.decisions.queue({ includeAll: true, companyId: company.id })) as unknown as Row[];
   const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; neverStartedRuns: number; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
-  return { ...built, db, reads, close, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, sweep, advance, clock, offline, online };
+  return { ...built, db, reads, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, sweep, advance, clock, offline, online };
 }
 
 describe("ranked decision queue (R20)", () => {
@@ -385,8 +400,10 @@ describe("stale blockers (R21)", () => {
     expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
-    // The sweep also asked the CEO to hand out work, as the worker had nothing to do (BOS-615).
-    expect(await ctx.db.select().from(wakes).where(ne(wakes.reason, "idle agents"))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+    // The sweep also asked the CEO to hand out work, as the worker had nothing to do (BOS-615). That wake
+    // then waits 25 hours with no run finishing, so the no-progress alert (BOS-593) rightly wakes the CEO
+    // with a "decision" card too; neither is what this test is about.
+    expect(await ctx.db.select().from(wakes).where(and(ne(wakes.reason, "idle agents"), ne(wakes.reason, "decision")))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
   });
 
   it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {
@@ -547,7 +564,9 @@ describe("stale blockers (R21)", () => {
       await ctx.req("PATCH", `/api/tickets/${waiting.id}`, { state: "done" });
       loose = waiting;
     }
-    const at = ctx.clock();
+    // Ended over an hour ago: a run that ended cleanly within the hour is the company making progress,
+    // which rightly changes what the no-progress sweep (BOS-593) reads; these are only meant to be unrelated.
+    const at = new Date(ctx.clock().getTime() - 2 * HOUR);
     for (let i = 0; i < 6; i++) await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: loose.id, status: "succeeded", startedAt: at, lastEventAt: at, endedAt: at } as never);
     expect(await measure()).toEqual(two);
 

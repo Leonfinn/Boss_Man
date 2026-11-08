@@ -82,6 +82,13 @@ const INLINE_CODE = /`[^`\n]+`/;
 // A command word followed by an argument anywhere in a line, whatever comes before it (a list marker, "run this:", a sentence). Prose
 // that mentions one is reviewed too: when unsure, review. "make" and "source" are left out (everyday words); a line-start "make" is caught above.
 const WORD_CMD = /\b(?:sudo|curl|wget|bash|zsh|ksh|npx|npm|pnpm|yarn|pipx?|pip3|uvx?|python[\d.]*|node|deno|bun|ruby|perl|php|lua|powershell|pwsh|eval|exec|chmod|chown|ssh|scp|docker|kubectl|git\s+clone|run\s+make)\s+[-\w./@:~$"'(]/i;
+// A file-reading command anywhere in a line, but only with a path as its argument: "cat ~/.aws/credentials", "cp .env /tmp/x",
+// "tar czf ~/backup.tgz /srv". A path is absolute, home- or dot-relative, or a dotted name (.env); a bare word is not.
+// Without the path this is prose ("copy the notes with cat", "use cp when moving files") and stays prose. BOS-177: the
+// owner's card read "Read the operator's credentials: cat ~/.aws/credentials" as no script.
+// Flags may only hold letters, digits, "=" and "-", so a token like "-(cat" cannot carry a match start and restart the scan at
+// every flag: that made a hostile line quadratic (Jane's BOS-177 security review, round 1).
+const READ_FILE_CMD = /(?:^|[\s:;|(])(?:cat|cp|mv|tar|zip|unzip|head|tail|less|more|base64|xxd|strings|grep|sort|tee|dd|ln|touch|wc)\s+(?:-[\w=-]*\s+)*(?:~\/|\.\.?\/|\/(?!\/)|\.[A-Za-z0-9_-]+\b|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,8}\b)[^\s]*/i;
 // Prose that points at a terminal, or sends/downloads/runs something at an address.
 const TERMINAL = /\b(?:terminal|command[- ]line|command prompt|shell script|powershell|\bcmd\.exe)\b/i;
 const URL_ACTION = /https?:\/\/\S+/i;
@@ -111,7 +118,7 @@ function runnableText(text: string): boolean {
   for (const line of normalised.split(/\r?\n/)) {
     if (/^\s*(```|~~~)/.test(line)) return true; // any fenced block
     if (/^( {4}|\t)\S/.test(line)) return true; // an indented block
-    if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line) || INLINE_CODE.test(line) || WORD_CMD.test(line) || TERMINAL.test(line) || (URL_ACTION.test(line) && ACTION_WORD.test(line)) || ONE_LINER.test(line)) return true;
+    if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line) || INLINE_CODE.test(line) || WORD_CMD.test(line) || READ_FILE_CMD.test(line) || TERMINAL.test(line) || (URL_ACTION.test(line) && ACTION_WORD.test(line)) || ONE_LINER.test(line)) return true;
   }
   return false;
 }
