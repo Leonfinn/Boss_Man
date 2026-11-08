@@ -21,7 +21,7 @@ case "$url" in
   */update-file) cp "$data" "$FAKE_DIR/update-file.json"; body='{}' ;;
   */upload-file-media-object) if [[ -n ${FAKE_UPLOAD_FAIL:-} ]]; then code=500; body='{}'; else body='{"id":"MEDIA1","width":640,"height":480,"mtype":"image/png","name":"image"}'; fi ;;
   */get-file) [[ -n ${FAKE_FILE_JSON:-} ]] && body="$(cat "$FAKE_FILE_JSON")" || body='{"id":"FILE1","projectId":"PROJ1","teamId":"T1","revn":3,"vern":0,"data":{"pagesIndex":{"PAGE1":{"id":"PAGE1","name":"Page 1","objects":{"00000000-0000-0000-0000-000000000000":{"id":"00000000-0000-0000-0000-000000000000","parentId":"00000000-0000-0000-0000-000000000000","type":"frame","x":0,"y":0,"width":0.01}}}}}}' ;;
-  */get-teams) body='[{"id":"T1","name":"Team","permissions":{"isOwner":true}}]' ;;
+  */get-teams) body='[{"id":"T1","name":"Team","permissions":{"isOwner":true}}]'; [[ -n ${FAKE_TEAMS:-} ]] && body="$FAKE_TEAMS" ;;
   */get-projects) body="[{\"id\":\"PROJ1\",\"name\":\"${FAKE_PROJECT_NAME}\"}]" ;;
   */create-file) body='{"id":"NEWFILE"}' ;;
   *) body='{}' ;;
@@ -191,11 +191,78 @@ jq -e '.changes[] | select(.obj.name == "Photo") | .obj.fills[0]["fill-color"] =
 grep -q "Penpot did not accept the upload" "$t/err" || fail "no note about the refused upload"
 if grep '^curl ' "$t/curl.log" | grep -q SUPERSECRET123; then fail "token on a command line (upload)"; fi
 
+# ---- BOS-94: text sizing, line height, font weights, pages, the guard in a team the agent only belongs to ----------
+rm -f "$u"
+cat >"$t/text.json" <<'JSON'
+{"page":"T","boards":[{"name":"B","children":[
+ {"type":"text","name":"Short","x":0,"y":0,"text":"FAQ","size":16},
+ {"type":"text","name":"Wrapped","x":0,"y":40,"w":200,"size":16,"lineHeight":1.5,
+  "text":"Boss Man runs a small company of agents that plan, build, review and ship work for you while you sleep."},
+ {"type":"text","name":"Fixed","x":0,"y":300,"w":200,"h":30,"size":16,"text":"Boss Man runs a small company of agents that plan and build."},
+ {"type":"text","name":"Two lines","x":0,"y":400,"size":20,"text":"First\nSecond"},
+ {"type":"text","name":"Plex","x":0,"y":500,"size":20,"text":"Plex","font":"IBM Plex Sans","weight":"bold"},
+ {"type":"text","name":"Plex semi","x":0,"y":540,"size":20,"text":"Plex","font":"IBM Plex Sans","weight":600},
+ {"type":"text","name":"Source","x":0,"y":580,"size":20,"text":"Source","weight":"bold"}]}]}
+JSON
+run apply FILE1 "$t/text.json" >/dev/null || { cat "$t/err"; fail "text apply failed"; }
+tx() { jq -c --arg n "$1" '.changes[] | select(.obj.name == $n) | .obj' "$u"; }
+jq -e '.width >= 3 * 16 * 0.6 and .height >= 19' <<<"$(tx Short)" >/dev/null || fail "auto-width text too small: $(tx Short | jq -c '{width,height}')"
+# 104 characters at 200px wide (about 20 per line) is 6 lines or more: at 16px x 1.5 that is at least 144px.
+jq -e '.width == 200 and .height >= 144 and .["grow-type"] == "auto-height"' <<<"$(tx Wrapped)" >/dev/null || fail "wrapped text height not from its lines: $(tx Wrapped | jq -c '{width,height}')"
+jq -e '[.. | objects | select(has("line-height")) | .["line-height"]] | unique == ["1.5"]' <<<"$(tx Wrapped)" >/dev/null || fail "lineHeight not applied"
+jq -e '[.. | objects | select(has("line-height")) | .["line-height"]] | unique == ["1.2"]' <<<"$(tx Short)" >/dev/null || fail "default line height is not 1.2"
+jq -e '.height == 30' <<<"$(tx Fixed)" >/dev/null || fail "explicit h should win"
+jq -e '([.content.children[0].children[] | select(.type == "paragraph")] | map(.children[0].text)) == ["First","Second"] and .height >= 48' <<<"$(tx "Two lines")" >/dev/null || fail "a newline should start a second paragraph (and line)"
+jq -e '.content.children[0].children[0].children[0] | .["font-id"] == "gfont-ibm-plex-sans" and .["font-variant-id"] == "700" and .["font-weight"] == "700"' <<<"$(tx Plex)" >/dev/null || fail "Google font bold should use variant 700"
+jq -e '.content.children[0].children[0].children[0] | .["font-variant-id"] == "600" and .["font-weight"] == "600"' <<<"$(tx "Plex semi")" >/dev/null || fail "numeric weight not passed on"
+jq -e '.content.children[0].children[0].children[0] | .["font-id"] == "sourcesanspro" and .["font-variant-id"] == "bold" and .["font-weight"] == "700"' <<<"$(tx Source)" >/dev/null || fail "built-in font bold should use variant bold"
+
+echo '{"boards":[{"name":"B","children":[{"type":"text","name":"A","text":"a","weight":"heavy"},{"type":"text","name":"S","text":"s","weight":600},{"type":"text","name":"L","text":"l","lineHeight":9},{"type":"text","name":"M","text":"m","lineHeight":"tall"}]}]}' >"$t/badt.json"
+out="$(bash "$here/penpot.sh" validate "$t/badt.json" 2>&1)" && fail "validate passed bad text options"
+for want in '"B" > "A": unknown weight "heavy"' '"B" > "S": the built-in font only has "regular" and "bold"' '"B" > "L": "lineHeight" is a multiple' '"B" > "M": "lineHeight" must be a number'; do
+  grep -qF "$want" <<<"$out" || fail "validate missing: $want"
+done
+
+# Pages: list, rename, delete; the only page can't be deleted, nor a page that isn't there.
+cat >"$t/pages.json" <<'JSON'
+{"id":"FILE1","projectId":"PROJ1","revn":5,"vern":0,"data":{"pages":["p1","p2"],"pagesIndex":{
+ "p1":{"id":"p1","name":"Page 1","objects":{}},"p2":{"id":"p2","name":"Home","objects":{}}}}}
+JSON
+export FAKE_FILE_JSON="$t/pages.json"
+run pages FILE1 >"$t/out" || fail "pages failed"
+[[ "$(cat "$t/out")" == $'p1\tPage 1\np2\tHome' ]] || fail "pages output wrong: $(cat "$t/out")"
+rm -f "$u"; run delete-page FILE1 p1 >/dev/null || { cat "$t/err"; fail "delete-page failed"; }
+jq -e '.changes == [{"type":"del-page","id":"p1"}] and .revn == 5' "$u" >/dev/null || fail "delete-page sent the wrong change"
+rm -f "$u"; run rename-page FILE1 p2 "Website" >/dev/null || fail "rename-page failed"
+jq -e '.changes == [{"type":"mod-page","id":"p2","name":"Website"}]' "$u" >/dev/null || fail "rename-page sent the wrong change"
+rm -f "$u"; if run delete-page FILE1 nope >/dev/null; then fail "deleted a missing page"; fi
+grep -q "has no page nope" "$t/err" || fail "missing page unexplained"
+cat >"$t/onepage.json" <<'JSON'
+{"id":"FILE1","projectId":"PROJ1","revn":5,"vern":0,"data":{"pages":["p1"],"pagesIndex":{"p1":{"id":"p1","name":"Page 1","objects":{}}}}}
+JSON
+if FAKE_FILE_JSON="$t/onepage.json" run delete-page FILE1 p1 >/dev/null; then fail "deleted the only page"; fi
+grep -q "only page" "$t/err" || fail "only-page refusal unexplained"
+[[ ! -e $u ]] || fail "sent a change for a refused page delete"
+export FAKE_PROJECT_NAME="Owner stuff"
+if run delete-page FILE1 p1 >/dev/null; then fail "deleted a page in an owner's file"; fi
+grep -q "Agents only change their own files" "$t/err" || fail "page delete in an owner's file not refused by the guard"
+unset FAKE_FILE_JSON
+
+# The guard on a later run (no record of created files): "Agent designs" counts in a team where the agent is an editor
+# but not the owner (the owner's team, BOS-81), and not in one where it is only a viewer.
+rm -f "$t/penpot-agent-files.txt" "$u"; export FAKE_PROJECT_NAME="Agent designs"
+FAKE_TEAMS='[{"id":"T1","name":"Boss Man","permissions":{"type":"editor","isOwner":false,"isAdmin":false,"canEdit":true}}]' \
+  run remove-shape FILE1 PAGE1 SHAPE1 >/dev/null || { cat "$t/err"; fail "refused the agent project in a team where the agent is an editor"; }
+rm -f "$u"
+if FAKE_TEAMS='[{"id":"T1","name":"Boss Man","permissions":{"type":"viewer","isOwner":false,"isAdmin":false,"canEdit":false}}]' \
+  run remove-shape FILE1 PAGE1 SHAPE1 >/dev/null; then fail "wrote in a team where the agent is only a viewer"; fi
+[[ ! -e $u ]] || fail "sent a change from a viewer team"
+
 # Link has no token; the token reached curl only through stdin.
 run link FILE1 >"$t/link"
 grep -q "file-id=FILE1" "$t/link" || fail "link missing file id"
 if grep -rq 'SUPERSECRET123' "$t/link" "$t/err" "$t/out"; then fail "token printed"; fi
 if grep '^curl ' "$t/curl.log" | grep -q SUPERSECRET123; then fail "token on a command line"; fi
-if grep -rq 'SUPERSECRET123' "$t/penpot-agent-files.txt"; then fail "token saved in the file list"; fi
+if grep -rqs 'SUPERSECRET123' "$t/penpot-agent-files.txt"; then fail "token saved in the file list"; fi
 
 echo "penpot.write.test.sh: ok"
