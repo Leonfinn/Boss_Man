@@ -17,6 +17,8 @@ mkdir -p "$T/w/scripts" "$T/w/apps/server"
 cat >"$T/w/scripts/deploy.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "deploy.sh $*" >>"$STUB_LOG"
+# A restart (BOS-647) adds --force before --commit.
+if [[ ${3:-} == --force ]]; then set -- "$1" "$2" "${@:4}"; fi
 [[ ${1:-} == --yes && ${2:-} == --no-runner && ${3:-} == --commit ]] || exit 9
 if [[ ${STUB_RC:-0} == 0 ]]; then git merge --ff-only --quiet "$4"; r=deployed; m=ok; else r=${STUB_RESULT:-failed}; m="the stub failed"; fi
 printf '{"result":"%s","message":"%s","to_commit":"%s","backup":"/b/x.sql.gz"}\n' "$r" "$m" "$4" >"$BOSSMAN_DEPLOY_STATUS"
@@ -281,6 +283,36 @@ if "$here/host-deployer.sh" >/dev/null 2>&1; then fail "world-readable config ac
 chmod 600 "$D/host.conf"
 a="$(grep -o "^RUNNER_PATHS='[^']*'" "$here/host-deployer.sh" | sed "s/^RUNNER_PATHS='//; s/'\$//")"
 grep -qF -- "grep -Eq '$a'" "$here/deploy.sh" || fail "runner paths differ between host-deployer.sh and deploy.sh"
+
+# 13b. Restart (BOS-647), single server: deploy.sh --force at the commit that runs; never a fetch or a move.
+rm -f "$D/state/last-server" "$D/state/last-restart"
+head="$(git -C "$T/src" rev-parse HEAD)"; before="$(calls)"
+req restart "$head"; host --dry-run
+has "$T/out" "would run: scripts/deploy.sh --yes --no-runner --force --commit ${head:0:8}"
+rm -f "$D/inbox/request.json"
+req restart "$head"; host
+[[ $(status result) == deployed && $(status target) == restart && $(status to_commit) == "$head" ]] || fail "restart status: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "Restarted at ${head:0:8}"
+has "$STUB_LOG" "deploy.sh --yes --no-runner --force --commit $head"
+[[ $(calls) == $((before + 1)) && $(git -C "$T/src" rev-parse HEAD) == "$head" ]] || fail "restart moved the checkout or ran twice"
+# It shares the server's rate limit (one slot, state/last-server), both ways.
+[[ -e $D/state/last-server && ! -e $D/state/last-restart ]] || fail "restart did not use the server's rate-limit slot"
+req restart "$head"; host
+[[ $(status result) == rejected ]] || fail "second restart inside the limit: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "updated or restarted less than 10 minutes ago"
+[[ $(calls) == $((before + 1)) ]] || fail "a restart ran inside the rate limit"
+# A commit that is not what runs (an update ran since the click): refused, nothing runs.
+rm -f "$D/state/last-server"
+req restart "$base"; host
+[[ $(status result) == rejected ]] || fail "restart of another commit: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "The version running changed since you asked"
+[[ $(calls) == $((before + 1)) && $(git -C "$T/src" rev-parse HEAD) == "$head" ]] || fail "a restart for another commit ran something"
+# Only the exact lower-case target is accepted.
+req Restart "$head"; host; has "$D/outbox/status.json" "expected format"
+# A restart that fails its health check says so.
+STUB_RC=1 STUB_RESULT=failed req restart "$head"; STUB_RC=1 STUB_RESULT=failed host
+[[ $(status result) == failed && $(status target) == restart ]] || fail "failed restart: $(cat "$D/outbox/status.json")"
+rm -f "$D/state/last-server"
 
 # ================= Blue/green (opt-in): fake docker, fake world =================
 # The script resets PATH, so the tests run a copy that looks in our fake bin first.
@@ -563,6 +595,40 @@ hasnt "$DL" "signal"; live_is green
 # Not blue/green: refused.
 unset COMPOSE_FILE; "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without blue/green should fail"; has "$T/out" "does not use blue/green"
 export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
+
+# 23. Restart (BOS-647), blue/green: a fresh copy of the commit that runs, swapped in like an update; no fetch, no move.
+reset_world blue "$P"; git -C "$T/src" reset -q --hard "$P"
+echo "green $cur" >"$D/state/previous"; echo "$b6" >"$D/state/hold"; before="$(calls)"
+rm -f "$D/state/last-server"; req restart "$P"; bg --dry-run
+has "$T/out" "would run: a blue/green restart (fresh copy) at ${P:0:8}"; rm -f "$D/inbox/request.json"
+req restart "$P"; bg
+[[ $(status result) == deployed && $(status target) == restart && $(status to_commit) == "$P" ]] || fail "bg restart status: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "Restarted at ${P:0:8}: a fresh green is live"
+order "$DL" "pg_dump" "build green commit=$P" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "signal USR1 blue" "signal USR2 green" "reload now green"
+live_is green; [[ -e $W/running.blue && $(cat "$W/role.green") == leader ]] || fail "world after a bg restart"
+[[ $(git -C "$T/src" rev-parse HEAD) == "$P" && $(calls) == "$before" ]] || fail "bg restart moved the checkout or ran deploy.sh"
+has "$D/state/soak" "old=blue new=green"; has "$D/state/soak" "commit=$P prev=$P"
+# The rebuilt colour held the release before: the rollback record goes, so --rollback refuses rather than "going back" to the same code.
+[[ ! -e $D/state/previous ]] || fail "state/previous kept after a restart"
+[[ $(cat "$D/state/hold") == "$b6" ]] || fail "a restart dropped the hold on a rejected release"
+# A restart during the trial window is refused: it would rebuild the copy the window switches back to.
+: >"$DL"; rm -f "$D/state/last-server"; req restart "$P"; bg
+[[ $(status result) == rejected ]] || fail "restart during the trial: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "still in its 15-minute trial"; hasnt "$DL" "pg_dump"; live_is green
+# The fresh copy fails its checks during the window: switched back to the copy it replaced, worded as a restart.
+: >"$DL"; FAKE_VERIFY_FAIL=green bg
+[[ $(status result) == rolled_back && $(status target) == restart ]] || fail "restart switch-back: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "The fresh copy started by the restart was switched back"
+live_is blue; [[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout moved by a restart switch-back"
+# A restart that was cut off is marked failed like an update, and a trial window for another version is dropped.
+reset_world blue "$P"; git -C "$T/src" reset -q --hard "$P"
+printf '{"id": "%s", "target": "restart", "result": "running", "message": "Running", "from_commit": "%s", "to_commit": "%s", "started": "2026-11-08T10:00:00Z", "ended": "", "at": "2026-11-08T10:00:00Z", "backup": ""}\n' "44444444-4444-4444-4444-444444444444" "$P" "$P" >"$D/outbox/status.json"
+printf 'old=blue new=green deadline=%s commit=%s prev=%s\n' "$(($(date +%s) + 900))" "$b1" "$P" >"$D/state/soak"
+: >"$DL"; bg
+[[ $(status result) == failed && $(status target) == restart ]] || fail "interrupted restart: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "The restart run for ${P:0:8} was cut off"
+[[ ! -e $D/state/soak ]] || fail "soak for a version that is not running kept after an interrupted restart"
+hasnt "$DL" "signal"; live_is blue
 
 # 30. A run that was cut off (status stuck on "running"): the next tick marks it failed, puts the checkout back on what answers,
 # drops a trial window for a version that is not running, and touches no container (BOS-494).

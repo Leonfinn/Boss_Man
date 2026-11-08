@@ -850,6 +850,78 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect((await c.db.select().from(notifications)).filter((n) => n.level !== "ask")).toHaveLength(1);
     });
   });
+
+  // BOS-647: the owner's "Restart the server" button. The click is the approval; the host does the rest.
+  describe("Restart the server (BOS-647)", () => {
+    const inbox = (c: { dir: string }) => path.join(c.dir, "inbox", "request.json");
+
+    it("writes one restart request for the commit that runs, with no decision card", async () => {
+      const c = (ctx = await setup());
+      await c.available({ deployed: B, tip: C, bluegreen: true });
+      const r = await c.req("POST", "/api/self-deploy/restart");
+      expect(r.statusCode).toBe(200);
+      expect(r.json()).toMatchObject({ commit: B, bluegreen: true });
+      const body = JSON.parse(await readFile(inbox(c), "utf8"));
+      // The commit is what runs, never the tip: a restart must not bring anything new in.
+      expect(body).toMatchObject({ id: r.json().requestId, target: "restart", commit: B });
+      expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(Object.keys(body).sort()).toEqual(["approvedBy", "commit", "id", "requestedAt", "target"]);
+      expect(await c.open()).toHaveLength(0);
+      // One request at a time.
+      const again = await c.req("POST", "/api/self-deploy/restart");
+      expect(again.statusCode).toBe(409);
+      expect(again.json().message).toContain("already waiting");
+    });
+
+    it("refuses when self-deploy is off, the host hasn't reported, or a deploy is running", async () => {
+      const off = (ctx = await setup({ deployer: false }));
+      expect((await off.req("POST", "/api/self-deploy/restart")).json().message).toContain("not set up");
+      await off.app.close();
+      await off.close();
+      await rm(off.dir, { recursive: true, force: true });
+
+      const c = (ctx = await setup());
+      const none = await c.req("POST", "/api/self-deploy/restart");
+      expect(none.statusCode).toBe(409);
+      expect(none.json().message).toContain("has not reported");
+      await c.available({ deployed: B });
+      await c.status({ id: randomUUID(), result: "running", message: "Running", to_commit: C, ended: "" });
+      const busy = await c.req("POST", "/api/self-deploy/restart");
+      expect(busy.statusCode).toBe(409);
+      expect(busy.json().message).toContain("running now");
+      expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+    });
+
+    it("is owner-only: no session, no restart", async () => {
+      const c = (ctx = await setup());
+      await c.available({ deployed: B });
+      const r = await c.app.inject({ method: "POST", url: "/api/self-deploy/restart", payload: {} });
+      expect([401, 403]).toContain(r.statusCode);
+      expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+    });
+
+    it("tells the owner how it went, and starts no runner trial", async () => {
+      const c = (ctx = await setup());
+      await c.available({ deployed: B, tip: B });
+      await c.status({ id: randomUUID(), target: "restart", result: "deployed", message: "Restarted at bbbbbbbb.", from_commit: B, to_commit: B });
+      await c.selfDeploy.sync();
+      const told = async (title: string) => (await c.db.select().from(notifications)).find((n) => n.title === title);
+      expect(await told("Boss Man restarted (bbbbbbbb)")).toMatchObject({ level: "note" });
+      // A restart is not an update: the runner hold and the last-update record are left alone.
+      const held = await c.db.select().from(settings).where(eq(settings.key, "self_deploy_runner_due"));
+      const last = await c.db.select().from(settings).where(eq(settings.key, "self_deploy_last_server"));
+      expect([held, last]).toEqual([[], []]);
+      for (const [result, title, level] of [
+        ["rejected", "Restart refused", "flag"],
+        ["failed", "Restart failed (bbbbbbbb)", "page"],
+        ["rolled_back", "Restart switched back (bbbbbbbb)", "page"],
+      ] as const) {
+        await c.status({ id: randomUUID(), target: "restart", result, message: "x", from_commit: B, to_commit: B });
+        await c.selfDeploy.sync();
+        expect(await told(title), result).toMatchObject({ level });
+      }
+    });
+  });
 });
 
 // BOS-639: on 6–7 Nov the BOS-410 memory fix merged at 08:44, but its deploy card looked like every other
