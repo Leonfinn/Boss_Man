@@ -787,7 +787,12 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
       if (w !== "-exec" && w !== "-execdir" && w !== "-ok" && w !== "-okdir") continue;
       let end = i + 1;
       // A following -exec starts its own slice, so the slices never overlap and the total work stays linear.
-      while (end < seg.words.length && !/^(?:;|\+|-exec|-execdir|-ok|-okdir)$/.test(seg.words[end]!)) end++;
+      // BOS-724: find ends -exec at `+` only when the word right before it is `{}`; any other `+` is a plain argument (`env -u +`).
+      while (
+        end < seg.words.length &&
+        !/^(?:;|-exec|-execdir|-ok|-okdir)$/.test(seg.words[end]!) &&
+        !(seg.words[end] === "+" && seg.words[end - 1] === "{}" && end - 1 > i)
+      ) end++;
       if (firstWordBad(seg.words.slice(i + 1, end))) return true;
     }
     if (firstWordBad(seg.words)) return true;
