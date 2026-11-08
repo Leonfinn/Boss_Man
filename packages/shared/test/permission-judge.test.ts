@@ -810,6 +810,16 @@ describe("BOS-631: a file the command wrote (or a /tmp path) must not be loaded 
     "echo 'import os' > c.py; stdbuf -oL python3 -c \"import c\"",
     "echo 'import os' > c.py; /usr/bin/time -f %e python3 -c \"import c\"",
     "echo 'import os' > c.py; exec -a name python3 -c \"import c\"",
+    // abbreviated long options (GNU getopt_long takes any unambiguous prefix) and a duration that starts with a dot
+    "echo 'import os' > c.py; nice --adj 5 python3 -c \"import c\"",
+    "echo 'import os' > c.py; timeout --sig KILL 5 python3 -c \"import c\"",
+    "echo 'import os' > c.py; echo \"import c\" | timeout --sig KILL 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | timeout --s KILL 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | nice --adj 5 python3",
+    "echo 'import os' > c.py; echo \"import c\" | env --unse X python3",
+    "echo 'import os' > c.py; echo \"import c\" | stdbuf --out L python3",
+    "echo 'import os' > c.py; env --sp 'python3 c.py'",
+    "echo 'import os' > c.py; echo \"import c\" | timeout .5 python3",
   ]);
   allows([
     "ls /tmp; python3 -c \"import json\"",

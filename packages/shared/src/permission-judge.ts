@@ -912,17 +912,17 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
  * `-oL`), `long` the options whose value is the next word (`--signal KILL`; `--signal=KILL` is one word and needs no entry).
  * One table for the main command path and the pipe-segment parser, so they cannot drift apart.
  */
-const WRAPPER_OPTS: Record<string, { short: string; long: string[] }> = {
-  setsid: { short: "", long: [] },
-  nohup: { short: "", long: [] },
-  command: { short: "", long: [] },
-  exec: { short: "a", long: [] },
-  time: { short: "fo", long: ["--format", "--output"] },
-  nice: { short: "n", long: ["--adjustment"] },
-  timeout: { short: "sk", long: ["--signal", "--kill-after"] },
-  env: { short: "uCP", long: ["--unset", "--chdir"] },
-  flock: { short: "wE", long: ["--timeout", "--wait", "--conflict-exit-code"] },
-  stdbuf: { short: "ioe", long: ["--input", "--output", "--error"] },
+const WRAPPER_OPTS: Record<string, { short: string; long: string[]; bare: string[] }> = {
+  setsid: { short: "", long: [], bare: ["--ctty", "--fork", "--wait", "--help", "--version"] },
+  nohup: { short: "", long: [], bare: ["--help", "--version"] },
+  command: { short: "", long: [], bare: [] },
+  exec: { short: "a", long: [], bare: [] },
+  time: { short: "fo", long: ["--format", "--output"], bare: ["--append", "--verbose", "--portability", "--quiet", "--help", "--version"] },
+  nice: { short: "n", long: ["--adjustment"], bare: ["--help", "--version"] },
+  timeout: { short: "sk", long: ["--signal", "--kill-after"], bare: ["--foreground", "--preserve-status", "--verbose", "--help", "--version"] },
+  env: { short: "uCP", long: ["--unset", "--chdir", "--argv0"], bare: ["--ignore-environment", "--null", "--debug", "--list-signal-handling", "--block-signal", "--default-signal", "--ignore-signal", "--help", "--version"] },
+  flock: { short: "wE", long: ["--timeout", "--wait", "--conflict-exit-code"], bare: ["--shared", "--exclusive", "--unlock", "--nonblock", "--nb", "--no-fork", "--close", "--verbose", "--fcntl", "--help", "--version"] },
+  stdbuf: { short: "ioe", long: ["--input", "--output", "--error"], bare: ["--help", "--version"] },
 };
 
 /**
@@ -942,9 +942,17 @@ function peelWrapper(head: string, args: string[]): { head: string; args: string
     const a = args[i]!;
     if (!optionsDone && a === "--") { optionsDone = true; i++; continue; }
     if (!optionsDone && a.startsWith("--")) {
-      if (name === "env" && /^--split-string/.test(a)) return "split";
-      if (name === "flock" && /^--command/.test(a)) return null;
-      i += spec.long.includes(a) ? 2 : 1;
+      // GNU getopt_long takes any unambiguous prefix (`nice --adj 5`, `env --sp 'cmd'`): match by prefix, fail closed when it is ambiguous.
+      const opt = a.replace(/=.*$/s, "");
+      const hasEq = opt !== a;
+      const hit = (n: string) => n === opt || (opt.length > 2 && n.startsWith(opt));
+      const unreadable = name === "env" ? "--split-string" : name === "flock" ? "--command" : "";
+      const all = [...spec.long, ...spec.bare, ...(unreadable ? [unreadable] : [])];
+      const exact = all.includes(opt);
+      const matches = exact ? [opt] : all.filter(hit);
+      if (unreadable && matches.includes(unreadable)) return name === "env" ? "split" : null;
+      if (matches.length > 1 && matches.some((m) => spec.long.includes(m))) return "split"; // ambiguous prefix with a value option: unreadable
+      i += !hasEq && matches.length === 1 && spec.long.includes(matches[0]!) ? 2 : 1;
       continue;
     }
     if (!optionsDone && a.startsWith("-") && a.length > 1) {
@@ -957,7 +965,7 @@ function peelWrapper(head: string, args: string[]): { head: string; args: string
       continue;
     }
     if (/^\w+=/.test(a)) { assigns.push(a); i++; continue; }
-    if (durationLeft && /^\d[\w.]*$/.test(a)) { durationLeft = false; i++; continue; }
+    if (durationLeft && /^[\d.][\w.]*$/.test(a)) { durationLeft = false; i++; continue; }
     if (lockLeft) { lockLeft = false; i++; continue; }
     break;
   }
