@@ -618,4 +618,36 @@ describe("approval card while the merge runs", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
   });
+
+  it("a workflow-change card says why Apply and Skip are greyed out until a reason is typed (BOS-799)", () => {
+    const change = decision({
+      kind: "approval",
+      question: "Apply this workflow change?",
+      options: ["Apply the change", "Skip the change"],
+      recommendedOption: "Apply the change",
+      context: { type: "workflow_change" },
+    });
+    render(<Decisions decisions={[change]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const apply = screen.getByRole("button", { name: "Apply the change" });
+    expect((apply as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Skip the change" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(apply.getAttribute("title")).toBe("Type a reason above to Apply or Skip");
+    expect(screen.getByText("Type a reason above to Apply or Skip")).toBeTruthy();
+
+    const box = screen.getByLabelText(/Why \(shown on the Changes table, required\)/) as HTMLTextAreaElement;
+    fireEvent.click(apply);
+    expect(document.activeElement === box).toBe(true);
+
+    fireEvent.change(box, { target: { value: "Adds a skill; waits for BOS-172" } });
+    expect(screen.queryByText("Type a reason above to Apply or Skip")).toBeNull();
+    expect((screen.getByRole("button", { name: "Apply the change" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Apply the change" }).getAttribute("title")).toBeNull();
+  });
+
+  it("other card kinds never show the reason hint (BOS-799)", () => {
+    const ask = decision({ kind: "budget", question: "Raise the budget?", context: undefined });
+    render(<Decisions decisions={[ask]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.queryByText("Type a reason above to Apply or Skip")).toBeNull();
+    expect((screen.getByRole("button", { name: "Raise to $80" }) as HTMLButtonElement).disabled).toBe(false);
+  });
 });
