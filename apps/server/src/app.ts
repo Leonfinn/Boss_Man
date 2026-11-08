@@ -439,7 +439,8 @@ export async function buildApp(opts: AppOptions) {
       log: (line) => app.log.warn({ memoryJump: line }, "memory jump"),
     },
   });
-  // BOS-770: the owner's BOSSMAN_NETGUARD_ALLOW entries; null when neither the launcher nor the host has anything to say.
+  // BOS-770: the owner's BOSSMAN_NETGUARD_ALLOW entries, and (BOS-791) what the guard opens by itself; null when neither
+  // the launcher nor the host has anything to say.
   const netguardAllow = async () => {
     const [launcher, env] = await Promise.all([launch.netguardConfig(), hostFacts.netguardEnv().catch(() => null)]);
     if (!launcher && !env) return null;

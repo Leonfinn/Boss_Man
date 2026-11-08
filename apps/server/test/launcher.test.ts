@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, notifications, settings } from "../src/db/schema.js";
-import { gitHostAddress, slugify, toolServerAddress } from "../src/services/launcher.js";
+import { gitHostAddress, resolvesStack, slugify, toolServerAddress, toolServerDropped } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -117,6 +117,34 @@ describe("runners through the launcher (R55)", () => {
     expect(toolServerAddress("http://[fd00::1]/mcp")).toBeNull();
   });
 
+  it("lists the addresses Boss Man opens by itself, per company, with what each one is (BOS-791)", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "Acme Tools" })).json() as { company: { id: string } };
+    // A public-name tool server (resolves to 93.184.216.34): allowed, listed with its company.
+    expect((await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "scrapling", url: "http://example.com:8000/mcp", transport: "http" })).statusCode).toBe(201);
+    // A tool server whose name points at the stack: shown as not allowed, with the reason (the BOS-708 rule).
+    expect((await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "db-client", url: "http://db:5432/", transport: "http" })).statusCode).toBe(201);
+    // A project with a LAN git host: allowed for this company.
+    const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Website" })).json() as { id: string };
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://git.example.lan:3003/team/site.git" });
+    // An archived project's git host is no longer opened.
+    const gone = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Old" })).json() as { id: string };
+    await c.req("PATCH", `/api/projects/${gone.id}`, { repoUrl: "http://oldgit.example.lan:3003/o/r.git" });
+    await c.req("PATCH", `/api/projects/${gone.id}`, { archived: true });
+
+    const report = (await c.req("GET", "/api/netguard-allow")).json() as { report: { automatic: Array<{ address: string; kind: string; name: string; company: string | null; notAllowed: string | null }> } };
+    const at = (a: string) => report.report.automatic.find((e) => e.address === a);
+    expect(at("example.com:8000")).toMatchObject({ kind: "tool server", name: "scrapling", company: "Acme Tools", notAllowed: null });
+    expect(at("db:5432")).toMatchObject({ kind: "tool server", name: "db-client", company: "Acme Tools", notAllowed: expect.stringContaining("Not allowed") });
+    expect(at("git.example.lan:3003")).toMatchObject({ kind: "git host", name: "Website", company: "Acme Tools", notAllowed: null });
+    expect(at("oldgit.example.lan:3003")).toBeUndefined();
+    // Only host:port and names come out.
+    expect(JSON.stringify(report)).not.toMatch(/https?:\/\/|\/mcp|\/team\/site/);
+    // The CEO's server status carries the same list.
+    const status = (await c.serverStatus.status(company.id)) as { netguardAllow: { automatic: Array<{ address: string }> } | null };
+    expect(status.netguardAllow?.automatic.map((e) => e.address)).toContain("git.example.lan:3003");
+  });
+
   it("shows the owner the launcher's BOSSMAN_NETGUARD_ALLOW entries and marks the ones a project's git host covers (BOS-770)", async () => {
     const c = (ctx = await setup());
     const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
@@ -213,6 +241,30 @@ describe("runners through the launcher (R55)", () => {
     c.fake.calls.length = 0;
     await c.launcher.syncAll(1);
     expect(c.fake.calls.map((x) => `${x.method} ${x.path}`)).toEqual(["PUT /runners/app-co/allow"]);
+  });
+
+  it("toolServerDropped matches the guard: a private IP literal is kept, and so is an entry trusted for private; other names that resolve privately are dropped (BOS-791)", () => {
+    // A private IP literal can't be re-pointed, so the guard keeps it.
+    expect(toolServerDropped("http://192.168.68.20:11235/mcp", "stack")).toBe(false);
+    // A name that resolves to a private address (a compose name like db, a re-pointed name, a LAN name) is dropped,
+    // unless the owner allowed a private address for it (an import tick or a tool server they added on a LAN host).
+    expect(toolServerDropped("http://db:5432/", "stack")).toBe(true);
+    expect(toolServerDropped("http://evil.example.org:5432/", "stack")).toBe(true);
+    expect(toolServerDropped("http://evil.example.org:5432/", "stack", true)).toBe(false);
+    // A public name, or one that couldn't be looked up, is not dropped.
+    expect(toolServerDropped("http://example.com:8000/mcp", "ok")).toBe(false);
+    expect(toolServerDropped("http://broken.example.net:8000/", "lookup-failed")).toBe(false);
+  });
+
+  it("resolvesStack tells a private name from a public one and a failed lookup (BOS-791)", async () => {
+    const lookup = async (h: string) => (h === "private.example.net" ? ["172.18.0.2"] : h === "public.example.net" ? ["93.184.216.34"] : (() => { throw new Error("ENOTFOUND"); })());
+    expect(await resolvesStack("http://private.example.net:8080/mcp", lookup)).toBe("stack");
+    expect(await resolvesStack("http://public.example.net:8080/mcp", lookup)).toBe("ok");
+    // A failed lookup is its own answer (the guard would drop nothing it couldn't resolve): never a false "stack".
+    expect(await resolvesStack("http://broken.example.net:8080/mcp", lookup)).toBe("lookup-failed");
+    expect(await resolvesStack("http://db:5432/", lookup)).toBe("stack");
+    expect(await resolvesStack("http://10.1.2.3:3100/", lookup)).toBe("stack");
+    expect(await resolvesStack("http://93.184.216.34:3100/", lookup)).toBe("ok");
   });
 
   it("does nothing without the launcher", async () => {

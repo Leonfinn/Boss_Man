@@ -7,6 +7,7 @@ import { isIP } from "node:net";
 import { and, eq, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, mcpServers, projects, runners, settings } from "../db/schema.js";
+import { DROPPED_PRIVATE, DROPPED_TIED_TO_SERVER, type AutomaticEntry } from "./netguard-allow.js";
 import { expectRestart } from "./runner-restarts.js";
 import type { runnersService } from "./runners.js";
 
@@ -106,6 +107,47 @@ export async function reachesStack(url: string, lookup: HostLookup = systemLooku
     return addrs.length === 0 || addrs.some(isPrivateAddress);
   } catch {
     return true;
+  }
+}
+
+/**
+ * Where a name's addresses sit for the page (BOS-791): "stack" when it names Boss Man's own service or resolves to a
+ * private address, "lookup-failed" when the name can't be looked up from here, "ok" for a public address. Unlike
+ * `reachesStack`, a failed lookup is its own answer: only a name that really resolves to a private address is dropped.
+ */
+export async function resolvesStack(url: string, lookup: HostLookup = systemLookup): Promise<"stack" | "lookup-failed" | "ok"> {
+  if (isStackService(url)) return "stack";
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+  } catch {
+    return "lookup-failed";
+  }
+  if (host.startsWith("[")) return "stack";
+  if (isIP(host)) return isPrivateAddress(host) ? "stack" : "ok";
+  if (!host.includes(".") || /\.(local|internal|localhost|lan|home|docker)$/.test(host)) return "stack";
+  try {
+    const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
+    return addrs.some(isPrivateAddress) ? "stack" : "ok";
+  } catch {
+    return "lookup-failed";
+  }
+}
+
+/**
+ * Whether the guard drops one of Boss Man's own tool-server addresses (BOS-708, shown on the page by BOS-791). The guard
+ * keeps a private address it can't be tricked into: a private IP literal (it can't be re-pointed in DNS) and an entry the
+ * owner trusted for private (an import tick or a tool server they added on a LAN host, which `trusted` carries). Any other
+ * name that resolves to a private address is dropped. Mirrors `allow_rules` in apps/netguard/netguard.sh. Pure, so the test
+ * needs neither the database nor a lookup.
+ */
+export function toolServerDropped(url: string, where: "stack" | "lookup-failed" | "ok", trusted = false): boolean {
+  if (trusted || where !== "stack") return false;
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+    return !(isIP(host) && isPrivateAddress(host));
+  } catch {
+    return false;
   }
 }
 
@@ -224,12 +266,39 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       }
     },
 
-    /** What Boss Man already lets every company's runner reach, across all companies: tool servers and project git hosts (BOS-770). */
-    async ownAllows(): Promise<{ toolServers: string[]; gitHosts: string[] }> {
-      const rows = await db.select({ url: mcpServers.url }).from(mcpServers);
-      const repos = await db.select({ url: projects.repoUrl }).from(projects).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
-      const only = (a: (string | null)[]) => [...new Set(a.filter((x): x is string => !!x))];
-      return { toolServers: only(rows.map((r) => sendable(toolServerAddress(r.url)))), gitHosts: only(repos.map((r) => gitHostAddress(r.url!))) };
+    /**
+     * What Boss Man already lets every company's runner reach, across all companies (BOS-770, BOS-791): each tool server
+     * and each project's git host, as host:port with what it is and the company it is for. A tool server that the guard
+     * now drops (BOS-708: a name that resolves to a private address, unless it is trusted) is listed as not allowed, with
+     * the plain reason, so a missing tool server shows rather than silently leaving the list. The same allow data the guard
+     * is sent (allowFor), never a second copy. Only host:port, names and reasons come out: never a URL or a token.
+     */
+    async ownAllows(): Promise<{ toolServers: string[]; gitHosts: string[]; automatic: AutomaticEntry[] }> {
+      const mcp = await db.select({ url: mcpServers.url, name: mcpServers.name, company: companies.name }).from(mcpServers).innerJoin(companies, eq(companies.id, mcpServers.companyId));
+      const repos = await db.select({ url: projects.repoUrl, name: projects.name, company: companies.name }).from(projects).innerJoin(companies, eq(companies.id, projects.companyId)).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+      const toolServers = [...new Set(mcp.map((r) => sendable(toolServerAddress(r.url))).filter((a): a is string => !!a))];
+      const gitHosts = [...new Set(repos.map((r) => gitHostAddress(r.url!)).filter((a): a is string => !!a))];
+      const tool = await Promise.all(mcp.map(async (r): Promise<AutomaticEntry | null> => {
+        const address = sendable(toolServerAddress(r.url));
+        if (!address) return null;
+        // After BOS-708 a tool server carries its own allow_private (an import tick or a LAN host the owner added); until
+        // that column ships, none is trusted, which only marks a name that resolves privately as dropped on this page.
+        const trusted = false;
+        const where = await resolvesStack(r.url);
+        const notAllowed = toolServerDropped(r.url, where, trusted) ? (isStackService(r.url) ? DROPPED_TIED_TO_SERVER : DROPPED_PRIVATE) : null;
+        return { address, kind: "tool server", name: r.name, company: r.company, trusted, notAllowed };
+      }));
+      const git = repos.map((r): AutomaticEntry | null => {
+        const address = gitHostAddress(r.url!);
+        if (!address) return null;
+        // A git host the owner set is trusted for a private address (a LAN git server), so the guard keeps it even if its
+        // name resolves privately: never looked up here, so no row is ever shown as not allowed for a git host (BOS-708).
+        return { address, kind: "git host", name: r.name, company: r.company, trusted: true, notAllowed: null };
+      });
+      // Only what the guard is actually sent: tool servers and project git hosts. Penpot and the other add-ons are not
+      // opened by the guard on their own (the owner adds a BOSSMAN_NETGUARD_ALLOW line for Penpot), so they don't appear.
+      const automatic = [...tool, ...git].filter((e): e is AutomaticEntry => !!e);
+      return { toolServers, gitHosts, automatic };
     },
 
     /** Tells the launcher the company's tool servers again (after one is added or removed). Best effort: a launcher that is down picks them up at the next start. */

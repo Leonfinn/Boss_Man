@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { hostFactsService } from "../src/services/host-facts.js";
-import { COVERED_NOTE, netguardAllowReport } from "../src/services/netguard-allow.js";
+import { COVERED_NOTE, DROPPED_PRIVATE, netguardAllowReport, type AutomaticEntry } from "../src/services/netguard-allow.js";
 
 // BOS-770: the owner's BOSSMAN_NETGUARD_ALLOW entries are shown, and the ones Boss Man covers anyway are marked.
 // The addresses are made-up examples.
@@ -52,6 +52,71 @@ describe("netguardAllowReport", () => {
     expect(noLauncher.warnings).toEqual([expect.stringContaining("set on 2 lines")]);
     const noHost = netguardAllowReport({ launcher: { mode: "auto", allow: [] }, env: null, toolServers: [], gitHosts: [] });
     expect(noHost).toMatchObject({ entries: [], lineCanGo: false, env: null, warnings: [] });
+  });
+
+  // BOS-791: what the guard opens by itself, and any address it now drops (BOS-708).
+
+  const auto = (e: Partial<AutomaticEntry> & { address: string; kind: AutomaticEntry["kind"]; name: string }): AutomaticEntry => ({ company: null, trusted: false, notAllowed: null, ...e });
+
+  it("lists the addresses Boss Man opens by itself, each with its kind and company, in address order", () => {
+    const automatic = [
+      auto({ address: "tools.example.net:443", kind: "tool server", name: "crawl4ai", company: "Acme" }),
+      auto({ address: "git.example.lan:3003", kind: "git host", name: "Website", company: "Acme", trusted: true }),
+    ];
+    const r = netguardAllowReport({ launcher: { mode: "auto", allow: [] }, env: null, toolServers: [], gitHosts: [], automatic });
+    expect(r.automatic!.map((e) => e.address)).toEqual(["git.example.lan:3003", "tools.example.net:443"]);
+    expect(r.automatic![1]).toMatchObject({ kind: "tool server", name: "crawl4ai", company: "Acme", notAllowed: null });
+    expect(r.automatic![0]).toMatchObject({ kind: "git host", name: "Website", company: "Acme" });
+  });
+
+  it("shows an entry the guard drops as not allowed, with the reason, and keeps it in the list", () => {
+    const automatic = [
+      auto({ address: "evil.example.org:5432", kind: "tool server", name: "pkg-server", company: "Imported Co", notAllowed: DROPPED_PRIVATE }),
+      auto({ address: "tools.example.net:443", kind: "tool server", name: "crawl4ai", company: "Acme" }),
+    ];
+    const r = netguardAllowReport({ launcher: { mode: "auto", allow: [] }, env: null, toolServers: [], gitHosts: [], automatic });
+    expect(r.automatic).toHaveLength(2);
+    expect(r.automatic![0]).toMatchObject({ address: "evil.example.org:5432", notAllowed: DROPPED_PRIVATE });
+    expect(r.automatic![1]!.notAllowed).toBeNull();
+  });
+
+  it("keeps one row per address: a known kind wins, and a dropped row shares its address with an allowed one", () => {
+    const r = netguardAllowReport({
+      launcher: { mode: "auto", allow: [] },
+      env: null,
+      toolServers: [],
+      gitHosts: [],
+      automatic: [
+        auto({ address: "shared.example.lan:443", kind: "tool server", name: "typo" }),
+        auto({ address: "shared.example.lan:443", kind: "git host", name: "Website", company: "Acme", trusted: true }),
+        auto({ address: "dropped.example.org:5432", kind: "tool server", name: "one", notAllowed: DROPPED_PRIVATE }),
+        auto({ address: "dropped.example.org:5432", kind: "tool server", name: "two" }),
+      ],
+    });
+    expect(r.automatic).toEqual([
+      expect.objectContaining({ address: "dropped.example.org:5432", name: "one", notAllowed: DROPPED_PRIVATE }),
+      expect.objectContaining({ address: "shared.example.lan:443", kind: "git host" }),
+    ]);
+  });
+
+  it("says the automatic list is unknown when it couldn't be worked out, and nothing breaks without it", () => {
+    const r = netguardAllowReport({ launcher: { mode: "auto", allow: [] }, env: null, toolServers: [], gitHosts: [], automatic: null });
+    expect(r.automatic).toBeNull();
+    // No `automatic` at all (an older caller, or no launcher) reads as unknown too, never as an empty list.
+    expect(netguardAllowReport({ launcher: { mode: "auto", allow: [] }, env: null, toolServers: [], gitHosts: [] }).automatic).toBeNull();
+  });
+
+  it("never puts a URL, a path or a token in the automatic list", () => {
+    const r = netguardAllowReport({
+      launcher: { mode: "auto", allow: [] },
+      env: null,
+      toolServers: [],
+      gitHosts: [],
+      automatic: [auto({ address: "tools.example.net:443", kind: "tool server", name: "crawl4ai", company: "Acme" })],
+    });
+    const text = JSON.stringify(r);
+    expect(text).not.toMatch(/https?:\/\//);
+    expect(text).not.toMatch(/token|password|secret/i);
   });
 });
 

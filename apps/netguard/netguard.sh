@@ -4,11 +4,13 @@
 # network namespace (the launcher starts it with network mode container:<runner>) and owns one
 # nftables table, so the runner itself needs no capability and every agent session inside it is
 # covered. Docker's DNS (127.0.0.11) is on loopback and stays open; the table never touches
-# Docker's own NAT rules.
+# Docker's own NAT rules. An allow entry whose name now resolves to a private address is dropped
+# unless it is trusted for private, so a re-pointed name can't open the stack network (BOS-708).
 #   NETGUARD_ALLOW       host:port of the server, e.g. server:3100 (required)
 #   NETGUARD_EXTRA       optional, space-separated host:port entries that stay reachable (owner setting)
 #   NETGUARD_ALLOW_FILE  optional file with one host:port per line, read again every cycle
-#                        (the company's tool servers; default /etc/netguard/allow)
+#                        (the company's tool servers; default /etc/netguard/allow). A line may end in
+#                        "private" when the owner allowed that entry a private address (BOS-708).
 #   NETGUARD_DNS         optional, space-separated resolver addresses (default: read from /etc/resolv.conf)
 #   NETGUARD_EVERY       seconds between re-resolving the allowed addresses (default 15)
 # Exit code 3 means nf_tables itself doesn't work here (a probe table can't be made): the
