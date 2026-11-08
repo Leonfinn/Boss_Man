@@ -65,6 +65,17 @@ describe("merge queue screen (BOS-587)", () => {
     expect(screen.getByText(/merged as abcdef1/)).toBeTruthy();
   });
 
+  it("shows work held for another ticket's unapproved work as waiting for it, stuck, with what happens next (BOS-766, QA BOS-821)", async () => {
+    const held = { ticketId: "t9", ref: "APP-20", title: "Build the page", minutes: 65, state: "waiting_for_other_ticket", label: "waiting for APP-19 to merge first", stuck: true, next: "APP-19 has to be reviewed and merged first.", actor: "system", decisionId: null, risk: "low", urgent: false, failedCheck: false, carried: [{ ticketId: "t8", ref: "APP-19", title: "Ship the API" }] };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, waiting: [held], waitingCount: 1 })));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Build the page")).toBeTruthy();
+    const row = screen.getAllByRole("article").find((r) => within(r).queryByText("Build the page"))!;
+    expect(row.getAttribute("data-stuck")).toBe("true");
+    expect(within(row).getByText(/waiting for APP-19 to merge first/)).toBeTruthy();
+    expect(within(row).getByText(/Next: APP-19 has to be reviewed and merged first/)).toBeTruthy();
+  });
+
   it("says plainly when nothing is waiting or running", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, waitingCount: 0, running: [], waiting: [], recent: [] })));
     render(<MergeQueue companies={[company]} companyId="c1" />);
