@@ -64,6 +64,9 @@ describe("freeze rule: more than 10 freezes in 10 minutes reaches the owner (BOS
     expect(card).toMatchObject({ kind: "server_freezes", from: "owner", dedupeKey: "alert:server-freezes", clearWhen: [{ kind: "serverCalm", rule: "freezes" }] });
     expect(card.question).toContain("froze 11 times");
     expect(card.question).toContain("restart the server");
+    // BOS-647: the card names the Settings button, not a step on the host.
+    expect(card.question).toContain("Settings → Server and runner → Updates → Restart the server");
+    expect(card.question).not.toContain("server container");
     expect(card.question).toMatch(/closes itself once there have been 10 or fewer freezes in 10 minutes for 30 minutes/);
   });
 
