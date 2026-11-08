@@ -13,6 +13,7 @@ import { companies, decisions, owners, settings, tickets } from "../db/schema.js
 import { record } from "./activity.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
+import { leaveClosedNotice, liveNotice, newerNotice, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 
@@ -421,7 +422,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (row && target === "server") {
       // An older, still-open question about an earlier commit can no longer be answered: the host only deploys the tip.
       // Free each one's dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped (Freddy).
-      for (const d of await openFor("server")) if (d.id !== row.id) await withdrawOpen(d.id);
+      // BOS-739: each leaves a notice where it was, naming this card to follow instead.
+      const label = infra ? `Main has moved to ${short(commit)}` : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}`;
+      for (const d of await openFor("server")) if (d.id !== row.id) await withdrawOpen(d.id, (steps) => newerNotice({ newerId: row.id, label, steps, now: new Date() }));
       // BOS-683 (DR-036): an older server hand-apply to-do, still open or waiting in the owner's queue, is now
       // covered by this newer card — applying the newer commit brings the older one's changes in too. So it is
       // cleared with a note naming the new card, instead of sitting beside it. A to-do for the same commit is left
@@ -431,20 +434,36 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         .from(decisions)
         .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'owner_todo'`, sql`${decisions.context}->>'target' = 'server'`));
       const includes = carried.length ? ` It includes ${carried.join("; ")}.` : "";
+      const newerLabel = `Main has moved to ${short(commit)}`;
       for (const t of todos) {
         const c = t.context as Extract<DecisionContext, { type: "owner_todo" }>;
         if (!c.commit || c.commit === commit) continue;
-        const r = await clearOwnerTodo(db, `owner-todo:self-deploy:${c.commit}`, `Covered by the newer update card ("Main has moved to ${short(commit)}"): applying ${short(commit)} brings this in too.${includes} Marked done.`);
-        if (r) deps.log?.(`self-deploy: older hand-apply to-do for ${short(c.commit)} covered by ${short(commit)} (BOS-683)`);
+        const r = await clearOwnerTodo(db, `owner-todo:self-deploy:${c.commit}`, `Covered by the newer update card ("${newerLabel}"): applying ${short(commit)} brings this in too.${includes} Marked done.`);
+        if (r) {
+          // BOS-739: leave a notice where the card was, so an owner part-way through its steps knows why
+          // it closed and is pointed at the newer card. The card's steps stay readable with it.
+          await leaveClosedNotice(db, r.id, newerNotice({ newerId: row.id, label: newerLabel, steps: c.steps, now: new Date() }), { notify: deps.notify });
+          deps.log?.(`self-deploy: older hand-apply to-do for ${short(c.commit)} covered by ${short(commit)} (BOS-683)`);
+        }
       }
     }
     return row ?? null;
   }
 
   /** A card closed by the product, not answered: its notification is marked read here (BOS-413). */
-  async function withdrawOpen(id: string) {
+  async function withdrawOpen(id: string, notice?: ClosedNotice | ((steps?: string[]) => ClosedNotice)) {
+    const [row] = await db.select({ context: decisions.context }).from(decisions).where(eq(decisions.id, id));
     await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, id));
     await markDecisionNotificationRead(db, id);
+    // BOS-739: a card the system closed leaves a notice where it was, so an owner part-way through its
+    // hand steps knows why it closed (and where to carry on). Its steps stay readable with the notice.
+    const ctx = row?.context as SelfDeployContext | undefined;
+    const steps = ctx?.type === "self_deploy" ? ctx.handSteps : undefined;
+    // Only a hand-apply card has steps the owner might be part-way through; a one-click deploy card
+    // leaves nothing to explain, so it is just removed as before.
+    const handApply = !!steps?.length || !!ctx?.ownerOpenedAt;
+    const n = handApply ? (typeof notice === "function" ? notice(steps) : notice) : undefined;
+    if (n) await leaveClosedNotice(db, id, n, { notify: deps.notify });
   }
 
   async function saveSeen(key: string) {
@@ -639,8 +658,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
      * the owner doing anything. (It may land on a later commit than the approved one, per BOS-124.)
      * Rows from before `fromCommit` existed fall back to an exact match on the approved commit.
      */
-    async clearDoneOwnerTodos(a: Available | null) {
+    async clearDoneOwnerTodos(a: Available | null, s?: DeployStatus | null) {
       if (!a?.deployed) return 0;
+      // When the host says it deployed the live commit, its own end time is when it went live; otherwise
+      // the poll's time is the best we have. Either way it is a real reading, never guessed.
+      const deployed = s?.result === "deployed" && s.to_commit === a.deployed ? Date.parse(s.ended) : NaN;
+      const liveAt = Number.isFinite(deployed) ? new Date(deployed) : new Date(a.checkedAt);
       const todos = await db
         .select({ id: decisions.id, context: decisions.context })
         .from(decisions)
@@ -651,7 +674,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         const caughtUp = ctx.fromCommit ? a.deployed !== ctx.fromCommit : ctx.commit === a.deployed;
         if (!caughtUp) continue;
         const r = await clearOwnerTodo(db, `owner-todo:self-deploy:${ctx.commit}`, `The approved change to ${short(a.deployed)} is applied: the host reports it running. Marked done.`);
-        if (r) cleared++;
+        if (r) {
+          // BOS-739: leave a notice where the card was, so an owner part-way through its steps knows why
+          // it closed (the update went live by itself), and its steps stay readable with it.
+          await leaveClosedNotice(db, r.id, liveNotice({ commit: a.deployed, liveAt, steps: ctx.steps, now: new Date() }), { notify: deps.notify });
+          cleared++;
+        }
       }
       return cleared;
     },
@@ -664,7 +692,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const a = await available();
       if (s && s.result !== "running") await finished(s, a);
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
-      if (a) await this.clearDoneOwnerTodos(a);
+      if (a) await this.clearDoneOwnerTodos(a, s);
       if (s?.result !== "running") await releaseRunnerDue(a);
       // The database/proxy step is its own card, never part of a server update (BOS-487).
       await clearServiceCards(a);
@@ -675,7 +703,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return woken;
       if (a.tip === a.deployed) {
         // Free the dedupe key, as every other withdraw does, so a later offer for that commit is not silently dropped (Freddy).
-        for (const d of await openFor("server")) await withdrawOpen(d.id);
+        // BOS-739 (8 Nov 13:47): the owner may be part-way through this card's hand steps; the notice says it is live and they can stop.
+        const liveAt = s?.result === "deployed" && s.to_commit === a.deployed && Number.isFinite(Date.parse(s.ended)) ? new Date(s.ended) : new Date(a.checkedAt);
+        for (const d of await openFor("server")) await withdrawOpen(d.id, (steps) => liveNotice({ commit: a.deployed, liveAt, steps, now: new Date() }));
         return woken;
       }
       await raise("server", a.tip, a.deployed, a);
