@@ -84,6 +84,7 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
 
   // Agents.
   const holders = new Map<string, string[]>(); // skill → agent folders. lost on restart, harmless: one import call.
+  const skippedSecrets = new Set<string>(); // lowercase secret names, for one note. lost on restart, harmless: one import call.
   const secrets = new Map<string, string[]>(); // env name → agent folders. lost on restart, harmless: one import call.
   const agentDirs = [...new Set([...files.keys()].filter((p) => /^agents\/[^/]+\/AGENTS\.md$/.test(p)).map((p) => p.split("/")[1]!))].sort();
   const paperclipy: string[] = [];
@@ -120,8 +121,16 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
       else missing.push(ref.split("/").at(-1)!);
     }
     if (missing.length) notes.push(`${str(md.meta.name) ?? slug} had skills that aren't in the export: ${missing.join(", ")}.`);
-    for (const [env, v] of Object.entries(obj(obj(cfg.inputs).env))) if (obj(v).kind === "secret" && /^[A-Z][A-Z0-9_]{0,63}$/.test(env)) secrets.set(env, [...(secrets.get(env) ?? []), slug]);
+    for (const [env, v] of Object.entries(obj(obj(cfg.inputs).env))) {
+      if (obj(v).kind !== "secret") continue;
+      if (/^[A-Z][A-Z0-9_]{0,63}$/.test(env)) secrets.set(env, [...(secrets.get(env) ?? []), slug]);
+      else skippedSecrets.add(env);
+    }
   }
+  if (skippedSecrets.size)
+    notes.push(
+      `Secret names must be upper case, so these weren't imported: ${[...skippedSecrets].map((n) => `${n} (add it as ${n.toUpperCase()})`).join(", ")}. Scripts that read the old name will get an empty value; change them to read the upper-case name.`,
+    );
   if (paperclipy.length)
     notes.push(
       `${paperclipy.length === 1 ? "1 agent's instructions describe" : `${paperclipy.length} agents' instructions describe`} working in Paperclip (the paperclip skill, heartbeats, its API or /paperclip paths), which Boss Man doesn't have: ${paperclipy.join(", ")}. After importing, ask your CEO to revise them (it can read and update every agent's instructions), or edit them under Agents.`,

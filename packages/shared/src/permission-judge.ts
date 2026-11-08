@@ -50,7 +50,9 @@ const SHELL_ALT = SHELL_NAMES.split(" ").sort((a, b) => b.length - a.length).joi
  * Tools that create, move or delete a file named by their arguments (BOS-715). Given a target the judge can't place, or
  * reading their targets from `xargs` input, they are unread code. `shred` overwrites in place, so it counts as a delete.
  */
-const FILE_TOOLS = new Set("rm rmdir shred unlink cp mv ln install touch truncate tee mkdir mkfifo mknod".split(" "));
+/** Programs that may run under `xargs` / `parallel` and still get Allow: they only read (BOS-730). */
+const XARGS_READONLY = new Set("echo printf cat grep egrep fgrep rg wc ls head tail uniq basename dirname stat file diff cmp md5sum sha256sum".split(" "));
+const FILE_TOOLS =new Set("rm rmdir shred unlink cp mv ln install touch truncate tee mkdir mkfifo mknod".split(" "));
 
 /**
  * One work budget for the whole `-c` scan of a command, shared by every nesting level (BOS-715, Dougal's timing finding): each
@@ -254,13 +256,29 @@ export function judgePermission(question: string, command: string | null, ownFol
     // One greedy, non-overlapping capture per tool keeps the scan linear (BOS-729: re-slicing the rest of the line for every
     // match was O(n²)). `xargs` appends its input to the command, so a file tool under it deletes or overwrites names the judge
     // never sees (`echo /etc | xargs rm -rf`, `find / | xargs shred`): no Allow.
-    for (const m of c.matchAll(/\b(?:rm|rmdir|cp|mv|install|ln|shred|unlink|xargs)\b([^;&|\n]*)/g)) {
+    for (const m of c.matchAll(/\b(?:rm|rmdir|cp|mv|install|ln|shred|unlink)\b([^;&|\n]*)/g)) {
       const rest = m[1]!;
       if (/<\(/.test(rest)) return result("outside"); // a process substitution is a path the judge can't place
       if (hasBraceExpansion(rest)) return result("outside"); // `rm -rf /tmp/a {/etc,/tmp/b}` is several paths (BOS-725)
-      const words = shellWords(rest);
-      if (m[0].startsWith("xargs") && words.some((w) => FILE_TOOLS.has(w.replace(/^.*\//, "")))) return result("outside");
-      for (const tok of words) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
+      for (const tok of shellWords(rest)) if (tok !== "" && hasUnresolvedExpansion(tok)) return result("outside");
+    }
+    // `xargs` / `parallel` get their own pass, so an earlier file-tool word can't swallow them (`echo / | env -u rm xargs rm -rf`,
+    // BOS-730). The program they run is the first word that is not an option or an option's value; only a short read-only list
+    // may follow (anything else, `perl`, `find -delete`, `env`, `nice`, `rm`, can delete names the judge never sees). Any file
+    // tool word anywhere after them also counts. Fail closed: a word the scan misreads as the program is not on the list.
+    for (const m of c.matchAll(/\b(?:xargs|parallel)\b([^;&|\n]*)/g)) {
+      const words = shellWords(m[1]!);
+      if (words.some((w) => FILE_TOOLS.has(w.replace(/^.*\//, "")))) return result("outside");
+      let prog: string | undefined;
+      for (let i = 0; i < words.length; i++) {
+        const w = words[i]!;
+        if (w === "" || w === ":::" || w === "::::") continue;
+        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJN]$|^--(?:max-args|replace|delimiter|max-procs|max-lines|eof|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
+        prog = w.replace(/^.*\//, "");
+        break;
+      }
+      // No program found: xargs then runs echo, but a bare `parallel` runs each input line as a command (BOS-731).
+      if (prog === undefined ? m[0].startsWith("parallel") : !XARGS_READONLY.has(prog)) return result("outside");
     }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.

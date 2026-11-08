@@ -2124,3 +2124,33 @@ describe("rules judge: wrappers, shells and option table under xargs/parallel (B
     expect(Date.now() - t).toBeLessThan(3000);
   });
 });
+
+// BOS-730 (Jane's review of BOS-729): `..` in shred targets, xargs hidden behind an earlier file-tool word, and xargs/parallel
+// feeding a program that deletes but is not a file tool. Every Deny row got Allow before this fix.
+describe("rules judge: shred .., xargs behind a tool word, xargs/parallel deleters (BOS-730)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    "shred /tmp/../etc/passwd",
+    "cd /tmp && shred ../etc/passwd",
+    "echo / | env -u rm xargs rm -rf",
+    "echo / | nice cp xargs rm -rf",
+    "echo / | xargs perl -e 'unlink @ARGV'",
+    "echo / | xargs find -delete",
+    "echo /etc | parallel rm -rf",
+    "echo /etc | xargs -n 1 perl -e 'unlink @ARGV'",
+    "echo /etc | xargs -I{} find {} -delete",
+    "echo /etc | xargs -r find cat -delete",
+    "echo / | xargs -t find ls -delete",
+    "echo / | parallel -r find ls -delete",
+    "echo /etc | xargs -r nice ls",
+    "echo /etc | xargs -t sh ls",
+    "cat /tmp/cmds.txt | parallel",
+    "echo /etc/passwd | xargs sort -o",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "ls /tmp/a | xargs echo",
+    "ls /tmp/a | xargs -r ls",
+    "ls /tmp/a | xargs -n 1 grep foo > /tmp/out.txt",
+  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+});
