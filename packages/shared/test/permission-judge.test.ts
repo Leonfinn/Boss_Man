@@ -1953,6 +1953,7 @@ describe("rules judge: rules-judge rolling follow-ups (BOS-744)", () => {
     "cat <<'EOF' > /tmp/x\nrm -rf /etc\nEOF",
     "tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
     "cat <<'EOF' > /tmp/x\nhello\nEOF",
+    "echo hi && tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
     "echo `date`\n",
     "cat `date` > /tmp/x\n",
   ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
