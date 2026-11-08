@@ -86,9 +86,11 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
     async createTarget(companyId: string, input: TargetInput) {
       const problem = endpointProblem(input.kind, input.endpoint);
       if (problem) throw new DeployError(422, problem);
+      // A new target asks the owner unless they say otherwise (BOS-754): the safe value is the default, and
+      // `requiresApproval: false` is the deliberate choice. Targets made before this keep what they have.
       const [t] = await db
         .insert(deployTargets)
-        .values({ companyId, name: input.name, kind: input.kind, endpoint: input.endpoint.trim(), isProduction: input.isProduction ?? false, rules: { requiresApproval: input.requiresApproval ?? false } })
+        .values({ companyId, name: input.name, kind: input.kind, endpoint: input.endpoint.trim(), isProduction: input.isProduction ?? false, rules: { requiresApproval: input.requiresApproval ?? true } })
         .returning();
       return t!;
     },
