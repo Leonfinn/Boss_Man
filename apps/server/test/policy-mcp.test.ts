@@ -181,7 +181,7 @@ describe("permission requests through the policy engine", () => {
     await ctx.db.insert(policyRules).values({ companyId: ctx.homelab.company.id, name: "No crawl4ai JS", trigger: "permission", condition: { titlePattern: "^mcp__crawl4ai__execute_js$" }, outcome: "deny", position: 0 });
     ask("r1", "mcp__crawl4ai__md");
     const [d] = await open(1);
-    expect(d!.options).toEqual(["Allow once", "Always allow crawl4ai's md tool", "Always allow every crawl4ai tool", "Deny"]);
+    expect(d!.options).toEqual(["Allow once", "Always allow crawl4ai's md tool", "Deny"]);
     expect(d!.question).toMatch(/^CEO wants to use a tool/);
     const ans = await ctx.app.inject({ method: "POST", url: `/api/decisions/${d!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Always allow crawl4ai's md tool" } });
     expect(ans.json()).toMatchObject({ delivered: true });
@@ -190,8 +190,8 @@ describe("permission requests through the policy engine", () => {
     const rules = await ctx.db.select().from(policyRules).where(eq(policyRules.companyId, ctx.homelab.company.id)).orderBy(policyRules.position);
     expect(rules).toHaveLength(2);
     expect(rules[0]).toMatchObject({ name: "No crawl4ai JS", position: 0 });
-    expect(rules[1]).toMatchObject({ outcome: "allow", position: 1, condition: { titlePattern: "^mcp__crawl4ai__md$", safeOnly: true } });
-    expect(rules[1]!.name).toMatch(/^Allow crawl4ai's md tool \(from a request on \d+ \w+\)$/);
+    expect(rules[1]).toMatchObject({ outcome: "allow", position: 1, condition: { titlePattern: "^mcp__crawl4ai__md$", safeOnly: true, agentIds: [ctx.homelab.ceo.id] } });
+    expect(rules[1]!.name).toMatch(/^Allow crawl4ai's md tool for CEO \(from a request on \d+ \w+\)$/);
 
     ask("r2", "mcp__crawl4ai__md");
     await waitFor(() => commands.length, (n) => n === 2);

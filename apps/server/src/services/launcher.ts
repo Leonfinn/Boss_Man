@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { and, eq, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { companies, mcpServers, projects, settings } from "../db/schema.js";
+import { companies, mcpServers, projects, runners, settings } from "../db/schema.js";
 import { expectRestart } from "./runner-restarts.js";
 import type { runnersService } from "./runners.js";
 
@@ -253,6 +253,8 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     async stop(companyId: string) {
       const slug = await slugFor(companyId);
       await call("DELETE", `/runners/${slug}`);
+      // A deliberate stop is not an outage: forget when it was last seen so the runner watch stays quiet.
+      await db.update(runners).set({ lastSeenAt: null }).where(eq(runners.companyId, companyId));
       return { slug };
     },
 
@@ -262,6 +264,22 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       const rows = await db.select().from(settings).where(like(settings.key, `${SLUG_KEY}%`));
       const company = new Map(rows.map((r) => [r.value as string, r.key.slice(SLUG_KEY.length)]));
       return all.map((r) => ({ slug: r.slug, companyId: company.get(r.slug) ?? null, current: r.current }));
+    },
+
+    /**
+     * The company ids whose runner the launcher means to keep running (a container or a token file),
+     * or null when that can't be known: no launcher (runners are registered by hand), the launcher
+     * is down, or it is older than this server. Null means "treat every runner as wanted".
+     */
+    async wantedCompanies(): Promise<Set<string> | null> {
+      if (!opts) return null;
+      try {
+        const slugs = new Set(await call<string[]>("GET", "/wanted"));
+        const rows = await db.select().from(settings).where(like(settings.key, `${SLUG_KEY}%`));
+        return new Set(rows.filter((r) => slugs.has(r.value as string)).map((r) => r.key.slice(SLUG_KEY.length)));
+      } catch {
+        return null;
+      }
     },
 
     /** One company's runner again on the current image; the launcher keeps its token and data. // leader-only */
