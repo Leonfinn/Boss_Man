@@ -332,8 +332,11 @@ function gitArgsDenied(args: string[], dirOk: (p: string) => boolean, pathOk: (p
   }
   if (spec.none && plain.length > 0) return true;
   if (spec.first && !(plain[0] !== undefined && spec.first.test(plain[0]))) return true;
+  // A `::` transport (`ext::sh -c ...`, `fd::3`) runs an arbitrary program whatever the subcommand: BOS-701 restored this for
+  // every remote-taking subcommand, not just `clone` (BOS-378 checked only `clone`, so `fetch`/`ls-remote`/`pull` slipped).
+  const REMOTE_SUB = /^(?:clone|fetch|pull|push|ls-remote|remote|submodule|archive|bundle|ls-tree|cat-file|show|diff)$/;
   for (const p of plain) {
-    if (/::/.test(p) && sub === "clone") return true;
+    if (/::/.test(p) && sub !== undefined && REMOTE_SUB.test(sub)) return true;
     if (/\{[^}]*(?:,|\.\.)[^}]*\}/.test(p)) return true; // brace expansion
     if (!spec.w) continue;
     if (/(?:^|\/)\.\.(?:\/|$)/.test(p)) return true;
@@ -846,6 +849,9 @@ const TOOL_RUNNER = /^(?:pnpm|npm|yarn|npx|pnpx|bunx)$/;
 // Options whose value names a file or folder a package manager runs from or reads config from. Judged wherever they stand
 // (`--silent -C /tmp/p`, `--script-shell=/tmp/x.sh`), with the value attached (`-C/tmp`, `--prefix=/tmp`) or in the next word.
 const TOOL_PATH_OPT = /^(?:-C|--dir|--prefix|--cwd|--config|--git-dir|--work-tree|--workspace-dir|--userconfig|--globalconfig|--use-yarnrc|--require|-r|--loglevel-file|--root|--script-shell)$/;
+// BOS-701 (allow-list, not a deny-list): the package-manager options whose value only names where output is written, so an
+// absolute /tmp path there is fine (`pnpm run build --outDir /tmp/out`). Any other `--key=/abs/path` value gets no Allow.
+const OUTPUT_OPT = /^--(?:outDir|out-dir|output-dir|outputDir|dist-dir|distDir|report-dir|reportDir|coverage-dir|coverageDir)$/;
 /** True when `w` is a relative path that climbs out of the checkout with `..` (`../x.ts`, `../../x.test.ts`). */
 function climbsOut(w: string): boolean {
   const p = w.replace(/^['"]+|['"]+$/g, "");
@@ -870,16 +876,65 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
   const segs = shellSegments(c, bad);
   if (bad.v) return true; // the parser can't tell where a heredoc or arithmetic ends: fail closed
   const wrappers = /^(?:env|nohup|time|sudo|command|nice|setsid|stdbuf|exec|timeout|-exec|-execdir|-ok|-okdir|then|do|else|if|while|until|!|\{)$/;
+  // BOS-701 (lost BOS-378 check): a folder a `cd`/`pushd`/`chdir` or a wrapper's folder flag (`env -C`) moves to that is
+  // outside the checkout. `/tmp` is outside here even though `cd /tmp` itself is fine: running repo code there is code the
+  // judge can't read. A relative sub-folder and the own folder keep it inside.
+  const repoDirOk = (dir: string): boolean => dir !== "" && dir !== "-" && (inOwn(dir) || /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(dir)) && !dir.includes("..");
+  // A program that runs repo code from the checkout once the working folder is outside it gets no Allow. git always counts (it
+  // runs hooks and aliases). A package manager counts when it runs a script (`run`, `test`, a bare script name); a plain
+  // `npm init`/`install` in a fresh /tmp folder only sets up or installs packages there, which the CEO allowed (BOS-329 eval).
+  const RUNS_REPO_CODE = /^(?:git|make|gmake|cmake|gradle|mvn|ant|cargo|dotnet|rake|bundle|mix|stack)$/;
+  const PM = /^(?:pnpm|npm|yarn|npx|pnpx|bunx|bun)$/;
+  const PM_SCRIPT = /^(?:run|run-script|test|t|start|dev|restart|rebuild|pack|publish|exec|dlx|create)$/;
+  const pmRunsScript = (args: string[]): boolean => {
+    const first = args.find((a) => !a.startsWith("-") && a !== "");
+    // No verb (`pnpm` alone) or a script-run verb, or a word that is not a known non-script verb (a bare script name).
+    if (first === undefined) return true;
+    if (PM_SCRIPT.test(first)) return true;
+    return !/^(?:install|i|ci|add|remove|rm|update|up|init|prune|audit|list|ls|outdated|why|licenses|dedupe|fetch|prefetch|store|config|c|set|link|unlink|patch|version)$/.test(first);
+  };
+  let away = false;
   for (const s of segs) {
     let k = 0;
-    while (k < s.words.length && (/^\w+\+?=/.test(s.words[k]!) || wrappers.test(s.words[k]!))) { if (s.words[k] === "timeout") k++; k++; }
+    // Peel launchers and their own flags: `env -C /tmp/p cmd`, `env -u X cmd`, `timeout 120 cmd`, `sudo cmd`, `A=b cmd`.
+    while (k < s.words.length) {
+      const w = s.words[k]!;
+      if (/^\w+\+?=/.test(w)) { k++; continue; }
+      if (w === "timeout") { k++; if (/^\d[\w.]*$/.test(s.words[k] ?? "")) k++; continue; }
+      if (w === "env" || w === "chdir") {
+        // A wrapper that can change the working folder: `-C /tmp/p` / `--chdir /tmp/p`.
+        k++;
+        while (k < s.words.length) {
+          const f = s.words[k]!;
+          if (f === "-C" || f === "--chdir") { if (!repoDirOk(s.words[k + 1] ?? "")) away = true; k += 2; continue; }
+          if (/^(?:--chdir)=/.test(f)) { if (!repoDirOk(f.slice(f.indexOf("=") + 1))) away = true; k++; continue; }
+          if (/^(?:-u|--unset|-S|--split-string)$/.test(f)) { k += 2; continue; } // takes a value
+          if (f.startsWith("-") && f !== "-") { k++; continue; }
+          break;
+        }
+        continue;
+      }
+      if (wrappers.test(w)) { k++; continue; }
+      break;
+    }
     const head = (s.words[k] ?? "").replace(/^.*\//, "");
     const args = s.words.slice(k + 1);
+    // A `cd`/`pushd`/`chdir` moves the working folder for the segments that follow; a bare `popd`/`cd -` can't be read.
+    if (/^(?:cd|pushd|chdir)$/.test(head)) {
+      const target = args.find((a) => a !== "--")?.replace(/^['"]+|['"]+$/g, "") ?? "";
+      if (target === "" || target === "-" || /^\/tmp(\/|$)/.test(target) || target.includes("..") || !repoDirOk(target)) away = true;
+      continue;
+    }
+    if (head === "popd") { away = true; continue; }
+    if (away && (RUNS_REPO_CODE.test(head) || (PM.test(head) && pmRunsScript(args)))) return true;
     // find's `-exec`/`-execdir`/`-ok`/`-okdir` program: a path that leaves the checkout is code from elsewhere.
     if (head === "find") {
       for (let i = 0; i < args.length; i++) {
         if (!/^-(?:exec|execdir|ok|okdir)$/.test(args[i]!)) continue;
-        const prog = args[i + 1] ?? "";
+        // The -exec program may sit behind a wrapper (`env ../x.sh`): peel env/nohup/nice/... and its assigns to reach it.
+        let j = i + 1;
+        while (j < args.length && (wrappers.test(args[j]!) || /^\w+\+?=/.test(args[j]!))) j++;
+        const prog = args[j] ?? "";
         // A bare name (`grep`, `rm`) runs from PATH; only a word naming a path (`../x.sh`, `/tmp/x.sh`, `./x.sh`) is judged.
         if (prog.includes("/") && (climbsOut(prog) || pathLeaves(prog, inOwn))) return true;
       }
@@ -902,6 +957,18 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
       // already denied by usesScratchUnsafely. A package name (`@scope/pkg`) has no `..`, so it is not caught.
       const val = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : a;
       if (!val.startsWith("-") && climbsOut(val)) return true;
+      // BOS-701 (lost BOS-378 check, part B): npm and pnpm read any `--key=value` as a config setting, so BOS-638's fixed list of
+      // option names misses some (`--node-options=--require=/tmp/x.js`, `--config.script-shell=/tmp/x.sh`). Allow-list, not one
+      // more name on the deny-list: any option value naming an absolute path outside the checkout gets no Allow, unless the option
+      // is a known output option that only writes there (`--outDir`).
+      if (a.startsWith("--")) {
+        const name = eq > 0 ? a.slice(0, eq) : a;
+        const v = eq > 0 ? a.slice(eq + 1) : args[i + 1];
+        // Any absolute path token inside the value that leaves the checkout (`--require=/tmp/x.js`, `--node-options` value).
+        if (!OUTPUT_OPT.test(name) && v !== undefined) {
+          for (const tok of v.split(/[\s=,'"]+/)) if (/^\//.test(tok) && pathLeaves(tok, inOwn)) return true;
+        }
+      }
     }
   }
   return false;

@@ -960,3 +960,50 @@ describe("rules judge: Jane's round-5 BOS-378 findings (BOS-638)", () => {
     allows(["find . -exec grep -l x {} +", "find . -exec ./scripts/x.sh {} +"]);
   });
 });
+
+// BOS-701 (Jane's merge-only security round on BOS-638, head ab17c713): BOS-378's checks were Deny at its head 189a7ba7 but are
+// Allow on main (e448aa05) and on BOS-638, because BOS-377/631 replaced that code and BOS-378 merged with "no code left". The
+// judge is only in "watch", so none affects anyone today, but all must be closed before any company switches it to "advise".
+describe("rules judge: BOS-378 checks lost in the merges (BOS-701)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+
+  // A. Lost from BOS-378. After a `cd`/`pushd`/`env -C` to a folder outside the checkout, no Allow for a program that runs repo
+  // code. BOS-378's original criteria 2 and 3 (git in a repo outside the checkout; `::` transports) and the pnpm/npm run and
+  // find -exec forms that reach a /tmp folder by a cd or a wrapper's folder flag instead of `-C`.
+  describe("A. lost from BOS-378", () => {
+    deny([
+      "cd /tmp/p && git status",
+      "pushd /tmp/p && git status",
+      "cd /tmp/p; git status",
+      "cd /tmp/p && pnpm --silent run evil",
+      "cd /tmp/p; npm test",
+      "env -C /tmp/p pnpm run evil",
+      "find . -exec env ../x.sh {} \\;",
+    ]);
+    // A `::` transport on any remote-taking git subcommand runs an arbitrary command; BOS-378 only checked `clone`.
+    deny([
+      "git fetch 'ext::sh -c id'",
+      "git ls-remote 'ext::sh -c id'",
+      "git pull 'ext::sh -c id'",
+    ]);
+    // A cd into a sub-folder of the checkout, an own-folder cd, and a git with its own -C stay Allow.
+    allows(["cd packages/shared && git status", "cd packages/shared && pnpm run build", "git -C packages/shared status", "pnpm --silent run build"]);
+  });
+
+  // B. npm/pnpm config by flag. npm and pnpm read any `--key=value` as a config setting, so BOS-638's fixed list of option names
+  // misses some. Any option value naming an absolute path outside the checkout gets no Allow, unless the option is on a short
+  // allow-list of known output options (`--outDir`), which is an allow-list rule, not one more name on the deny-list.
+  describe("B. npm/pnpm config by flag", () => {
+    deny([
+      "npm --node-options=--require=/tmp/x.js run build",
+      "pnpm --config.script-shell=/tmp/x.sh run build",
+      "npm --node-options --require=/tmp/x.js run build",
+    ]);
+    // A known output option that names a /tmp path stays Allow (the build writes there), as it did before.
+    allows(["pnpm run build --outDir /tmp/out", "npm --silent run build"]);
+  });
+});
