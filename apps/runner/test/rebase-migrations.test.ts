@@ -268,6 +268,18 @@ describe("mergeSnapshots", () => {
     const theirs = { id: "t", tables: { t: { columns: { a: { type: "x" }, c: { type: "z" } } } } };
     expect((mergeSnapshots(base, ours, theirs) as typeof base).tables.t.columns).toEqual({ a: { type: "x" }, c: { type: "z" }, b: { type: "y" } });
   });
+  it("keeps columns named like Object.prototype members (BOS-737)", () => {
+    const col = (n: string) => JSON.parse(`{"id":"x","tables":{"t":{"columns":{"a":{"type":"x"},"${n}":{"type":"y"}}}}}`);
+    const theirs = { id: "t", tables: { t: { columns: { a: { type: "x" } } } } };
+    for (const name of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      const merged = mergeSnapshots(base, col(name), theirs) as typeof base;
+      expect(Object.keys(merged.tables.t.columns).sort()).toEqual(["a", name].sort());
+      expect(JSON.stringify(merged)).toContain(`"${name}":{"type":"y"}`);
+    }
+    // and the same name added on main's side
+    const merged = mergeSnapshots(base, { id: "o", tables: { t: { columns: { a: { type: "x" } } } } }, col("constructor")) as typeof base;
+    expect(Object.keys(merged.tables.t.columns)).toContain("constructor");
+  });
   it("throws when both sides change the same column differently", () => {
     const ours = { id: "o", tables: { t: { columns: { a: { type: "y" } } } } };
     const theirs = { id: "t", tables: { t: { columns: { a: { type: "z" } } } } };

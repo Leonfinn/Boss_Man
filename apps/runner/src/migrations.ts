@@ -242,10 +242,12 @@ export function mergeSnapshots(base: Json, ours: Json, theirs: Json): Json {
     const unit = p[0] === "tables" ? 4 : 2;
     if (p.length < unit && isPlain(o) && isPlain(t) && (b === ABSENT || isPlain(b))) {
       const bb: Plain = b === ABSENT ? {} : b;
-      const out: Plain = {};
+      // Own keys only, and an output with no prototype: a column called "constructor" or "toString" must survive.
+      const has = (x: Plain, k: string) => Object.hasOwn(x, k);
+      const out: Plain = Object.create(null);
       for (const key of [...Object.keys(t), ...Object.keys(o)]) {
-        if (key in out) continue;
-        const v = walk(key in bb ? bb[key] : ABSENT, key in o ? o[key] : ABSENT, key in t ? t[key] : ABSENT, [...p, key]);
+        if (has(out, key)) continue;
+        const v = walk(has(bb, key) ? bb[key] : ABSENT, has(o, key) ? o[key] : ABSENT, has(t, key) ? t[key] : ABSENT, [...p, key]);
         if (v !== ABSENT) out[key] = v;
       }
       return out;
