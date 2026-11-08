@@ -184,6 +184,19 @@ describe("rule 1 and 2 hand-offs reach the Scrum Master (BOS-659)", () => {
     expect((await ctx.db.select().from(watchdogFlags)).filter((f) => f.status === "open")).toHaveLength(0);
   });
 
+  it("rule 1b: an agent that picked the ticket up and whose run then ended is handed over at the short limit (live follow-up)", async () => {
+    await ctx.switchOn();
+    // The real live shape: the scheduler moved the ticket in progress 40 min ago, the run started just after
+    // and ended normally 20 min ago, and nothing has happened since. Before the fix this fell through to the
+    // 45-minute grace and the two-hour long rule, so half the slots sat empty for hours.
+    const t = await ctx.ticket({ title: "Picked up then let go", systemState: "in_progress", stateChangedAt: ctx.ago(40) });
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, purpose: "work", startedAt: ctx.ago(39), endedAt: ctx.ago(20), outcome: "end_turn" });
+    await ctx.watchdog.run();
+    expect(await ctx.smWakes()).toHaveLength(1);
+    const flags = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id));
+    expect(flags.map((f) => f.rule)).toEqual(["idle_agent"]);
+  });
+
   it("rule 2: a ready ticket released from a finished blocker and never run is handed to the Scrum Master", async () => {
     await ctx.switchOn();
     const blocker = await ctx.ticket({ title: "Blocker", systemState: "done", stateChangedAt: ctx.ago(30) });
