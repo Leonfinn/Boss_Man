@@ -1,10 +1,14 @@
-// @vitest-environment jsdom
+// @vitest-environment node
+//
+// A real browser, not jsdom: the box's own markup is rendered here (React's server renderer, so no
+// DOM is needed), then that markup is loaded into headless Chromium and measured at real widths.
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { cleanup, render } from "@testing-library/react";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import type { Company, Plan as PlanData, PlanNode } from "../src/api";
-import { Plan } from "../src/pages/Plan";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
+import { afterAll, describe, expect, it } from "vitest";
+import type { Plan as PlanData, PlanNode } from "../src/api";
+import { Causes } from "../src/pages/Plan";
 
 // BOS-745: a rendering check of the "What's holding work up" box at real widths, not a reading of
 // the CSS text. The box's own markup is rendered by the real component (the same tree the pages
@@ -48,13 +52,6 @@ const browser = await launch();
 afterAll(async () => {
   await browser?.close();
 });
-afterEach(() => {
-  cleanup();
-  vi.unstubAllGlobals();
-});
-
-const company = { id: "c1", name: "App Co", mission: "x", paused: false, agents: [] } as Company;
-
 const ticket = (i: number, holdingUp: number): PlanNode => ({
   id: `t${i}`,
   kind: "ticket",
@@ -94,20 +91,13 @@ const manyBlockers = (n: number): PlanData => {
   };
 };
 
-// The box's real markup, from the real component, wrapped in the page it sits on.
-async function causesHtml(plan: PlanData): Promise<string> {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => new Response(JSON.stringify(plan), { status: 200, headers: { "content-type": "application/json" } })),
-  );
-  const { container } = render(<Plan companies={[company]} companyId="c1" go={() => {}} />);
-  // Wait for the async plan fetch to land and the box to appear.
-  for (let i = 0; i < 100 && !container.querySelector("#causes-h"); i++) {
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  const card = container.querySelector(".card") as HTMLElement | null;
-  if (!card) throw new Error("the causes box did not render");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body style="margin:0">${card.outerHTML}</body></html>`;
+// The box's real markup, from the real component, wrapped in the page it sits on. The Plan page
+// only reads its data through usePoll after it mounts, so the box is rendered directly from the
+// same component the page uses; the browser below then loads its markup and runs its real handlers.
+function causesHtml(plan: PlanData): string {
+  const box = renderToString(createElement(Causes, { plan }));
+  if (!box.includes('id="causes-h"')) throw new Error("the causes box did not render");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body style="margin:0">${box}</body></html>`;
 }
 
 const VIEWPORTS = [

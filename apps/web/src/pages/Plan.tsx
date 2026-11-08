@@ -158,27 +158,30 @@ const CAUSES_ROLLED_KEY = "bossman.plan.causesRolledUp";
 /** How many items show before "Show all" (BOS-745). */
 export const CAUSES_SHOWN = 5;
 
-/** A choice kept in the browser: true when it matches, the stored value (or null) otherwise. */
-function readChoice(key: string): boolean | null {
+/**
+ * A choice kept in the browser as "1" (on) or "0" (off). Read is guarded so a page without a
+ * local store (a server render, or a browser that refuses it) still works.
+ */
+function readChoice(key: string): boolean {
   try {
-    const saved = localStorage.getItem(key);
-    if (saved !== null) return saved === "1";
-  } catch {}
-  return null;
+    return globalThis.localStorage?.getItem(key) === "1";
+  } catch {
+    return false;
+  }
 }
 
 function writeChoice(key: string, value: boolean) {
   try {
-    localStorage.setItem(key, value ? "1" : "0");
+    globalThis.localStorage?.setItem(key, value ? "1" : "0");
   } catch {}
 }
 
 /** The things to move first: open blockers that aren't waiting on anything, biggest first. */
-function Causes({ plan }: { plan: PlanData }) {
+export function Causes({ plan }: { plan: PlanData }) {
   const causes = plan.nodes.filter((n) => n.open && !n.blocked && n.holdingUp > 0).sort((a, b) => b.holdingUp - a.holdingUp);
   const byId = new Map(plan.nodes.map((n) => [n.id, n]));
-  const [showAll, setShowAll] = useState(() => readChoice(CAUSES_OPEN_KEY) === true);
-  const [rolled, setRolled] = useState(() => readChoice(CAUSES_ROLLED_KEY) === true);
+  const [showAll, setShowAll] = useState(() => readChoice(CAUSES_OPEN_KEY));
+  const [rolled, setRolled] = useState(() => readChoice(CAUSES_ROLLED_KEY));
   if (!causes.length) return null;
   const total = causes.length;
   const shown = showAll ? causes : causes.slice(0, CAUSES_SHOWN);
