@@ -2602,7 +2602,7 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
 
 /**
  * Every tool with a case in changeTrace, which may return null for its read actions (notes list,
- * roadmap list). Kept in step with the switch below by a guard there and by chat.test.ts.
+ * roadmap list, review diff). Kept in step with the switch below by a guard there and by chat.test.ts.
  */
 export const TRACED_TOOLS: ReadonlySet<string> = new Set([
   "notes", "create_ticket", "create_feature", "log_feedback", "set_ticket_state", "update_ticket", "set_ticket_risk",
@@ -2714,9 +2714,7 @@ async function changeTrace(name: string, input: Record<string, unknown>, ref: (i
         ? `reviewed a ticket (${input.verdict === "approved" ? "approved" : "asked for changes"})`
         : action === "sequence" || action === "overrule" || action === "retry_merge"
           ? "arranged a ticket's reviews"
-          : action === "diff"
-            ? "read a ticket's diff"
-            : null;
+          : null;
     case "request_note":
       return "asked for a lasting note";
     case "feedback":
@@ -2741,11 +2739,17 @@ const UUID_ANYWHERE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  */
 function traceCalls(server: McpServer, db: Db, runId: string, companyId: string): McpServer {
   const register = server.registerTool.bind(server);
-  // Names a ticket by its BOS-style reference (BOS-806), looked up once per id.
+  // Names a ticket by its BOS-style reference (BOS-806), looked up once per id. The lookup runs after the
+  // tool already succeeded: if it fails, the change is still made and still named, just without the number
+  // (BOS-820), so a failed lookup can never turn a good call into an error the agent would retry.
   const refOf = async (id: string) => {
-    const [t] = await db.select({ number: tickets.number }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
-    if (!t) return null;
-    return (await refsOf(db, companyId))(t).ref;
+    try {
+      const [t] = await db.select({ number: tickets.number }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
+      if (!t) return null;
+      return (await refsOf(db, companyId))(t).ref;
+    } catch {
+      return null;
+    }
   };
   server.registerTool = ((name: string, config: never, cb: (input: Record<string, unknown>, extra: never) => Promise<unknown>) =>
     register(name, config, (async (input: Record<string, unknown>, extra: never) => {
