@@ -987,13 +987,15 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
         continue;
       }
       if (base === "chdir") { k++; continue; }
+      // BOS-711: `corepack pnpm install` runs the package manager; judge it as that program.
+      if (base === "corepack" && /^(?:pnpm|npm|yarn|npx|pnpx)$/.test(words[k + 1] ?? "")) { k++; continue; }
       if (wrappers.test(w)) { k++; continue; }
       break;
     }
     const head = (words[k] ?? "").replace(/^.*\//, "");
     const args = words.slice(k + 1);
     // A launcher that could not be read, or a flag standing where the program should be (`sudo -u x git`), hides the program.
-    if (away && (unreadable || (head.startsWith("-") && head.length > 1) || /^(?:sh|bash|dash|zsh|ksh|ash)$/.test(head))) return true;
+    if (away && (unreadable || head === "corepack" || (head.startsWith("-") && head.length > 1) || /^(?:sh|bash|dash|zsh|ksh|ash)$/.test(head))) return true;
     // A `cd`/`pushd`/`chdir` moves the working folder for the segments that follow; a bare `popd`/`cd -` can't be read.
     if (/^(?:cd|pushd|chdir)$/.test(head)) {
       // cd's own flags (`-P`, `-L`, `-e`, `-@`, `-n`) are skipped: the first word that is not a flag is the target.
@@ -1006,9 +1008,30 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     // BOS-706 (CEO decision): outside the checkout an install runs that folder's own preinstall/install/postinstall/prepare
     // scripts, which the judge can't read. It gets no Allow unless `--ignore-scripts` (or `=true`) is given. Inside the checkout
     // and its workspaces installs stay Allow (BOS-329).
+    // BOS-711 (allow-list): only a verb known to run no folder or dependency script stays Allow without the flag; every other verb
+    // (update, dedupe, remove, link, version, prune, ...) reifies the tree or runs lifecycle scripts, so it needs the flag too. The
+    // flags are read in order up to `--`; the flag counts only when nothing undoes it (`--no-ignore-scripts`, `=false`, a following
+    // `false`) and any other spelling of the setting is unreadable, which is no Allow.
     if (away && /^(?:pnpm|npm|yarn|bun)$/.test(head)) {
       const verb = args.find((a) => !a.startsWith("-") && a !== "");
-      if (verb !== undefined && /^(?:install|i|ci|add|install-test|it|install-clean-slate|cit)$/.test(verb) && !args.some((a) => /^--ignore-scripts(?:=true)?$/.test(a))) return true;
+      if (verb !== undefined && !/^(?:init|audit|list|ls|outdated|why|licenses|fetch|prefetch|store|config|c|set)$/.test(verb)) {
+        let on = false;
+        let bad = false;
+        const end = args.indexOf("--");
+        const flags = end < 0 ? args : args.slice(0, end);
+        for (let i = 0; i < flags.length; i++) {
+          const a = flags[i]!;
+          if (!/ignore-?scripts/i.test(a)) continue;
+          if (a === "--ignore-scripts" || a === "--ignore-scripts=true") {
+            on = true;
+            const nextWord = flags[i + 1];
+            if (a === "--ignore-scripts" && (nextWord === "true" || nextWord === "false")) { if (nextWord === "false") bad = true; i++; }
+          } else {
+            bad = true; // --no-ignore-scripts, =false, =0, odd case or spelling
+          }
+        }
+        if (!on || bad) return true;
+      }
     }
     // find's `-exec`/`-execdir`/`-ok`/`-okdir` program: a path that leaves the checkout is code from elsewhere.
     if (head === "find") {

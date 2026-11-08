@@ -1203,6 +1203,38 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     ]);
   });
 
+  // BOS-711 (Jane's review of BOS-706): the flag undone later, other verbs that run scripts, and the corepack launcher.
+  describe("A5. outside install: flag undone, other verbs, corepack (BOS-711)", () => {
+    deny([
+      "cd /tmp/p && npm install --ignore-scripts --no-ignore-scripts",
+      "cd /tmp/p && npm install --ignore-scripts --ignore-scripts=false",
+      "cd /tmp/p && npm i --ignore-scripts=true --ignore-scripts=false",
+      "cd /tmp/p && npm install --ignore-scripts false",
+      "cd /tmp/p && npm --ignore-scripts install --no-ignore-scripts",
+      "cd /tmp/p && pnpm install --ignore-scripts --no-ignore-scripts",
+      "cd /tmp/p && npm install -- --ignore-scripts",
+      "cd /tmp/p && npm install --Ignore-Scripts=false --ignore-scripts",
+      "cd /tmp/p && npm version patch",
+      "cd /tmp/p && npm link",
+      "cd /tmp/p && npm update",
+      "cd /tmp/p && pnpm update",
+      "cd /tmp/p && npm dedupe",
+      "cd /tmp/p && npm remove x",
+      "cd /tmp/p && corepack pnpm install",
+      "cd /tmp/p && corepack pnpm run evil",
+      "cd /tmp/p && corepack use pnpm@9",
+    ]);
+    allows([
+      "cd /tmp/p && npm update --ignore-scripts",
+      "cd /tmp/p && npm remove x --ignore-scripts",
+      "cd /tmp/p && npm version patch --ignore-scripts",
+      "cd /tmp/p && npm install --no-ignore-scripts --ignore-scripts",
+      "cd /tmp/p && corepack pnpm install --ignore-scripts",
+      "cd /tmp/p && npm ls",
+      "cd packages/shared && npm update",
+    ]);
+  });
+
   describe("B. node-options by flag", () => {
     deny([
       "npm --node-options=--require=../x.js run build",
