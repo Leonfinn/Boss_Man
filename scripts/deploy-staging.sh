@@ -45,6 +45,9 @@ guard_isolated() { # this folder
   data="$(env_get "$here/.env" BOSSMAN_DATA)"
   [[ -n $data && $data == /* ]] || die "Set BOSSMAN_DATA in $here/.env to an absolute staging-only folder."
   [[ $data != /srv/boss-man/data ]] || die "BOSSMAN_DATA is the default (production) folder. Use a staging-only folder."
+  # Every docker compose call in this folder (deploy.sh and update-runner.sh refuse here, but a hand-typed one would
+  # not) must get the staging overlay, or it builds production's image tags and starts a launcher with no stack.
+  [[ $(env_get "$here/.env" COMPOSE_FILE) == *deploy/staging.yml* ]] || die "Set COMPOSE_FILE=docker-compose.yml:deploy/staging.yml in $here/.env so every docker compose command here uses the staging overlay."
   pw="$(env_get "$here/.env" POSTGRES_PASSWORD)"
   local others=() d
   for d in "$here"/../*/ ${BOSSMAN_PRODUCTION_DIRS:-}; do
@@ -60,6 +63,10 @@ guard_isolated() { # this folder
   done
   PROJECT="$proj"
   say "Isolation checks passed: project $PROJECT, ports $port/$pport, data $data, ${#others[@]} other install(s) compared."
+  if ((${#others[@]} == 0)); then
+    say "WARNING: no other install was found to compare against, so a shared database password or copied master.key would NOT be caught."
+    say "         If production is in another folder, run:  BOSSMAN_PRODUCTION_DIRS=/path/to/production $0 --check"
+  fi
 }
 
 PROJECT=boss-man-staging
@@ -81,7 +88,7 @@ wait_healthy() {
 # Builds and starts the stack at the checked-out commit.
 rebuild_and_start() { # old-commit new-commit
   local svcs=(server) built=(server) profiles
-  profiles="$(env_get .env COMPOSE_PROFILES)"
+  profiles="${COMPOSE_PROFILES:-$(env_get .env COMPOSE_PROFILES)}" # the same precedence docker compose uses
   if [[ ,$profiles, == *,launcher,* ]]; then svcs+=(launcher); built+=(launcher netguard); fi
   step "Building (${built[*]})"
   run dc build "${built[@]}"
@@ -96,7 +103,12 @@ rebuild_and_start() { # old-commit new-commit
   step "Starting"
   run dc up -d "${svcs[@]}"
   step "Waiting for the server to be healthy (up to ${HEALTH_TIMEOUT}s)"
-  wait_healthy
+  wait_healthy || return 1
+  # New runner image: have staging's own launcher (never production's) recreate the staging runners onto it.
+  if ((${RUNNER_NEW:-0})) && [[ ,$profiles, == *,launcher,* ]]; then
+    step "Moving the staging runners onto the new image"
+    run dc exec -T launcher node dist/main.js recreate-all || say "Warning: could not recreate the staging runners; run: docker compose exec launcher node dist/main.js recreate-all"
+  fi
 }
 
 finish_note() {
@@ -104,7 +116,6 @@ finish_note() {
   port="$(env_get .env BOSSMAN_HOST_PORT)"; bind="$(env_get .env BOSSMAN_BIND)"
   say ""
   say "Staging is up at http://${bind:-127.0.0.1}:$port (bind address ${bind:-127.0.0.1}; BOSSMAN_BIND in .env controls who can reach it)."
-  ((${RUNNER_NEW:-0})) && say "The runner image changed: in staging's Settings → Server and runner → Updates, click Build and update runners."
   say "Now run the smoke checklist: docs/22-staging.md, 'Smoke checklist'."
 }
 
@@ -120,17 +131,22 @@ main() {
   ((check)) && exit 0
   command -v docker >/dev/null || die "docker is not installed or not on PATH."
   ((DRY)) && say "DRY RUN: nothing below is actually changed."
-  local gitdir prev_file cur
-  gitdir="$(git rev-parse --git-dir)"; prev_file="$gitdir/staging-previous-commit"
+  local gitdir prev_file good_file cur
+  gitdir="$(git rev-parse --git-dir)"; prev_file="$gitdir/staging-previous-commit"; good_file="$gitdir/staging-healthy-commit"
   [[ -z $(git status --porcelain --untracked-files=no) ]] || die "Uncommitted changes in the staging checkout; look at them first."
   cur="$(git rev-parse HEAD)"
 
   if ((rollback)); then
-    [[ -s $prev_file ]] || die "No previous commit is recorded ($prev_file)."
-    local to; to="$(cat "$prev_file")"
+    # Back to the last commit that came up healthy; if that is what runs now, to the one before it.
+    local to=""
+    [[ -s $good_file ]] && to="$(cat "$good_file")"
+    if [[ -z $to || $to == "$cur" ]]; then [[ -s $prev_file ]] && to="$(cat "$prev_file")"; fi
+    [[ -n $to ]] || die "No earlier commit is recorded ($prev_file)."
     say "Rolling staging back from ${cur:0:8} to ${to:0:8}. The staging database is not touched."
+    say "If the newer code changed the database schema, the older code may not start on it; then reset the staging data (docs/22-staging.md, Rollback)."
     run git checkout --quiet "$to"
     rebuild_and_start "$cur" "$to" || die "Still unhealthy after the rollback. Check: docker compose -p $PROJECT logs --tail 100 server"
+    ((DRY)) || { printf '%s\n' "$cur" >"$prev_file"; printf '%s\n' "$to" >"$good_file"; }
     say "Rolled back. To go forward again: scripts/deploy-staging.sh ${cur:0:8}"
     finish_note; exit 0
   fi
@@ -139,10 +155,10 @@ main() {
   step "Fetching and resolving $ref"
   git fetch --quiet --tags origin || say "Warning: git fetch failed; using what this folder already has."
   local new
-  new="$(git rev-parse --verify --quiet "$ref^{commit}" || git rev-parse --verify --quiet "origin/$ref^{commit}")" || die "Can't find '$ref' in this repository."
-  say "Deploying ${new:0:8} (was ${cur:0:8})"
+  # A branch name means the remote's branch: this checkout's own local branches are never advanced, so try origin/ first.
+  new="$(git rev-parse --verify --quiet "origin/$ref^{commit}" || git rev-parse --verify --quiet "$ref^{commit}")" || die "Can't find '$ref' in this repository."
+  say "Deploying $ref = ${new:0:8} (was ${cur:0:8})"
   if [[ $new != "$cur" ]]; then
-    ((DRY)) || printf '%s\n' "$cur" >"$prev_file"
     run git checkout --quiet "$new"
   else
     say "Already at that commit; rebuilding and starting it again (safe to repeat)."
@@ -150,8 +166,15 @@ main() {
   if ! rebuild_and_start "$cur" "$new"; then
     say ""; say "The staging server did not become healthy. Nothing was undone automatically."
     dc logs --no-color --tail 20 server 2>&1 | cut -c1-300 || true
-    say "To go back to the old code:   scripts/deploy-staging.sh --rollback"
+    say "To go back to the last good code:   scripts/deploy-staging.sh --rollback"
     exit 1
+  fi
+  # Recorded only now that the new commit is healthy, so --rollback never lands on a commit that failed.
+  if ((! DRY)); then
+    if [[ $new != "$cur" ]]; then
+      if [[ -s $good_file ]]; then cp "$good_file" "$prev_file"; else printf '%s\n' "$cur" >"$prev_file"; fi
+    fi
+    printf '%s\n' "$new" >"$good_file"
   fi
   finish_note
 }

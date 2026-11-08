@@ -48,9 +48,9 @@ Do this on the host that will run staging, with `docker` and `git`. Nothing here
    COMPOSE_PROFILES=launcher
    BOSSMAN_DOCKER_GID=<the group id above>
    BOSSMAN_RUNNER_MEMORY=2g
-   BOSSMAN_INSECURE_COOKIES=1
+   COMPOSE_FILE=docker-compose.yml:deploy/staging.yml
    ```
-   `BOSSMAN_BIND` is who can reach staging: use the host's LAN or Tailscale address, never `0.0.0.0` on a host that faces the internet. `BOSSMAN_INSECURE_COOKIES=1` is only for plain-http LAN access; leave it out behind HTTPS.
+   `BOSSMAN_BIND` is who can reach staging: use the host's LAN or Tailscale address, never `0.0.0.0` on a host that faces the internet. `COMPOSE_FILE` makes every `docker compose` command in this folder use the staging overlay (staging image names, staging launcher stack), so even a hand-typed one can't build production's image tags; `--check` refuses without it. Do not run `scripts/deploy.sh` or `scripts/update-runner.sh` in this folder: they are production's and refuse here.
 5. Check the isolation rules without starting anything:
    ```
    scripts/deploy-staging.sh --check
@@ -63,18 +63,18 @@ From the staging folder:
 ```
 scripts/deploy-staging.sh <commit, branch or tag>
 ```
-It refuses to run if this folder shares anything with another install it can see (project name, ports, `POSTGRES_PASSWORD`, `BOSSMAN_DATA`, `master.key`), checks out exactly that commit, records the one it replaced, builds, starts the stack, waits for the server to be healthy and prints the address. Running it again for the same commit is safe. `--dry-run` shows the steps first. If the runner code changed it builds the staging runner image and tells you to click Build and update runners in staging's Settings.
+It refuses to run if this folder shares anything with another install it can see (project name, ports, `POSTGRES_PASSWORD`, `BOSSMAN_DATA`, `master.key`), checks out exactly that commit, builds, starts the stack, waits for the server to be healthy and prints the address. A branch name means the remote's branch (`origin/<name>`), and the line "Deploying <ref> = <hash>" shows what was picked. Only after the new commit is healthy does it remember the last good commit for rollback. Running it again for the same commit is safe. `--dry-run` shows the steps first. If the runner code changed it builds the staging runner image and has staging's own launcher recreate the staging runners; there is nothing to click in Settings. If production lives in a folder that is not beside this one, the script warns that it compared nothing; pass `BOSSMAN_PRODUCTION_DIRS=/path/to/production` so a shared password or copied key is caught.
 
 ## Rollback
 
 ```
 scripts/deploy-staging.sh --rollback
 ```
-puts the previous commit back (code only; the staging database is not touched) and waits for health. To go forward again, deploy the newer commit by hash. If staging's data itself is damaged, it is disposable: from the staging folder run `docker compose -p boss-man-staging down -v`, which removes only staging's containers and volumes (never run it from the production folder), then deploy again. The staging data folder is under `BOSSMAN_DATA`; delete it only after checking the path.
+puts the last commit that came up healthy back (code only; the staging database is not touched) and waits for health. A commit that failed to start is never the rollback target. To go forward again, deploy the newer commit by hash. If the newer code changed the database schema, the older code may not start on it; and if staging's data itself is damaged, it is disposable: from the staging folder run `docker compose -p boss-man-staging down -v`, which removes only staging's containers and volumes (never run it from the production folder), then deploy again. The staging data folder is under `BOSSMAN_DATA`; delete it only after checking the path.
 
 ## Boss Man's staging target
 
-To let a release's "staging first" step use this, add a non-production deploy target named `staging` in Settings, with a host deployer of its own: a second `host-deployer.sh` with its own folder and schedule (see `docs/09-self-deploy.md`) pointing at the staging checkout. That target belongs to the production Boss Man, so it is set up there; staging's own Settings stay for staging companies.
+**Not supported yet.** A host deployer runs `scripts/deploy.sh` and `scripts/update-runner.sh`, which are production's and now refuse in a staging folder, so do not point one at the staging checkout. Until a staging-aware deployer exists, deploy to staging with `scripts/deploy-staging.sh` and record the result on the release ticket by hand. A deploy target named `staging` in Settings is follow-up work.
 
 ## Smoke checklist (QA, about 10 minutes)
 
@@ -92,6 +92,7 @@ To let a release's "staging first" step use this, add a non-production deploy ta
 - Real secrets and integrations (GitHub, Cloudflare, mail): add test ones or leave them out.
 - The edge in front of production (HTTPS, Tailscale serve, blue/green swap): staging is a single server on plain http unless you add the same files.
 - Load: staging shares the host with production, so timings are not production's. Stop it when idle: `docker compose -p boss-man-staging stop`.
+- Isolation of the host: staging's launcher holds the host's Docker socket, so any commit deployed to staging can control the whole host, production included. Deploy only commits you would trust on production's host, never unreviewed agent branches.
 - Anything that needs the owner's real accounts or other machines.
 
 ## Worked example: TrueNAS and the Minisforum (Proxmox) box
