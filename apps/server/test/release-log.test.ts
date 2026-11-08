@@ -510,6 +510,8 @@ describe("runner-update asks close themselves when the live runner image already
     const [card] = await c.db.select().from(decisions);
     expect(card!.dedupeKey).toBe(`self-deploy:runner:${C}`);
     expect((card!.context as { requested?: boolean }).requested).toBe(true);
+    // Brains' fix 1: the runners already run this commit, and the card says so.
+    expect(card!.question).toContain(`The runners already run ${C.slice(0, 8)}, which includes this. Nothing to do.`);
     await c.selfDeploy.sync();
     expect((await c.db.select().from(decisions))[0]!.status).toBe("open");
     // Same commit again with the card still open: the same card.
@@ -531,6 +533,21 @@ describe("runner-update asks close themselves when the live runner image already
     expect(all).toHaveLength(1);
     expect(all[0]!.status).toBe("withdrawn");
     expect((all[0]!.context as { withdrawn: { note: string } }).withdrawn.note).toContain("already rebuilt");
+  });
+
+  it("self-closing goes through the shared withdraw path: a card the owner opened leaves the closed notice (Brains' fix 2)", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await merged(c, projectId);
+    await c.db.insert(decisions).values({ ...runnerCard(companyId, B), context: { type: "self_deploy", target: "runner", commit: B, fromCommit: A, ownerOpenedAt: new Date().toISOString() } });
+    await withImage(c, companyId, C);
+    await available(c, C);
+    await c.selfDeploy.sync();
+    const [d] = await c.db.select().from(decisions);
+    expect(d!.status).toBe("withdrawn");
+    const x = d!.context as { withdrawn: { note: string }; closedNotice?: { text: string } };
+    expect(x.withdrawn.note).toContain("already rebuilt");
+    expect(x.closedNotice?.text).toContain("already rebuilt");
   });
 
   it("keeps the card when the image is older than the commit, when no image commit is recorded, and for the owner's own button", async () => {
