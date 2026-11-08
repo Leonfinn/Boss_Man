@@ -422,7 +422,7 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
   });
 
-  it("still counts a branch that fast-forwarded this ticket in, then committed: same shape as the reverse, so it can't be told apart (BOS-369)", async () => {
+  it("does not count a branch that fast-forwarded onto this ticket as its first move, then committed: its reflog says so (BOS-733)", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
     const ffId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -432,7 +432,66 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     git(ff.path, "add", ".");
     git(ff.path, "commit", "-qm", "ff ticket's work");
     const hit = { ticketId: ffId, branch: `bossman/${ffId}` };
-    expect(await ws.carried(spec, "main", [hit])).toEqual({ carried: [{ ...hit, contained: false }] });
+    expect(await ws.carried(spec, "main", [hit])).toEqual({ carried: [] });
+    // Asked from the stacked branch's side, this ticket is still carried (and held whole).
+    const me = { ticketId: ids.t, branch: `bossman/${ids.t}` };
+    expect(await ws.carried({ ...spec, ticketId: ffId }, "main", [me])).toEqual({ carried: [{ ...me, contained: true }] });
+  });
+
+  it("lets the bottom of a fast-forwarded stack land after it merged another branch and main in (BOS-733, the BOS-725 shape)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const repo = ws.repoDir(ids.project);
+    const w = await ws.ensure(spec);
+    const commitIn = (dir: string, file: string) => {
+      writeFileSync(path.join(dir, file), `${file}\n`);
+      git(dir, "add", ".");
+      git(dir, "commit", "-qm", file);
+    };
+    // A merged another open ticket's branch in first (as BOS-725 took BOS-715), then committed its fix.
+    const xId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const x = await ws.ensure({ ...spec, ticketId: xId });
+    commitIn(x.path, "x.txt");
+    git(w.path, "merge", "--no-edit", `bossman/${xId}`);
+    commitIn(w.path, "a2.txt");
+    // B and C start from main and fast-forward onto the ticket below as their first move, then commit.
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const cId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    git(b.path, "merge", "--no-edit", `bossman/${ids.t}`);
+    commitIn(b.path, "b.txt");
+    const c = await ws.ensure({ ...spec, ticketId: cId });
+    git(c.path, "merge", "--no-edit", `bossman/${bId}`);
+    commitIn(c.path, "c.txt");
+    // X merges to main; A then merges main in (a real merge commit B and C don't have).
+    git(repo, "push", "-q", "origin", `refs/heads/bossman/${xId}:refs/heads/main`);
+    o.pushChange("main.txt", "main\n");
+    git(w.path, "fetch", "-q", "origin");
+    git(w.path, "merge", "--no-edit", "origin/main");
+    const B = { ticketId: bId, branch: `bossman/${bId}` };
+    const C = { ticketId: cId, branch: `bossman/${cId}` };
+    expect(await ws.carried(spec, "main", [B, C])).toEqual({ carried: [] });
+    // B and C still carry A, so they can't jump ahead of it.
+    const A = { ticketId: ids.t, branch: `bossman/${ids.t}` };
+    expect(await ws.carried({ ...spec, ticketId: bId }, "main", [A, C])).toMatchObject({ carried: [{ ticketId: ids.t, contained: false }] });
+  });
+
+  it("still counts a branch that fast-forwarded onto a hidden commit on top of this ticket (BOS-733, security)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "a.txt", "a\n");
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    // An unreviewed commit made off the branch, on top of this ticket's tip, then fast-forwarded into the branch.
+    git(b.path, "checkout", "-q", "--detach", `bossman/${ids.t}`);
+    writeFileSync(path.join(b.path, "payload.txt"), "unreviewed\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "hidden");
+    const hidden = git(b.path, "rev-parse", "HEAD");
+    git(b.path, "checkout", "-q", `bossman/${bId}`);
+    git(b.path, "merge", "--no-edit", hidden);
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    // The fast-forward landed on a commit this ticket doesn't hold, so it proves nothing: B stays reported.
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
   });
 
   it("still counts a branch whose work this ticket fast-forwarded in, then committed, before the branch fast-forwarded this ticket (BOS-369)", async () => {
