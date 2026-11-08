@@ -980,7 +980,21 @@ function usesScratchUnsafely(c: string): boolean {
         .replace(/\d*>&\d+|&>>?\s*\S+|\d*>>?\s*\S+|\d*<\s*\S+/g, " ")
         .split(/\s+/)
         .filter((w) => w !== "" && w !== "&");
-      while (words.length && /^(?:env|exec|nohup|time)$/.test(words[0]!)) words.shift();
+      // A subshell's opening bracket and the wrappers the main command path peels (BOS-698), with their options and values.
+      for (let guard = 0; guard < 8 && words.length; guard++) {
+        if (/^[({]/.test(words[0]!)) { words[0] = words[0]!.replace(/^[({]+/, ""); if (words[0] === "") words.shift(); continue; }
+        const wrapper = words[0]!.replace(/^.*\//, "");
+        if (!/^(?:setsid|nohup|nice|time|command|exec|env|timeout)$/.test(wrapper)) break;
+        words.shift();
+        let timeoutDuration = wrapper === "timeout";
+        while (words.length) {
+          const w = words[0]!;
+          if (/^\w+=/.test(w) || w.startsWith("-")) {
+            words.shift();
+            if (wrapper === "env" ? /^(?:-u|-C|-P)$/.test(w) : /^(?:-n|-u|-C|-S|-s|-k)$/.test(w)) words.shift();
+          } else if (timeoutDuration && /^\d[\w.]*$/.test(w)) { words.shift(); timeoutDuration = false; } else break;
+        }
+      }
       let ai = 0;
       if (words.length && /^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(words[0]!)) {
         ai = words.findIndex((w) => interpreters.test(w.replace(/^.*\//, "")));
@@ -992,8 +1006,11 @@ function usesScratchUnsafely(c: string): boolean {
       // only a cluster ending in `c` does (`bash -e` is errexit, `python3 -E` ignores the environment, `node -p` has no code).
       const shellInterp = /^(?:sh|bash|zsh|dash|ksh)$/.test((words[ai] ?? "").replace(/^.*\//, ""));
       const codeFlag = shellInterp ? /^-[A-Za-z]*c$/ : /^-[A-Za-z]*[cermEpM]|^--(?:eval|print|require|import|exec)\b/;
-      if (rest.some((a, k) => codeFlag.test(a) && k + 1 < rest.length)) continue;
-      if (rest.some((a) => a !== "-" && /[./]/.test(a))) continue;
+      // The word after the flag must be code: a following `-` (stdin) or another flag means the flag carried none (`python3 -E -`).
+      if (rest.some((a, k) => codeFlag.test(a) && k + 1 < rest.length && !rest[k + 1]!.startsWith("-"))) continue;
+      // A script operand comes before the stdin marker: words after `-`, or after `-s` for a shell, are arguments to the stdin program.
+      const marker = rest.findIndex((a) => a === "-" || (shellInterp && /^-[A-Za-z]*s[A-Za-z]*$/.test(a)));
+      if ((marker < 0 ? rest : rest.slice(0, marker)).some((a) => /[./]/.test(a))) continue;
       piped.push({ index: m.index! });
     }
     for (const m of piped) {
