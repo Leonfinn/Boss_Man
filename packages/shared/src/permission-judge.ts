@@ -65,7 +65,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Outward actions.
   if (readPush(c)?.dangerous) return result("outward");
   if (/\bgit\s+push\b[^;&|\n]*(\s-f\b|--force|\s\+\S|:main\b|:master\b|--delete|\s:\S)/.test(c)) return result("outward");
-  if (/\b(npm|pnpm|yarn)\s+publish\b|\bdocker\s+(push|restart|stop|kill|rm|compose|run)\b|\bsystemctl\b|\bservice\s+\w+\s+(restart|stop)|\bgh\s+pr\s+merge\b|\bdeploy(\.sh)?\b[^\n]*\b(prod|production)\b|\bcrontab\b/.test(c)) return result("outward");
+  if (/\b(npm|pnpm|yarn|yarnpkg)\s+publish\b|\bdocker\s+(push|restart|stop|kill|rm|compose|run)\b|\bsystemctl\b|\bservice\s+\w+\s+(restart|stop)|\bgh\s+pr\s+merge\b|\bdeploy(\.sh)?\b[^\n]*\b(prod|production)\b|\bcrontab\b/.test(c)) return result("outward");
   if (/os\.system\([^)]*git\s+push|execSync\([^)]*git\s+push/.test(c)) return result("outward");
   // Secrets.
   if (/\/run\/secrets|\.git-credentials|\.netrc|\/\.ssh\/|\/\.aws\/|(^|[\s/"'=<>])\.env(\.\w+)?(?=$|[\s"';|&)])|\/environ\b|\bprintenv\b|(^|[;&|(]\s*)(set|export\s+-p|declare\s+-[px])\s*($|[|;&>)])|process\.env\b|os\.environ\b|\/api\/secrets\b|\.config\/(gh|gcloud|hub)\b|\.docker\/config\.json|\.npmrc\b|\.pgpass\b|\.kube\/config|\.git\/config\b[^\n]*\btoken/.test(c)) return result("secret");
@@ -100,7 +100,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Allow-list: a git command passes only as a subcommand in GIT_TABLE with flags listed for it (checked below, once the own
   // folder is known) or the read-only config forms; everything else that uses git is Deny.
   if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
-  if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
+  if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn|yarnpkg)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn|yarnpkg)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
   // Editors take commands (`vim -c "w! /file"`); an agent has no use for one.
   if (/(?:^|[;&|(\n]\s*)(?:vi|vim|nvim|ex|ed|view|vimdiff|emacs|nano|pico)\s/.test(c)) return result("outside");
   const rootRe = workspaceRoot ? workspaceRoot.replace(/\/+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "(?:/[\\w.@+-]+)*/workspaces";
@@ -989,7 +989,7 @@ function shellDashCString(words: string[]): { word: string; ok: boolean } {
  * cmd`) is code the judge can't read. pnpm/npm/yarn/git may name a /tmp path but not a path the command wrote, and not with an
  * exec-style word. Over-denial (generate a file, then feed it to a checked-in script) is accepted.
  */
-const TOOL_RUNNER = /^(?:pnpm|npm|yarn|npx|pnpx|bunx)$/;
+const TOOL_RUNNER = /^(?:pnpm|npm|yarn|yarnpkg|npx|pnpx|bunx)$/;
 // Options whose value names a file or folder a package manager runs from or reads config from. Judged wherever they stand
 // (`--silent -C /tmp/p`, `--script-shell=/tmp/x.sh`), with the value attached (`-C/tmp`, `--prefix=/tmp`) or in the next word.
 const TOOL_PATH_OPT = /^(?:-C|--dir|--prefix|--cwd|--config|--git-dir|--work-tree|--workspace-dir|--userconfig|--globalconfig|--use-yarnrc|--require|-r|--loglevel-file|--root|--script-shell)$/;
@@ -1108,11 +1108,13 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
       }
       if (base === "chdir") { k++; continue; }
       // BOS-711: `corepack pnpm install` runs the package manager; judge it as that program.
-      if (base === "corepack" && /^(?:pnpm|npm|yarn|npx|pnpx)$/.test(words[k + 1] ?? "")) { k++; continue; }
+      if (base === "corepack" && /^(?:pnpm|npm|yarn|yarnpkg|npx|pnpx)$/.test(words[k + 1] ?? "")) { k++; continue; }
       if (wrappers.test(w)) { k++; continue; }
       break;
     }
-    const head = (words[k] ?? "").replace(/^.*\//, "");
+    // BOS-717: `yarnpkg` is yarn 1 under another name (same yarn-path rule), so it is judged as `yarn`.
+    const head0 = (words[k] ?? "").replace(/^.*\//, "");
+    const head = head0 === "yarnpkg" ? "yarn" : head0;
     const args = words.slice(k + 1);
     // A launcher that could not be read, or a flag standing where the program should be (`sudo -u x git`), hides the program.
     if (away && (unreadable || head === "corepack" || (head.startsWith("-") && head.length > 1) || /^(?:sh|bash|dash|zsh|ksh|ash)$/.test(head))) return true;
@@ -1126,10 +1128,17 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
     if (head === "popd") { away = true; continue; }
     if (away && (RUNS_REPO_CODE.test(head) || (PM.test(head) && pmRunsScript(head, args)))) return true;
     // BOS-716: `npm init <name>` downloads and runs a package wherever it is run, so it is no Allow inside the checkout too.
+    // BOS-717: an unknown option before the verb may take the next word as its value (`npm --loglevel info init x`), so the verb
+    // is the first word that is not an option or an option's value; `init` anywhere there counts.
     if (/^(?:pnpm|npm|bun)$/.test(head)) {
-      const at = args.findIndex((a) => !a.startsWith("-") && a !== "");
-      if (at >= 0 && args[at] === "init" && args.slice(at + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
+      const initAt = args.indexOf("init");
+      const before = initAt < 0 ? [] : args.slice(0, initAt);
+      const onlyOpts = before.every((a, i) => a.startsWith("-") || (a !== "" && (before[i - 1] ?? "").startsWith("-") && (before[i - 1] ?? "") !== "--" && !(before[i - 1] ?? "").includes("=")));
+      if (initAt >= 0 && onlyOpts && args.slice(initAt + 1).some((a) => !a.startsWith("-") || a === "--")) return true;
     }
+    // BOS-717: npm reads `init-module=<file>` from the folder's `.npmrc` and runs that file on `npm init`, so outside the checkout
+    // any `npm init` gets no Allow (pnpm and bun do not read init-module). Inside the checkout the .npmrc is ours.
+    if (away && head === "npm" && args.includes("init")) return true;
     // BOS-706 (CEO decision): outside the checkout an install runs that folder's own preinstall/install/postinstall/prepare
     // scripts, which the judge can't read. It gets no Allow unless `--ignore-scripts` (or `=true`) is given. Inside the checkout
     // and its workspaces installs stay Allow (BOS-329).
@@ -1311,7 +1320,7 @@ function usesScratchUnsafely(c: string): boolean {
   const safe = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf rm rmdir mkdir cp mv ln tee touch cd pushd popd " +
     "test [ [[ realpath dirname basename readlink du df sort uniq cut tr jq md5sum sha256sum sha1sum mktemp export local unset set read for " +
     "true false sleep chmod date tar unzip gzip gunzip zip curl wget sed less more tree nl od xxd hexdump column").split(" "));
-  const tooling = new Set(["pnpm", "npm", "yarn", "git"]);
+  const tooling = new Set(["pnpm", "npm", "yarn", "yarnpkg", "git"]);
   const keywords = new Set(["if", "then", "do", "else", "elif", "while", "until", "!", "time", "{", "}", "fi", "done", "esac", "in"]);
   const clean = (w: string): string => w.replace(/^\.\//, "").replace(/\/+$/, "");
   const written = new Set<string>();
@@ -1456,7 +1465,7 @@ function usesScratchUnsafely(c: string): boolean {
         words = [peeled.head, ...peeled.args].filter((w) => w !== "");
       }
       let ai = 0;
-      if (words.length && /^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(words[0]!)) {
+      if (words.length && /^(?:pnpm|npx|bunx|uvx|yarn|yarnpkg|npm|uv|poetry|pipx)$/.test(words[0]!)) {
         ai = words.findIndex((w) => interpreters.test(w.replace(/^.*\//, "")));
         if (ai < 0) return false;
       }
@@ -1535,7 +1544,7 @@ function usesScratchUnsafely(c: string): boolean {
     // An interpreter behind a runner (`pnpm exec node -e`, `pnpm tsx -e`, `npx tsx -e`, `uv run python -c`, `poetry run python -c`).
     let ish = sh;
     let iargs = args;
-    if (/^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(sh)) {
+    if (/^(?:pnpm|npx|bunx|uvx|yarn|yarnpkg|npm|uv|poetry|pipx)$/.test(sh)) {
       // The first interpreter word anywhere in the arguments (`pnpm --filter x exec node`, `uv run --with y python`).
       const j = iargs.findIndex((a) => interpreters.test(a.replace(/^.*\//, "")));
       if (j >= 0) { ish = iargs[j]!.replace(/^.*\//, ""); iargs = iargs.slice(j + 1); }
