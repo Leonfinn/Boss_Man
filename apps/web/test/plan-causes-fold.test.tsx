@@ -35,11 +35,30 @@ const ticket = (i: number, holdingUp: number): PlanNode => ({
   holdingUp,
 });
 
-const blockerCount = (n: number): PlanData => ({
-  nodes: Array.from({ length: n }, (_, i) => ticket(i, n - i)),
-  edges: [],
-  columns: [],
-});
+// The blockers sit in one column and each holds a real waiting task up, so the graph can lay the
+// page out too (an empty columns list makes the graph's height maths read Infinity).
+const blockerCount = (n: number): PlanData => {
+  const waiting: PlanNode = {
+    id: "waiting",
+    kind: "ticket",
+    ref: "BOS-900",
+    title: "Waiting task",
+    state: "blocked",
+    open: true,
+    link: "#/ticket/waiting",
+    assignee: "Someone",
+    project: "Development",
+    layer: 1,
+    blocked: true,
+    causes: Array.from({ length: n }, (_, i) => `t${i}`),
+    holdingUp: 0,
+  };
+  return {
+    nodes: [...Array.from({ length: n }, (_, i) => ticket(i, n - i)), waiting],
+    edges: Array.from({ length: n }, (_, i) => ({ id: `e${i}`, from: `t${i}`, to: "waiting" })),
+    columns: [Array.from({ length: n }, (_, i) => `t${i}`), ["waiting"]],
+  };
+};
 
 function stubPlan(plan: PlanData) {
   vi.stubGlobal(
