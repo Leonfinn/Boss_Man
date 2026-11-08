@@ -709,13 +709,21 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
  * system binaries one level under /bin, /usr/bin, /usr/local/bin, /sbin, /usr/sbin (the image's own tools, not agent-writable).
  * Linear: one pass over the shell words of each segment.
  */
-function runsByPathOutside(c: string, inOwn: (p: string) => boolean): boolean {
-  let relOk = true;
+function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk = true): boolean {
+  let relOk = startRelOk;
+  let relCd = false;
   for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) {
     const d = m[1] ?? "";
     if (!dirOk(d, inOwn) || (/^[/~$]/.test(d) && !inOwn(d))) relOk = false;
+    if (d !== "" && !/^[/~$]/.test(d)) relCd = true;
   }
-  const wrapper = /^(?:then|do|else|elif|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs)$/;
+  // BOS-722: a relative `cd` may follow a symlink the same command made (`ln -s /tmp/p l && cd l`), so it is outside.
+  if (relCd && /(?:^|[;&|(\n{]\s*|\b(?:then|do|else)\s+)(?:\S*\/)?ln(?=\s)/.test(c)) relOk = false;
+  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
+  // Wrappers whose first plain words are not the command (`flock l ./foo`, `taskset 1 ./foo`, `chroot dir ./foo`).
+  const positional: Record<string, number> = { flock: 1, taskset: 1, chrt: 1, chroot: 1 };
+  // Wrappers that run the string after `-c` / `--command` (`flock -c ./foo l`, `script -qc ./foo`) as a shell command.
+  const cmdOpt = /^(?:flock|script)$/;
   const sysBin = /^\/(?:usr\/(?:local\/)?)?s?bin\/[\w.+-]+$/;
   // Short options of each wrapper that take a value in the next word (`env -P /bin`, `timeout -s KILL`, `nice -n 5`). Any other
   // option is value-less, so the word after it is still the command.
@@ -726,20 +734,53 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean): boolean {
     stdbuf: /^-[A-Za-z]*[ioe]$|^--(?:input|output|error)$/,
     sudo: /^-[A-Za-z]*[ugCDhprRTU]$/,
     xargs: /^-[A-Za-z]*[nIdPLEsa]$/,
+    exec: /^-[A-Za-z]*a$/,
+    ionice: /^-[A-Za-z]*[cnp]$|^--(?:class|classdata|pid)$/,
+    flock: /^-[A-Za-z]*[wE]$|^--(?:timeout|conflict-exit-code)$/,
+    watch: /^-[A-Za-z]*n$|^--interval$/,
+    strace: /^-[A-Za-z]*[oeEpsuabIOPSXyYZ]$/,
+    ltrace: /^-[A-Za-z]*[oeEpsuabnlLxAF]$/,
+    chrt: /^-[A-Za-z]*[p]$/,
+    script: /^-[A-Za-z]*[TIOBEt]$|^--(?:timing|log-in|log-out|log-io|logging-format|echo|output-limit)$/,
+    unshare: /^-[A-Za-z]*[R]$|^--(?:root|wd|map-user|map-group|setgroups|propagation)$/,
+    setpriv: /^--(?:reuid|regid|ruid|rgid|euid|egid|groups|inh-caps|bounding-set|ambient-caps|securebits|selinux-label|apparmor-profile)$/,
+    nsenter: /^-[A-Za-z]*[tSGrw]$/,
+    doas: /^-[A-Za-z]*[uC]$/,
+  };
+  // The first real command word of each segment, plus the program after `find -exec`, is checked.
+  const bad = (w: string): boolean => {
+    if (!w.includes("/") || sysBin.test(w)) return false;
+    if (/\$|\x60|^~|\.\./.test(w) || /^\/tmp(\/|$)/.test(w)) return true;
+    return w.startsWith("/") ? !inOwn(w) : !relOk;
   };
   for (const seg of shellSegments(c)) {
     let skipNext = false;
+    let cmdNext = false;
     let lead = "";
-    for (const w of seg.words) {
-      if (skipNext) { skipNext = false; continue; }
-      // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
-      if (wrapper.test(w)) { lead = w; continue; }
-      if (/^-/.test(w)) { if (takesValue[lead]?.test(w)) skipNext = true; continue; }
-      if (/^\w+=/.test(w) || /^\d+[smhd]?$/.test(w)) continue;
-      if (w.includes("/") && !sysBin.test(w)) {
-        if (/\$|\x60|^~|\.\./.test(w) || /^\/tmp(\/|$)/.test(w)) return true;
-        if (w.startsWith("/") ? !inOwn(w) : !relOk) return true;
+    let pos = 0;
+    let hit = false;
+    seg.words.forEach((w, i) => {
+      if (w === "-exec" || w === "-execdir" || w === "-ok" || w === "-okdir") {
+        if (bad(seg.words[i + 1] ?? "")) hit = true;
       }
+    });
+    if (hit) return true;
+    for (const w of seg.words) {
+      if (cmdNext) { if (runsByPathOutside(w, inOwn, relOk)) return true; break; }
+      if (skipNext) { skipNext = false; continue; }
+      // A system binary that runs its argument counts as that wrapper (`/usr/bin/env ./foo`).
+      const base = sysBin.test(w) ? w.replace(/^.*\//, "") : w;
+      // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
+      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; continue; }
+      if (/^-/.test(w)) {
+        if (cmdOpt.test(lead) && /^-[A-Za-z]*c$|^--command$/.test(w)) cmdNext = true;
+        else if (cmdOpt.test(lead) && /^--command=/.test(w)) { if (runsByPathOutside(w.slice(10), inOwn, relOk)) return true; }
+        else if (takesValue[lead]?.test(w)) skipNext = true;
+        continue;
+      }
+      if (pos > 0) { pos--; continue; }
+      if (/^\w+=/.test(w) || /^\d+[smhd]?$/.test(w)) continue;
+      if (bad(w)) return true;
       break; // the first real command word of the segment
     }
   }

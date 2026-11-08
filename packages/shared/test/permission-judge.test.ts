@@ -1578,3 +1578,89 @@ describe("rules judge: a script run by its own path outside the checkout (BOS-72
     ]);
   });
 });
+
+// BOS-722 (Jane's review of BOS-721): more ways to run a script by path from outside the checkout. Every "denies" row here was
+// Allow on the BOS-721 branch (63d3db1d).
+describe("rules judge: more ways to run a script by path outside the checkout (BOS-722)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const ws = "/home/node/workspaces";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", ws);
+  const deny = (cmds: string[]) => it.each(cmds)("denies: %s", (cmd) => expect(judge(cmd)).toMatchObject({ verdict: "deny", row: "outside" }));
+  const allows = (cmds: string[]) => it.each(cmds)("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  describe("keywords and builtins", () => {
+    deny([
+      "cd /tmp/p; if ./foo; then :; fi",
+      "cd /tmp/p; while ./foo; do :; done",
+      "cd /tmp/p; until ./foo; do :; done",
+      "cd /tmp/p && coproc ./foo",
+      "cd /tmp/p && eval ./foo",
+      "cd /tmp/p && builtin exec ./foo",
+      "cd /tmp/p && exec -a x ./foo",
+      "exec -a x /tmp/x/run.sh",
+    ]);
+  });
+  describe("system binaries that run their argument", () => {
+    deny([
+      "cd /tmp/p && /usr/bin/env ./foo",
+      "cd /tmp/p && /usr/bin/env -i ./foo",
+      "cd /tmp/p && /usr/bin/nice -n 5 ./foo",
+      "cd /tmp/p && /usr/bin/timeout 5 ./foo",
+      "/usr/bin/env /home/node/other/run.sh",
+    ]);
+  });
+  describe("find -exec", () => {
+    deny([
+      "cd /tmp/p && find . -exec ./foo {} \\;",
+      "cd /tmp/p && find . -execdir ./foo {} +",
+      "cd /tmp/p && find . -type f -ok ./foo {} \\;",
+      "find . -exec /tmp/x/run.sh {} \\;",
+    ]);
+  });
+  describe("launchers", () => {
+    deny([
+      "cd /tmp/p && ionice -c3 ./foo",
+      "cd /tmp/p && ionice -c 3 -n 7 ./foo",
+      "cd /tmp/p && flock l ./foo",
+      "cd /tmp/p && flock -n l ./foo",
+      "cd /tmp/p && flock -c ./foo l",
+      "cd /tmp/p && watch ./foo",
+      "cd /tmp/p && watch -n 5 ./foo",
+      "cd /tmp/p && strace ./foo",
+      "cd /tmp/p && strace -o out.txt ./foo",
+      "cd /tmp/p && taskset 1 ./foo",
+      "cd /tmp/p && taskset 0x3 ./foo",
+      "cd /tmp/p && chrt 0 ./foo",
+      "cd /tmp/p && chrt -r 10 ./foo",
+      "cd /tmp/p && script -c ./foo",
+      "cd /tmp/p && script -qc ./foo /dev/null",
+      "cd /tmp/p && ltrace ./foo",
+      "cd /tmp/p && unshare -m ./foo",
+      "cd /tmp/p && setpriv --no-new-privs ./foo",
+    ]);
+  });
+  describe("a symlinked folder", () => {
+    deny([
+      "ln -s /tmp/p l && cd l && ./foo",
+      "ln -sf /tmp/p l; cd l; ./foo",
+      "ln -s /tmp/p l && cd l && /usr/bin/env ./foo",
+    ]);
+  });
+  describe("inside the checkout nothing changes", () => {
+    allows([
+      "if ./scripts/check-quick.sh; then :; fi",
+      "while ./scripts/check-quick.sh; do :; done",
+      "eval ./scripts/check-quick.sh",
+      "exec -a x ./scripts/check-quick.sh",
+      "/usr/bin/env ./scripts/check-quick.sh",
+      "find . -name '*.ts' -exec grep -l foo {} \\;",
+      "find packages -exec ./scripts/check-quick.sh {} \\;",
+      "ionice -c3 ./scripts/check-quick.sh",
+      "flock l ./scripts/check-quick.sh",
+      "taskset 1 ./scripts/check-quick.sh",
+      "cd /tmp/p && find . -name '*.ts' -exec grep -l foo {} \\;",
+      "cd /tmp/p && ionice -c3 ls",
+      "ln -s a b && cd packages && ls",
+      "ln -s a b",
+    ]);
+  });
+});
