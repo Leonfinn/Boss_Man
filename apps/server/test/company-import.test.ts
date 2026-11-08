@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
@@ -9,6 +9,16 @@ afterEach(async () => {
   await ctx?.close();
   ctx = undefined;
 });
+
+// No real DNS: public names resolve to a public address, "rebind" names to the stack's, anything else fails.
+vi.mock("node:dns/promises", () => ({
+  lookup: async (host: string) => {
+    if (host === "tools.example.org") return [{ address: "93.184.216.34", family: 4 }];
+    if (host === "rebind.example.org") return [{ address: "172.18.0.2", family: 4 }];
+    if (host === "rebind6.example.org") return [{ address: "fd00::2", family: 6 }];
+    throw new Error("ENOTFOUND");
+  },
+}));
 
 const b64 = (s: string) => Buffer.from(s).toString("base64");
 
@@ -106,16 +116,20 @@ describe("company import (docs/11, step 2)", () => {
     const server = (name: string, url: string) => ({ name, url, transport: "http" });
     const pack = (servers: unknown[]) => Buffer.from(zipSync({ "manifest.json": strToU8('{"format":"bossman-company/1"}'), "company.json": strToU8('{"name":"Tools Co"}'), "tool-servers.json": strToU8(JSON.stringify(servers)) })).toString("base64");
 
-    const fine = pack([server("crawl", "http://192.168.68.20:11235/mcp"), server("pen", "https://tools.example.org/mcp")]);
+    const fine = pack([server("pen", "https://tools.example.org/mcp"), server("pub", "http://8.8.8.8:80/mcp")]);
     const pre = (await req("POST", "/api/companies/import/preview", { zip: fine })).json();
     expect(pre.toolServers).toEqual([
-      { name: "crawl", url: "http://192.168.68.20:11235/mcp", opens: "192.168.68.20:11235", stackService: false },
       { name: "pen", url: "https://tools.example.org/mcp", opens: "tools.example.org:443", stackService: false },
+      { name: "pub", url: "http://8.8.8.8:80/mcp", opens: "8.8.8.8:80", stackService: false },
     ]);
     expect((await req("POST", "/api/companies/import", { zip: fine })).statusCode).toBe(201);
 
-    // db, launcher, any case, any port: flagged in the preview, refused on import.
-    for (const url of ["http://db:5432/mcp", "http://launcher:3105/x", "http://LAUNCHER:9/x", "http://netguard:80/", "http://server:3100/mcp", "http://runner-app-co:1/"]) {
+    // Stack names (incl. blue-green overlay), container names, loopback, IP literals (incl. a LAN host), names resolving to private
+    // addresses, and a name whose lookup fails: flagged in the preview, refused on import.
+    for (const url of ["http://db:5432/mcp", "http://launcher:3105/x", "http://LAUNCHER:9/x", "http://netguard:80/", "http://server:3100/mcp", "http://runner-app-co:1/",
+      "http://server-blue:3100/", "http://proxy:80/", "http://boss-man-db-1:5432/", "http://localhost:5432/", "http://127.0.0.1:5432/", "http://host.docker.internal:80/",
+      "http://172.18.0.2:5432/", "http://10.0.0.5:1/", "http://192.168.68.20:11235/mcp", "http://169.254.169.254/", "http://[::1]:5432/",
+      "http://rebind.example.org/", "http://rebind6.example.org/", "http://nxdomain.example.org/"]) {
       const bad = pack([server("sneaky", url)]);
       expect((await req("POST", "/api/companies/import/preview", { zip: bad })).json().toolServers[0].stackService, url).toBe(true);
       const refused = await req("POST", "/api/companies/import", { zip: bad, name: "Bad" });

@@ -12,7 +12,7 @@ import { EXPORT_FORMAT } from "./company-export.js";
 import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.js";
 import { MAX_BODY, slugify } from "./wiki.js";
 import { cleanPath, LIMITS, normalise, parseSkillMd, skillName, SkillError, type SkillFile } from "./skills.js";
-import { isStackService, sendableAddress } from "./launcher.js";
+import { reachesStack, sendableAddress } from "./launcher.js";
 import { addTicketDependency } from "./ticket-links.js";
 
 export class ImportError extends Error {
@@ -274,7 +274,7 @@ export async function previewPackage(db: Db, pkg: Package, name = pkg.company.na
     skills: pkg.skills.map((s) => ({ name: s.name, renamedFrom: s.name !== s.folder ? s.folder : null, description: s.description, scripts: s.files.map((f) => f.path).filter((p) => SCRIPT.test(p)) })),
     secrets: pkg.secrets.map((s) => ({ name: s.name, envName: s.envName, agents: s.agents })),
     // Each tool server and the host:port the runner's network guard would let through for it (null: none it can allow).
-    toolServers: pkg.toolServers.map((t) => ({ name: t.name, url: t.url, opens: sendableAddress(t.url), stackService: isStackService(t.url) })),
+    toolServers: await Promise.all(pkg.toolServers.map(async (t) => ({ name: t.name, url: t.url, opens: sendableAddress(t.url), stackService: await reachesStack(t.url) }))),
     warnings,
   };
 }
@@ -302,9 +302,10 @@ function remapPolicy(policy: unknown, ids: Map<string, string>, marks: Partial<R
 /** Creates the package as a new company in one transaction. Every agent starts paused. */
 export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; fundingSourceId?: string | null; allowStackServices?: boolean } = {}) {
   const name = opts.name?.trim() || pkg.company.name;
-  const onStack = pkg.toolServers.filter((t) => isStackService(t.url));
-  if (onStack.length && opts.allowStackServices !== true)
-    throw new ImportError(400, `Tool server${onStack.length > 1 ? "s" : ""} ${onStack.map((t) => `"${t.name}" (${sendableAddress(t.url) ?? t.url})`).join(", ")} point${onStack.length > 1 ? "" : "s"} at Boss Man's own services, which would give the company's runner a direct path to them. Tick the box to allow it, or remove ${onStack.length > 1 ? "them" : "it"} from the package.`);
+  const flags = opts.allowStackServices === true ? [] : await Promise.all(pkg.toolServers.map((t) => reachesStack(t.url)));
+  const onStack = pkg.toolServers.filter((_, i) => flags[i]);
+  if (onStack.length)
+    throw new ImportError(400, `Tool server${onStack.length > 1 ? "s" : ""} ${onStack.map((t) => `"${t.name}" (${sendableAddress(t.url) ?? t.url})`).join(", ")} point${onStack.length > 1 ? "" : "s"} at Boss Man's own services or a private-network address, which could give the company's runner a direct path to them. Tick the box to allow it, or remove ${onStack.length > 1 ? "them" : "it"} from the package.`);
   if (opts.fundingSourceId && !(await db.select({ id: fundingSources.id }).from(fundingSources).where(eq(fundingSources.id, opts.fundingSourceId))).length) throw new ImportError(400, "No such funding source.");
   if ((await db.select({ id: companies.id }).from(companies).where(eq(companies.name, name))).length) throw new ImportError(409, `There's already a company called ${name}. Pick another name.`);
 

@@ -2347,13 +2347,13 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                 {preview.toolServers.map((t) => (
                   <li key={t.name}>
                     {t.name}: <code>{t.opens ?? "nothing (no address the guard can allow)"}</code> ({t.url})
-                    {t.stackService && <span className="error"> This is one of Boss Man's own services.</span>}
+                    {t.stackService && <span className="error"> This is one of Boss Man's own services or a private-network address.</span>}
                   </li>
                 ))}
               </ul>
               {stackTools.length > 0 && (
                 <label>
-                  <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services, and I want it anyway.
+                  <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
                 </label>
               )}
             </div>
