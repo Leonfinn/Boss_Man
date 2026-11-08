@@ -114,6 +114,41 @@ export const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket i
 /** Wakes held for a full subscription window: re-checked every pass, so adding or reordering an account releases them (BOS-449). */
 const QUOTA_HOLD_LIKE = "subscription % nearly used up%";
 
+/**
+ * Why a closed ticket's wake is dropped (BOS-256). A wake that waited for a reason (quiet hours, the
+ * subscription quota, a paused company) can outlive the ticket it is for. When nothing on the ticket has
+ * happened since a person or Boss Man closed it, starting it would only replay the old note or nudge, so
+ * the wake is dropped instead. Said in plain words, as it is the wake's recorded reason.
+ */
+const CLOSED_TICKET_REASON = "the ticket was already finished, so there was nothing to do";
+
+/**
+ * The wakes whose only job is to replay something that already happened: a note that the owner moved the
+ * ticket, a colleague's nudge or message, a chase, an assignment or an unblock (BOS-256). Every other
+ * reason is left alone, because it can still be real work on a closed ticket: a watch or tree wake gives
+ * its final update, a review or check wake closes one out, and a decision or alert card is answered on
+ * the card. Only these replays are dropped for a ticket that was finished before they could start.
+ */
+const REPLAY_REASONS = new Set(["woken by owner", "nudge", "message", "chased", "assigned", "unblocked"]);
+
+/**
+ * Whether these waiting wakes for this ticket have nothing to act on any more (BOS-256): every one is a
+ * replay, the ticket is closed (done, cancelled included), and every one was queued at or before the
+ * moment it closed. `stateChangedAt` is when it closed (a database trigger sets it on every state
+ * change), so a wake created after that is something new — a nudge or message sent once the ticket was
+ * finished — and is not a replay. It compares wake times with the close time, not the ticket's last
+ * activity: nudges, messages and chases don't update that, so they would be mistaken for replays (R
+ * review on BOS-256). Someone who reopens it moves the state clock, so their work keeps its wake too.
+ */
+function finishedSince(open: Array<{ reason: string; createdAt: Date }>, t: { systemState: string; stateChangedAt: Date | null }): boolean {
+  // Only replays; a watch, review, check or card wake is left to its own handling even on a closed ticket.
+  if (!open.length || !open.every((w) => REPLAY_REASONS.has(w.reason))) return false;
+  if (t.systemState !== "done") return false;
+  // No close time recorded: treat it as just closed, so a replay is still dropped rather than waking anyone.
+  if (!t.stateChangedAt) return true;
+  return open.every((w) => w.createdAt.getTime() <= t.stateChangedAt!.getTime());
+}
+
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
@@ -727,7 +762,7 @@ export function schedulerService(
     if (w.reason === REVIEW_REASON) {
       lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):");
       const copy = await reviewCopy(w);
-      if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included. Read the code around the change and run its checks there before you give your verdict; nothing you change there reaches the ticket. For any other ticket listed, use the review tool's diff and tickets read.`);
+      if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included, with its packages installed from the shared store. Read the code around the change and run one related test with \`pnpm vitest run <path/to/that.test.ts>\` there (no permission card) before you give your verdict; nothing you change there reaches the ticket. If the install didn't happen (node_modules is missing or the test command can't find vitest), run \`pnpm install --frozen-lockfile --prefer-offline --store-dir "$(pnpm store path)"\` in that folder first, then run the test. For any other ticket listed, use the review tool's diff and tickets read.`);
     }
     if (w.reason === CEO_REPLY_REASON)
       lines.push(
@@ -841,6 +876,24 @@ export function schedulerService(
       .catch((err) => deps.log?.(`claude account notice failed: ${(err as Error).message}`));
   }
 
+  /**
+   * The waiting wakes for this wake's ticket that have outlived it (BOS-256), or null when it still has
+   * work. It reads the ticket once, and only for a wake with a ticket; a wake with none launches as
+   * before. The ids are the ticket's other waiting wakes, so the whole replay goes in one step.
+   */
+  async function finishedTicketWake(w: typeof wakes.$inferSelect): Promise<{ finished: true; ids: string[] } | null> {
+    if (!w.ticketId) return null;
+    const [t] = await db.select({ systemState: tickets.systemState, stateChangedAt: tickets.stateChangedAt }).from(tickets).where(eq(tickets.id, w.ticketId));
+    if (!t || t.systemState !== "done") return null;
+    const waiting = await db
+      .select({ id: wakes.id, reason: wakes.reason, createdAt: wakes.createdAt })
+      .from(wakes)
+      .where(and(eq(wakes.ticketId, w.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
+    if (!finishedSince(waiting, t)) return null;
+    return { finished: true, ids: waiting.map((x) => x.id).filter((id) => id !== w.id) };
+  }
+
+  /** The launch of one wake, or why it doesn't start (BOS-256); see launch(). */
   async function launch(w: typeof wakes.$inferSelect, onSource?: string): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
     const [agent] = await db.select().from(agents).where(eq(agents.id, w.agentId));
     const [company] = await db.select().from(companies).where(eq(companies.id, w.companyId));
@@ -1455,7 +1508,7 @@ export function schedulerService(
     settled: () => lane.catch(() => undefined),
 
     async tickOnce() {
-      const result = { launched: 0, deferred: 0, waiting: 0, paused: false };
+      const result = { launched: 0, deferred: 0, waiting: 0, dropped: 0, paused: false };
       if (await globallyPaused()) return { ...result, paused: true };
       const t = now();
       const queue = await db
@@ -1550,6 +1603,16 @@ export function schedulerService(
         }
         if (pausedAgents.has(w.agentId)) {
           await wait("agent paused");
+          continue;
+        }
+        // A wake that outlived its ticket is a replay of an old note or nudge, and starting it wakes its
+        // agent for nothing (BOS-256). Once the ticket is closed (done, cancelled included) and nothing on it
+        // changed after it closed, the wake is dropped. As with the loop guards, the whole of a ticket's
+        // waiting wakes go together, so the next pass doesn't start the one that was beside it.
+        const finished = await finishedTicketWake(w);
+        if (finished) {
+          await db.update(wakes).set({ status: "dropped", statusReason: CLOSED_TICKET_REASON }).where(inArray(wakes.id, [w.id, ...finished.ids]));
+          result.dropped += 1 + finished.ids.length;
           continue;
         }
         const isChat = w.reason === CHAT_REASON;

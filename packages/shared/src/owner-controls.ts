@@ -107,6 +107,8 @@ export const OWNER_CONTROLS = {
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
     // This host: confirm a fact only the owner can give.
     "Confirm",
+    // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
+    "Measuring", "Record this device", "Rename", "Forget",
   ],
   // Tool servers and funding sources (a new funding source is added here, not on the Funding tab).
   "Access and funding": ["Remove", "Add tool server", "Edit", "Delete", "Save", "Add", "Cancel"],
@@ -211,7 +213,11 @@ export const OWNER_FIELDS = {
     // The agent fence's mode (BOS-325).
     "Fence",
   ],
-  "Import and export": ["Include the wiki", "Tickets", "Package", "Company name", "Funding for every agent"],
+  "Import and export": [
+    "Include the wiki", "Tickets", "Package", "Company name", "Funding for every agent",
+    // The import preview's opt-in for a tool server that reaches the stack or the private network (BOS-335 follow-up).
+    "I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway",
+  ],
   Funding: [
     "Hold routine work at", "I have extra usage", "Can trigger the hold",
     "Order (1 is used first; leave empty to keep this account out of the list)", "Login for this account",

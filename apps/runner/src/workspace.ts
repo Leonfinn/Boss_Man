@@ -506,15 +506,37 @@ export class Workspaces {
     throw new Error(`There's no ${file} in this ticket's working folder. Save the image there (a path relative to where you work) and try again.`);
   }
 
-  async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024): Promise<WorkspaceDiff> {
+  /**
+   * The base a review should be measured from (BOS-694): the merge-base of the ticket's head and a
+   * freshly fetched origin/<baseRef>, the same split `git diff origin/<baseRef>...HEAD` uses, so a
+   * branch that has merged main since it started shows only its own changes. Without a baseRef, or
+   * when origin can't be reached, the recorded base stands: a stale diff's better than none.
+   */
+  private async reviewBase(repo: string, head: string, recorded: string, baseRef: string | undefined, secrets: Record<string, string | undefined>): Promise<{ base: string; tip?: string }> {
+    if (!baseRef) return { base: recorded };
+    try {
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: gitAuthEnv(secrets) });
+      const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${baseRef}^{commit}`], { cwd: repo });
+      // Where the branch split from main's current tip, however far main has moved since.
+      return { base: (await this.git(["merge-base", head, tip], { cwd: repo })) || recorded, tip };
+    } catch {
+      return { base: recorded };
+    }
+  }
+
+  async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024, baseRef?: string, secrets: Record<string, string | undefined> = {}): Promise<WorkspaceDiff> {
     const repo = this.repoDir(spec.projectId);
     const dir = await this.reopen(spec);
-    const baseCommit = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
+    const recorded = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
+    // Fetches under the repo lock, like every other git call that touches the shared refs.
+    const { base: baseCommit, tip } = await this.withRepoLock(spec.projectId, () => this.reviewBase(repo, head, recorded, baseRef, secrets));
     // The tree is read from the same commit as head, before the slow steps: a commit landing
     // mid-diff must not leave head A tagged with B's tree (the check queue reuses passes by tree).
     const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: dir });
-    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`], { cwd: dir });
+    // A fresh base can be far ahead of the recorded one; main's own commits aren't the ticket's work, so with a fetched
+    // tip they are left out of its commit list.
+    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..${head}`, ...(tip ? ["--not", tip] : [])], { cwd: dir });
     const commits = log ? log.split("\n").map((l) => ({ sha: l.slice(0, 40), subject: l.slice(41) })) : [];
     const index = path.join(this.root, "tmp", `${spec.ticketId}.index`);
     mkdirSync(path.dirname(index), { recursive: true });
@@ -1018,6 +1040,14 @@ export class Workspaces {
     for (const line of log.stdout.split("\n").filter(Boolean).reverse()) {
       const [sha, ...msg] = line.split(" ");
       const text = msg.join(" ");
+      // A fast-forward merge before the branch's first commit moves it just as a reset does (BOS-733: BOS-726
+      // was made from main, then `git merge` fast-forwarded it onto BOS-725's tip). It has no commit of its own
+      // yet, so everything it moved onto came from elsewhere; the guards below still apply. git writes this
+      // reflog text untranslated.
+      if (/^merge [^:]+: Fast-forward$/.test(text) && sha) {
+        start = sha;
+        continue;
+      }
       if (/^commit|^merge|^rebase|^cherry-pick/.test(text)) break;
       if (/^reset: moving to|^branch: Reset to|^checkout: moving/.test(text) && sha) start = sha;
     }
@@ -1074,7 +1104,8 @@ export class Workspaces {
         const bLine = await refs(b.branch, true);
         if (bLine.some((sha) => mine.has(sha))) {
           // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
-          // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
+          // server may allow when B is approved (BOS-372). From the graph alone a fast-forward can't be told from a hole; B's
+          // reflog can, when the fast-forward was B's first move (realBase, BOS-733).
           const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
           // B stacked on this ticket (BOS-629): B was created from a commit this branch holds. The graph alone can't say who
           // wrote a shared commit, but the base the runner recorded when it created B's branch can: a shared commit that is

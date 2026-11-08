@@ -60,6 +60,10 @@ function fakeDocker() {
       calls.push(`remove ${id}`);
       for (const [name, c] of containers) if (c.id === id) containers.delete(name);
     },
+    // BOS-335: the launcher watches Docker events; this fake's stream stays open until aborted (tested in guard-events.test.ts).
+    events(_filter, _since, _onEvent, _onError, signal: AbortSignal) {
+      return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
   };
   return { docker, containers, calls, image, fail };
 }
@@ -328,6 +332,39 @@ describe("the runner launcher (R55)", () => {
     fake.containers.delete("boss-man-netguard-app-co");
     expect(await api.reconcileGuards()).toEqual(["app-co"]);
     expect(fake.containers.has("boss-man-netguard-app-co")).toBe(true);
+  });
+
+  it("reports the guard's real state: a dead, missing or older guard is 'down', also after a launcher restart (BOS-436)", async () => {
+    const fake = fakeDocker();
+    await launcher(config(), fake.docker).put("app-co", TOKEN);
+    const guardOf = () => fake.containers.get("boss-man-netguard-app-co")!;
+    // A new launcher process has no memory of the first one's work.
+    const api = launcher(config(), fake.docker);
+    expect((await api.list())[0]!.guard).toBe("on");
+    guardOf().state = "exited"; // the guard died after start
+    expect((await api.list())[0]!.guard).toBe("down");
+    guardOf().state = "running";
+    guardOf().health = "unhealthy";
+    expect((await api.list())[0]!.guard).toBe("down");
+    guardOf().health = "healthy";
+    fake.containers.delete("boss-man-netguard-app-co"); // e.g. the host rebooted and it never came back
+    expect((await api.list())[0]!.guard).toBe("down");
+    // The runner comes back by itself (unless-stopped) and the guard hasn't: reconcile repairs it.
+    expect(await api.reconcileGuards()).toEqual(["app-co"]);
+    expect((await api.list())[0]!.guard).toBe("on");
+    // Runner restarted after the guard started: the guard is in an old namespace.
+    await fake.docker.restart(fake.containers.get("boss-man-runner-app-co")!.id);
+    expect((await api.list())[0]!.guard).toBe("down");
+    expect(await api.reconcileGuards()).toEqual(["app-co"]);
+    expect((await api.list())[0]!.guard).toBe("on");
+  });
+
+  it("a host that can't load nftables stays 'unavailable' after a launcher restart; enforce mode says 'down'", async () => {
+    const fake = fakeDocker();
+    fake.fail.nft = true;
+    await launcher(config(), fake.docker).put("app-co", TOKEN);
+    expect((await launcher(config(), fake.docker).list())[0]!.guard).toBe("unavailable");
+    expect((await launcher({ ...config(), guardMode: "enforce" }, fake.docker).list())[0]!.guard).toBe("down");
   });
 
   it("recreates one company's runner and says which runners are on the current image", async () => {

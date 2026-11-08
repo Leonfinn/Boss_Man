@@ -9,6 +9,7 @@ import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
 import { DEFAULT_VACUUM_TIMEOUT_MS, keepDaysFrom, opencodeDataHomes, pruneOpencodeSessions } from "./opencode-prune.js";
 import { RunnerConnection } from "./connection.js";
+import { hostBootAt, markStopped, previousExit } from "./restart-info.js";
 import { SessionManager } from "./session-manager.js";
 import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeRunnerToken } from "./token.js";
@@ -27,6 +28,9 @@ const dataDir = env.BOSSMAN_RUNNER_DATA ?? "/home/node/runner-data";
 mkdirSync(dataDir, { recursive: true });
 const journal = new Journal(path.join(dataDir, "journal.jsonl"));
 const log = (m: string) => console.log(`[runner] ${m}`);
+// How the last process ended, read before anything else can fail (BOS-594).
+const restart = { previousExit: previousExit(dataDir), hostBootAt: hostBootAt() };
+if (restart.previousExit) log(`previous runner process: ${restart.previousExit === "stopped" ? "stopped from outside" : "ended without being stopped (crash or out of memory)"}`);
 
 const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
 // check-all.sh's queue, slot locks and results: one folder that every session, fenced or not, and
@@ -102,6 +106,7 @@ connection = new RunnerConnection({
   log,
   onCommand: (command) => sessions.handle(command),
   pendingPermissions: () => sessions.pendingPermissions(),
+  restart,
   runningChecks: () => checkJobs.running(),
   onWelcome: () => checkJobs.resend(),
   liveRuns: () => sessions.liveRunIds(),
@@ -178,6 +183,7 @@ const beat = setInterval(() => {
 }, 15_000);
 
 const stop = () => {
+  markStopped(dataDir);
   clearInterval(beat);
   clearInterval(sweep);
   clearInterval(prune);

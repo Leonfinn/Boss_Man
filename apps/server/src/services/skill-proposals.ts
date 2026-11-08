@@ -129,6 +129,8 @@ export type SkillDeps = {
   closeReview?: (ticketId: string, stateNote: string) => Promise<unknown>;
   /** Closes the review ticket as done once its verdict is in (BOS-304): the review is over, so its own reviewer finishes it. */
   closeReviewDone?: (ticketId: string, stateNote: string) => Promise<unknown>;
+  /** A proposal ended without installing (owner said no, stale, or expired): a workflow change that nominated it must stop reading as applied. */
+  ended?: (companyId: string, proposalId: string) => Promise<unknown>;
   now?: () => Date;
 };
 
@@ -166,6 +168,14 @@ const VERDICT_WORDS = { recommend: "recommend", conditions: "recommend with cond
 export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillDeps) {
   const now = deps.now ?? (() => new Date());
   const patch = async (id: string, set: Partial<typeof skillProposals.$inferInsert>) => (await db.update(skillProposals).set(set).where(eq(skillProposals.id, id)).returning())[0]!;
+  /** Tells the workflow retro a nomination ended; its own failure never blocks the owner's answer. */
+  const ended = async (p: { companyId: string; id: string }) => {
+    try {
+      await deps.ended?.(p.companyId, p.id);
+    } catch {
+      /* the retro's check reconciles a change it was not told about */
+    }
+  };
   /** Takes every card for a proposal off the owner's queue once it has been answered one way or another. */
   const withdrawStrayCards = async (proposalId: string) => {
     const open = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, `skill:${proposalId}`), eq(decisions.status, "open")));
@@ -432,6 +442,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       if (!adding) {
         p = await patch(p.id, { status: "rejected", decidedBy: by, decidedAt: at, updatedAt: at });
         await withdrawStrayCards(p.id);
+        await ended(p);
         await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.decided", summary: `${by} decided not to add ${p.name}.`, at });
         await told(`The owner decided not to add the skill ${p.name}.`);
         return p;
@@ -440,6 +451,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       if (!same.ok) {
         p = await patch(p.id, { status: "stale", decidedBy: by, decidedAt: at, updatedAt: at });
         await withdrawStrayCards(p.id);
+        await ended(p);
         await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.stale", summary: `${by} said to add ${p.name}, but ${same.reason}. Nothing was installed; it has to be proposed and reviewed again.`, at });
         await told(`The owner said yes to ${p.name}, but ${same.reason}, so nothing was installed. Propose it again so the new version is reviewed.`);
         return p;
@@ -474,6 +486,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
           if (!(e instanceof SkillError)) throw e;
           p = await patch(p.id, { status: "stale", decidedBy: by, decidedAt: at, updatedAt: at });
           await withdrawStrayCards(p.id);
+          await ended(p);
           await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.stale", summary: `${p.name} could not be installed: ${e.message}` });
           await told(`The skill ${p.name} could not be installed: ${e.message}`);
           return p;
@@ -574,6 +587,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       for (const p of open) {
         await db.update(skillProposals).set({ status: "expired", updatedAt: now() }).where(eq(skillProposals.id, p.id));
         if (p.decisionId) await deps.withdrawDecision(p.decisionId);
+        await ended(p);
         // A review task left open would keep waking its reviewer and take a verdict that can no
         // longer count. Close it, tell the reviewer, and tell the CEO who proposed the skill.
         if (p.reviewTicketId) {

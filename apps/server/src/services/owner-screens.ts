@@ -35,7 +35,7 @@ function tab(parent: Place, name: string): Place {
 
 /** Every place a step can name, by its normalised name: the side menu, Setup, and the tabs of Settings and a project. */
 const PLACES = (() => {
-  const out = new Map<string, Place>();
+  const out = new Map<string, Place>(); // not state: local to the PLACES lookup-table builder
   for (const m of OWNER_MENU) out.set(norm(m), top(m));
   out.set("project", top("Projects"));
   const setup: Place = { route: "Setup (Settings → Run the setup wizard)", screen: "Setup", tabs: [] };
@@ -59,7 +59,7 @@ const whereAll = (screens: Iterable<OwnerScreen>) => [...new Set([...screens].ma
 
 /** The screens each listed button and field is on, by normalised label (a "(note)" may be left off, as cards do). */
 function screensByLabel(lists: Partial<Record<OwnerScreen, readonly string[]>>) {
-  const out = new Map<string, Set<OwnerScreen>>();
+  const out = new Map<string, Set<OwnerScreen>>(); // not state: local to screensByLabel
   for (const [screen, labels] of Object.entries(lists) as Array<[OwnerScreen, readonly string[]]>) {
     for (const l of labels) {
       const base = l.replace(/\s*…$/, "");
@@ -213,7 +213,7 @@ type FieldMention = { label: string; start: number; end: number };
 
 /** The listed fields, longest first, each as a pattern over its words (so "Before merging, Boss Man will…" matches with or without the comma). */
 const FIELD_PATTERNS = (() => {
-  const seen = new Set<string>();
+  const seen = new Set<string>(); // not state: local to the FIELD_PATTERNS lookup-table builder
   const out: Array<{ label: string; words: number; re: RegExp; exact: RegExp }> = [];
   for (const labels of Object.values(OWNER_FIELDS) as ReadonlyArray<readonly string[]>) {
     for (const l of labels) {
