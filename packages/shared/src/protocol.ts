@@ -242,6 +242,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** The git commit this image was built from (BOS-764); absent from an image built before it was recorded. */
+    imageCommit: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
     /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
     harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */

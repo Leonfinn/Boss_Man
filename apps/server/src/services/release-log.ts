@@ -8,6 +8,7 @@ import type { Db } from "../db/client.js";
 import { agents, decisions, projects, settings, tickets, wakes } from "../db/schema.js";
 import { nameRunnerSetupTickets, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
+import { imageContains, mergeCommitOrder, runnerImageCommit } from "./runner-image.js";
 
 /** The Release Manager's wake reason. */
 export const RELEASE_REASON = "live release";
@@ -51,7 +52,7 @@ function setupStepsOf(steps: string[]) {
 }
 
 /** A live ticket and the owner steps it still needs after the runner-update-only ones are taken out (BOS-741). */
-type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null };
+type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null; mergeCommit: string };
 
 const short = (sha: string) => sha.slice(0, 8);
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
@@ -233,7 +234,7 @@ export const releaseLogService = (
       // A ticket whose every step is the runner update comes through with no steps: it is named on the
       // runner-update card instead of getting one of its own (BOS-741).
       const steps = setupStepsOf(t.steps);
-      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId });
+      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId, mergeCommit: t.mergeCommit });
     }
     // Take back each affected card once, clearing every ticket that pointed at it (BOS-741). A ticket
     // still live here that shared a withdrawn card now has no card, so the grouping below raises one for
@@ -297,7 +298,10 @@ export const releaseLogService = (
    * Returns 1 when it changed a card, so the pass's count still says what it did.
    */
   async function nameOnRunnerCard(companyId: string, to: string, live: SetupTicket[]) {
-    const names = live.filter((t) => !t.steps.size && !t.decisionId).map((t) => ({ ticketId: t.id, title: t.title }));
+    // A ticket the live runner image already has (BOS-764) is not named: the owner has nothing left to build for it.
+    const image = await runnerImageCommit(db, companyId);
+    const order = image ? await mergeCommitOrder(db, companyId) : [];
+    const names = live.filter((t) => !t.steps.size && !t.decisionId && !imageContains(image, t.mergeCommit, order)).map((t) => ({ ticketId: t.id, title: t.title }));
     if (!names.length) return 0;
     return (await nameRunnerSetupTickets(db, companyId, to, names)) ? 1 : 0;
   }

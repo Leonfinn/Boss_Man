@@ -239,7 +239,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
               connected: deps.isConnected(runner.id),
               connectedSince: deps.connectedSince?.(runner.id)?.toISOString() ?? null,
               swapping,
-              lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null,
+              lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, imageCommit: runner.imageCommit, harnessVersions: runner.harnessVersions ?? null,
               // When and why the runner last restarted (BOS-594): update, setting change, owner restart, host, crash or out of memory.
               lastRestart: await lastRestart(db, runner.id),
             }
