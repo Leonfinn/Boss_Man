@@ -1,5 +1,5 @@
-ALTER TABLE "mcp_servers" ADD COLUMN "allow_private" boolean DEFAULT false NOT NULL;
---> statement-breakpoint
+ALTER TABLE "mcp_servers" ADD COLUMN "allow_private" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+ALTER TABLE "projects" ADD COLUMN "allow_private" boolean DEFAULT false NOT NULL;--> statement-breakpoint
 -- Existing tool servers keep working when the stricter guard ships (BOS-708): trust the ones whose host was meant for a
 -- private address, using the same name rules the server uses without DNS (a private IP literal, or a LAN/stack-style
 -- name). A public name added before this deploy stays untrusted, so re-pointing it later can't open the stack network.
@@ -24,4 +24,8 @@ WHERE "mcp_servers"."id" = u."id"
       -- A stack or LAN-style name: no dot at all (a container name such as db), or a .local/.internal/.lan/.home/.docker name.
       split_part(u."raw", ':', 1) !~ '\.' OR split_part(u."raw", ':', 1) ~ '\.(local|internal|localhost|lan|home|docker)$'
     )
-  );
+  );--> statement-breakpoint
+-- Every project's git host was trusted for private addresses before this deploy (a LAN git server must keep working), so
+-- trust existing ones too (BOS-708). A package imported from now on only gets the trust when its git address was flagged in
+-- the preview and the owner ticked, so a re-pointable name in a package can't open the stack network.
+UPDATE "projects" SET "allow_private" = true WHERE "repo_url" IS NOT NULL;

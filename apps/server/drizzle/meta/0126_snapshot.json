@@ -1,6 +1,6 @@
 {
-  "id": "abc56a91-ff73-4e77-8743-5cdfa71e05e9",
-  "prevId": "c3239f07-c0a9-4fcf-a2e0-f83e39a7cdb5",
+  "id": "f3ac97cb-2ad2-4d7a-8f34-508fed86c765",
+  "prevId": "b17f6553-0973-4633-92a8-1d804bb2dbae",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2268,6 +2268,42 @@
           "primaryKey": false,
           "notNull": false
         },
+        "commit": {
+          "name": "commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_name": {
+          "name": "tag_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_from": {
+          "name": "tag_from",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_to": {
+          "name": "tag_to",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_at": {
+          "name": "tag_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_result": {
+          "name": "tag_result",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3934,13 +3970,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "allow_private": {
-          "name": "allow_private",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5455,13 +5484,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "allow_private": {
-          "name": "allow_private",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "verify_command": {
           "name": "verify_command",
