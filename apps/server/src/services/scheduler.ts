@@ -133,17 +133,20 @@ const REPLAY_REASONS = new Set(["woken by owner", "nudge", "message", "chased", 
 
 /**
  * Whether these waiting wakes for this ticket have nothing to act on any more (BOS-256): every one is a
- * replay, the ticket is closed (done, cancelled included), and nothing has happened on it since it
- * closed. `stateChangedAt` is when it closed (a database trigger sets it on every state change), so a
- * ticket whose last activity is no later than that has not been touched since. Someone who reopens it
- * moves the state clock, so their work is not mistaken for a replay and its wake still starts.
+ * replay, the ticket is closed (done, cancelled included), and every one was queued at or before the
+ * moment it closed. `stateChangedAt` is when it closed (a database trigger sets it on every state
+ * change), so a wake created after that is something new — a nudge or message sent once the ticket was
+ * finished — and is not a replay. It compares wake times with the close time, not the ticket's last
+ * activity: nudges, messages and chases don't update that, so they would be mistaken for replays (R
+ * review on BOS-256). Someone who reopens it moves the state clock, so their work keeps its wake too.
  */
-function finishedSince(open: Array<{ reason: string }>, t: { systemState: string; stateChangedAt: Date | null; lastActivityAt: Date | null }): boolean {
+function finishedSince(open: Array<{ reason: string; createdAt: Date }>, t: { systemState: string; stateChangedAt: Date | null }): boolean {
   // Only replays; a watch, review, check or card wake is left to its own handling even on a closed ticket.
   if (!open.length || !open.every((w) => REPLAY_REASONS.has(w.reason))) return false;
   if (t.systemState !== "done") return false;
-  const closed = t.stateChangedAt ?? t.lastActivityAt;
-  return !closed || closed.getTime() >= (t.lastActivityAt?.getTime() ?? 0);
+  // No close time recorded: treat it as just closed, so a replay is still dropped rather than waking anyone.
+  if (!t.stateChangedAt) return true;
+  return open.every((w) => w.createdAt.getTime() <= t.stateChangedAt!.getTime());
 }
 
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
@@ -880,10 +883,10 @@ export function schedulerService(
    */
   async function finishedTicketWake(w: typeof wakes.$inferSelect): Promise<{ finished: true; ids: string[] } | null> {
     if (!w.ticketId) return null;
-    const [t] = await db.select({ systemState: tickets.systemState, stateChangedAt: tickets.stateChangedAt, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(eq(tickets.id, w.ticketId));
+    const [t] = await db.select({ systemState: tickets.systemState, stateChangedAt: tickets.stateChangedAt }).from(tickets).where(eq(tickets.id, w.ticketId));
     if (!t || t.systemState !== "done") return null;
     const waiting = await db
-      .select({ id: wakes.id, reason: wakes.reason })
+      .select({ id: wakes.id, reason: wakes.reason, createdAt: wakes.createdAt })
       .from(wakes)
       .where(and(eq(wakes.ticketId, w.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
     if (!finishedSince(waiting, t)) return null;

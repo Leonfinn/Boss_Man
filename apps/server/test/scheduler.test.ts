@@ -358,11 +358,14 @@ describe("scheduler", () => {
     ctx = await setup({ agent: 5 });
     const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
     const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Finished long ago", assigneeAgentId: worker.id })).json();
+    // It closed an hour ago; both wakes were queued before then, as a hold would leave them.
+    const closedAt = new Date(Date.now() - 3_600_000);
     await ctx.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, t.id));
     // What a hold leaves behind: the ticket's own wake, a colleague's nudge on it, and a later one for another ticket.
     await ctx.db.delete(wakes);
     // Backdated, as a wake held overnight would be: the ticket was done after it was queued.
-    const wokeAt = new Date(Date.now() - 20 * 3_600_000);
+    const wokeAt = new Date(closedAt.getTime() - 20 * 3_600_000);
     await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: t.id, reason: "woken by owner", priority: 3, note: "The owner moved this ticket to Ready.", createdAt: wokeAt });
     await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: t.id, reason: "nudge", priority: 2, note: "A day-old nudge.", createdAt: wokeAt });
     const later = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Still wanted", assigneeAgentId: worker.id })).json();
@@ -378,30 +381,34 @@ describe("scheduler", () => {
     expect(ctx.commands[0]!.prompt).toContain("Still wanted");
   });
 
-  it("drops a replay for a closed ticket that was reopened and closed again, and still starts one for a ticket touched after it closed (BOS-256)", async () => {
+  it("drops a replay for a closed ticket, but still starts a nudge sent after it closed (BOS-256)", async () => {
     ctx = await setup({ agent: 5 });
     // A ticket the owner reopened after it closed, then closed once more: it is done, and the reopen
     // moved its state clock past its later activity, so a wake held through the hold is a replay again.
     const reopened = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Reopened then closed", assigneeAgentId: ctx.ceo.id })).json();
     await ctx.req("PATCH", `/api/tickets/${reopened.id}`, { state: "done" });
-    // A ticket that is done but was touched with something new after it closed (a reply, a note): its
-    // wake has real work to do, so it is not dropped just because the ticket is closed.
-    const touched = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "A reply came in", assigneeAgentId: ctx.ceo.id })).json();
-    await ctx.req("PATCH", `/api/tickets/${touched.id}`, { state: "done" });
+    // A ticket that is done but was nudged after it closed: that nudge is something new, so its wake
+    // has real work to do and must start even though the ticket is closed.
+    const nudgedAfter = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "A nudge came in", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${nudgedAfter.id}`, { state: "done" });
     await ctx.db.delete(wakes);
     const closedAt = new Date(Date.now() - 3_600_000);
-    // The reopen and re-close move the state clock past the close, and no activity came after it.
-    await ctx.db.update(tickets).set({ stateChangedAt: closedAt, lastActivityAt: closedAt }).where(eq(tickets.id, reopened.id));
-    // This one's last activity is after the state change, so something new arrived after it closed.
-    await ctx.db.update(tickets).set({ stateChangedAt: closedAt, lastActivityAt: new Date(closedAt.getTime() + 60_000) }).where(eq(tickets.id, touched.id));
-    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: reopened.id, reason: "woken by owner", priority: 3, note: "Old replay." });
-    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: touched.id, reason: "woken by owner", priority: 3, note: "Something new came in." });
+    // Both closed an hour ago, and the state clock says so.
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, reopened.id));
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, nudgedAfter.id));
+    // The first wake was queued before the close (a replay); the second was queued a minute after it.
+    const beforeClose = new Date(closedAt.getTime() - 60_000);
+    const afterClose = new Date(closedAt.getTime() + 60_000);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: reopened.id, reason: "woken by owner", priority: 3, note: "Old replay.", createdAt: beforeClose });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: nudgedAfter.id, reason: "nudge", priority: 2, note: "A nudge sent after it closed.", createdAt: afterClose });
 
     expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 1 });
     expect(ctx.commands).toHaveLength(1);
-    expect(ctx.commands[0]!.prompt).toContain("A reply came in");
+    expect(ctx.commands[0]!.prompt).toContain("A nudge came in");
     const [reopenedRow] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, reopened.id));
     expect(reopenedRow!.status).toBe("dropped");
+    const [nudgedRow] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, nudgedAfter.id));
+    expect(nudgedRow!.status).not.toBe("dropped");
   });
 
   it("still starts a watch wake for a ticket just closed, so the watcher gives its final update (BOS-256)", async () => {
@@ -410,9 +417,9 @@ describe("scheduler", () => {
     await ctx.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
     await ctx.db.delete(wakes);
     const closedAt = new Date(Date.now() - 3_600_000);
-    await ctx.db.update(tickets).set({ stateChangedAt: closedAt, lastActivityAt: closedAt }).where(eq(tickets.id, t.id));
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, t.id));
     // Not a replay: a watch wake on a closed ticket is how the watcher reports the finish, so it goes ahead.
-    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: t.id, reason: "ticket watch", priority: 1, note: "Watch it once more." });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: t.id, reason: "ticket watch", priority: 1, note: "Watch it once more.", createdAt: new Date(closedAt.getTime() - 60_000) });
     expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
   });
 
