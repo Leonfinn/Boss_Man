@@ -173,6 +173,28 @@ describe("Synthetic Infinite mode (BOS-279)", () => {
     expect((await sweep()).stalledRuns.raised).toBe(1);
   });
 
+  it("keeps the longer check-queue limit for an infinite run waiting 45 minutes in the shared check slot (BOS-279 review)", async () => {
+    ctx = await setup({ limits: { agent: 5 } });
+    const p = await ctx.plan();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { model: INF, fundingSourceId: p.id });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { reason: "woken by owner" });
+    await ctx.req("POST", "/api/scheduler/tick");
+    const run = ctx.commands.at(-1)!;
+    await ctx.emit({ type: "run.started", runId: run.runId, agentId: ctx.ceo.id, acpSessionId: "s1", model: INF });
+    // The agent is inside scripts/check-quick.sh, waiting for a shared check slot: the 2-hour limit applies, not
+    // the 30-minute infinite stall limit, so a 45-minute wait is not a stall.
+    await ctx.emit({ type: "run.update", runId: run.runId, update: { kind: "tool_call", title: "Run quick check", rawInput: { command: "cd /work && scripts/check-quick.sh" }, status: "in_progress" } } as unknown as RunnerEvent);
+    const sweep = async () => {
+      await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+      return (await ctx.req("POST", "/api/sweep")).json() as { stalledRuns: { raised: number } };
+    };
+    ctx.advance(45 * 60_000);
+    expect((await sweep()).stalledRuns.raised).toBe(0);
+    // Past two hours it is still flagged.
+    ctx.advance(76 * 60_000);
+    expect((await sweep()).stalledRuns.raised).toBe(1);
+  });
+
   it("offers infinite mode for OpenCode on a Synthetic plan, in the Agents picker and in model_options", async () => {
     ctx = await setup();
     await ctx.plan();

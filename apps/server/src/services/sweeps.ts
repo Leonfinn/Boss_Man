@@ -407,17 +407,19 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const stallAfter = infinite ? Math.max(limits.stallAfterMs, limits.infiniteStallAfterMs) : limits.stallAfterMs;
       // A finished ticket needs no alert about its run, and neither does one waiting on the owner.
       const eligible = !waiting.has(run.run.id) && !!run.runnerId && run.ticketState !== "done";
-      if (!eligible || idle < stallAfter) return { idle, stalled: false };
+      if (!eligible) return { idle, stalled: false };
       // A run that has never said anything is not stalled but not started: the never-started sweep
       // retries it, and nobody is asked to cancel it (BOS-480).
       if (!run.run.lastEventAt) return { idle, stalled: false };
       if (!withBusyChecks) return { idle, stalled: true };
+      const limitOf = (busyLimit: number) => (infinite ? Math.max(stallAfter, busyLimit) : busyLimit);
       const command = await busyInCommand(run.run.id);
       if (command) {
         busy.set(run.run.id, command.title);
         // A check script waits silently for the shared check slot; the queue can be long, so it gets the longer limit (BOS-518).
-        // An infinite-mode run already got the longer scale above, so its long pause is never mistaken for a stall.
-        const limit = infinite ? stallAfter : command.checkScript ? limits.checkQueueAfterMs : limits.busyStallAfterMs;
+        // An infinite-mode run keeps whichever of its own stall limit and the busy limit is longer, so
+        // waiting 45 minutes in the check queue is not called a stall (BOS-279 round 2).
+        const limit = command.checkScript ? limitOf(limits.checkQueueAfterMs) : limitOf(limits.busyStallAfterMs);
         return { idle, stalled: idle >= limit };
       }
       // The runner answers Boss Man's pings every 15 seconds even mid-command. Events only arrive at
@@ -425,9 +427,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const lastSeen = run.runnerLastSeenAt?.getTime() ?? 0;
       if (lastSeen > (run.run.lastEventAt ?? run.run.startedAt).getTime() + stallAfter) {
         busy.set(run.run.id, "a long command");
-        return { idle, stalled: idle >= (infinite ? stallAfter : limits.busyRunnerAfterMs) };
+        return { idle, stalled: idle >= limitOf(limits.busyRunnerAfterMs) };
       }
-      return { idle, stalled: true };
+      // The run has been quiet this long with no sign of a command: it is stalled past its own limit.
+      return { idle, stalled: idle >= stallAfter };
     };
     for (const r of live) {
       const v = await idleOf(r, true);
