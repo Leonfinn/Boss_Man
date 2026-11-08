@@ -71,12 +71,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
   // A quoted word reads as the word it is: quote removal (`"..."`, `'...'`, `$'...'`, `$"..."`, `\-`, backslash-newline)
   // is applied to every plain word before every check below, not only to flags (BOS-715).
-  const base = dequoteWords(withoutOwnMemory(command, ownProject)).replace(/((?:^|[;&|(\n])[ \t]*(?:cat|tee)\b[^\n;&|()]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (m: string, head: string, q: string, end: string, body: string) => {
-    // With an unquoted delimiter bash expands the body: `$(…)` and backticks in it run (BOS-725). Keep such a body so the
-    // checks below read it; a body with no substitution is data and is dropped as before.
-    if (q === "" && /\$\(|\x60/.test(body)) return m;
-    return head + end;
-  });
+  const base = dropCatHeredocBodies(dequoteWords(withoutOwnMemory(command, ownProject)));
   // The command string of each shell `-c` runs too, so `bash -c 'r''m -rf /'`, `bash -c $'\x72m -rf /'` and
   // `sh -c 'echo '$'\x24(cat /tmp/x)'` are all read (BOS-715). It is judged as its own command rather than glued onto the
   // outer line, so its redirects do not change how the outer line is read. A shell nested inside a shell is bounded by
@@ -1917,6 +1912,62 @@ function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
     if (touchesFiles && /\+|\bjoin\b|%[sdr(]|\bformat\b|\bchr\b|fromCharCode|base64|b64|decode|\\x[0-9a-fA-F]|\\u|environ|\benv\b|HOME|argv|getenv|\$\{/.test(code)) return false;
   }
   return true;
+}
+
+/** Commands a cat/tee heredoc may be piped into without its body becoming code (BOS-727); any other stage keeps the body. */
+const HEREDOC_SINK_SAFE = new Set("cat tee head tail wc sort uniq tr cut grep".split(" "));
+
+/**
+ * Drops the bodies of heredocs that belong to cat/tee (text written to a file is data), and nothing else (BOS-727).
+ * Every `<<` on a line is read in order, and the bodies that follow the line are taken in that order, so an earlier
+ * interpreter heredoc keeps its body even when a cat heredoc comes later on the same line. A body is also kept when
+ * the cat/tee output is run: sent to a process substitution (`> >(bash)`) or piped to anything but a plain text tool
+ * (`| xargs rm`, `| python3`). A body whose end is not found, or one with `$(…)`/backticks under an unquoted delimiter
+ * (bash expands those, BOS-725), is kept. One pass over the lines, so linear in the command.
+ */
+function dropCatHeredocBodies(text: string): string {
+  if (!text.includes("<<")) return text;
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    out.push(line);
+    i++;
+    const ops = [...line.matchAll(/(?<!<)<<(?!<)(-?)[ \t]*(['"]?)(\w+)\2/g)];
+    if (ops.length === 0) continue;
+    // Read the bodies in order; if any end is missing, keep everything from here on as it is.
+    const bodies: { body: string[]; term: string; drop: boolean }[] = [];
+    let j = i;
+    let ok = true;
+    for (const op of ops) {
+      const [, dash, q, end] = op as unknown as [string, string, string, string];
+      const body: string[] = [];
+      while (j < lines.length && (dash ? lines[j]!.replace(/^\t+/, "") : lines[j]!) !== end) body.push(lines[j++]!);
+      if (j >= lines.length) { ok = false; break; }
+      const k = op.index!;
+      const segStart = Math.max(line.lastIndexOf(";", k), line.lastIndexOf("&", k), line.lastIndexOf("|", k), line.lastIndexOf("(", k)) + 1;
+      let drop = /^[ \t]*(?:cat|tee)\b/.test(line.slice(segStart, k)) && !/[;&|()]/.test(line.slice(segStart, k));
+      if (drop && q === "" && /\$\(|\x60/.test(body.join("\n"))) drop = false;
+      if (drop) {
+        const rest = line.slice(segStart);
+        if (/[<>]\(/.test(rest)) drop = false;
+        else {
+          const stages = rest.split(/(?<!\|)\|(?!\|)&?/).slice(1);
+          if (stages.some((s) => !HEREDOC_SINK_SAFE.has(/^[ \t]*([\w.-]+)/.exec(s)?.[1] ?? ""))) drop = false;
+        }
+      }
+      bodies.push({ body, term: lines[j]!, drop });
+      j++;
+    }
+    if (!ok) { while (i < lines.length) out.push(lines[i++]!); break; }
+    for (const b of bodies) {
+      if (!b.drop) out.push(...b.body);
+      out.push(b.term);
+    }
+    i = j;
+  }
+  return out.join("\n");
 }
 
 /**

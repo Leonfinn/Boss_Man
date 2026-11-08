@@ -1871,3 +1871,24 @@ describe("rules judge: a heredoc belongs to the command that has it (BOS-726)", 
     "echo hi && tee /tmp/x <<'EOF'\nrm -rf /etc\nEOF",
   ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
 });
+
+describe("rules judge: each heredoc on a line has its own owner and body (BOS-727)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  it.each([
+    "bash <<'B'; cat <<'A' > /tmp/x\nrm -rf /etc\nB\nfoo\nA",
+    "bash <<'B' && cat <<'A' > /tmp/x\nrm -rf /etc\nB\nfoo\nA",
+    "python3 <<'B'; cat <<'A' > /tmp/x\nimport shutil; shutil.rmtree('/etc')\nB\nfoo\nA",
+    "bash <<B; cat <<'A' > /tmp/x\nrm -rf /etc\nB\nfoo\nA",
+    "cat <<'EOF' > >(bash)\nrm -rf /etc\nEOF",
+    "cat <<'EOF' | xargs rm -rf\n/etc\nEOF",
+    "cat <<'EOF' | tee /tmp/x | xargs rm -rf\n/etc\nEOF",
+    "tee >(bash) <<'EOF'\nrm -rf /etc\nEOF",
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "cat <<'A' > /tmp/x; cat <<'B' > /tmp/y\nrm -rf /etc\nA\nfoo\nB",
+    "cat <<'EOF' | tee /tmp/x\nrm -rf /etc\nEOF",
+    "cat <<'EOF' | grep foo > /tmp/x\nrm -rf /etc\nEOF",
+    "bash <<'B'; cat <<'A' > /tmp/x\necho hi\nB\nrm -rf /etc\nA",
+  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+});
