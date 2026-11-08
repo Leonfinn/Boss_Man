@@ -30,7 +30,7 @@ You need:
 
 ## 2. Update the server
 
-Every way of updating the server takes a database backup first. Database changes apply by themselves during the update.
+Every way of updating the server takes a database backup first. Database changes apply by themselves during the update. Each one is written so the previous code still runs against the new schema, which is why a code rollback works. The rules are in [docs/10-migrations.md](10-migrations.md).
 
 - Single server, by hand: run `scripts/deploy.sh`. It backs up, pulls, rebuilds, restarts and waits for the server to report healthy. Add `--dry-run` to see the steps first. Success is the line `The server is healthy.` The full description is in [docs/00, step 14](00-first-time-install.md#14-updating-later) and [docs/06, step 9](06-install-truenas.md#9-updates-and-checks).
 - With the host deployer: approve the "Deploy <commit>?" card on Decisions, or use Settings → Server and runner → Updates → Deploy latest. Setting it up is in [docs/06, 9a](06-install-truenas.md#9a-install-the-host-deployer-optional).
