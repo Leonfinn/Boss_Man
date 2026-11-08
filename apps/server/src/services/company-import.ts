@@ -12,7 +12,7 @@ import { EXPORT_FORMAT } from "./company-export.js";
 import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.js";
 import { MAX_BODY, slugify } from "./wiki.js";
 import { cleanPath, LIMITS, normalise, parseSkillMd, skillName, SkillError, type SkillFile } from "./skills.js";
-import { reachesStack, sendableAddress } from "./launcher.js";
+import { allowsPrivate, reachesStack, sendableAddress } from "./launcher.js";
 import { addTicketDependency } from "./ticket-links.js";
 
 export class ImportError extends Error {
@@ -303,6 +303,11 @@ function remapPolicy(policy: unknown, ids: Map<string, string>, marks: Partial<R
 export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; fundingSourceId?: string | null; allowStackServices?: boolean } = {}) {
   const name = opts.name?.trim() || pkg.company.name;
   const flags = opts.allowStackServices === true ? [] : await Promise.all(pkg.toolServers.map((t) => reachesStack(t.url)));
+  // The tick says the owner allows private addresses for the servers the preview flagged, and only those: a public name
+  // the package also lists stays untrusted, so re-pointing it later can't open the stack network (BOS-708).
+  const trustPrivate = await Promise.all(
+    pkg.toolServers.map(async (t, i) => opts.allowStackServices === true && flags[i] === true && (await allowsPrivate(t.url))),
+  );
   const onStack = pkg.toolServers.filter((_, i) => flags[i]);
   if (onStack.length)
     throw new ImportError(400, `Tool server${onStack.length > 1 ? "s" : ""} ${onStack.map((t) => `"${t.name}" (${sendableAddress(t.url) ?? t.url})`).join(", ")} point${onStack.length > 1 ? "" : "s"} at Boss Man's own services or a private-network address, which could give the company's runner a direct path to them. Tick the box to allow it, or remove ${onStack.length > 1 ? "them" : "it"} from the package.`);
@@ -385,7 +390,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
 
     // The import tick lets a packaged tool server point at a private address, so trust it for private from then on
     // (BOS-708): the guard keeps its private addresses instead of dropping them when its name is re-pointed.
-    if (pkg.toolServers.length) await tx.insert(mcpServers).values(pkg.toolServers.map((t) => ({ companyId, ...t, secretEnv: t.secretEnv ?? null, allowPrivate: opts.allowStackServices === true })));
+    if (pkg.toolServers.length) await tx.insert(mcpServers).values(pkg.toolServers.map((t, i) => ({ companyId, ...t, secretEnv: t.secretEnv ?? null, allowPrivate: trustPrivate[i] === true })));
 
     for (const t of pkg.tickets) {
       const project = projectId.get(t.project);

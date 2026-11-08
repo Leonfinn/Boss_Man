@@ -26,7 +26,7 @@ import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
-import { LauncherError, launcherService, reachesStack, type LauncherOptions } from "./services/launcher.js";
+import { allowsPrivate, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
@@ -1418,7 +1418,7 @@ export async function buildApp(opts: AppOptions) {
       if (!c) return reply.code(404).send({ error: "not_found" });
       // The owner typed this one in, so a private host (or a LAN name) is meant; a public name they add is not trusted,
       // since it could be re-pointed at a private address later (BOS-708).
-      const allowPrivate = await reachesStack(b.url);
+      const allowPrivate = await allowsPrivate(b.url);
       const [row] = await db.insert(mcpServers).values({ ...b, companyId: id, allowPrivate }).onConflictDoNothing().returning();
       if (row) void launch.syncAllow(id);
       return row ? reply.code(201).send(row) : reply.code(409).send({ error: "name_taken", message: "This company already has a tool server with that name." });

@@ -83,6 +83,19 @@ export function isPrivateAddress(ip: string): boolean {
 export type HostLookup = (host: string) => Promise<string[]>;
 const systemLookup: HostLookup = async (host) => (await dnsLookup(host, { all: true })).map((r) => r.address);
 
+/** A name meant for the LAN or the compose network: no dot (a container name), or a .local/.internal/.lan/.home/.docker/.localhost name. */
+const STACK_LIKE_NAME = (host: string) => !host.includes(".") || /\.(local|internal|localhost|lan|home|docker)$/.test(host);
+
+/** The URL's host name, lower-cased and without a trailing dot, or null if it isn't one the guard handles (a bad URL, an IPv6 literal). */
+function guardHost(url: string): string | null {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+    return host.startsWith("[") ? null : host;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Whether a tool server's URL could reach Boss Man's own services (best effort; the preview's host:port is the owner's real control).
  * Flags: the known service names, any name with no dot (a compose or container name such as boss-man-db-1, localhost),
@@ -92,20 +105,35 @@ const systemLookup: HostLookup = async (host) => (await dnsLookup(host, { all: t
  */
 export async function reachesStack(url: string, lookup: HostLookup = systemLookup): Promise<boolean> {
   if (isStackService(url)) return true;
-  let host: string;
-  try {
-    host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
-  } catch {
-    return false;
-  }
-  if (host.startsWith("[")) return true;
+  const host = guardHost(url);
+  if (host === null) return true;
   if (isIP(host)) return isPrivateAddress(host);
-  if (!host.includes(".") || /\.(local|internal|localhost|lan|home|docker)$/.test(host)) return true;
+  if (STACK_LIKE_NAME(host)) return true;
   try {
     const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
     return addrs.length === 0 || addrs.some(isPrivateAddress);
   } catch {
     return true;
+  }
+}
+
+/**
+ * Whether the owner meant a tool server to reach a private address, so the guard keeps private addresses for it (BOS-708).
+ * Unlike the preview's reachesStack (fail closed so it flags generously), this decides trust so it fails closed the other way:
+ * true only for a private IP literal (can't be re-pointed), a stack or LAN-style name (the owner typed a LAN host), or a name
+ * that actually resolved with every address private. A lookup that errors, times out or comes back empty is not trusted, so a
+ * public name can't be trusted by making its DNS fail at add time and then re-pointed at the stack.
+ */
+export async function allowsPrivate(url: string, lookup: HostLookup = systemLookup): Promise<boolean> {
+  const host = guardHost(url);
+  if (host === null) return false;
+  if (isIP(host)) return isPrivateAddress(host);
+  if (STACK_LIKE_NAME(host)) return true;
+  try {
+    const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
+    return addrs.length > 0 && addrs.every(isPrivateAddress);
+  } catch {
+    return false;
   }
 }
 

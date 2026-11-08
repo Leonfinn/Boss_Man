@@ -143,6 +143,11 @@ describe("company import (docs/11, step 2)", () => {
     // a normal import (no tick) does not.
     const serversOf = async (companyId: string) => (await req("GET", `/api/companies/${companyId}/mcp-servers`)).json() as Array<{ url: string; allowPrivate: boolean }>;
     expect((await serversOf(ticked.json().companyId)).map((s) => s.allowPrivate)).toEqual([true]);
+    // Jane's finding 2: the tick trusts only the servers the preview flagged, not every server in the package, so a
+    // hostile package can't sneak a re-pointable public name in beside one stack-looking server and get both trusted.
+    const mixed = await req("POST", "/api/companies/import", { zip: pack([server("db", "http://db:5432/"), server("pub", "https://tools.example.org/mcp")]), name: "Mixed", allowStackServices: true });
+    expect(mixed.statusCode).toBe(201);
+    expect((await serversOf(mixed.json().companyId)).map((s) => s.allowPrivate)).toEqual([true, false]);
     const plain = await req("POST", "/api/companies/import", { zip: pack([server("pub", "https://tools.example.org/mcp")]), name: "Plain" });
     expect((await serversOf(plain.json().companyId)).map((s) => s.allowPrivate)).toEqual([false]);
     const names = ((await req("GET", "/api/companies")).json() as Array<{ name: string }>).map((c) => c.name);

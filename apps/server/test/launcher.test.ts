@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, notifications, settings } from "../src/db/schema.js";
-import { gitHostAddress, slugify, toolServerAddress } from "../src/services/launcher.js";
+import { allowsPrivate, gitHostAddress, slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -205,5 +205,35 @@ describe("runners through the launcher (R55)", () => {
     expect((await c.req("POST", `/api/companies/${company.id}/runner/launch`)).statusCode).toBe(409);
     expect((await c.req("GET", `/api/companies/${company.id}/runner`)).json()).toEqual({ registered: false, launcher: null });
     expect(c.fake.calls).toEqual([]);
+  });
+});
+
+describe("allowsPrivate (BOS-708): whether a tool server is trusted for private addresses", () => {
+  const lookup = (table: Record<string, string[]>, fail = false) => async (host: string) => {
+    if (fail) throw new Error("ENOTFOUND");
+    const addrs = table[host];
+    if (!addrs) throw new Error("ENOTFOUND");
+    return addrs;
+  };
+
+  it("trusts only what the owner meant for a private address", async () => {
+    // A private IP literal can't be re-pointed; a LAN or stack-style name is the owner's own host.
+    expect(await allowsPrivate("http://172.18.0.2:5432/mcp", lookup({}))).toBe(true);
+    expect(await allowsPrivate("http://10.0.0.5:1/", lookup({}))).toBe(true);
+    expect(await allowsPrivate("http://db:5432/mcp", lookup({}))).toBe(true);
+    expect(await allowsPrivate("http://penpot.lan:8080/", lookup({}))).toBe(true);
+    // A public IP literal or a public name is not trusted.
+    expect(await allowsPrivate("http://8.8.8.8:80/", lookup({}))).toBe(false);
+    expect(await allowsPrivate("https://tools.example.org/mcp", lookup({ "tools.example.org": ["93.184.216.34"] }))).toBe(false);
+  });
+
+  it("does not trust a name whose lookup fails (Jane's finding 1): a DNS error or empty answer is not a private address", async () => {
+    expect(await allowsPrivate("https://evil.example.org/mcp", lookup({}, true))).toBe(false);
+    expect(await allowsPrivate("https://evil.example.org/mcp", lookup({ "evil.example.org": [] }))).toBe(false);
+  });
+
+  it("trusts a name only when every address it resolves to is private, so a mixed answer is not trusted", async () => {
+    expect(await allowsPrivate("https://mixed.example.org/mcp", lookup({ "mixed.example.org": ["93.184.216.34", "172.18.0.2"] }))).toBe(false);
+    expect(await allowsPrivate("https://lan.example.org/mcp", lookup({ "lan.example.org": ["172.18.0.2", "172.18.0.3"] }))).toBe(true);
   });
 });

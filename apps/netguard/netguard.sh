@@ -65,7 +65,7 @@ is_private() {
       }
       print hit; exit
     }
-    if (a == "::" || a == "::1" || a ~ /^fe80:/ || a ~ /^f[cd]/ || a ~ /^64:ff9b:/ || a ~ /^2001:db8:/) print 1
+    if (a == "::" || a == "::1" || a ~ /^fe[89ab]/ || a ~ /^f[cd]/ || a ~ /^64:ff9b:/ || a ~ /^2001:db8:/) print 1
     else print 0
   }'
 }
