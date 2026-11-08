@@ -105,6 +105,8 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
+    "Restart the server",
     // This host: confirm a fact only the owner can give.
     "Confirm",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
@@ -149,6 +151,7 @@ export const OWNER_FIELDS = {
     "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for the agent (if you send it back)",
     "Why (shown on the Changes table, required)", "Wiki page that explains it (optional)",
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
+    "Every agent in this company",
   ],
   Notifications: [
     "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",

@@ -85,7 +85,24 @@ The owner enables it once by hand (it is an infra file): add it to `COMPOSE_FILE
 { "id": "decision uuid", "target": "server", "commit": "40 hex characters", "requestedAt": "2026-10-20T12:00:00.000Z", "approvedBy": "owner id" }
 ```
 
-`target` is `server` or `runner`. Anything else, a missing field, a bad format, or a file over 4 KB is refused; unknown extra fields are ignored. Every field is validated against a strict pattern before it is used, and the only action chosen from it is the `target`. `approvedBy` is only for the log.
+`target` is `server`, `runner` or `restart`. Anything else, a missing field, a bad format, or a file over 4 KB is refused; unknown extra fields are ignored. Every field is validated against a strict pattern before it is used, and the only action chosen from it is the `target`. `approvedBy` is only for the log.
+
+### Restart (BOS-647)
+
+Settings → Server and runner → Updates → **Restart the server** (owner session only; `POST /api/self-deploy/restart`, no MCP tool) writes a request with `target: "restart"`, a fresh random `id` (there is no decision card: the owner's click is the approval) and `commit` = the `deployed` commit from `available.json`. The server refuses it when self-deploy is off, the host has not reported, a deploy is running or a request is already waiting. It is for the server-health cards (memory high, freezes piling up) when no update is waiting.
+
+The host checks, after the usual format and replay checks:
+
+- `commit` must equal the checked-out HEAD, the code that runs. Otherwise it is refused ("the version running changed since you asked"). A restart never fetches, merges or moves the checkout, so it can't bring new code in, and the infra-path rule does not apply to it.
+- It shares the server's rate limit (`state/last-server`): no restart within 10 minutes of an update or another restart, and no update within 10 minutes of a restart.
+- Blue/green: refused while `state/soak` exists (an update or restart is still in its trial window), because a restart rebuilds the stopped colour that the window switches back to.
+
+What it runs:
+
+- **Blue/green:** the same swap as an update, at the same commit: backup, build the idle colour (mostly cached), migrate (nothing to do), start it as a standby, smoke test, hand over, flip the proxy, the whole-stack check, then the trial window with the old copy as a standby and the automatic switch-back. Pages keep working. `state/previous` is **removed** on success: the colour just rebuilt held the release before, so no stopped colour holds it any more, and `host-deployer.sh --rollback` then refuses with its usual message instead of "going back" to the code that runs now. **Trade-off:** after a restart the one-step hand rollback to the release before is gone (the confirm box says so). `state/hold` is kept. A switch-back in the window is reported with `target: "restart"`.
+- **Single server:** `scripts/deploy.sh --yes --no-runner --force --commit <HEAD>`: backup, rebuild what is checked out, **recreate** the server container (`--force` with nothing new adds `up -d --force-recreate server`; a plain `up -d` leaves a container with an unchanged image running), health check. The launcher is left alone. About a minute of downtime. `deploy-status.previous-commit` is left as it was, so `deploy.sh --rollback` still goes back to the release before.
+
+`status.json` carries `target: "restart"`; Boss Man notifies "Boss Man restarted (abc12345)", "Restart refused", "Restart failed" or "Restart switched back" at the usual levels. A restart does not start the runner update trial and does not change the last server update record. An older host script refuses `target: restart` as a bad format (the owner sees "Restart refused"), so nothing breaks while the new deployer is not yet copied into place.
 
 ## What the host script checks (in order; a failure writes `status.json` with the reason and posts the webhook)
 
@@ -97,7 +114,7 @@ The owner enables it once by hand (it is an infra file): add it to `COMPOSE_FILE
 6. **Infra paths** (`server` only): `git fetch`, require the commit to be a fast-forward of what is deployed, then refuse if `git diff --name-only HEAD..commit` matches the infra list: `docker-compose*.yml`, `deploy/` (except `deploy/penpot.yml`, the separate Penpot add-on), the four scripts that deploy or run Boss Man (`scripts/deploy.sh`, `scripts/rebuild-live.sh`, `scripts/update-runner.sh`, `scripts/host-deployer.sh`), `.dockerignore`, `.npmrc`, `.env*` (top level), and any `Dockerfile*`. Documentation, CI files (`.github/`, `.gitea/`) and every other script are not on the list: they never run on the host, or only at build and check time (`scripts/make-app-icons.mjs`, `check-*`, `test-*`, `lint-migrations.mjs`, `ci-launcher.sh`, the backup and restore-test scripts). Migrations are not on it either: the app applies them on every deploy. The list is the `INFRA` variable in `scripts/host-deployer.sh`; the deployer's refusal and the hand-apply card (`infraPaths` in `available.json`) both use it, so they cannot disagree. When you add a script that changes how Boss Man runs or deploys, add it to `INFRA`; a build-only script needs nothing.
 
    **The hand-apply card (BOS-269).** It is built from what the host reports in `available.json`: `srcDir` and `deployerDir` (the real folders, never guessed), `bluegreen` and `liveColour`. The card picks `scripts/rebuild-live.sh` on blue/green and `scripts/deploy.sh --commit <sha>` on a single server from `bluegreen`. If a folder or the layout is not reported (an older host script) the card says so in plain words and shows no command. The "Rebuild the runners" step is on the card only when `runnerChanged` is true, the same flag that drives the "Runner update afterwards" line. Every command sits in its own fenced block under the sentence that explains it (`apps/server/src/services/steps.ts`): nothing but the text to paste, no `$`, no trailing punctuation, no placeholder to edit. The web app shows each block with a Copy button. Any owner step card can use `step()` from that file.
-7. Run the fixed action under git settings that disable hooks: server = `scripts/deploy.sh --yes --no-runner --commit <sha>`; runner = `scripts/update-runner.sh`. Both go through one function each, so a later phase changes one place.
+7. Run the fixed action under git settings that disable hooks: server = `scripts/deploy.sh --yes --no-runner --commit <sha>`; runner = `scripts/update-runner.sh`; restart = `scripts/deploy.sh --yes --no-runner --force --commit <HEAD>` (single server) or the blue/green swap at HEAD (see Restart above). Each goes through one function, so a later phase changes one place.
 8. Write `status.json` and append it to `history.jsonl`; post the webhook if it was a failure (or on success when `WEBHOOK_ON_SUCCESS=1`).
 
 `--dry-run` runs every check and prints what it would do without taking the request, running anything or writing anything.
