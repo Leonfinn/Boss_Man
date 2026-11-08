@@ -180,14 +180,15 @@ Before, a runner update recreated every runner at once and killed the agent runs
 ```
 owner approves "Update runners" (or runs scripts/update-runner.sh)
   1. update-runner.sh builds the new image, runs the canary, tags :current     (nothing running is touched)
-  2. it writes inbox/drain.json and returns                                    (the host lock is free again)
-  3. the server turns the maintenance hold on: banner, no new runs anywhere
-  4. every few seconds the drain step looks at each runner:
+  2. it rebuilds and recreates the launcher when one is running               (only the launcher restarts; BOS-335)
+  3. it writes inbox/drain.json and returns                                    (the host lock is free again)
+  4. the server turns the maintenance hold on: banner, no new runs anywhere
+  5. every few seconds the drain step looks at each runner:
        its company has no active run  ->  launcher recreates that runner on :current
        its company is still busy      ->  wait
-  5. deadline (30 min) with runs still going -> ONE owner decision:
+  6. deadline (30 min) with runs still going -> ONE owner decision:
        Stop the remaining runs and update now / Keep waiting another 30 min / Cancel the update
-  6. every runner is on :current (and has reconnected) -> the hold lifts, the owner is notified, the queue runs
+  7. every runner is on :current (and has reconnected) -> the hold lifts, the owner is notified, the queue runs
 ```
 
 ### Decisions made

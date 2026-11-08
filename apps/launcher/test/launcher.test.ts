@@ -60,6 +60,10 @@ function fakeDocker() {
       calls.push(`remove ${id}`);
       for (const [name, c] of containers) if (c.id === id) containers.delete(name);
     },
+    // BOS-335: the launcher watches Docker events; this fake's stream stays open until aborted (tested in guard-events.test.ts).
+    events(_filter, _since, _onEvent, _onError, signal: AbortSignal) {
+      return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
   };
   return { docker, containers, calls, image, fail };
 }
