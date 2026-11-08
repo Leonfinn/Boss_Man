@@ -22,6 +22,7 @@ function show(opts: { collapsed?: boolean; narrow?: boolean; onToggleCollapsed?:
       unread={3}
       feedback={2}
       mergeWaiting={0}
+      mergeStuck={0}
       notifications="unsupported"
       collapsed={opts.collapsed ?? false}
       narrow={opts.narrow ?? false}
@@ -52,7 +53,7 @@ describe("side menu collapse toggle", () => {
 
   it("marks the strip so the stylesheet can drop the labels", () => {
     const { container } = render(
-      <Sidebar active="projects" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={0} notifications="unsupported" collapsed narrow={false} onToggleCollapsed={() => {}} onPickCompany={() => {}} onCreateCompany={async () => {}} onEnableNotifications={() => {}} onLogout={() => {}} />,
+      <Sidebar active="projects" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={0} mergeStuck={0} notifications="unsupported" collapsed narrow={false} onToggleCollapsed={() => {}} onPickCompany={() => {}} onCreateCompany={async () => {}} onEnableNotifications={() => {}} onLogout={() => {}} />,
     );
     expect(container.querySelector("nav.side")?.className).toContain("collapsed");
   });
