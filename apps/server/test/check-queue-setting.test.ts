@@ -84,4 +84,27 @@ describe("the check queue switch (BOS-798)", () => {
     // Saving legacy again (already legacy) cancels nothing more.
     expect((await c.req("PUT", "/api/settings/check-queue", { mode: "legacy", slots: 1 })).json()).toMatchObject({ cancelled: 0 });
   });
+
+  it("server → legacy → server never sends a job twice, never starts a cancelled one, and a running job's result still lands", async () => {
+    const c = (ctx = await setup(["check-jobs"]));
+    const runs = () => c.sent.filter((s) => s.type === "check.run").map((s) => (s as { jobId: string }).jobId);
+    await c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 1 });
+    const running = (await c.enqueue("t1")).job;
+    await c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 1 });
+    const waiting = (await c.enqueue("t2")).job;
+    expect(runs()).toEqual([running.id]);
+    await c.req("PUT", "/api/settings/check-queue", { mode: "legacy", slots: 1 });
+    // Back on, twice: the running job is not sent again and the cancelled one stays cancelled.
+    await c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 1 });
+    await c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 2 });
+    await c.checks.pump();
+    expect(runs()).toEqual([running.id]);
+    expect((await c.db.select().from(checkJobs).where(eq(checkJobs.id, waiting.id)))[0]!.state).toBe("cancelled");
+    // The running job finishes (with the queue switched off meanwhile, as in the owner flipping it mid-run) and its agent is told.
+    await c.req("PUT", "/api/settings/check-queue", { mode: "legacy", slots: 1 });
+    await c.checks.onDone(c.runnerId, { jobId: running.id, commit: "c-t1", exitCode: 0, timedOut: false, tail: "ok" });
+    expect((await c.db.select().from(checkJobs).where(eq(checkJobs.id, running.id)))[0]!.state).toBe("passed");
+    const told = (await c.db.select().from(wakes)).filter((w) => w.agentId === c.ceo.id && w.reason === "check_result");
+    expect(told.some((w) => /passed/.test(w.note ?? ""))).toBe(true);
+  });
 });
