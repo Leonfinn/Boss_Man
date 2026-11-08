@@ -59,11 +59,11 @@ describe("deploy targets (R14)", () => {
 describe("deploys (R15)", () => {
   it("gives a target's secrets only to the run carrying out an approved deploy, and only until it reports", async () => {
     const c = (ctx = await setup());
-    const staging = (await c.target({ name: "Staging", kind: "docker", endpoint: "tcp://socket-proxy:2375", requiresApproval: false })).json();
+    const staging = (await c.target({ name: "Staging", kind: "docker", endpoint: "tcp://socket-proxy:2375" })).json();
     await c.req("POST", `/api/secrets/${await c.secret("company token", "company-wide-value")}/grants`, { companyId: c.company.id, envName: "COMPANY_TOKEN" });
     await c.req("POST", `/api/secrets/${await c.secret("staging deploy key", "staging-deploy-value")}/grants`, { companyId: c.company.id, envName: "STAGING_KEY", deployTargetId: staging.id });
 
-    // Not production and the owner said no approval: approved straight away, and the agent is woken to carry it out.
+    // Not production: approved straight away, and the agent is woken to carry it out.
     const r = await c.deploys.request(c.actor, { target: "staging", ref: "v1.4.0" });
     expect(r.deploy.status).toBe("approved");
     expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.ceo.id, deployId: r.deploy.id, reason: "deploy approved" })]);
@@ -103,22 +103,9 @@ describe("deploys (R15)", () => {
     expect((await c.db.select().from(deploys).where(eq(deploys.id, again.deploy.id)))[0]!.status).toBe("approved");
   });
 
-  it("asks the owner about a new target's deploys unless the owner said it needs no approval (BOS-754)", async () => {
-    const c = (ctx = await setup());
-    const plain = (await c.target({ name: "Site", kind: "ssh", endpoint: "deploy@site.example" })).json();
-    expect(plain.rules).toEqual({ requiresApproval: true });
-    const r = await c.deploys.request(c.actor, { target: "Site", ref: "v1" });
-    expect(r.deploy.status).toBe("pending_approval");
-    expect((await c.db.select().from(decisions)).filter((d) => d.status === "open")).toHaveLength(1);
-    expect(await c.db.select().from(wakes)).toHaveLength(0);
-
-    await c.target({ name: "Scratch", kind: "ssh", endpoint: "deploy@scratch.example", requiresApproval: false });
-    expect((await c.deploys.request(c.actor, { target: "Scratch", ref: "v1" })).deploy.status).toBe("approved");
-  });
-
   it("fails a deploy whose run ends without reporting, which ends its secrets", async () => {
     const c = (ctx = await setup());
-    await c.target({ name: "Staging", kind: "docker", endpoint: "tcp://socket-proxy:2375", requiresApproval: false });
+    await c.target({ name: "Staging", kind: "docker", endpoint: "tcp://socket-proxy:2375" });
     const r = await c.deploys.request(c.actor, { target: "Staging", ref: "v2" });
     await c.scheduler.tick();
     const run = c.starts()[0]!;
