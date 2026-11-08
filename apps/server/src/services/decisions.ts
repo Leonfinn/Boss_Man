@@ -1624,7 +1624,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const ownerReason = tier !== "owner" ? null : outcome === "ceo" ? (agent?.role === "ceo" ? "Sent to you, not the CEO, because it is the CEO's own request." : "Sent to you, not the CEO, because the CEO could not take it first (paused, or the delete has no checkout of its own).") : ownerWhy(commandOf(info.rawInput), rule);
       if (ownerReason) explain.ownerWhy = ownerReason;
       // Standing rules are the owner's call, never an agent's.
-      const always =tier === "owner" ? alwaysChoices(info, explain) : [];
+      const always = tier === "owner" ? alwaysChoices(info, explain) : [];
       // The rules judge (BOS-337) only picks which button is suggested. The policy above already decided who answers; nothing here answers a card.
       const [company] = await db.select({ mode: companies.permissionJudge }).from(companies).where(eq(companies.id, runner.companyId));
       const judgeMode = company?.mode ?? "watch";
