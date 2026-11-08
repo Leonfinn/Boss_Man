@@ -4,7 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkResults, companies, decisions, reviewRequests, settings, ticketDependencies, tickets } from "../src/db/schema.js";
-import { failingLine, failingStep } from "../src/services/merge-queue.js";
+import { failingLine, failingStep, mergeQueueService } from "../src/services/merge-queue.js";
 import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY } from "../src/services/check-queue.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -144,6 +144,22 @@ describe("merge queue screen (BOS-587)", () => {
       expect(run).toMatchObject({ title: "Merging now", what: "merge_check" });
       expect(data.waiting.some((r: { ticketId: string }) => r.ticketId === t.id)).toBe(false);
     }
+  });
+
+  it("counts a running check over its limit as stuck, with nothing else stuck (BOS-767)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Running too long" })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    await approve(c, t.id);
+    // The merge is running (not waiting), and it started past the 60-minute limit.
+    const service = mergeQueueService(c.db, {
+      runningMerges: () => [{ ticketId: t.id, startedAt: new Date(Date.now() - 90 * 60_000).toISOString(), startedBy: "the reviewer" }],
+      limit: async () => 1,
+    });
+    const data = await service.get(c.company.id);
+    expect(data.running.find((r: { ticketId: string }) => r.ticketId === t.id)).toMatchObject({ overLimit: true });
+    expect(data.waiting.some((r: { ticketId: string }) => r.ticketId === t.id)).toBe(false);
+    expect(data.stuckCount).toBe(1);
   });
 
   it("shows a recently merged ticket and its failing check, newest first", async () => {
