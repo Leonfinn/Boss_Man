@@ -27,6 +27,16 @@ set -euo pipefail
 
 # BOS-562: not affected by unreadable checkout files: the runner image copies with COPY --chown=node and the netguard image runs as root.
 IMAGE=boss-man-runner
+# BOS-69: this script tags boss-man-runner/netguard/launcher:current and talks to the project "boss-man", which are
+# production's. In a staging folder (another project name or a stack) it would put staging code under production's
+# image names, so it refuses; scripts/deploy-staging.sh builds the staging images and starts the staging launcher.
+proj="${COMPOSE_PROJECT_NAME:-$(grep -s '^COMPOSE_PROJECT_NAME=' .env | tail -1 | cut -d= -f2- || true)}"
+stack="${BOSSMAN_STACK:-$(grep -s '^BOSSMAN_STACK=' .env | tail -1 | cut -d= -f2- || true)}"
+if [[ -n $stack || ( -n $proj && $proj != boss-man ) ]]; then
+  echo "This folder is not the production install (project '${proj:-boss-man}', stack '${stack:-none}'). update-runner.sh only handles production's images, so it refuses here." >&2
+  echo "For a staging stack use scripts/deploy-staging.sh, which builds the staging runner image." >&2
+  exit 1
+fi
 # Compose runners follow COMPOSE_PROFILES (from .env); with none set, the "runners" profile as
 # before. Runners the launcher made (R55) are recreated by the launcher itself.
 profiles="${COMPOSE_PROFILES:-$(grep -s '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2- || true)}"
@@ -134,6 +144,9 @@ if ((ROLLBACK)); then
 fi
 
 stamp="$(date -u +%Y%m%d%H%M)"
+# The commit the image is built from (BOS-764): Boss Man skips a "Build and update runners" ask when the image already has the change.
+# Empty outside a git checkout, and then the runner reports none and the ask is made as before.
+commit="$(git rev-parse HEAD 2>/dev/null || true)"
 # The network guard the launcher starts beside every runner (BOS-324); a runner is not started without it.
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
 
@@ -141,6 +154,7 @@ echo "Building $IMAGE:candidate with Claude Code ${version:-(the version pinned 
 docker build --pull -f apps/runner/Dockerfile \
   ${version:+--build-arg CLAUDE_CODE_VERSION="$version"} \
   --build-arg BOSSMAN_IMAGE_VERSION="$stamp" \
+  --build-arg BOSSMAN_IMAGE_COMMIT="$commit" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
 

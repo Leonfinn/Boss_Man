@@ -164,6 +164,8 @@ export const runners = pgTable("runners", {
   companyId: uuid("company_id").notNull().unique().references(() => companies.id, { onDelete: "cascade" }),
   tokenHash: text("token_hash").notNull(),
   imageVersion: text("image_version"),
+  /** The git commit the runner image was built from (BOS-764), from its last hello; null for an image built before it was recorded. */
+  imageCommit: text("image_commit"),
   /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
   harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
@@ -1527,7 +1529,11 @@ export const activity = pgTable(
      */
     detail: jsonb("detail").$type<Record<string, unknown> | null>(),
   },
-  (t) => [index("activity_company_at").on(t.companyId, t.at)],
+  (t) => [
+    index("activity_company_at").on(t.companyId, t.at),
+    // A ticket's merge-line timeline (BOS-769): each event reads the ticket's last row to close an open hold.
+    index("activity_merge_line").on(t.ticketId, t.at).where(sql`${t.kind} = 'merge_line'`),
+  ],
 );
 
 // ---------- Scrum Master watchdog (BOS-58) ----------

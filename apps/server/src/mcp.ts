@@ -2580,6 +2580,97 @@ function registerListMyWork(server: Pick<McpServer, "registerTool">, db: Db, sco
   );
 }
 
+// shortcut: one run's record is held in memory and dropped when the run ends; lost on restart, harmless because a chat run dies with the restart (BOS-758).
+type RunTrace = { changes: string[]; tickets: string[] };
+const traces = new Map<string, RunTrace>();
+/** What a chat run changed and the tickets it touched (created or read), read by chat.ts under its reply. */
+export const runTrace = (runId: string): RunTrace => traces.get(runId) ?? { changes: [], tickets: [] };
+export function forgetRunTrace(runId: string) {
+  traces.delete(runId);
+}
+
+/** A changing tool call, as one item for the "Done in this reply" line; null for a call that is not one. */
+function changeTrace(name: string, input: Record<string, unknown>): string | null {
+  const s = (v: unknown, n = 60) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+  const action = String(input.action ?? "");
+  switch (name) {
+    case "notes":
+      return action === "save" || action === "update" || action === "accept" ? `saved note "${s(input.title)}"` : action === "remove" || action === "decline" ? "removed a note" : null;
+    case "create_ticket":
+      return "created a ticket";
+    case "create_feature":
+      return `created a feature request "${s(input.title)}"`;
+    case "log_feedback":
+      return "filed feedback";
+    case "set_ticket_state":
+      return "moved a ticket";
+    case "update_ticket":
+      return "updated a ticket";
+    case "set_ticket_risk":
+      return "set a ticket's risk";
+    case "assign_ticket":
+      return `handed a ticket to ${s(input.agent)}`;
+    case "link_tickets":
+      return "made a ticket wait on another";
+    case "set_milestone":
+      return "put a ticket in a milestone";
+    case "raise_decision":
+      return "raised a decision for the owner";
+    case "withdraw_decision":
+      return "withdrew a decision";
+    case "decisions":
+      return ["answer", "withdraw", "escalate", "advise"].includes(action) ? "settled a decision" : null;
+    case "nudge":
+      return `nudged ${s(input.agent)}`;
+    case "wiki":
+      return action === "write" || action === "append" ? `wrote the wiki page "${s(input.title || input.slug)}"` : null;
+    case "update_instructions":
+      return `changed ${s(input.agent)}'s instructions`;
+    case "rename_agent":
+      return `renamed an agent to ${s(input.newName)}`;
+    case "set_agent_picture":
+      return "set an agent's picture";
+    case "standing_rules":
+      return action === "write" ? "changed the standing rules" : null;
+    case "propose_hire":
+      return `proposed hiring ${s(input.name)}`;
+    case "propose_team":
+      return "proposed a team";
+    case "propose_model_change":
+      return `proposed a model change for ${s(input.agent)}`;
+    case "propose_rule":
+      return "proposed a permission rule";
+    case "attach_image":
+      return "attached an image to a ticket";
+    default:
+      return null;
+  }
+}
+
+const UUID_ANYWHERE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+/**
+ * Records a chat run's changing calls, and every ticket id any of its tools returned (BOS-758), so the
+ * reply can be checked against what the run actually did. Wraps the server's registerTool: only the
+ * chat's server gets here, and a failed call (isError) records nothing.
+ */
+function traceCalls(server: McpServer, runId: string): McpServer {
+  const register = server.registerTool.bind(server);
+  server.registerTool = ((name: string, config: never, cb: (input: Record<string, unknown>, extra: never) => Promise<unknown>) =>
+    register(name, config, (async (input: Record<string, unknown>, extra: never) => {
+      const out = (await cb(input, extra)) as { isError?: boolean };
+      if (!out?.isError) {
+        const trace = traces.get(runId) ?? { changes: [], tickets: [] };
+        for (const id of JSON.stringify(out).match(UUID_ANYWHERE) ?? []) if (!trace.tickets.includes(id)) trace.tickets.push(id);
+        const change = changeTrace(name, input);
+        if (change && !trace.changes.includes(change)) trace.changes.push(change);
+        if (trace.changes.length || trace.tickets.length) traces.set(runId, trace);
+      }
+      return out;
+    }) as never)) as never;
+  return server;
+}
+
 /** The tools a PA may have (R87): all reads. Anything else is never registered for it. */
 const PA_READS = new Set(["tickets", "decisions", "list_my_work", "wiki", "whats_new", "board"]);
 
@@ -2785,7 +2876,8 @@ const CHAT_SKIP: ReadonlySet<string> = new Set(["create_ticket", "nudge"]);
  */
 function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean) {
   const { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
-  const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  // Wrapped before any tool registers, or the registrars below keep the plain one (BOS-758).
+  const server = traceCalls(new McpServer({ name: "bossman", version: "0.1.0" }), scope.runId);
   // The CEO gets the same tools in its chat as in its runs, except create_ticket and nudge, which
   // have chat versions below (BOS-224). Another agent's chat keeps the board tools only: its runs
   // may be deliberately restricted (BOS-58), and a chat must not widen them. No tool here edits

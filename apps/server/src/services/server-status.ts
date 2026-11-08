@@ -15,6 +15,7 @@ import type { BlueGreen } from "./bluegreen.js";
 import { checkQueue } from "./check-queue.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
+import type { NetguardAllowReport } from "./netguard-allow.js";
 import { lastRestart } from "./runner-restarts.js";
 import type { StallSummary } from "./stall-monitor.js";
 
@@ -38,6 +39,8 @@ export type ServerStatusDeps = {
   stalls?: () => StallSummary;
   /** Whether runners keep a core back for the server, database and proxy, and which threads (launcher GET /cpu, BOS-586). Absent or null: no launcher. */
   cpuReserve?: () => Promise<unknown>;
+  /** The owner's network-guard allow entries from .env and which ones Boss Man already allows (netguard-allow.ts, BOS-770). Absent or null: nothing to report. */
+  netguardAllow?: () => Promise<NetguardAllowReport | null>;
   /** The last hour of permission decisions for one company (permission-log.ts, BOS-306). */
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
@@ -141,7 +144,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
     /** The read-only server status, filtered to one company wherever it could name another's work. */
     async status(companyId: string) {
       const at = now();
-      const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, harnessVersions: runners.harnessVersions, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
+      const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, imageCommit: runners.imageCommit, harnessVersions: runners.harnessVersions, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
       // Mid-swap: an update hold is on and the runner is away, or it only just came back and is
       // starting its queued runs. "Never started" alerts wait while this is true.
       const connected = runner ? deps.isConnected(runner.id) : false;
@@ -212,6 +215,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         stalls: deps.stalls?.() ?? null,
         // Reserved CPU threads (BOS-586): on or off, which threads, and why.
         cpuReserve: (await deps.cpuReserve?.()) ?? null,
+        // The owner's BOSSMAN_NETGUARD_ALLOW entries (BOS-770): what the launcher uses, what .env holds, which ones Boss Man covers anyway.
+        netguardAllow: deps.netguardAllow ? await deps.netguardAllow().catch(() => null) : null,
         deploy: {
           enabled: !!deploy?.enabled,
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),
@@ -234,7 +239,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
               connected: deps.isConnected(runner.id),
               connectedSince: deps.connectedSince?.(runner.id)?.toISOString() ?? null,
               swapping,
-              lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null,
+              lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, imageCommit: runner.imageCommit, harnessVersions: runner.harnessVersions ?? null,
               // When and why the runner last restarted (BOS-594): update, setting change, owner restart, host, crash or out of memory.
               lastRestart: await lastRestart(db, runner.id),
             }

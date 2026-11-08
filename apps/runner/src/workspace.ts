@@ -28,7 +28,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
+import { checkMigrations, journalAt, journalProblems, rebaseMigrations } from "./migrations.js";
 import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
 const run = promisify(execFile);
@@ -1159,7 +1159,7 @@ export class Workspaces {
         const who = this.authorEnv();
         const commit = await this.git(["commit-tree", tree, "-p", targetSha, "-p", branchSha, "-m", message], { cwd: repo, env: who });
         const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
-        if (pushed.code === 0) return { status: "merged", commit };
+        if (pushed.code === 0) return { status: "merged", commit, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
         if (attempt === 1) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
       }
       throw new Error("unreachable");
@@ -1192,7 +1192,7 @@ export class Workspaces {
       if (phase.phase === "prepare") {
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         await this.git(["update-ref", keep, commit], { cwd: repo });
-        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha };
+        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
       }
       // The target moved to something whose merge differs from what was checked: check again.
       if (tried.tree !== phase.tree) return { status: "main_moved" };
@@ -1208,7 +1208,7 @@ export class Workspaces {
         return { status: "main_moved" };
       }
       await this.git(["update-ref", "-d", keep], { cwd: repo }).catch(() => undefined);
-      return { status: "merged", commit: toPush, checked: { sha: phase.commit, tree: tried.tree, ms: 0 } };
+      return { status: "merged", commit: toPush, checked: { sha: phase.commit, tree: tried.tree, ms: 0 }, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
     });
   }
 
@@ -1263,7 +1263,7 @@ export class Workspaces {
         const same = checked.targetSha === tried.targetSha && checked.branchSha === tried.branchSha;
         const toPush = same ? checked.commit : commit;
         const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
-        if (pushed.code === 0) return { status: "merged", commit: toPush, checked: { sha: checked.commit, tree: tried.tree, ms: checkedMs } };
+        if (pushed.code === 0) return { status: "merged", commit: toPush, checked: { sha: checked.commit, tree: tried.tree, ms: checkedMs }, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
         // Rejected: either the target moved again, or the push is refused for good (protected branch, bad token,
         // hook). The next round tells them apart: if the target sha is unchanged, it throws git's message.
         refused = { targetSha: tried.targetSha, stderr: pushed.stderr };
@@ -1309,13 +1309,30 @@ export class Workspaces {
     const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
     if (ancestor.code === 0) return { status: "already_merged" as const, commit: targetSha };
     const tried = await this.gitCode(["merge-tree", "--write-tree", "--name-only", "--messages", targetSha, branchSha], { cwd: repo });
+    // When the only trouble is migration bookkeeping, the gate renumbers the branch's migration itself (BOS-690, DR-037).
+    // Anything it can't do safely comes back "refused" and the merge result is what it was before.
+    const rebuild = async () => {
+      const mb = await this.gitCode(["merge-base", targetSha, branchSha], { cwd: repo });
+      if (mb.code !== 0 || !mb.stdout) return null;
+      const r = await rebaseMigrations((args, env) => this.gitCode(args, { cwd: repo, env }), { base: mb.stdout, branch: branchSha, main: targetSha });
+      return r.status === "rebuilt" ? r : null;
+    };
     if (tried.code === 1) {
       const lines = tried.stdout.split("\n");
       const files = lines.slice(1, lines.indexOf("") === -1 ? undefined : lines.indexOf("")).filter(Boolean);
+      const rebuilt = await rebuild();
+      if (rebuilt) return { status: "clean" as const, tree: rebuilt.tree, targetSha, branchSha, renamed: rebuilt.renamed };
       return { status: "conflicts" as const, files };
     }
     if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
-    return { status: "clean" as const, tree: tried.stdout.split("\n")[0]!, targetSha, branchSha };
+    const tree = tried.stdout.split("\n")[0]!;
+    // A clean merge can still leave the journal wrong (an old "when"); the rebuild lifts it.
+    const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
+    if (journalProblems(await journalAt(gitIn, targetSha), await journalAt(gitIn, tree), Date.now(), target).length) {
+      const rebuilt = await rebuild();
+      if (rebuilt) return { status: "clean" as const, tree: rebuilt.tree, targetSha, branchSha, renamed: rebuilt.renamed };
+    }
+    return { status: "clean" as const, tree, targetSha, branchSha, renamed: undefined };
   }
 
   /**
