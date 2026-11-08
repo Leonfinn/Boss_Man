@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { companies, deviceProfiles, owners } from "../src/db/schema.js";
+import { agents, companies, deviceProfiles, owners, projects, tickets } from "../src/db/schema.js";
 import { buildBrief } from "../src/services/brief.js";
 import { deviceProfilesService, DEVICE_PROFILES_MAX } from "../src/services/device-profiles.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
@@ -72,13 +72,30 @@ describe("deviceProfilesService", () => {
     expect(await t.db.select().from(deviceProfiles).where(eq(deviceProfiles.ownerId, ownerId))).toHaveLength(DEVICE_PROFILES_MAX);
   });
 
+  /** A company with one worker and an open ticket assigned to it; returns the ids the brief needs. */
+  async function workerWithTicket() {
+    const [company] = await t.db.insert(companies).values({ name: "App Co" }).returning();
+    const [project] = await t.db.insert(projects).values({ companyId: company!.id, name: "App" }).returning();
+    const [agent] = await t.db.insert(agents).values({ companyId: company!.id, name: "Dev", role: "worker", agentKind: "claude" }).returning();
+    await t.db.insert(tickets).values({ companyId: company!.id, projectId: project!.id, title: "Sidebar spacing", assigneeAgentId: agent!.id, systemState: "in_progress" });
+    return { companyId: company!.id, agentId: agent!.id };
+  }
+
   it("puts a recorded device in the agent's brief, with its measured figures", async () => {
     await deviceProfilesService(t.db).report(ownerId, phoneReport());
-    const [company] = await t.db.insert(companies).values({ name: "App Co" }).returning();
-    const brief = await buildBrief(t.db, { companyId: company!.id, agentId: null, role: "worker", since: null, now: new Date() });
+    const { companyId, agentId } = await workerWithTicket();
+    const brief = await buildBrief(t.db, { companyId, agentId, role: "worker", since: null, now: new Date() });
     expect(brief).toContain("Your devices");
     expect(brief).toContain("100dvh 800");
     expect(brief).toContain("840×900");
+  });
+
+  it("leaves the device query and its section out when the agent has no open ticket to be a layout ticket", async () => {
+    await deviceProfilesService(t.db).report(ownerId, phoneReport());
+    const [company] = await t.db.insert(companies).values({ name: "App Co" }).returning();
+    const [agent] = await t.db.insert(agents).values({ companyId: company!.id, name: "Dev", role: "worker", agentKind: "claude" }).returning();
+    const brief = await buildBrief(t.db, { companyId: company!.id, agentId: agent!.id, role: "worker", since: null, now: new Date() });
+    expect(brief).not.toContain("Your devices");
   });
 });
 
