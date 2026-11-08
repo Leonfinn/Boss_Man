@@ -54,14 +54,11 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
-  // A quoted flag is the same flag (`rm "-rf" /`, `rm -"r"f /`): drop the quotes from a word that starts with a dash.
-  const unquoteFlags = (s: string): string => s.replace(/(^|[\s;&|(])((?:["']*-["']*)[\w"'=.,:@/+-]*)(?=$|[\s;&|)])/g, (all, pre: string, w: string) =>
-    (w.split('"').length % 2 === 1 && w.split("'").length % 2 === 1 && /["']/.test(w) ? pre + w.replace(/["']/g, "") : all));
+  // A quoted flag is the same flag: quote removal (`"..."`, `'...'`, `$'...'`, `\-`) is applied before every check below.
   const c = unquoteFlags(withoutOwnMemory(command, ownProject)).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
-  // Opaque: a command substitution in the string given to `bash -c` / `sh -c` makes the inner command unknown.
-  if (/\b(?:ba|z|da|k)?sh\s+(?:-\S+\s+)*-\w*c\s+(?:--\s+)?(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)/.test(c)) {
-    for (const m of c.matchAll(/\b(?:ba|z|da|k)?sh\s+(?:-\S+\s+)*-\w*c\s+(?:--\s+)?("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g)) if (/\$\(|\x60/.test(m[1]!)) return result("opaque");
-  }
+  // Opaque: the command string a shell runs for `-c` (in any combined flag, with all of its joined quoted pieces) is
+  // unknown when it holds a substitution or a variable the judge can't resolve.
+  if (shellDashCOpaque(c)) return result("opaque");
   const ids = [...c.matchAll(WORKSPACE)].map((m) => m[1]!);
   const own = ownFolder ?? LEADING_CD.exec(c)?.[1] ?? [...ids].sort((a, b) => ids.filter((x) => x === b).length - ids.filter((x) => x === a).length)[0];
 
@@ -197,6 +194,11 @@ export function judgePermission(question: string, command: string | null, ownFol
     for (const t of targets) if (!/^\/tmp\//.test(t) && !inOwn(t) && t !== "/dev/null") return result("outside");
     // A relative target can climb out of the folder (`rm -rf ..`), and a `cd` somewhere else makes every relative target land there.
     for (const m of c.matchAll(/\brm\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
+    // An unresolved substitution or variable given to a file tool (`rm -rf $(curl ...)`, `cp $(cat /tmp/l) d`) is a target
+    // the judge can't place, so it gets no Allow.
+    for (const m of c.matchAll(/\b(?:rm|cp|mv|install|ln)\b([^;&|\n]*)/g)) {
+      for (const tok of shellWords(m[1]!)) if (!tok.startsWith("-") && tok !== "" && /\$\(|\x60|\$\{?[A-Za-z_]/.test(tok)) return result("outside");
+    }
     for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
     for (const m of c.matchAll(/\bfind\s+((?:-[HLP]\s+)*)([^\s-][^\s]*|)[^\n;&|]*?(-delete\b|-exec\s+rm\b)/g)) {
@@ -289,6 +291,50 @@ function shellWords(s: string): string[] {
   }
   if (has || cur) out.push(cur);
   return out;
+}
+
+/**
+ * Bash's quote removal for one word: `"..."`, `'...'`, `$'...'` and backslash escapes all go. Returns null when the word
+ * holds a substitution (`$(`, a backtick) or a variable the judge can't resolve, so its value is not a plain literal.
+ */
+function dequoteWord(w: string): string | null {
+  let out = "";
+  for (let i = 0; i < w.length; i++) {
+    const ch = w[i]!;
+    if (ch === "\\" && i + 1 < w.length) { out += w[++i]!; continue; }
+    if (ch === "$" && w[i + 1] === "'") {
+      const e = w.indexOf("'", i + 2);
+      if (e < 0) return null;
+      out += w.slice(i + 2, e).replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+      i = e;
+      continue;
+    }
+    if (ch === "'") { const e = w.indexOf("'", i + 1); if (e < 0) return null; out += w.slice(i + 1, e); i = e; continue; }
+    if (ch === '"') {
+      let j = i + 1;
+      for (; j < w.length && w[j] !== '"'; j++) { if (w[j] === "\\" && j + 1 < w.length) out += w[++j]!; else out += w[j]!; }
+      if (j >= w.length) return null;
+      i = j;
+      continue;
+    }
+    if (ch === "$" || ch === "\x60") return null; // a substitution or a variable: not a plain literal
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * Drops the quoting from a word that a shell reads as a flag (`rm "-rf" /`, `rm -"r"f /`, `rm $'-rf' /`, `rm \-rf /` are
+ * all `rm -rf /`). Only a balanced word whose dequoted form starts with `-` is rewritten, and only when it holds no
+ * substitution or variable; anything else is left for the other checks. Each flag word keeps its place among the others.
+ */
+function unquoteFlags(s: string): string {
+  return s.replace(/(^|[\s;&|(])((?:\$?'[^']*'|"[^"]*"|\\[^\s]|[^\s;&|()"'])+)(?=$|[\s;&|)])/g, (all, pre: string, w: string) => {
+    if (!/["'\\]/.test(w)) return all; // no quoting to remove
+    const d = dequoteWord(w);
+    // Only a plain option word is rewritten: a value with a space or a shell metacharacter stays quoted.
+    return d !== null && d.startsWith("-") && !/[\s;&|()<>"'\x60$]/.test(d) ? pre + d : all;
+  });
 }
 
 /** True when the arguments of one git command (words after `git`) are not on the allow-list. `dirOk` places a folder git is pointed at. */
@@ -835,6 +881,22 @@ function setsUnknownEnvironment(assigns: string[], sh: string, args: string[]): 
     if (exports && args.some((a) => !a.startsWith("-") && unknown(a))) return true;
   }
   if (sh === "set" && args.some((a, i) => /^-[A-Za-z]*[ak]/.test(a) || ((a === "allexport" || a === "keyword") && args[i - 1] === "-o") || /^-o?(?:allexport|keyword)$/.test(a))) return true;
+  return false;
+}
+
+/**
+ * True when a shell's `-c` command string is unknown: a substitution (`$(...)`, a backtick) or a variable the judge
+ * can't resolve. The string is assembled the way bash joins adjacent quoted pieces (`bash -c 'echo '"$(cat /tmp/x)"`),
+ * and only the word the shell actually runs (after any option words, BOS-695) is read.
+ */
+function shellDashCOpaque(c: string): boolean {
+  for (const m of c.matchAll(/\b(?:ba|z|da|k)?sh\b/g)) {
+    const words = shellWords(c.slice(m.index! + m[0].length).split(/\n/)[0]!);
+    const at = words.findIndex((w) => /^[-+][A-Za-z]*c/.test(w));
+    if (at < 0) continue;
+    const { word, ok } = shellDashCString(words.slice(at + 1));
+    if (ok === false || (word !== "" && /\$\(|\x60|\$\{?[A-Za-z_]/.test(word))) return true;
+  }
   return false;
 }
 
