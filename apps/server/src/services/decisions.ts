@@ -828,6 +828,8 @@ export type LoopHooks = {
   landAgain(ticketId: string, skipChecks: boolean): Promise<unknown>;
   /** A stalled-review card's action on the review (BOS-426): the reviewer, the reviewer's id and the kind. Returns false when the review can't take that action any more, which keeps the card open. */
   reviewStall?(ctx: Extract<DecisionContext, { type: "review_stall" }>, answer: string, byAgentId: string | null): Promise<boolean>;
+  /** A sign-off card for commit `cardHead` is being approved: null if that commit still stands, else the plain reason it can't (the card is replaced) (BOS-734). */
+  signoffStale?(ticketId: string, cardHead: string): Promise<string | null>;
 };
 
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
@@ -2576,6 +2578,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // known each repeat is marked settled, and every later write keeps those marks (so a delivery that
       // fails and is re-sent doesn't lose the audit of what this one answer settled).
       let repeatsNow = ctx.type === "permission" ? ctx.repeats : undefined;
+      // A sign-off card for code that has since changed is never taken as an approval: it is replaced, and the owner is told why (BOS-734).
+      if (ctx.type === "risk_review" && answer === APPROVE_MERGE && !extra.settledBy && ctx.head && loopHooks?.signoffStale) {
+        const stale = await loopHooks.signoffStale(ctx.ticketId, ctx.head).catch(() => null);
+        if (stale) throw new AnswerError(stale);
+      }
       if (ctx.type === "model_change" && answer === MODEL_EDIT && !extra.modelConfig) throw new AnswerError("Edit needs the harness, provider, model and paid-from you want.");
       if (ctx.type === "team_plan" && extra.picks?.some((i) => !Number.isInteger(i) || i < 0 || i >= ctx.hires.length)) throw new AnswerError("That hire isn't in the plan.");
       // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
