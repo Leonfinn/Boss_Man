@@ -23,7 +23,6 @@ const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 type Page = {
   setContent: (html: string, opts?: { waitUntil?: "load" }) => Promise<void>;
   evaluate: <T, A>(fn: (arg: A) => T, arg?: A) => Promise<T>;
-  click: (selector: string) => Promise<void>;
   close: () => Promise<void>;
 };
 type Browser = {
@@ -91,13 +90,26 @@ const manyBlockers = (n: number): PlanData => {
   };
 };
 
-// The box's real markup, from the real component, wrapped in the page it sits on. The Plan page
-// only reads its data through usePoll after it mounts, so the box is rendered directly from the
-// same component the page uses; the browser below then loads its markup and runs its real handlers.
-function causesHtml(plan: PlanData): string {
-  const box = renderToString(createElement(Causes, { plan }));
-  if (!box.includes('id="causes-h"')) throw new Error("the causes box did not render");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body style="margin:0">${box}</body></html>`;
+// The box's real markup, from the real component the page uses, in the state the browser would show
+// after a reload with that choice made (the component reads the choice from localStorage on mount,
+// so a small stand-in for it here renders the same markup). The markup is then loaded into a real
+// Chromium below and measured; the folded/unfolded margins are measured, not the CSS text.
+function causesHtml(plan: PlanData, choice: { showAll?: boolean; rolled?: boolean } = {}): string {
+  const saved = globalThis.localStorage;
+  const map = new Map<string, string>();
+  if (choice.showAll) map.set("bossman.plan.causesOpen", "1");
+  if (choice.rolled) map.set("bossman.plan.causesRolledUp", "1");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: { getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => void map.set(k, v) },
+  });
+  try {
+    const box = renderToString(createElement(Causes, { plan }));
+    if (!box.includes('id="causes-h"')) throw new Error("the causes box did not render");
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body style="margin:0">${box}</body></html>`;
+  } finally {
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: saved });
+  }
 }
 
 const VIEWPORTS = [
@@ -108,11 +120,11 @@ const VIEWPORTS = [
 
 describe.skipIf(!browser)("What's holding work up at real widths (BOS-745)", () => {
   for (const v of VIEWPORTS) {
-    it(`${v.name}: 5 items show, the 'Show all 14' button and heading arrow are reachable, and expanding shows all`, async () => {
-      const html = await causesHtml(manyBlockers(14));
+    it(`${v.name}: 5 items show, the 'Show all 14' button and heading arrow are reachable, and expanding fits`, async () => {
       const page = await browser!.newPage({ viewport: v.viewport, deviceScaleFactor: v.deviceScaleFactor, hasTouch: v.hasTouch, isMobile: v.isMobile });
       try {
-        await page.setContent(html, { waitUntil: "load" });
+        // Collapsed: 5 items, a reachable "Show all 14" and heading arrow, no sideways overflow.
+        await page.setContent(causesHtml(manyBlockers(14)), { waitUntil: "load" });
         const m = await page.evaluate(() => {
           const items = Array.from(document.querySelectorAll("#causes-list > li"));
           const more = document.querySelector(".pl-causes-more") as HTMLElement;
@@ -123,40 +135,58 @@ describe.skipIf(!browser)("What's holding work up at real widths (BOS-745)", () 
           return {
             items: items.length,
             label: more.textContent?.trim(),
+            moreExpanded: more.getAttribute("aria-expanded"),
             moreInView: r.left >= 0 && r.right <= window.innerWidth + 1 && r.top >= 0,
             toggleInView: t.left >= 0 && t.right <= window.innerWidth + 1 && t.height >= 32,
             moreWidth: r.width,
+            firstIsBiggest: items[0]?.textContent?.includes("holds up 14") ?? false,
             boxScroll: box.scrollWidth <= box.clientWidth + 1 && document.documentElement.scrollWidth <= window.innerWidth + 1,
           };
         });
         expect(m.items).toBe(5);
         expect(m.label).toContain("Show all 14");
+        expect(m.moreExpanded).toBe("false");
         expect(m.moreInView).toBe(true);
         expect(m.toggleInView).toBe(true);
-        // The button has real tappable width on a touch screen, not a text-squeezed sliver.
+        // The button has real tappable width, not a text-squeezed sliver.
         expect(m.moreWidth).toBeGreaterThanOrEqual(80);
+        // Kept most-held-up first.
+        expect(m.firstIsBiggest).toBe(true);
         // No sideways overflow of the page at this width.
         expect(m.boxScroll).toBe(true);
 
-        // Expand: every item shows and the page still fits the width.
-        await page.click(".pl-causes-more");
+        // Expanded (the box re-reads the saved choice on load): every item shows and it still fits.
+        await page.setContent(causesHtml(manyBlockers(14), { showAll: true }), { waitUntil: "load" });
         const after = await page.evaluate(() => ({
           items: document.querySelectorAll("#causes-list > li").length,
           label: (document.querySelector(".pl-causes-more") as HTMLElement).textContent?.trim(),
+          expanded: (document.querySelector(".pl-causes-more") as HTMLElement).getAttribute("aria-expanded"),
           fits: document.documentElement.scrollWidth <= window.innerWidth + 1,
         }));
         expect(after.items).toBe(14);
         expect(after.label).toContain("Show fewer");
+        expect(after.expanded).toBe("true");
         expect(after.fits).toBe(true);
 
-        // The heading arrow rolls the whole box up and the body is gone from the flow.
-        await page.click(".pl-causes-toggle");
-        const rolled = await page.evaluate(() => ({
-          hidden: (document.querySelector("#causes-body") as HTMLElement).hidden,
-          expanded: (document.querySelector(".pl-causes-toggle") as HTMLElement).getAttribute("aria-expanded"),
-        }));
+        // Rolled up (the saved heading choice): the body is out of the flow, the arrow points right,
+        // and the box is no taller than its heading.
+        await page.setContent(causesHtml(manyBlockers(14), { rolled: true }), { waitUntil: "load" });
+        const rolled = await page.evaluate(() => {
+          const body = document.querySelector("#causes-body") as HTMLElement;
+          const toggle = document.querySelector(".pl-causes-toggle") as HTMLElement;
+          const card = document.querySelector(".card") as HTMLElement;
+          return {
+            hidden: body.hidden || getComputedStyle(body).display === "none" || body.offsetHeight === 0,
+            expanded: toggle.getAttribute("aria-expanded"),
+            arrow: (document.querySelector(".pl-causes-toggle .pl-arrow") as HTMLElement).textContent?.trim(),
+            cardH: card.getBoundingClientRect().height,
+            headH: toggle.getBoundingClientRect().height,
+          };
+        });
         expect(rolled.hidden).toBe(true);
         expect(rolled.expanded).toBe("false");
+        expect(rolled.arrow).toBe("▸");
+        expect(rolled.cardH).toBeLessThanOrEqual(rolled.headH + 40);
       } finally {
         await page.close();
       }

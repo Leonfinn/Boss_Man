@@ -205,7 +205,7 @@ export function Causes({ plan }: { plan: PlanData }) {
           </h2>
         </button>
       </div>
-      <div id="causes-body" hidden={rolled} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div id="causes-body" hidden={rolled} style={rolled ? { display: "none" } : { display: "flex", flexDirection: "column", gap: 10 }}>
       <ul className="pl-causes" id="causes-list">
         {shown.map((c) => {
           const waiting = plan.nodes.filter((n) => n.causes.includes(c.id));
