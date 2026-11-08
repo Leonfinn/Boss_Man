@@ -1214,6 +1214,7 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
       "cd /tmp/p && pnpm install --ignore-scripts --no-ignore-scripts",
       "cd /tmp/p && npm install -- --ignore-scripts",
       "cd /tmp/p && npm install --Ignore-Scripts=false --ignore-scripts",
+      "cd /tmp/p && npm install --no-ignore-scripts --ignore-scripts", // unreadable order: fail closed
       "cd /tmp/p && npm version patch",
       "cd /tmp/p && npm link",
       "cd /tmp/p && npm update",
@@ -1228,7 +1229,6 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
       "cd /tmp/p && npm update --ignore-scripts",
       "cd /tmp/p && npm remove x --ignore-scripts",
       "cd /tmp/p && npm version patch --ignore-scripts",
-      "cd /tmp/p && npm install --no-ignore-scripts --ignore-scripts",
       "cd /tmp/p && corepack pnpm install --ignore-scripts",
       "cd /tmp/p && npm ls",
       "cd packages/shared && npm update",
