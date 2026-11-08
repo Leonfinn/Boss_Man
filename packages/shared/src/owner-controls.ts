@@ -105,6 +105,8 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
+    "Restart the server",
     // This host: confirm a fact only the owner can give.
     "Confirm",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
@@ -204,7 +206,10 @@ export const OWNER_FIELDS = {
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
     "Instructions, in Markdown", "A skill folder, its files, or a .zip",
   ],
-  "Server and runner": ["Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)"],
+  "Server and runner": [
+    "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
+    "Background (infinite mode) runs at once (0 to 16)",
+  ],
   "Access and funding": [
     "Server name", "Server URL", "Transport", "Token secret", "Header name", "Header value",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",

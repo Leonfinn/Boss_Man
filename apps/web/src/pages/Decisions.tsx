@@ -702,7 +702,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                 <span className="muted">
                   ·{" "}
                   {a.withdrawn
-                    ? `withdrawn by ${a.withdrawn.by}: ${a.withdrawn.note}`
+                    ? `withdrawn by ${a.withdrawn.by}: ${a.withdrawn.note}${a.withdrawn.notice ? ` (${a.withdrawn.notice})` : ""}`
                     : a.settled
                       ? `${settledWord(a.settled.answer)} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
                       : a.advice?.state === "reissued"
@@ -894,6 +894,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             {x.effect === "unknown" && " Read the exact command before you allow it."}
                           </p>
                         )}
+                        {x.ownerWhy && <p className="muted" style={{ fontSize: 13 }}>{x.ownerWhy}</p>}
                         {x.alwaysNote && !done && <p className="muted" style={{ fontSize: 13 }}>{x.alwaysNote}</p>}
                         {x.reason && <p className="muted">What the agent says it's for: {x.reason}</p>}
                         {x.command && (

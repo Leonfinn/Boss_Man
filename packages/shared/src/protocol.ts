@@ -23,7 +23,7 @@ export const SandboxReport = z.object({
   errno: z.string().max(200).nullable(),
   level: z.enum(["full", "partial", "unavailable"]),
   missing: z.array(z.string().max(100)).max(10),
-  /** Unprivileged user namespaces (what bubblewrap needs); for information only. */
+  /** Unprivileged user namespaces (what bubblewrap needs); for information only: nothing uses them, and runs are kept apart by Landlock, not namespaces (BOS-555). */
   userns: z.boolean(),
   probe: z.boolean().nullable(),
 });
@@ -173,7 +173,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** An image (a screenshot) from the ticket's working folder, to attach to the ticket; the reply carries it as base64. */
   z.object({ type: z.literal("workspace.image"), requestId: z.string(), ticketId: Uuid, path: z.string().min(1).max(500) }),
   /** Runs the ticket's check in its worktree (R47). */
-  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
+  /**
+   * fence: run the check inside the fence (BOS-323), like run.start's. A runner that can't fence runs
+   * it as before and says so (VerifyResult.fenced); an older runner ignores it.
+   */
+  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1), fence: z.boolean().optional() }),
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Whether the ticket's branch still merges into the target, without merging it (BOS-426). */
@@ -238,6 +242,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** The git commit this image was built from (BOS-764); absent from an image built before it was recorded. */
+    imageCommit: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
     /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
     harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
@@ -300,7 +306,8 @@ export type WorkspaceDiff = {
 };
 
 /** The outcome of a ticket's check (R47). */
-export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
+/** fenced: set only when the check was asked to run fenced, saying whether it was. */
+export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean };
 /**
  * A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): one folder per ticket on the workspaces disk, so a proof
  * or a check log outlives the runner and the temp sweep. Kept a week, or a few hours once the ticket's work is gone.

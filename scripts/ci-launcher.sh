@@ -15,12 +15,48 @@ touch secrets/runner-app-co.token
 export POSTGRES_PASSWORD=ci BOSSMAN_DATA="$data" BOSSMAN_LAUNCHER=1 COMPOSE_PROFILES=launcher BOSSMAN_INSECURE_COOKIES=1
 export BOSSMAN_DOCKER_GID="$(stat -c %g /var/run/docker.sock)" BOSSMAN_HOST_PORT="${BOSSMAN_HOST_PORT:-3100}"
 runner=boss-man-runner-ci-co
+guard="boss-man-netguard-ci-co"
+network=boss-man_default
 cleanup() {
-  docker rm -f "$runner" >/dev/null 2>&1 || true
+  [[ -z "${watcher:-}" ]] || kill "$watcher" 2>/dev/null || true
+  docker rm -f "$runner" "$guard" >/dev/null 2>&1 || true
   docker compose down -v >/dev/null 2>&1 || true
   sudo rm -rf "$data"
 }
 trap cleanup EXIT
+
+# BOS-576: a runner is never on its network while its guard isn't loaded. Samples Docker every 0.2 s and writes a
+# line for each sample where the runner runs on the network but no healthy guard newer than it is in its namespace.
+nanos() { date -d "$1" +%s%N; }
+watch_hold() {
+  local out="$1" r g run started nets grun ghealth gstarted
+  : >"$out"
+  while :; do
+    r="$(docker inspect "$runner" --format '{{.State.Running}} {{.State.StartedAt}} {{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}' 2>/dev/null)" || { sleep 0.2; continue; }
+    read -r run started nets <<<"$r"
+    if [[ "$run" == true && ",${nets:-}" == *",$network,"* ]]; then
+      g="$(docker inspect "$guard" --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.State.StartedAt}}' 2>/dev/null || echo "false none 0001-01-01T00:00:00Z")"
+      read -r grun ghealth gstarted <<<"$g"
+      if [[ "$grun" != true || "$ghealth" != healthy ]] || (($(nanos "$gstarted") < $(nanos "$started"))); then
+        echo "$(date -u +%T.%N) runner on $network, guard: $g" >>"$out"
+      fi
+    fi
+    sleep 0.2
+  done
+}
+hold_log="$(mktemp)"
+watch_hold "$hold_log" &
+watcher=$!
+stop_watch() {
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  watcher=""
+  if [[ -s "$hold_log" ]]; then
+    echo "$1: the runner was on its network without a loaded guard:" >&2
+    head -20 "$hold_log" >&2
+    exit 1
+  fi
+}
 
 docker compose up -d --no-build db server launcher
 base="http://127.0.0.1:$BOSSMAN_HOST_PORT"
@@ -42,6 +78,8 @@ if ! grep -q '"connected":true' <<<"$status"; then
   exit 1
 fi
 echo "Connected: $status"
+stop_watch "First start"
+echo "Network hold: the new runner joined its network only once its guard was loaded."
 
 settings="$(docker inspect "$runner" --format '{{.Config.User}} {{json .HostConfig.CapDrop}} {{.HostConfig.Privileged}} {{.HostConfig.NetworkMode}} {{json .HostConfig.SecurityOpt}} {{.HostConfig.PidsLimit}} {{index .Config.Labels "boss-man.launcher"}}')"
 echo "Runner settings: $settings"
@@ -49,7 +87,6 @@ echo "Runner settings: $settings"
 
 # Network guard (BOS-324): the runner reaches the server, but not the database or the network gateway (IPv4 or IPv6).
 # curl exits 7 when it can't connect: that is the guard's answer; a reachable port gives another code.
-guard="boss-man-netguard-ci-co"
 guard_settings="$(docker inspect "$guard" --format '{{json .HostConfig.CapAdd}} {{json .HostConfig.CapDrop}} {{.HostConfig.Privileged}} {{.HostConfig.ReadonlyRootfs}}')"
 [[ "$guard_settings" == '["NET_ADMIN"] ["ALL"] false true' ]]
 [[ "$(docker inspect "$runner" --format '{{json .HostConfig.CapAdd}}')" == '[]' ]]
@@ -144,7 +181,27 @@ echo "Network guard: a connection opened before it was up is cut off."
 
 # Self-heal (BOS-467): a runner that disappears while its token file is still there (what a guard failure leaves
 # behind) is made again by the launcher, with the guard, without anyone pressing a button.
+watch_hold "$hold_log" &
+watcher=$!
 docker rm -f "$runner" >/dev/null
+# BOS-576: as soon as the new runner runs, it tries the database. Whether it is still held off its network or already
+# guarded, the attempt must be refused (curl 7), never reach Postgres.
+db_first="$(head -1 <<<"$db_addrs")"
+if [[ "$db_first" == *:* ]]; then db_url="http://[$db_first]:5432/"; else db_url="http://$db_first:5432/"; fi
+early=""
+for _ in $(seq 600); do
+  if [[ "$(docker inspect "$runner" --format '{{.State.Running}}' 2>/dev/null)" == true ]]; then
+    nets="$(docker inspect "$runner" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null || true)"
+    code=0
+    docker exec "$runner" curl -g -s -m 8 -o /dev/null "$db_url" 2>/dev/null || code=$?
+    if [[ "$code" == 7 ]]; then early="refused"; else early="not refused (curl exit $code)"; fi
+    early="$early; runner networks at the try: ${nets:-none}"
+    break
+  fi
+  sleep 0.1
+done
+echo "A database connection tried as soon as the recreated runner ran: ${early:-the runner never ran}"
+[[ "$early" == refused* ]] || { echo "A connection during the runner's startup wasn't refused" >&2; exit 1; }
 for _ in $(seq 80); do
   if docker exec "$runner" true 2>/dev/null && check_guard 2>/dev/null; then healed=1; break; fi
   sleep 3
@@ -157,6 +214,8 @@ for _ in $(seq 30); do
 done
 grep -q '"connected":true' <<<"$status" || { echo "The recreated runner never connected: $status" >&2; exit 1; }
 echo "Self-heal: removed runner recreated, guarded and connected."
+stop_watch "Self-heal"
+echo "Network hold: the self-healed runner joined its network only once its guard was loaded."
 
 # The launcher publishes no ports.
 [[ -z "$(docker compose port launcher 3105 2>/dev/null || true)" ]]
