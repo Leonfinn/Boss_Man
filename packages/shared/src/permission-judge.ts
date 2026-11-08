@@ -907,6 +907,79 @@ function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean 
   return false;
 }
 
+/**
+ * Wrappers that only start the real command, with the options that take a value (BOS-703): `short` lists the letters (`-k 2`,
+ * `-oL`), `long` the options whose value is the next word (`--signal KILL`; `--signal=KILL` is one word and needs no entry).
+ * One table for the main command path and the pipe-segment parser, so they cannot drift apart.
+ */
+const WRAPPER_OPTS: Record<string, { short: string; long: string[]; bare: string[] }> = {
+  setsid: { short: "", long: [], bare: ["--ctty", "--fork", "--wait", "--help", "--version"] },
+  nohup: { short: "", long: [], bare: ["--help", "--version"] },
+  command: { short: "", long: [], bare: [] },
+  exec: { short: "a", long: [], bare: [] },
+  time: { short: "fo", long: ["--format", "--output"], bare: ["--append", "--verbose", "--portability", "--quiet", "--help", "--version"] },
+  nice: { short: "n", long: ["--adjustment"], bare: ["--help", "--version"] },
+  timeout: { short: "sk", long: ["--signal", "--kill-after"], bare: ["--foreground", "--preserve-status", "--verbose", "--help", "--version"] },
+  env: { short: "uCP", long: ["--unset", "--chdir", "--argv0"], bare: ["--ignore-environment", "--null", "--debug", "--list-signal-handling", "--block-signal", "--default-signal", "--ignore-signal", "--help", "--version"] },
+  flock: { short: "wE", long: ["--timeout", "--wait", "--conflict-exit-code"], bare: ["--shared", "--exclusive", "--unlock", "--nonblock", "--nb", "--no-fork", "--close", "--verbose", "--fcntl", "--help", "--version"] },
+  stdbuf: { short: "ioe", long: ["--input", "--output", "--error"], bare: ["--help", "--version"] },
+};
+
+/**
+ * Peel one wrapper (`head` may carry a path: `/usr/bin/time`). Returns null when `head` is no wrapper or cannot be peeled
+ * (`flock -c 'cmd'`), "split" for `env -S` (a command string the judge can't read), else the command behind it.
+ */
+function peelWrapper(head: string, args: string[]): { head: string; args: string[]; assigns: string[] } | "split" | null {
+  const name = head.replace(/^.*\//, "");
+  const spec = Object.hasOwn(WRAPPER_OPTS, name) ? WRAPPER_OPTS[name]! : null;
+  if (!spec) return null;
+  const assigns: string[] = [];
+  let durationLeft = name === "timeout"; // timeout DURATION command
+  let lockLeft = name === "flock"; // flock LOCKFILE command
+  let optionsDone = false;
+  let i = 0;
+  while (i < args.length) {
+    const a = args[i]!;
+    if (!optionsDone && a === "--") { optionsDone = true; i++; continue; }
+    if (!optionsDone && a.startsWith("--")) {
+      // GNU getopt_long takes any unambiguous prefix (`nice --adj 5`, `env --sp 'cmd'`): match by prefix, fail closed when it is ambiguous.
+      const opt = a.replace(/=.*$/s, "");
+      const hasEq = opt !== a;
+      const hit = (n: string) => n === opt || (opt.length > 2 && n.startsWith(opt));
+      const unreadable = name === "env" ? "--split-string" : name === "flock" ? "--command" : "";
+      const all = [...spec.long, ...spec.bare, ...(unreadable ? [unreadable] : [])];
+      const exact = all.includes(opt);
+      const matches = exact ? [opt] : all.filter(hit);
+      if (unreadable && matches.includes(unreadable)) return name === "env" ? "split" : null;
+      if (matches.length > 1 && matches.some((m) => spec.long.includes(m))) return "split"; // ambiguous prefix with a value option: unreadable
+      i += !hasEq && matches.length === 1 && spec.long.includes(matches[0]!) ? 2 : 1;
+      continue;
+    }
+    if (!optionsDone && a.startsWith("-") && a.length > 1) {
+      if (name === "env" && /^-[A-Za-z]*S/.test(a)) return "split";
+      if (name === "flock" && /^-[A-Za-z]*c$/.test(a)) return null;
+      // The first letter that takes a value: the rest of the word is the value (`-oL`), or the next word when it ends the word.
+      let takesNext = false;
+      for (let k = 1; k < a.length; k++) if (spec.short.includes(a[k]!)) { takesNext = k === a.length - 1; break; }
+      i += takesNext ? 2 : 1;
+      continue;
+    }
+    if (/^\w+=/.test(a)) { assigns.push(a); i++; continue; }
+    if (durationLeft && /^[\d.][\w.]*$/.test(a)) { durationLeft = false; i++; continue; }
+    if (lockLeft) { lockLeft = false; i++; continue; }
+    break;
+  }
+  return { head: args[i] ?? "", args: args.slice(i + 1), assigns };
+}
+
+/** Flags of an interpreter that take the next word as their value (`python3 -W ignore::x.Warning`, `perl -I lib.d`), by interpreter. */
+const INTERP_VALUE_FLAGS: [RegExp, string][] = [
+  [/^python[\d.]*$|^pypy[\d.]*$|^ipython[\d.]*$/, "WXQ"],
+  [/^perl$/, "I"],
+  [/^ruby$/, "IC"],
+  [/^php$/, "d"],
+];
+
 function usesScratchUnsafely(c: string): boolean {
   const bad = { v: false };
   const segs = shellSegments(c, bad);
@@ -1044,44 +1117,52 @@ function usesScratchUnsafely(c: string): boolean {
     // operand (no word with a dot or slash) and no -c/-e code reads its program from stdin; a lone `-` is stdin too.
     const pipeSeg = /(?<!\|)\|(?!\|)((?:(?!&&)[^;\n|)])*)/g;
     const piped: { index: number }[] = [];
-    for (const m of c.matchAll(pipeSeg)) {
-      const words = m[1]!
+    // Whether one command after a pipe (its text up to the next separator) is an interpreter that reads its program from stdin.
+    const readsStdin = (text: string): boolean => {
+      let words = text
         .replace(/\d*>&\d+|&>>?\s*\S+|\d*>>?\s*\S+|\d*<\s*\S+/g, " ")
         .split(/\s+/)
         .filter((w) => w !== "" && w !== "&");
-      // A subshell's opening bracket and the wrappers the main command path peels (BOS-698), with their options and values.
+      // A subshell's opening bracket and the wrappers the main command path peels, with their options and values (BOS-698, BOS-703).
       for (let guard = 0; guard < 8 && words.length; guard++) {
         if (/^[({]/.test(words[0]!)) { words[0] = words[0]!.replace(/^[({]+/, ""); if (words[0] === "") words.shift(); continue; }
-        const wrapper = words[0]!.replace(/^.*\//, "");
-        if (!/^(?:setsid|nohup|nice|time|command|exec|env|timeout)$/.test(wrapper)) break;
-        words.shift();
-        let timeoutDuration = wrapper === "timeout";
-        while (words.length) {
-          const w = words[0]!;
-          if (/^\w+=/.test(w) || w.startsWith("-")) {
-            words.shift();
-            if (wrapper === "env" ? /^(?:-u|-C|-P)$/.test(w) : /^(?:-n|-u|-C|-S|-s|-k)$/.test(w)) words.shift();
-          } else if (timeoutDuration && /^\d[\w.]*$/.test(w)) { words.shift(); timeoutDuration = false; } else break;
-        }
+        const peeled = peelWrapper(words[0]!, words.slice(1));
+        if (peeled === null) break;
+        if (peeled === "split") return true; // `env -S 'cmd'`: unreadable, fail closed
+        words = [peeled.head, ...peeled.args].filter((w) => w !== "");
       }
       let ai = 0;
       if (words.length && /^(?:pnpm|npx|bunx|uvx|yarn|npm|uv|poetry|pipx)$/.test(words[0]!)) {
         ai = words.findIndex((w) => interpreters.test(w.replace(/^.*\//, "")));
-        if (ai < 0) continue;
+        if (ai < 0) return false;
       }
-      if (!interpreters.test((words[ai] ?? "").replace(/^.*\//, ""))) continue;
-      const rest = words.slice(ai + 1);
+      const interpName = (words[ai] ?? "").replace(/^.*\//, "");
+      if (!interpreters.test(interpName)) return false;
+      // Flags that take a value (`-W ignore::x.Warning`, `-Wignore::x.Warning`, `-X utf8`) are dropped with that value: it is
+      // neither inline code nor a script operand.
+      const valueLetters = INTERP_VALUE_FLAGS.find(([re]) => re.test(interpName))?.[1] ?? "";
+      const rest: string[] = [];
+      const afterInterp = words.slice(ai + 1);
+      for (let k = 0; k < afterInterp.length; k++) {
+        const a = afterInterp[k]!;
+        const at = /^-[A-Za-z]/.test(a) && valueLetters !== "" ? [...a.slice(1)].findIndex((ch) => valueLetters.includes(ch)) : -1;
+        if (at < 0) { rest.push(a); continue; }
+        if (at === a.length - 2) k++; // the value letter ends the word: the next word is its value
+      }
       // Only a flag that carries inline code (one with an operand after it) means the program is not on stdin; for shells
       // only a cluster ending in `c` does (`bash -e` is errexit, `python3 -E` ignores the environment, `node -p` has no code).
       const shellInterp = /^(?:sh|bash|zsh|dash|ksh)$/.test((words[ai] ?? "").replace(/^.*\//, ""));
       const codeFlag = shellInterp ? /^-[A-Za-z]*c$/ : /^-[A-Za-z]*[cermEpM]|^--(?:eval|print|require|import|exec)\b/;
       // The word after the flag must be code: a following `-` (stdin) or another flag means the flag carried none (`python3 -E -`).
-      if (rest.some((a, k) => codeFlag.test(a) && k + 1 < rest.length && !rest[k + 1]!.startsWith("-"))) continue;
+      if (rest.some((a, k) => codeFlag.test(a) && k + 1 < rest.length && !rest[k + 1]!.startsWith("-"))) return false;
       // A script operand comes before the stdin marker: words after `-`, or after `-s` for a shell, are arguments to the stdin program.
       const marker = rest.findIndex((a) => a === "-" || (shellInterp && /^-[A-Za-z]*s[A-Za-z]*$/.test(a)));
-      if ((marker < 0 ? rest : rest.slice(0, marker)).some((a) => /[./]/.test(a))) continue;
-      piped.push({ index: m.index! });
-    }
+      return !(marker < 0 ? rest : rest.slice(0, marker)).some((a) => /[./]/.test(a));
+    };
+    for (const m of c.matchAll(pipeSeg)) if (readsStdin(m[1]!)) piped.push({ index: m.index! });
+    // `| (cd x && python3)`, `| { cd x; python3; }`: every command in the group inherits the pipe.
+    const pipeGroup = /(?<!\|)\|(?!\|)\s*[({]([^)}\n]*)/g;
+    for (const m of c.matchAll(pipeGroup)) if (m[1]!.split(/&&|\|\||;/).some(readsStdin)) piped.push({ index: m.index! });
     for (const m of piped) {
       const before = c.slice(0, m.index);
       if (loadsCode(before) || mentionsWritten(before)) return true;
@@ -1094,26 +1175,14 @@ function usesScratchUnsafely(c: string): boolean {
     let { head, args } = p;
     const assigns = [...p.assigns];
     // Peel plain wrappers that only start the real command: `setsid nohup`, `env A=b`, `timeout 120`, `nice -n 5`, `time`.
-    for (let guard = 0; guard < 8 && /^(?:setsid|nohup|nice|time|command|exec|env|timeout|flock)$/.test(head); guard++) {
-      // `env -S 'A=b cmd'` splits a string into assignments and a command: not readable here.
-      if (head === "env" && args.some((a) => /^-[A-Za-z]*S|^--split-string/.test(a))) return true;
-      let i = 0;
-      if (head === "flock") {
-        // flock [-nx..] <lock file> <command...>: the lock file is not the command's code (no -c form is peeled).
-        while (args[i]?.startsWith("-")) i++;
-        if (args.slice(0, i).some((a) => /^-[A-Za-z]*c$|^--command/.test(a))) break;
-        head = args[i + 1] ?? "";
-        args = args.slice(i + 2);
-        continue;
-      }
-      while (i < args.length && (args[i]!.startsWith("-") || /^\w+=/.test(args[i]!) || (head === "timeout" && /^\d[\w.]*$/.test(args[i]!)) || (head === "nice" && /^-?\d+$/.test(args[i]!)))) {
-        if (/^\w+=/.test(args[i]!)) assigns.push(args[i]!);
-        else if (head === "env" ? /^(?:-u|-C|-P|--unset|--chdir)$/.test(args[i]!) : /^(?:-n|-u|-C|-S|-s|-k)$/.test(args[i]!)) i++;
-        i++;
-      }
-      if (head === "timeout" && /^\d[\w.]*$/.test(args[i] ?? "")) i++;
-      head = args[i] ?? "";
-      args = args.slice(i + 1);
+    // The same helper peels them in the pipe-segment parser above (WRAPPER_OPTS); `env -S 'A=b cmd'` and `flock -c` are not readable.
+    for (let guard = 0; guard < 8; guard++) {
+      const peeled = peelWrapper(head, args);
+      if (peeled === null) break;
+      if (peeled === "split") return true;
+      assigns.push(...peeled.assigns);
+      head = peeled.head;
+      args = peeled.args;
     }
     if (head === "") continue; // a plain `X=1` is a shell variable, not environment
     if (setsUnknownEnvironment(assigns, head.replace(/^.*\//, ""), args)) return true;
