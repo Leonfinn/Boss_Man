@@ -140,6 +140,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
   "pages/Settings.tsx>ToolServers": "Access and funding",
+  "pages/Settings.tsx>DeployTargets": "Access and funding",
   "pages/Settings.tsx>Funding": "Access and funding",
   "pages/Settings.tsx>CompanyReviews": "Reviews and CEO",
   "pages/Settings.tsx>TicketPrefix": "Reviews and CEO",

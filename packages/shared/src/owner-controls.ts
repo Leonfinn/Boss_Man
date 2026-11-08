@@ -110,8 +110,8 @@ export const OWNER_CONTROLS = {
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
   ],
-  // Tool servers and funding sources (a new funding source is added here, not on the Funding tab).
-  "Access and funding": ["Remove", "Add tool server", "Edit", "Delete", "Save", "Add", "Cancel"],
+  // Tool servers, deploy targets and funding sources (a new funding source is added here, not on the Funding tab).
+  "Access and funding": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Add", "Cancel"],
   "Reviews and CEO": [
     "Reset to defaults", "Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours", "Run a retro now",
     "Cancel", "Edit", "Test", "Start a new chapter",
@@ -205,6 +205,9 @@ export const OWNER_FIELDS = {
   "Server and runner": ["Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)"],
   "Access and funding": [
     "Server name", "Server URL", "Transport", "Token secret", "Header name", "Header value",
+    // Deploy targets (BOS-619), with the tag that moves after a successful deploy.
+    "Name", "Address", "Production (you approve every deploy, and high-risk work must deploy to staging first)",
+    "Requires approval (you approve each deploy here too)", "After a successful deploy, move tag", "Tag name", "In the repo of",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
   ],
   "Reviews and CEO": [
