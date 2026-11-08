@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 1330" width="360" height="1330" role="img" aria-labelledby="htn-title htn-desc">
+  <title id="htn-title">How Boss Man tells you: four levels, three places, and what holds them back</title>
+  <desc id="htn-desc">Every notification has one of four levels. A note shows only on the Notifications page. A flag also shows as a browser notification when no Boss Man tab is in front. A page and an ask show there too, and are also sent to your phone through your own ntfy server. Flags reach the phone only if you tick Flags under To the phone; pages and asks are ticked by default. Two things lower a level instead of dropping the message. An agent that has used up its hourly limit (6 by default) has the rest turned into notes. During quiet hours, asks and pages become flags and flags become notes, so with the default settings nothing reaches the phone. On the phone side, Boss Man sends to your ntfy server, which your phone reaches over Tailscale. An iPhone also needs a wake-up through ntfy.sh, which carries only a message ID, not the text.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="htn-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+  </defs>
+  <rect width="360" height="1330" fill="#ffffff"/>
+
+  <text x="0" y="20" class="bb" font-size="16" fill="#3d4757">Every notification has a level.</text>
+  <text x="0" y="40" class="bb" font-size="16" fill="#3d4757">The level decides where it shows.</text>
+
+  <!-- Note -->
+  <rect x="0" y="60" width="360" height="40" rx="10" fill="#17202c"/>
+  <text x="16" y="87" class="d" font-size="21" fill="#eef2f6">Note</text>
+  <text x="90" y="86" class="b" font-size="14" fill="#c3cbd6">e.g. a card the CEO handles</text>
+  <g class="b" font-size="15" fill="#17202c">
+    <path d="M10 119 l6 6 l12 -13" fill="none" stroke="#17202c" stroke-width="3.5"/><text x="40" y="124" class="bb">Notifications page</text>
+    <text x="40" y="150" fill="#3d4757">Not in the browser</text>
+    <text x="40" y="176" fill="#3d4757">Never sent to your phone</text>
+  </g>
+
+  <!-- Flag -->
+  <rect x="0" y="202" width="360" height="40" rx="10" fill="#17202c"/>
+  <text x="16" y="229" class="d" font-size="21" fill="#eef2f6">Flag</text>
+  <text x="90" y="228" class="b" font-size="14" fill="#c3cbd6">e.g. a runner did not start</text>
+  <g class="b" font-size="15" fill="#17202c">
+    <path d="M10 261 l6 6 l12 -13" fill="none" stroke="#17202c" stroke-width="3.5"/><text x="40" y="266" class="bb">Notifications page</text>
+    <path d="M10 287 l6 6 l12 -13" fill="none" stroke="#17202c" stroke-width="3.5"/><text x="40" y="292" class="bb">Browser</text>
+  </g>
+  <rect x="0" y="306" width="360" height="40" rx="8" fill="#ffffff" stroke="#17202c" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="14" y="323" class="bb" font-size="14" fill="#17202c">Phone: only if you tick Flags</text>
+  <text x="14" y="339" class="b" font-size="13" fill="#3d4757">under To the phone</text>
+
+  <!-- Page -->
+  <rect x="0" y="366" width="360" height="40" rx="10" fill="#17202c"/>
+  <text x="16" y="393" class="d" font-size="21" fill="#eef2f6">Page</text>
+  <text x="90" y="392" class="b" font-size="14" fill="#c3cbd6">e.g. a runner goes offline</text>
+  <g class="b" font-size="15" fill="#17202c">
+    <path d="M10 425 l6 6 l12 -13" fill="none" stroke="#17202c" stroke-width="3.5"/><text x="40" y="430" class="bb">Notifications page</text>
+    <path d="M10 451 l6 6 l12 -13" fill="none" stroke="#17202c" stroke-width="3.5"/><text x="40" y="456" class="bb">Browser</text>
+  </g>
+  <rect x="0" y="470" width="360" height="40" rx="8" fill="#f0b75c"/>
+  <text x="14" y="487" class="bb" font-size="14" fill="#17202c">Phone: sent</text>
+  <text x="14" y="503" class="b" font-size="13" fill="#17202c">Ticked by default</text>
+
+  <!-- Ask -->
+  <rect x="0" y="530" width="360" height="40" rx="10" fill="#17202c"/>
+  <text x="16" y="557" class="d" font-size="21" fill="#eef2f6">Ask</text>
+  <text x="90" y="556" class="b" font-size="14" fill="#c3cbd6">needs your answer</text>
+  <g class="b" font-size="15" fill="#17202c">
+    <path d="M10 589 l6 6 l12 -13" fill="none" stroke="#17202c" stroke-width="3.5"/><text x="40" y="594" class="bb">Notifications page</text>
+    <path d="M10 615 l6 6 l12 -13" fill="none" stroke="#17202c" stroke-width="3.5"/><text x="40" y="620" class="bb">Browser</text>
+  </g>
+  <rect x="0" y="634" width="360" height="40" rx="8" fill="#f0b75c"/>
+  <text x="14" y="651" class="bb" font-size="14" fill="#17202c">Phone: sent</text>
+  <text x="14" y="667" class="b" font-size="13" fill="#17202c">Ticked by default</text>
+
+  <g class="b" font-size="14" fill="#3d4757">
+    <text x="0" y="702">Browser notifications show when no Boss</text>
+    <text x="0" y="720">Man tab is in front, and you turned them on.</text>
+    <text x="0" y="738">The phone needs your own ntfy server.</text>
+  </g>
+
+  <line x1="0" y1="762" x2="360" y2="762" stroke="#c3cbd6" stroke-width="1.5"/>
+
+  <text x="0" y="794" class="d" font-size="20" fill="#17202c">Two things turn a level down</text>
+  <text x="0" y="816" class="b" font-size="14" fill="#3d4757">The message is kept, just quieter.</text>
+
+  <!-- cap -->
+  <circle cx="14" cy="852" r="14" fill="#c8282f"/><text x="14" y="857.5" class="bb" font-size="15" text-anchor="middle" fill="#ffffff">1</text>
+  <text x="38" y="858" class="d" font-size="19" fill="#17202c">An agent sends too much</text>
+  <g class="b" font-size="15" fill="#3d4757">
+    <text x="0" y="886">Per agent, per hour caps the louder</text><text x="0" y="905">messages one agent can send.</text><text x="0" y="924">The default is 6.</text>
+  </g>
+  <rect x="0" y="940" width="150" height="52" rx="10" fill="#17202c"/>
+  <text x="14" y="963" class="d" font-size="17" fill="#eef2f6">Over the limit</text>
+  <text x="14" y="982" class="b" font-size="13" fill="#c3cbd6">any louder level</text>
+  <path d="M154 966 H202" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#htn-ar)"/>
+  <rect x="208" y="940" width="110" height="52" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="226" y="973" class="d" font-size="19" fill="#17202c">Note</text>
+
+  <!-- quiet -->
+  <circle cx="14" cy="1032" r="14" fill="#c8282f"/><text x="14" y="1037.5" class="bb" font-size="15" text-anchor="middle" fill="#ffffff">2</text>
+  <text x="38" y="1038" class="d" font-size="19" fill="#17202c">Quiet hours</text>
+  <g class="b" font-size="15" fill="#3d4757">
+    <text x="0" y="1066">You set From, Until and Time zone.</text><text x="0" y="1085">In that window every message goes</text><text x="0" y="1104">one step quieter.</text>
+  </g>
+  <rect x="0" y="1120" width="124" height="50" rx="10" fill="#17202c"/>
+  <text x="12" y="1151" class="d" font-size="16" fill="#eef2f6">Ask or Page</text>
+  <path d="M128 1145 H146" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#htn-ar)"/>
+  <rect x="152" y="1120" width="86" height="50" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="168" y="1151" class="d" font-size="19" fill="#17202c">Flag</text>
+  <path d="M242 1145 H260" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#htn-ar)"/>
+  <rect x="266" y="1120" width="86" height="50" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="282" y="1151" class="d" font-size="19" fill="#17202c">Note</text>
+  <text x="0" y="1196" class="bb" font-size="15" fill="#17202c">With the default phone setting, quiet</text>
+  <text x="0" y="1215" class="bb" font-size="15" fill="#17202c">hours keep your phone silent.</text>
+
+  <!-- phone path -->
+  <rect x="0" y="1240" width="360" height="80" rx="10" fill="#ffffff" stroke="#17202c" stroke-width="1.5"/>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="14" y="1261">Phone: Boss Man sends to your own ntfy</text>
+    <text x="14" y="1279">server; your phone reaches it over Tailscale.</text>
+    <text x="14" y="1297">iPhone also needs a wake-up through ntfy.sh,</text>
+    <text x="14" y="1313">which carries only a message ID, never the text.</text>
+  </g>
+</svg>

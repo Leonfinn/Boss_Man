@@ -7,7 +7,7 @@ import { BUILT_IN_RULES, type RunnerCommand, type RunnerEvent } from "@boss-man/
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, ceoChapters, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
-import { issueRunToken } from "../src/mcp.js";
+import { issueRunToken, READ_ONLY_TOOLS, TRACED_TOOLS } from "../src/mcp.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -183,7 +183,8 @@ describe("owner chat", () => {
     expect(chat.items[2].text).toContain(`#/tickets/${rateId}`);
     expect(chat.items[2].text).toContain("Done in this reply:");
     expect(chat.items[2].text).toContain("nudged Engineer");
-    expect(chat.items[2].text).toContain("created a ticket");
+    // A busy run lists the first 5 changes and counts the rest; the two created tickets are traced and counted (BOS-806).
+    expect(chat.items[2].text).toContain("(and 4 more)");
     expect(chat.items[2].text).not.toContain("Ticket link check");
     // A run that made changes doesn't also need a run-end note.
     expect(chat.items.map((m: { role: string }) => m.role)).not.toContain("system");
@@ -346,7 +347,7 @@ describe("owner chat", () => {
     const items = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items as Array<{ role: string; text: string }>;
     expect(items.map((m) => m.role)).toEqual(["owner", "assistant", "system"]);
     // The run-end line lists what this run did after its last reply, from its own record (BOS-758).
-    expect(items[2]!.text).toBe("CEO finished after its last message. Since that message: 1 decision sent to Decisions; changed Engineer's instructions; created a ticket.");
+    expect(items[2]!.text).toBe("CEO finished after its last message. Since that message: 1 decision sent to Decisions; changed Engineer's instructions; created a ticket APP-1.");
 
     // No reply at all, and nothing done: still said, so the owner isn't left waiting.
     await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Anything else?" });
@@ -440,7 +441,7 @@ describe("owner chat", () => {
     await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: `Noted. Ticket: #/tickets/${madeId}.` } });
     await c.settle();
     saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
-    expect(saved.text).toContain("Done in this reply: saved note \"Short replies\"; created a ticket.");
+    expect(saved.text).toContain("Done in this reply: saved note \"Short replies\"; created a ticket APP-1.");
     expect(saved.text).not.toContain("Ticket link check");
 
     // A third reply lists only what came since the last one: nothing, so "No changes made".
@@ -495,6 +496,116 @@ describe("owner chat", () => {
     expect(after).toHaveLength(before);
     expect(after.some((m) => m.text.includes("changed Engineer's instructions"))).toBe(false);
     expect(t).toBeDefined();
+  });
+
+  it("names a notify_owner note in the what-changed line, not \"No changes made\" (BOS-806)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Tell me when you're done." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const client = await c.mcp(start.runId);
+    // BOS-806's repro: a real note, which the old changeTrace left out of the line.
+    expect(textOf(await client.callTool({ name: "notify_owner", arguments: { level: "note", title: "Probe note" } }))).toBe("Sent as a note.");
+    await client.close();
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "I told the owner." } });
+    await c.settle();
+    const saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toBe("I told the owner.\n\nDone in this reply: sent the owner a note.");
+    expect(saved.text).not.toContain("No changes made in this reply.");
+  });
+
+  it("counts neither a read nor a failed call as a change, and names an updated or moved ticket by its ref (BOS-806, QA BOS-821)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Look around." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const client = await c.mcp(start.runId);
+    const saidAs = async (words: string) => {
+      await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: words } });
+      await c.settle();
+      return ((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string }).text;
+    };
+    // Read actions of tools that also write, plain reads, and a call that fails: none is a change.
+    await client.callTool({ name: "notes", arguments: { action: "list" } });
+    await client.callTool({ name: "decisions", arguments: { action: "list" } });
+    await client.callTool({ name: "board", arguments: {} });
+    expect((await client.callTool({ name: "set_ticket_state", arguments: { ticketId: randomUUID(), state: "done", summary: "x" } })).isError).toBe(true);
+    expect(await saidAs("Had a look.")).toBe("Had a look.\n\nNo changes made in this reply.");
+    // A real change to a ticket the run made names the ticket by its ref, not just "a ticket".
+    const made = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Tidy the inbox", project: "App" } }));
+    const id = /#\/tickets\/([0-9a-f-]{36})/.exec(made)![1]!;
+    await client.callTool({ name: "update_ticket", arguments: { ticketId: id, title: "Tidy the owner inbox", reason: "Clearer." } });
+    await client.callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary: "Not needed." } });
+    await client.callTool({ name: "notify_owner", arguments: { level: "flag", title: "FYI" } });
+    await client.close();
+    const text = await saidAs(`Done: #/tickets/${id}.`);
+    expect(text).toContain("Done in this reply: created a ticket APP-1; updated a ticket APP-1; moved a ticket APP-1; sent the owner a flag.");
+    expect(text).not.toContain("No changes made");
+  });
+
+  it("has every chat tool either listed as a change in the what-changed line or named as read-only (BOS-806)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Hello." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const client = await c.mcp(start.runId);
+    const names = (await client.listTools()).tools.map((t) => t.name).sort();
+    await client.close();
+    // A new tool cannot be added silently: it is either listed as a change (in TRACED_TOOLS, with a case
+    // in changeTrace) or named as read-only. The two sets must not overlap, so a read can't be counted as a change.
+    const readOnly = names.filter((n) => READ_ONLY_TOOLS.has(n));
+    const changing = names.filter((n) => TRACED_TOOLS.has(n));
+    const missed = names.filter((n) => !READ_ONLY_TOOLS.has(n) && !TRACED_TOOLS.has(n));
+    expect(missed).toEqual([]);
+    expect(names.filter((n) => READ_ONLY_TOOLS.has(n) && TRACED_TOOLS.has(n))).toEqual([]);
+    // Every tool is one or the other, and the sets hold no name the chat no longer has.
+    expect([...readOnly, ...changing].sort()).toEqual(names);
+    expect([...READ_ONLY_TOOLS].filter((n) => !names.includes(n))).toEqual([]);
+    expect([...TRACED_TOOLS].filter((n) => !names.includes(n))).toEqual([]);
+  });
+
+  it("counts reading a diff as a read, not a change (BOS-820)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Have a look at the ticket I just sent you." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Tidy the inbox" })).json() as { id: string };
+    const client = await c.mcp(start.runId);
+    expect(textOf(await client.callTool({ name: "review", arguments: { action: "diff", ticketId: t.id } }))).not.toBe("");
+    await client.close();
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "I read it." } });
+    await c.settle();
+    const saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toBe("I read it.\n\nNo changes made in this reply.");
+    expect(saved.text).not.toContain("read a ticket's diff");
+  });
+
+  it("still succeeds and is named when the ticket-number lookup fails (BOS-820)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Remember that I like short summaries." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    // The lookup reads the company's ticket prefix; give it a form it can't use, so it throws
+    // where a real one might (a busy or failing database) while the tool itself still worked.
+    await c.req("PATCH", `/api/companies/${c.company.id}`, { ticketPrefix: "NOT A PREFIX" });
+    const client = await c.mcp(start.runId);
+    const r = await client.callTool({ name: "create_ticket", arguments: { title: "Tidy the inbox", project: "App" } });
+    await client.close();
+    expect((r as { isError?: boolean }).isError).toBeFalsy();
+    expect(textOf(r)).not.toMatch(/isError|lookup/i);
+    const made = (await c.db.select().from(tickets).where(eq(tickets.companyId, c.company.id))).filter((t) => t.title === "Tidy the inbox");
+    expect(made).toHaveLength(1);
+    // The change was made, so the reply says so (the number is missing, the change is not).
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "Made it." } });
+    await c.settle();
+    const saved = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1) as { text: string };
+    expect(saved.text).toContain("Done in this reply: created a ticket");
+    expect(saved.text).not.toContain("No changes made in this reply.");
   });
 
   it("needs a CEO and a message", async () => {

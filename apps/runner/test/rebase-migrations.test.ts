@@ -131,6 +131,24 @@ describe("the merge gate renumbers a clashing migration (BOS-690)", () => {
     expect(Object.keys(last.tables["public.t"].columns).sort()).toEqual(["alpha", "beta", "id", "second"]);
   });
 
+  it("a branch that hand-numbered a gap (0005 while main has 0003 and the branch's base ends at 0002) still merges, with a clean journal and snapshot chain", async () => {
+    const o = origin();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-rb-ws-")));
+    const one = await ticket(ws, o, 1, (d) => addMigration(d, 3, "alpha", 3000, addColumn("alpha")));
+    const two = await ticket(ws, o, 2, (d) => addMigration(d, 5, "beta", 3100, addColumn("beta")));
+    expect((await ws.merge(one, "main", "m1")).status).toBe("merged");
+    const r = await ws.merge(two, "main", "m2");
+    expect(r.status).toBe("merged");
+    const main = mainCheckout(o);
+    const tags = readJson(path.join(main, DR, "meta", "_journal.json")).entries.map((e: { tag: string }) => e.tag);
+    expect(tags).toHaveLength(4);
+    expect(tags.slice(0, 3)).toEqual(["0001_init", "0002_second", "0003_alpha"]);
+    expect(tags[3]).toMatch(/^000[45]_beta$/);
+    expect(lintTree(main)).toEqual([]);
+    const last = readJson(path.join(main, DR, "meta", `${tags[3].slice(0, 4)}_snapshot.json`));
+    expect(Object.keys(last.tables["public.t"].columns).sort()).toEqual(["alpha", "beta", "id", "second"]);
+  });
+
   it("(c) both change the same column differently: sent back as before", async () => {
     const o = origin();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-rb-ws-")));

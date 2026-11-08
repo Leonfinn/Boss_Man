@@ -30,9 +30,23 @@ IMAGE=boss-man-runner
 # BOS-69: this script tags boss-man-runner/netguard/launcher:current and talks to the project "boss-man", which are
 # production's. In a staging folder (another project name or a stack) it would put staging code under production's
 # image names, so it refuses; scripts/deploy-staging.sh builds the staging images and starts the staging launcher.
-proj="${COMPOSE_PROJECT_NAME:-$(grep -s '^COMPOSE_PROJECT_NAME=' .env | tail -1 | cut -d= -f2- || true)}"
-stack="${BOSSMAN_STACK:-$(grep -s '^BOSSMAN_STACK=' .env | tail -1 | cut -d= -f2- || true)}"
-if [[ -n $stack || ( -n $proj && $proj != boss-man ) ]]; then
+env_get() { # file key: the last KEY=value in a .env-style file; accepts "export KEY=v", quotes and a trailing " # comment"
+  [[ -f $1 ]] || return 0
+  local line v
+  line="$({ grep -E "^[[:space:]]*(export[[:space:]]+)?$2[[:space:]]*=" "$1" || true; } | tail -n 1)"
+  [[ -n $line ]] || return 0
+  v="${line#*=}"; v="${v#"${v%%[![:space:]]*}"}"
+  if [[ $v == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
+  elif [[ $v == \'* ]]; then v="${v#\'}"; v="${v%%\'*}"
+  else v="${v%%[[:space:]]#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
+  printf '%s\n' "$v"
+}
+# A staging folder is also recognised by its compose overlay (COMPOSE_FILE with deploy/staging.yml), so one with no
+# project name or stack in .env still refuses.
+proj="${COMPOSE_PROJECT_NAME:-$(env_get .env COMPOSE_PROJECT_NAME)}"
+stack="${BOSSMAN_STACK:-$(env_get .env BOSSMAN_STACK)}"
+cfs="${COMPOSE_FILE:-$(env_get .env COMPOSE_FILE)}"
+if [[ -n $stack || ( -n $proj && $proj != boss-man ) || $cfs == *deploy/staging.yml* ]]; then
   echo "This folder is not the production install (project '${proj:-boss-man}', stack '${stack:-none}'). update-runner.sh only handles production's images, so it refuses here." >&2
   echo "For a staging stack use scripts/deploy-staging.sh, which builds the staging runner image." >&2
   exit 1

@@ -25,9 +25,16 @@ step() { say ""; say "== $* =="; }
 DRY=0
 run() { if ((DRY)); then say "[dry-run] $*"; else "$@"; fi; }
 
-env_get() { # file key: the last KEY=value in a .env-style file, quotes stripped
+env_get() { # file key: the last KEY=value in a .env-style file; accepts "export KEY=v", quotes and a trailing " # comment"
   [[ -f $1 ]] || return 0
-  { grep -E "^$2=" "$1" || true; } | tail -n 1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//'
+  local line v
+  line="$({ grep -E "^[[:space:]]*(export[[:space:]]+)?$2[[:space:]]*=" "$1" || true; } | tail -n 1)"
+  [[ -n $line ]] || return 0
+  v="${line#*=}"; v="${v#"${v%%[![:space:]]*}"}"
+  if [[ $v == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
+  elif [[ $v == \'* ]]; then v="${v#\'}"; v="${v%%\'*}"
+  else v="${v%%[[:space:]]#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
+  printf '%s\n' "$v"
 }
 
 # Refuses (nothing changed) when this folder could touch another install's data, secrets or ports.
@@ -64,8 +71,9 @@ guard_isolated() { # this folder
   PROJECT="$proj"
   say "Isolation checks passed: project $PROJECT, ports $port/$pport, data $data, ${#others[@]} other install(s) compared."
   if ((${#others[@]} == 0)); then
-    say "WARNING: no other install was found to compare against, so a shared database password or copied master.key would NOT be caught."
-    say "         If production is in another folder, run:  BOSSMAN_PRODUCTION_DIRS=/path/to/production $0 --check"
+    # Without a peer to compare against, a shared database password or copied master.key would go unnoticed.
+    [[ ${BOSSMAN_ISOLATION_NO_PEERS:-} == 1 ]] || die "No other install was found to compare against, so a shared password, port, data folder or master.key can't be ruled out. Set BOSSMAN_PRODUCTION_DIRS=/path/to/production (space-separated for several), or BOSSMAN_ISOLATION_NO_PEERS=1 if this host really has no other Boss Man install."
+    say "WARNING: BOSSMAN_ISOLATION_NO_PEERS=1: no other install compared."
   fi
 }
 
@@ -132,7 +140,13 @@ main() {
   command -v docker >/dev/null || die "docker is not installed or not on PATH."
   ((DRY)) && say "DRY RUN: nothing below is actually changed."
   local gitdir prev_file good_file cur
-  gitdir="$(git rev-parse --git-dir)"; prev_file="$gitdir/staging-previous-commit"; good_file="$gitdir/staging-healthy-commit"
+  gitdir="$(git rev-parse --git-dir)"
+  # One deploy at a time: two runs would check out different commits under each other. The lock is released when
+  # this process exits (even if it is killed), so it never goes stale.
+  command -v flock >/dev/null || die "flock is not installed (util-linux); it is needed so two deploys can't run at once."
+  exec 8>"$gitdir/staging-deploy.lock"
+  flock -n 8 || die "Another deploy-staging.sh is already running in this folder. Wait for it to finish, then run this again."
+  prev_file="$gitdir/staging-previous-commit"; good_file="$gitdir/staging-healthy-commit"
   [[ -z $(git status --porcelain --untracked-files=no) ]] || die "Uncommitted changes in the staging checkout; look at them first."
   cur="$(git rev-parse HEAD)"
 
