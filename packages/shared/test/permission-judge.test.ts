@@ -1457,6 +1457,9 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     allows([
       "npm create",
       "npm innit -y",
+      "npm run init x",
+      "yarnpkg list",
+      "cd /tmp/p && pnpm init",
       "cd packages/shared && yarn install",
       "yarn add global-agent",
       "yarn install",
