@@ -2031,3 +2031,75 @@ describe("rules judge: linear file-tool scan, shred targets, xargs input (BOS-72
     expect(tool / base).toBeLessThan(20);
   });
 });
+
+// BOS-776: what runs under xargs/parallel (Jane's BOS-744 security review, items 1 to 4). Every Deny row got Allow on 9dbbac40.
+describe("rules judge: wrappers, shells and option table under xargs/parallel (BOS-776)", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, own, "-p", "/home/node/workspaces");
+  const P = "perl -e 'unlink @ARGV'";
+  it.each([
+    // 1. A wrapper in front of the program resets the safe-program check.
+    `echo / | xargs nice ${P}`,
+    `echo / | xargs env ${P}`,
+    `echo / | xargs timeout 5 ${P}`,
+    `echo / | xargs -- nice ${P}`,
+    `echo / | xargs stdbuf -oL ${P}`,
+    `echo / | xargs ionice ${P}`,
+    `echo / | xargs nohup ${P}`,
+    `echo / | xargs /usr/bin/env ${P}`,
+    `echo / | xargs xargs ${P}`,
+    `echo / | parallel nice ${P} ::: 1`,
+    `echo / | parallel -j2 env ${P} ::: 1`,
+    // 2. parallel runs its command through a shell: a metacharacter in any argument is a second command.
+    `echo / | parallel echo 'a; perl -e "unlink @ARGV"' ::: 1`,
+    "echo / | parallel echo 'a | sh' ::: 1",
+    "echo / | parallel echo 'a & sh' ::: 1",
+    "echo / | parallel echo '$(rm -rf /)' ::: 1",
+    "echo / | parallel echo '`rm -rf /`' ::: 1",
+    "echo / | parallel echo 'a > /home/node/.bashrc' ::: 1",
+    "echo / | parallel echo 'a < /etc/passwd' ::: 1",
+    "echo / | parallel echo 'a\nrm -rf /' ::: 1",
+    "echo / | parallel echo '{= system(\"rm -rf /\") =}' ::: 1",
+    "echo / | parallel echo {} ::: 'a;rm -rf /'",
+    // 3. Option table: -s takes a value (so `echo` is its value and perl is the program); --rpl holds perl code;
+    // --max-lines / --eof / --replace take a value only when attached, so the next word is the program.
+    `echo / | parallel -s echo ${P}`,
+    "echo / | parallel --rpl '{x} $_=unlink(\"/\")' echo {x} ::: 1",
+    "echo / | xargs --max-lines perl echo",
+    "echo / | xargs --eof perl echo",
+    "echo / | xargs --replace perl echo",
+    // 4. Readers that write or run code are not safe programs.
+    "echo x | xargs sort -o /home/node/.bashrc",
+    "echo x | xargs tree -o /home/node/.bashrc",
+    "echo x | xargs uniq in /home/node/.bashrc",
+    "echo x | xargs rg --pre ./evil x",
+    "echo x | xargs xxd in /home/node/.bashrc",
+    "echo x | xargs file -C",
+    "echo x | xargs date -s 2000-01-01",
+    "echo x | parallel --joblog /home/node/.bashrc echo ::: 1",
+  ])("deny: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "xargs grep x",
+    "parallel -j4 echo ::: a",
+    "xargs -n1 cat",
+    "find . -name x | xargs wc -l",
+    "parallel --tag echo {} ::: a",
+    "parallel -s 100 echo ::: a",
+    "xargs --max-lines=2 echo",
+    "ls | xargs -I{} head -n 1 {}",
+  ])("allow: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+  it("reads long hostile input in linear time", () => {
+    const t = Date.now();
+    const inputs = [
+      "echo / | xargs " + "nice ".repeat(1500) + "perl",
+      "echo / | parallel echo " + "';' ".repeat(1500) + "::: 1",
+      "echo / | parallel " + "-s 1 ".repeat(1500) + "echo",
+      "echo / | parallel echo " + "'$(' ".repeat(1500) + "::: 1",
+    ];
+    for (const cmd of inputs) {
+      expect(cmd.length).toBeLessThan(10_000);
+      judge(cmd);
+    }
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+});

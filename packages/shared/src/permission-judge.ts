@@ -826,8 +826,10 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
  * code or write by themselves, so a value mistaken for one of them cannot hide a different program. A file tool reads its
  * targets from the runner's input, so it is never listed; neither is an interpreter or any other program.
  */
-const XARGS_PROGRAM_SAFE = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf test du df cut tr " +
-  "jq md5sum sha256sum sha1sum realpath dirname basename readlink sort uniq od xxd hexdump column nl tree true false sleep date").split(" "));
+// BOS-776: readers that can write a file or run code through an option are not listed (`sort -o`, `tree -o`, `uniq in out`,
+// `xxd in out`, `rg --pre`, `file -C`, `date -s`).
+const XARGS_PROGRAM_SAFE = new Set(("cat grep egrep fgrep ls ll head tail wc diff cmp stat echo printf test du df cut tr " +
+  "jq md5sum sha256sum sha1sum realpath dirname basename readlink od hexdump column nl true false sleep").split(" "));
 // Options of `xargs`/`parallel` the scan fully understands: short letters that are bare vs take a value, and long names the
 // same way. Any other option gives no Allow: it may take the next word as its value, and that value is not the program
 // (`xargs --process-slot-var echo perl` runs perl, not echo; BOS-744). A list of value options always misses some, so an
@@ -836,18 +838,27 @@ const XARGS_OPTS: Record<string, { bare: string; value: string; bareLong: string
   xargs: {
     bare: "0rtpxei",
     value: "EILPdnsa",
-    bareLong: ["--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit", "--show-limits", "--open-tty", "--help", "--version"],
-    valueLong: ["--eof", "--replace", "--max-lines", "--max-procs", "--delimiter", "--max-args", "--max-chars", "--arg-file", "--process-slot-var"],
+    // `--eof`, `--replace` and `--max-lines` take their value only attached (`--eof=X`), so the next word is not a value (BOS-776).
+    bareLong: ["--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit", "--show-limits", "--open-tty", "--help", "--version",
+      "--eof", "--replace", "--max-lines"],
+    valueLong: ["--max-procs", "--delimiter", "--max-args", "--max-chars", "--arg-file", "--process-slot-var"],
   },
+  // Checked against the GNU parallel 20221122 man page (BOS-776). Left out on purpose, so they give no Allow: `-e`, `-i`, `-l` and
+  // the long forms with an optional value (the next word may or may not be taken), `--rpl` (its value is Perl code), and
+  // options that write a file (`--joblog`, `--results`, `--compress-program`...). Short `-s` (--max-chars) takes a value.
   parallel: {
-    bare: "kqtsX",
-    value: "jS",
-    bareLong: ["--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--serial", "--interactive", "--help", "--version"],
-    valueLong: ["--workdir", "--env", "--tmpdir", "--halt", "--delay", "--timeout", "--basefile", "--transfer-file", "--joblog", "--sshlogin",
-      "--sshloginfile", "--results", "--colsep", "--rpl", "--max-args", "--max-lines", "--max-procs", "--max-chars", "--number-of-cpus", "--load",
-      "--memfree", "--nice", "--tag", "--block", "--recstart", "--recend", "--pipepart", "--unbuffer", "--template"],
+    bare: "0kmoptuvxXqhVM",
+    value: "jPSaCdEnNLIsJ",
+    bareLong: ["--null", "--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--interactive", "--help",
+      "--version", "--tag", "--pipe", "--pipepart", "--pipe-part", "--ungroup", "--group", "--line-buffer", "--lb", "--xargs", "--open-tty",
+      "--link", "--xapply", "--semaphore", "--no-keep-order", "--shuf", "--fg", "--bg", "--plus"],
+    valueLong: ["--workdir", "--wd", "--env", "--halt", "--halt-on-error", "--delay", "--timeout", "--sshlogin", "--sshloginfile", "--slf",
+      "--colsep", "--max-args", "--max-procs", "--jobs", "--max-chars", "--load", "--memfree", "--nice", "--block", "--block-size",
+      "--recstart", "--recend", "--tagstring", "--arg-file", "--delimiter", "--arg-sep", "--retries", "--max-replace-args"],
   },
 };
+// Under `parallel` the command is run through a shell, so a word with one of these is a second command (BOS-776).
+const PARALLEL_SHELL_META = /[;|&<>\n`]|\$\(|\{=/;
 
 function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk = true): boolean {
   let relOk = startRelOk;
@@ -916,13 +927,21 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
       }
       return "bare";
     };
-    for (const w of words) {
+    for (const [wi, w] of words.entries()) {
       if (cmdNext) { if (runsByPathOutside(w, inOwn, relOk)) return true; break; }
       if (skipNext) { skipNext = false; continue; }
       // A system binary that runs its argument counts as that wrapper (`/usr/bin/env ./foo`).
       const base = sysBin.test(w) ? w.replace(/^.*\//, "") : w;
       // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
-      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; xargsOptionsDone = false; continue; }
+      if (wrapper.test(base)) {
+        // BOS-776: a wrapper (`nice`, `env`, `timeout`...) as the program under `xargs`/`parallel` hides the program it runs, and
+        // only a known-safe reader may be the program, so it gets no Allow.
+        if (lead === "xargs" || lead === "parallel") return true;
+        lead = base; pos = positional[base] ?? 0; xargsOptionsDone = false;
+        // BOS-776: `parallel` runs its command through a shell, so a shell metacharacter in any later word is a second command.
+        if (base === "parallel" && words.slice(wi + 1).some((x) => PARALLEL_SHELL_META.test(x))) return true;
+        continue;
+      }
       const xopts = lead === "xargs" || lead === "parallel" ? XARGS_OPTS[lead] : null;
       if (/^-/.test(w)) {
         if (cmdOpt.test(lead) && /^-[A-Za-z]*c$|^--command$/.test(w)) cmdNext = true;
