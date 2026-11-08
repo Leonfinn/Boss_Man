@@ -1,6 +1,6 @@
 {
-  "id": "42c0582a-84e1-4f1c-9275-bfc0f0fb24ed",
-  "prevId": "18fa266e-f46d-48b1-8c2d-e73cfbc677ee",
+  "id": "e5402217-5596-4909-847a-88ab840dbc51",
+  "prevId": "d6c8f6c0-e014-4f4a-bde1-72ebc956195b",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3912,13 +3912,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "allow_private": {
-          "name": "allow_private",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -6332,6 +6325,12 @@
         },
         "image_version": {
           "name": "image_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "image_commit": {
+          "name": "image_commit",
           "type": "text",
           "primaryKey": false,
           "notNull": false

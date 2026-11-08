@@ -83,7 +83,7 @@ export async function runnerSocketRoutes(
               return;
             }
             queue = queue.then(async () => {
-              await runners.touch(runner, msg.imageVersion, msg.harnessVersions);
+              await runners.touch(runner, msg.imageVersion, msg.harnessVersions, msg.imageCommit);
               await runners.bootSeen(runner, msg.bootId, { previousExit: msg.previousExit, hostBootAt: msg.hostBootAt }).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "waking parked checks after a restart failed"));
               release = runners.connect(runner.id, (command) => {
                 if (socket.readyState !== socket.OPEN) return false;

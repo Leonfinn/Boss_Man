@@ -1,0 +1,17 @@
+# A second, separate Boss Man on the same Docker host, for checking a release before production (BOS-69, docs/22-staging.md).
+# Used by scripts/deploy-staging.sh from its own checkout folder; never add it to the production install.
+#
+# What it changes on top of docker-compose.yml: the names of the images the launcher starts and of the runner network, and
+# which stack the launcher manages, so it can't see or stop production's runners. The compose project name (set by the
+# script, boss-man-staging by default) keeps containers, volumes and networks apart; the ports, bind address, data folder
+# and secrets come from the staging folder's own .env and secrets/.
+services:
+  launcher:
+    image: boss-man-staging-launcher:current
+    environment:
+      BOSSMAN_STACK: ${BOSSMAN_STACK:-staging}
+      BOSSMAN_RUNNER_NETWORK: ${COMPOSE_PROJECT_NAME:-boss-man-staging}_default
+  netguard:
+    image: boss-man-staging-netguard:current
+  runner-app-co:
+    image: boss-man-staging-runner:current

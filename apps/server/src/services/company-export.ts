@@ -33,7 +33,7 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
 
   // The watchdog's switch travels with the company (BOS-762), so a package can ask for it and the
   // import can say in plain words when it kept it on anyway. Its limits are left out and take the defaults.
-  files["company.json"] = json({ name: c.name, mission: c.mission, reviewPolicy: c.reviewPolicy, goalCheckDays: c.goalCheckDays, ownerApprovesEngagements: c.ownerApprovesEngagements, ticketPrefix: c.ticketPrefix, watchdog: { enabled: readWatchdogSettings(c.watchdog).enabled } });
+  files["company.json"] = json({ name: c.name, mission: c.mission, reviewPolicy: c.reviewPolicy, goalCheckDays: c.goalCheckDays, ownerApprovesEngagements: c.ownerApprovesEngagements, ticketPrefix: c.ticketPrefix, ...(c.standingRules?.trim() ? { standingRules: c.standingRules } : {}), watchdog: { enabled: readWatchdogSettings(c.watchdog).enabled } });
 
   // Agents, by a folder name other files refer to them by.
   const team = await db.select().from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt))).orderBy(asc(agents.createdAt));

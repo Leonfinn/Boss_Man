@@ -212,6 +212,26 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       }
     },
 
+    /** The guard mode and the BOSSMAN_NETGUARD_ALLOW entries the launcher started with (BOS-770). Null when the launcher is off, can't be reached, or is older. */
+    async netguardConfig(): Promise<{ mode: string; allow: string[] } | null> {
+      if (!opts) return null;
+      try {
+        const r = await call<{ mode?: unknown; allow?: unknown }>("GET", "/netguard");
+        if (typeof r?.mode !== "string" || !Array.isArray(r.allow)) return null;
+        return { mode: r.mode, allow: r.allow.filter((a): a is string => typeof a === "string" && LAUNCHER_ALLOW_ENTRY.test(a)) };
+      } catch {
+        return null;
+      }
+    },
+
+    /** What Boss Man already lets every company's runner reach, across all companies: tool servers and project git hosts (BOS-770). */
+    async ownAllows(): Promise<{ toolServers: string[]; gitHosts: string[] }> {
+      const rows = await db.select({ url: mcpServers.url }).from(mcpServers);
+      const repos = await db.select({ url: projects.repoUrl }).from(projects).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+      const only = (a: (string | null)[]) => [...new Set(a.filter((x): x is string => !!x))];
+      return { toolServers: only(rows.map((r) => sendable(toolServerAddress(r.url)))), gitHosts: only(repos.map((r) => gitHostAddress(r.url!))) };
+    },
+
     /** Tells the launcher the company's tool servers again (after one is added or removed). Best effort: a launcher that is down picks them up at the next start. */
     async syncAllow(companyId: string) {
       if (!opts) return;

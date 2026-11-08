@@ -450,9 +450,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       timer.unref();
     },
 
-    async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>) {
-      // An older runner sends none: keep what we last knew rather than blanking it.
-      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
+    async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>, imageCommit?: string) {
+      // An older runner sends none: keep what we last knew rather than blanking it. A new image with no
+      // commit (built outside a checkout) clears the old one, so a stale commit never vouches for it (BOS-764).
+      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, imageCommit: imageCommit?.toLowerCase() ?? null, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
     },
 
     /**
