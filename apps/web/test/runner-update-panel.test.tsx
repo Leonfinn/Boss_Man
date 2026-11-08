@@ -74,14 +74,14 @@ describe("Settings → Runner: the network guard warning (BOS-335)", () => {
     const warn = await screen.findByTestId("guard-warning");
     expect(warn.textContent).toContain("turned off");
     expect(warn.textContent).toContain("private addresses");
-    expect(warn.textContent).toContain("BOSSMAN_NETGUARD=auto");
+    expect(warn.textContent).toContain("Ask your admin");
   });
 
   it("warns plainly when the guard is unavailable on the host", async () => {
     mount("unavailable");
     const warn = await screen.findByTestId("guard-warning");
     expect(warn.textContent).toContain("unavailable on this host");
-    expect(warn.textContent).toContain("BOSSMAN_NETGUARD=enforce");
+    expect(warn.textContent).toContain("Ask your admin");
   });
 
   it("shows no warning when the guard is on", async () => {

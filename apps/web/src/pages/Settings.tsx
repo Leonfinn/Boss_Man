@@ -112,7 +112,7 @@ function GuardWarning({ guard }: { guard: "off" | "unavailable" }) {
       {guard === "off"
         ? "The network guard is turned off, so this runner can reach private addresses (your home network and the database)."
         : "The network guard is unavailable on this host, which can't load firewall rules, so this runner can reach private addresses (your home network and the database)."}{" "}
-      {guard === "off" ? "Set BOSSMAN_NETGUARD=auto or enforce on the launcher to turn it back on, then restart the runner." : "Set BOSSMAN_NETGUARD=enforce on the launcher to refuse runners here instead."}
+      {guard === "off" ? "Ask your admin to turn the network guard back on for the launcher, then restart the runner." : "Ask your admin to make the launcher refuse runners on hosts that can't run the guard."}
     </p>
   );
 }

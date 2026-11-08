@@ -456,7 +456,20 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     );
     expect(text).not.toContain("host-deployer.sh didn't change");
     expect(text).toContain("docker compose build launcher && docker compose up -d --no-deps launcher");
-    expect(text).toContain("Runners keep their old limits until the next runner update.");
+    // The step says what it is for and that it leaves runners alone (BOS-335).
+    expect(text).toContain("your runners and running agents are not touched.");
+  });
+
+  it("rebuilds the launcher on a plain server update that changes it, with no infra file (BOS-335)", async () => {
+    const c = (ctx = await setup());
+    // Only app code changed: no infra path, so this is not a hand-apply card, but the launcher still needs a rebuild.
+    await c.available({ paths: ["apps/launcher/src/main.ts", "apps/server/src/x.ts"], ...LAYOUT });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    const ctx0 = d!.context as { infra?: boolean; handSteps?: string[] };
+    expect(ctx0.infra).toBeUndefined();
+    expect(ctx0.handSteps?.join("\n")).toContain("docker compose build launcher && docker compose up -d --no-deps launcher");
+    expect(ctx0.handSteps?.join("\n")).toContain("watching Docker events for runner restarts");
   });
 
   it("clears the owner to-do when the owner marks it done", async () => {

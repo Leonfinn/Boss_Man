@@ -122,11 +122,21 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
         if (filter.action) filters.event = filter.action;
         if (filter.label) filters.label = [filter.label];
         const qs = `since=${Math.floor(since)}&filters=${encodeURIComponent(JSON.stringify(filters))}`;
+        // Settle once and take the abort listener off, so a long-lived signal collecting one per reconnect (BOS-335)
+        // doesn't pile up listeners: Node warns past ten, and this reconnects for the life of the process.
+        let settled = false;
+        const onAbort = () => req.destroy();
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        };
         const req = http.request({ socketPath, method: "GET", path: `/events?${qs}`, headers: { host: "docker" } }, (res) => {
           if (res.statusCode !== 200) {
             res.resume();
             onError(new DockerError(res.statusCode ?? 0, `Watching Docker events failed: HTTP ${res.statusCode}`));
-            resolve();
+            done();
             return;
           }
           let buf = "";
@@ -145,17 +155,17 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
               }
             }
           });
-          res.on("end", resolve);
+          res.on("end", done);
           res.on("error", (err) => {
             onError(err);
-            resolve();
+            done();
           });
         });
         req.on("error", (err) => {
           onError(err);
-          resolve();
+          done();
         });
-        signal.addEventListener("abort", () => req.destroy(), { once: true });
+        signal.addEventListener("abort", onAbort, { once: true });
         req.end();
       });
     },

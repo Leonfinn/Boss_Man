@@ -96,7 +96,9 @@ const reconcile = (why: string) => {
 // The timer stays: events can be missed (a reconnect, a Docker restart), and it is the slow backstop.
 const guardWatch = watchGuardEvents({
   docker,
-  label: LABEL,
+  // The filter matches the runner containers' own label (`boss-man.launcher=1`), not just its name, so nothing else that
+  // happens to carry the key is watched (BOS-335).
+  label: `${LABEL}=1`,
   reconcile,
   log: (level, entry) => console[level](JSON.stringify({ at: new Date().toISOString(), ...entry })),
 });

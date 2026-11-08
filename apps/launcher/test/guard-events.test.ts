@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Docker, DockerEvent } from "../src/docker.js";
-import { watchGuardEvents } from "../src/guard-events.js";
+import { MAX_RECONNECT_MS, RECONNECT_MS, reconnectWait, watchGuardEvents } from "../src/guard-events.js";
 
 /** A Docker whose event stream the test drives; `sent` records the filters/since of each watch. */
 function fakeEvents() {
@@ -66,5 +66,28 @@ describe("the guard's fast path watches Docker events (BOS-335)", () => {
     watch.stop();
     await wait(1_100);
     expect(ev.sent.length).toBe(2);
+  });
+
+  it("backs off when Docker keeps failing, up to the 5 s backstop", async () => {
+    // Delays follow 1 s, 2 s, 4 s, then hold at the 5 s maximum: never faster, so a Docker that is down logs once per pause.
+    expect(reconnectWait(0)).toBe(RECONNECT_MS);
+    expect(reconnectWait(1)).toBe(RECONNECT_MS);
+    expect(reconnectWait(2)).toBe(RECONNECT_MS * 2);
+    expect(reconnectWait(3)).toBe(RECONNECT_MS * 4);
+    expect(reconnectWait(4)).toBe(MAX_RECONNECT_MS);
+    expect(reconnectWait(99)).toBe(MAX_RECONNECT_MS);
+    // A stream that keeps ending at once is retried: attempt 1 is at once, then 1 s, then 2 s later, so in 2.5 s
+    // it has tried twice and is inside the 2 s pause before the third (a fixed 1 s retry would have made five).
+    let attempts = 0;
+    const docker: Pick<Docker, "events"> = {
+      events() {
+        attempts += 1;
+        return Promise.resolve();
+      },
+    };
+    const watch = watchGuardEvents({ docker, label: "boss-man.launcher=1", reconcile: () => undefined });
+    await wait(2_500);
+    watch.stop();
+    expect(attempts).toBe(2);
   });
 });
