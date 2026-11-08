@@ -114,10 +114,12 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
           continue;
         }
         handChecked.delete(r.id);
-        // Stopped on purpose (the launcher stop clears lastSeenAt): not an outage.
+        // Stopped on purpose (the launcher stop clears lastSeenAt): not an outage, and any card raised for the
+        // outage before the stop is withdrawn, or it keeps saying the company's work cannot start (BOS-735).
         if (!r.lastSeenAt) {
           offlineSince.delete(r.id);
           swept.delete(r.id);
+          if (carded.has(r.id) || paged.has(r.id)) await clear(r.id, r.name);
           continue;
         }
         if (!isWanted(r)) {

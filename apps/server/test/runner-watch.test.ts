@@ -300,3 +300,32 @@ describe("runner watch follow-ups (BOS-497)", () => {
     expect(s.alertsRaised).toHaveLength(0);
   });
 });
+
+describe("runner watch: stopping a runner withdraws its offline card (BOS-735)", () => {
+  it("withdraws the card on the next tick after the owner stops a runner that was offline with one open", async () => {
+    const s = await setup(["Alpha"]);
+    await s.watch.step();
+    s.up.clear();
+    await s.watch.step();
+    s.advance(OFFLINE_REPORT_MS);
+    await s.watch.step();
+    const [open] = await s.db.select().from(decisions).where(eq(decisions.dedupeKey, runnerOfflineKey(s.rows[0]!.id)));
+    expect(open!.status).toBe("open");
+    // The owner clicks Stop: the launcher clears lastSeenAt.
+    await s.db.update(runners).set({ lastSeenAt: null }).where(eq(runners.id, s.rows[0]!.id));
+    const before = s.notes.length;
+    await s.watch.step();
+    const [after] = await s.db.select().from(decisions).where(eq(decisions.companyId, s.rows[0]!.companyId));
+    expect(after!.status).toBe("withdrawn");
+    expect(after!.dedupeKey).toBeNull();
+    // Quiet: no "is back" note, and no page or new card for a deliberate stop.
+    expect(s.notes.slice(before).filter((n) => n.level === "page")).toHaveLength(0);
+    expect(s.alertsRaised).toHaveLength(1);
+    expect(await s.db.select().from(settings).where(eq(settings.key, runnerPagedKey(s.rows[0]!.id)))).toHaveLength(0);
+    // A fresh watch (a restart) that only ever sees the stopped runner makes no note at all.
+    const fresh: NotifyInput[] = [];
+    const restarted = runnerWatchService(s.db, { isConnected: () => false, holdOn: async () => false, notify: async (n) => void fresh.push(n), alert: async () => undefined });
+    await restarted.step();
+    expect(fresh).toHaveLength(0);
+  });
+});
