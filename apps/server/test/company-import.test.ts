@@ -153,4 +153,37 @@ describe("company import (docs/11, step 2)", () => {
     expect((await send({ ...ok, "projects/p/project.json": JSON.stringify({ name: "P", repoUrl: "https://user:ghp_abcdefghijklmnopqrstuvwxyz0123456789@github.com/a/b.git", columns: [{ name: "To do", systemState: "backlog" }] }) })).statusCode).toBe(400);
     expect((await send(ok)).statusCode).toBe(200);
   });
+
+  it("starts a new company with the watchdog on, and an import keeps it on however the package asked (BOS-762)", async () => {
+    const { req } = await setup();
+    const enabledOf = async (companyId: string) => ((await req("GET", `/api/companies/${companyId}/watchdog`)).json() as { settings: { enabled: boolean } }).settings.enabled;
+    const exportOf = async (companyId: string) => unzipSync(new Uint8Array((await req("GET", `/api/companies/${companyId}/export`)).rawPayload));
+
+    // A new company starts with the watchdog on, and its export carries that switch.
+    const { company } = (await req("POST", "/api/companies", { name: "Watched Co" })).json() as { company: { id: string } };
+    expect(await enabledOf(company.id)).toBe(true);
+    const files = await exportOf(company.id);
+    expect(JSON.parse(strFromU8(files["company.json"]!)).watchdog).toEqual({ enabled: true });
+
+    // A package whose owner switched it off imports with it on, and the checklist says so in plain words.
+    const co = JSON.parse(strFromU8(files["company.json"]!));
+    const off = { ...files, "company.json": strToU8(JSON.stringify({ ...co, name: "Off Co", watchdog: { enabled: false } })) };
+    const res = await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(off)).toString("base64") });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+    expect(await enabledOf(companyId)).toBe(true);
+    expect(checklist).toContain("Kept on: the Scrum Master watchdog, which checks the board for stuck work. The package had it switched off. To change it, use Settings → Watchdog.");
+
+    // A package that kept it on imports with no such line.
+    const on = { ...files, "company.json": strToU8(JSON.stringify({ ...co, name: "On Co" })) };
+    const ok = (await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(on)).toString("base64") })).json() as { checklist: string[] };
+    expect(ok.checklist.filter((l) => l.includes("Scrum Master watchdog"))).toEqual([]);
+
+    // The company that made the package is unchanged: an existing company's switch is its own.
+    expect(await enabledOf(company.id)).toBe(true);
+    await req("PATCH", `/api/companies/${company.id}/watchdog`, { enabled: false });
+    expect(await enabledOf(company.id)).toBe(false);
+    await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(on)).toString("base64"), name: "Another Co" });
+    expect(await enabledOf(company.id)).toBe(false);
+  });
 });

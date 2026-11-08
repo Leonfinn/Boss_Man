@@ -29,7 +29,7 @@ export const IMPORT_LIMITS = { zipBytes: 48 * 1024 * 1024, unpackedBytes: 256 * 
 const str = (max: number) => z.string().max(max);
 const opt = (max: number) => str(max).nullable().optional();
 const Uuidish = z.string().max(100);
-const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional(), ticketPrefix: z.string().regex(TICKET_PREFIX).nullable().optional().catch(null) });
+const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional(), ticketPrefix: z.string().regex(TICKET_PREFIX).nullable().optional().catch(null), watchdog: z.object({ enabled: z.boolean().optional() }).partial().optional() });
 const Agent = z.object({
   ref: Uuidish.optional(),
   name: z.string().trim().min(1).max(80),
@@ -323,6 +323,11 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // Tickets keep their numbers (a repeat gets a new one); tickets without one are numbered after the highest.
     const seen = new Set<number>();
     const numberOf = new Map(pkg.tickets.map((t) => [t.ref, t.number && !seen.has(t.number) && seen.add(t.number) ? t.number : null]));
+    // A package may tighten the owner's safeguards but never loosen them (BOS-754, BOS-762). The
+    // watchdog is liveness rather than safety (DR-041), but it still starts on for a new company and
+    // a package can't switch it off. The insert leaves `watchdog` unset, so it takes the safe default.
+    const tightened: string[] = [];
+    if (pkg.company.watchdog?.enabled === false) tightened.push("Kept on: the Scrum Master watchdog, which checks the board for stuck work. The package had it switched off. To change it, use Settings → Watchdog.");
     const [c] = await tx
       .insert(companies)
       .values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ownerApprovesEngagements: pkg.company.ownerApprovesEngagements, ticketPrefix: pkg.company.ticketPrefix ?? defaultTicketPrefix(name), nextTicketNumber: Math.max(0, ...seen) + 1 })
@@ -444,6 +449,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       ...(opts.fundingSourceId ? [] : ["Give each agent a funding source."]),
       ...pkg.skills.filter((s) => s.files.some((f) => SCRIPT.test(f.path))).map((s) => `Read the scripts in the skill ${s.name} before agents use it.`),
       "Every imported agent is paused: check its model and instructions, then unpause it.",
+      ...tightened,
     ];
     return { companyId, name, agentIds: [...agentId.values()], wikiPageIds: pages.map((p) => p.id), checklist };
   });

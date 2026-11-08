@@ -111,11 +111,16 @@ describe("the ticket state clock and 'blocked until' (BOS-58, BOS-59 shape)", ()
 });
 
 describe("the watchdog sweep (BOS-58)", () => {
-  it("is off by default and needs a Scrum Master to switch on", async () => {
-    await ctx.ticket({ assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
-    await ctx.watchdog.run();
-    expect(await ctx.smWakes()).toHaveLength(0);
-    const r = await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { enabled: true });
+  it("is on by default (BOS-762), the owner can switch it off, and switching on needs a Scrum Master", async () => {
+    // A new company starts with the watchdog on, and the axes are unchanged.
+    const st = await ctx.watchdog.status(ctx.companyId);
+    expect(st.settings.enabled).toBe(true);
+    expect(st.scrumMaster?.id).toBe(ctx.sm.id);
+    // The owner can switch it off, and past a pause it stays off.
+    expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { enabled: false })).statusCode).toBe(200);
+    expect((await ctx.watchdog.status(ctx.companyId)).settings.enabled).toBe(false);
+    // Switching it back on with nobody to wake is refused.
+    const r = await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { scrumMasterAgentId: null, enabled: true });
     expect(r.statusCode).toBe(422);
     expect(r.json().message).toContain("Pick the Scrum Master");
     const bad = await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { inProgressHours: -1 });
