@@ -74,7 +74,7 @@ const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up"
 /** What the lint can be given: add-on facts for R9 (and the add-on this card sets up, whose steps are exempt),
  * the host facts for R6 (BOS-427) and the name the server runs on (BOS-774), the card's options, and the machine's
  * own update card for R15 (DR-036). Each may be absent, and then that rule only checks what it can without them. */
-export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts };
+export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; options?: readonly string[]; selfDeploy?: SelfDeployFacts };
 
 /** R9: a step that relies on an add-on that isn't running is refused; one Boss Man can't see is warned about. */
 function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: Addon | undefined, refuse: LintFinding[], warn: LintFinding[]) {
@@ -917,7 +917,7 @@ function modeOpensUp(p: Prog): boolean {
  * `cp`/`rsync` by the login); and a block that opens a backup folder to everyone is refused.
  * `staged` carries the folders earlier blocks made readable, so the check runs across the whole card.
  */
-function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, step: number, hosts: HostFacts[] | undefined, serverHost: string | undefined, staged: Map<string, Set<string>>, first: boolean): { refuse: LintFinding[]; warn: LintFinding[] } {
+function lintHost(blockPieces: Array<Extract<StepPiece, { type: "command" }>>, step: number, hosts: HostFacts[] | undefined, serverHost: string | null | undefined, staged: Map<string, Set<string>>, first: boolean): { refuse: LintFinding[]; warn: LintFinding[] } {
   const refuse: LintFinding[] = [];
   const warn: LintFinding[] = [];
   // R6 runs only when the caller has the host facts (BOS-427): `checkAsk` always passes them, so every card is
