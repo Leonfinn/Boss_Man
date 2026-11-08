@@ -315,14 +315,17 @@ function remapPolicy(policy: unknown, ids: Map<string, string>, marks: Partial<R
 /** Creates the package as a new company in one transaction. Every agent starts paused. */
 export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; fundingSourceId?: string | null; allowStackServices?: boolean } = {}) {
   const name = opts.name?.trim() || pkg.company.name;
-  const flags = opts.allowStackServices === true ? [] : await Promise.all(pkg.toolServers.map((t) => reachesStack(t.url)));
+  const ticked = opts.allowStackServices === true;
+  const flags = await Promise.all(pkg.toolServers.map((t) => reachesStack(t.url)));
   // The tick says the owner allows private addresses for the servers the preview flagged, and only those: a public name
-  // the package also lists stays untrusted, so re-pointing it later can't open the stack network (BOS-708).
+  // the package also lists stays untrusted, so re-pointing it later can't open the stack network (BOS-708). A server the
+  // preview didn't flag stays untrusted even when ticked, and so does one whose host isn't really meant for a private
+  // address (allowsPrivate fails closed on a lookup error).
   const trustPrivate = await Promise.all(
-    pkg.toolServers.map(async (t, i) => opts.allowStackServices === true && flags[i] === true && (await allowsPrivate(t.url))),
+    pkg.toolServers.map(async (t, i) => ticked && flags[i] === true && (await allowsPrivate(t.url))),
   );
   const onStack = pkg.toolServers.filter((_, i) => flags[i]);
-  if (onStack.length)
+  if (!ticked && onStack.length)
     throw new ImportError(400, `Tool server${onStack.length > 1 ? "s" : ""} ${onStack.map((t) => `"${t.name}" (${sendableAddress(t.url) ?? t.url})`).join(", ")} point${onStack.length > 1 ? "" : "s"} at Boss Man's own services or a private-network address, which could give the company's runner a direct path to them. Tick the box to allow it, or remove ${onStack.length > 1 ? "them" : "it"} from the package.`);
   if (opts.fundingSourceId && !(await db.select({ id: fundingSources.id }).from(fundingSources).where(eq(fundingSources.id, opts.fundingSourceId))).length) throw new ImportError(400, "No such funding source.");
   if ((await db.select({ id: companies.id }).from(companies).where(eq(companies.name, name))).length) throw new ImportError(409, `There's already a company called ${name}. Pick another name.`);
