@@ -120,6 +120,20 @@ hasnt "$D/outbox/host.json" 'abc123'
 hasnt "$D/outbox/host.json" 'SECRET_TOKEN'
 hasnt "$D/outbox/host.json" 'PENPOT_BIND'
 rm -f "$T/src/.env"
+# BOS-770: every BOSSMAN_NETGUARD_ALLOW line in .env is reported in order, host:port entries only, so a duplicate
+# (Compose uses only the last) shows; a comment, a commented-out line and anything that isn't host:port are left out.
+printf 'BOSSMAN_NETGUARD_ALLOW=git.example.lan:3000\n# BOSSMAN_NETGUARD_ALLOW=old.example.lan:1\nSECRET_TOKEN=abc123\nexport BOSSMAN_NETGUARD_ALLOW="penpot.example.lan:9001, 10.0.0.9:22 bad;entry" # the design tool\n' >"$T/src/.env"
+host
+node -e '
+const h=require(process.argv[1]);const g=h.netguardEnv;
+if(!g||g.envFound!==true||JSON.stringify(g.lines)!==JSON.stringify([["git.example.lan:3000"],["penpot.example.lan:9001","10.0.0.9:22"]])){console.error(JSON.stringify(g));process.exit(1)}
+' "$D/outbox/host.json" || fail "netguardEnv is wrong: $(cat "$D/outbox/host.json")"
+hasnt "$D/outbox/host.json" 'old.example.lan'
+hasnt "$D/outbox/host.json" 'abc123'
+hasnt "$D/outbox/host.json" 'design tool'
+rm -f "$T/src/.env"
+host
+has "$D/outbox/host.json" '"netguardEnv": {"envFound": false, "lines": []}'
 # The repo probe is cached for an hour: a second run does not repeat it.
 cp "$D/state/repo-probe" "$T/probe1"; sleep 1.1; host; cmp -s "$D/state/repo-probe" "$T/probe1" || fail "repo probe was repeated within the hour"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
