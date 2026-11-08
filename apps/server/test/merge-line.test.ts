@@ -109,28 +109,28 @@ describe("the merge line's timeline (BOS-769)", () => {
     expect(await c.review.land(c.ticket.id, "Boss Man (retry)")).toMatchObject({ outcome: "carried" });
     let rows = await c.line();
     expect(events(rows)).toEqual(["approved", "attempt", "hold_started", "attempt"]);
-    expect(rows[2]!.detail).toMatchObject({ event: "hold_started", reason: "carried", carried: [{ ticketId: other.id, title: "Permission gate" }] });
+    expect(rows[2]!.detail).toMatchObject({ event: "hold_started", hold: "carried", carried: [{ ticketId: other.id, title: "Permission gate" }] });
     // The other ticket merges, so the next attempt goes through: the hold ends when its check is queued.
     c.answers.carried = { carried: [] };
     expect(await c.review.land(c.ticket.id, "Boss Man (the ticket it waited for has merged)")).toMatchObject({ outcome: "merged" });
     rows = await c.line();
     expect(events(rows)).toEqual(["approved", "attempt", "hold_started", "attempt", "attempt", "hold_ended", "check_queued", "check_started", "check_ended", "merged"]);
-    expect(rows[5]!.detail).toMatchObject({ reason: "carried", since: rows[2]!.at.toISOString() });
+    expect(rows[5]!.detail).toMatchObject({ hold: "carried", since: rows[2]!.at.toISOString() });
   });
 
   it("closes an open hold before the next event, with how long it lasted", async () => {
     const c = await setup();
     const t = { id: c.ticket.id, companyId: c.company.id };
     await lineEvent(c.db, t, { event: "approved", by: "Geoffrey" }, new Date("2026-11-07T08:00:00Z"));
-    await lineEvent(c.db, t, { event: "hold_started", reason: "carried", carried: [{ ticketId: "x", title: "X" }] }, new Date("2026-11-07T08:01:00Z"));
+    await lineEvent(c.db, t, { event: "hold_started", hold: "carried", carried: [{ ticketId: "x", title: "X" }] }, new Date("2026-11-07T08:01:00Z"));
     // The same hold again is not a new hold.
-    await lineEvent(c.db, t, { event: "hold_started", reason: "carried", carried: [{ ticketId: "x", title: "X" }] }, new Date("2026-11-07T09:00:00Z"));
+    await lineEvent(c.db, t, { event: "hold_started", hold: "carried", carried: [{ ticketId: "x", title: "X" }] }, new Date("2026-11-07T09:00:00Z"));
     // A retry in between that is held again doesn't end it: one jam is one hold.
     await lineEvent(c.db, t, { event: "attempt", by: "Boss Man" }, new Date("2026-11-07T12:00:00Z"));
     await lineEvent(c.db, t, { event: "check_queued", check: "pnpm test", way: "gate" }, new Date("2026-11-07T17:01:00Z"));
     const rows = await c.line();
     expect(events(rows)).toEqual(["approved", "hold_started", "attempt", "hold_ended", "check_queued"]);
-    expect(rows[3]!.detail).toMatchObject({ event: "hold_ended", reason: "carried", since: "2026-11-07T08:01:00.000Z", heldMs: 9 * 3_600_000 });
+    expect(rows[3]!.detail).toMatchObject({ event: "hold_ended", hold: "carried", since: "2026-11-07T08:01:00.000Z", heldMs: 9 * 3_600_000 });
     expect(rows[3]!.at.toISOString()).toBe("2026-11-07T17:01:00.000Z");
     expect(rows[4]!.at.getTime()).toBeGreaterThan(rows[3]!.at.getTime());
   });

@@ -202,7 +202,7 @@ async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title
     })
     .onConflictDoNothing()
     .returning({ question: decisions.question });
-  await lineEvent(db, t, { event: "hold_started", reason: "card", note: `the check ${reason}`.slice(0, 200) });
+  await lineEvent(db, t, { event: "hold_started", hold: "card", note: `the check ${reason}`.slice(0, 200) });
   return row?.question ?? null;
 }
 
@@ -413,7 +413,7 @@ export function reviewService(
     const detail = { carried: carried.map((c) => ({ ticketId: c.ticketId, title: c.title, risk: c.risk })) };
     // The ticket stays in review, with the reason on it, until the carried ticket has merged.
     await db.update(tickets).set({ pullRequestNote: `Waiting: its branch also carries unapproved work from ${names} (${theirRisk} risk), which must merge first.` }).where(eq(tickets.id, t.id));
-    await lineEvent(db, t, { event: "hold_started", reason: "carried", carried: carried.map((c) => ({ ticketId: c.ticketId, title: c.title })) });
+    await lineEvent(db, t, { event: "hold_started", hold: "carried", carried: carried.map((c) => ({ ticketId: c.ticketId, title: c.title })) });
     const policy = await effectivePolicy(db, t);
     if (carried.some((c) => ruleFor(policy, c.risk).ownerSignoff)) {
       const [d] = await db
@@ -519,10 +519,10 @@ export function reviewService(
   }
 
   /** The ticket stays in review with the host's reason; the owner hears once per new reason. */
-  async function wait(t: typeof tickets.$inferSelect, note: string, reason: HoldReason = "host") {
+  async function wait(t: typeof tickets.$inferSelect, note: string, hold: HoldReason = "host") {
     const changed = note !== t.pullRequestNote;
     await db.update(tickets).set({ pullRequestNote: note }).where(eq(tickets.id, t.id));
-    await lineEvent(db, t, { event: "hold_started", reason, note: note.slice(0, 200) });
+    await lineEvent(db, t, { event: "hold_started", hold, note: note.slice(0, 200) });
     if (changed)
       await deps.notes?.notify({
         companyId: t.companyId,
@@ -763,7 +763,7 @@ export function reviewService(
           return { verdict: "approved" as const, ...(await this.landVisible(ticketId, o.reviewer, o.causedByRunId)) };
         }
         const id = await raiseSignoffCard(db, t, { reviewer: o.reviewer, reviewerAgentId: o.reviewerAgentId, head, earlier: prior.earlier });
-        await lineEvent(db, t, { event: "hold_started", reason: "sign_off", decisionId: id ?? null });
+        await lineEvent(db, t, { event: "hold_started", hold: "sign_off", decisionId: id ?? null });
         return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${id}` };
       }
       if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
@@ -1206,7 +1206,7 @@ export function reviewService(
         if (!t) throw err;
         // A sign-off that arrived while the merge ran is the owner's next answer, not a failed merge: no card (BOS-471).
         if (isSignoffPending(err)) {
-          await lineEvent(db, t, { event: "hold_started", reason: "sign_off" });
+          await lineEvent(db, t, { event: "hold_started", hold: "sign_off" });
           throw err;
         }
         // Handed over mid-merge (a deploy swapped the server copies): the copy now in charge tries again by itself.

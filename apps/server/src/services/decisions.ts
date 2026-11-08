@@ -460,7 +460,7 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
   const fix = /without [`']?workflows?[`']? (scope|permission)/i.test(why)
     ? " To fix it: on GitHub, edit the company's git token and set Repository permissions → Workflows to Read and write (a classic token needs the workflow scope), then Run the check again. The token itself doesn't change."
     : "";
-  await lineEvent(db, t, { event: "hold_started", reason: "card", note: `the merge didn't finish: ${why}`.slice(0, 200) });
+  await lineEvent(db, t, { event: "hold_started", hold: "card", note: `the merge didn't finish: ${why}`.slice(0, 200) });
   return db
     .insert(decisions)
     .values({
