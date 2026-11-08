@@ -60,7 +60,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   else if (msg.method === "session/new") {
     const file = msg.params?._meta?.claudeCode?.options?.extraArgs?.["mcp-config"] ?? null;
     if (env.PEER_ROLE === "holder") {
-      writeFileSync(path.join(cwd, "holder.json"), JSON.stringify({ mcpConfig: file, mcpConfigExists: !!file && existsSync(file) }));
+      writeFileSync(path.join(cwd, "holder.json"), JSON.stringify({ tmp: env.TMPDIR, mcpConfig: file, mcpConfigExists: !!file && existsSync(file) }));
       holdUntilReleased(() => send({ id: msg.id, result: { sessionId: "s1" } }));
     } else send({ id: msg.id, result: { sessionId: "s1" } });
   } else if (msg.method === "session/prompt") send({ id: msg.id, result: { stopReason: "end_turn" } });

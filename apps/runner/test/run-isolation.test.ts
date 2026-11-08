@@ -55,6 +55,9 @@ async function crossRun(sameAgent: boolean) {
   const runTmpA = path.join(fence.runTmpRoot, runA);
   const mcpA = path.join(runTmpA, "mcp", "mcp.json");
   const homeA = path.join(fence.agentsRoot, agentA);
+  // B aims at wherever A's files really are (what A's adapter saw), not where this test expects them.
+  type Holder = { tmp: string; mcpConfig: string; mcpConfigExists: boolean };
+  const readHolder = () => JSON.parse(readFileSync(path.join(cwdA, "holder.json"), "utf8")) as Holder;
 
   const events: RunnerEvent[] = [];
   const manager = new SessionManager({
@@ -62,10 +65,11 @@ async function crossRun(sameAgent: boolean) {
     baseEnv: { PATH: process.env.PATH, HOME: root },
     adapterBins: { claude: FAKE_PEER },
     fence,
-    resolveEnv: async (runId) =>
-      runId === runA
-        ? { PEER_ROLE: "holder", PEER_SECRET: secret }
-        : { PEER_ROLE: "prober", PEER_TMP: runTmpA, PEER_MCP: mcpA, PEER_MCP_EXISTS: existsSync(mcpA) ? "1" : "0", PEER_HOME: homeA, PEER_TOKEN: token, PEER_SECRET: secret },
+    resolveEnv: async (runId) => {
+      if (runId === runA) return { PEER_ROLE: "holder", PEER_SECRET: secret };
+      const h = readHolder();
+      return { PEER_ROLE: "prober", PEER_TMP: h.tmp, PEER_MCP: h.mcpConfig, PEER_MCP_EXISTS: existsSync(h.mcpConfig) ? "1" : "0", PEER_HOME: homeA, PEER_TOKEN: token, PEER_SECRET: secret };
+    },
     emit: (e) => events.push(e),
   });
   const ended = (runId: string) => events.find((e) => e.type === "run.ended" && e.runId === runId) as { error: string | null } | undefined;
@@ -76,7 +80,7 @@ async function crossRun(sameAgent: boolean) {
     start(runA, agentA, cwdA, token);
     await waitFor(() => existsSync(path.join(cwdA, "holder.json")) || !!ended(runA), "the holder's session/new");
     if (ended(runA)) throw new Error(`the holder ended early: ${ended(runA)!.error}`);
-    const holder = JSON.parse(readFileSync(path.join(cwdA, "holder.json"), "utf8")) as { mcpConfig: string; mcpConfigExists: boolean };
+    const holder = readHolder();
     // While A's session opens, its token is in one file, in A's own temp folder: not /tmp, /dev/shm or A's home.
     const atStart = { holder, homeHits: filesHolding(homeA, token), homeSecretHits: filesHolding(homeA, secret) };
 
@@ -84,12 +88,12 @@ async function crossRun(sameAgent: boolean) {
     await waitFor(() => !!ended(runB), "the prober");
     expect(ended(runB)).toMatchObject({ error: null });
     const probe = JSON.parse(readFileSync(path.join(cwdB, "probe.json"), "utf8")) as Probe;
-    const planted = existsSync(path.join(runTmpA, "planted.txt"));
+    const planted = existsSync(path.join(holder.tmp, "planted.txt"));
 
     writeFileSync(path.join(cwdA, "release"), "");
     await waitFor(() => !!ended(runA), "the holder to end");
     expect(ended(runA)).toMatchObject({ error: null });
-    return { ...atStart, probe, planted, runTmpA, mcpA, homeA, events, tmpAGone: !existsSync(runTmpA) };
+    return { ...atStart, probe, planted, runTmpA, mcpA, homeA, events, tmpAGone: !existsSync(holder.tmp) };
   } finally {
     manager.shutdown();
   }
@@ -100,16 +104,15 @@ describe.skipIf(!live)("two fenced runs at once (BOS-555)", () => {
     it(`of ${sameAgent ? "the same agent" : "different agents"}: neither reaches the other's temp folder, token file or command-line secrets`, async () => {
       const r = await crossRun(sameAgent);
       expect(r.events.filter((e) => e.type === "run.started")).toEqual([expect.objectContaining({ fenced: true }), expect.objectContaining({ fenced: true })]);
-      // A's token file was there while B looked, inside A's own temp folder, outside every agent's home.
-      expect(r.holder).toEqual({ mcpConfig: r.mcpA, mcpConfigExists: true });
+      // A's token file was there while B looked, and B can't list, read or write A's temp folder or that file.
       expect(r.probe.peerMcpExisted).toBe(true);
-      expect(r.mcpA.startsWith(`${r.homeA}${path.sep}`)).toBe(false);
-      expect(r.homeHits).toEqual([]);
-      expect(r.homeSecretHits).toEqual([]);
-      // B has its own temp folder and can't list, read or write A's.
-      expect(r.probe.tmp).not.toBe(r.runTmpA);
       expect(r.probe).toMatchObject({ listedPeerTmp: false, readPeerSecret: false, readPeerMcp: false, wrotePeerTmp: false });
       expect(r.planted).toBe(false);
+      // The folder is A's own, outside every agent's home, so A's home holds neither the token nor the secret.
+      expect(r.holder).toEqual({ tmp: r.runTmpA, mcpConfig: r.mcpA, mcpConfigExists: true });
+      expect(r.probe.tmp).not.toBe(r.runTmpA);
+      expect(r.homeHits).toEqual([]);
+      expect(r.homeSecretHits).toEqual([]);
       // Command lines stay readable without a PID namespace; what matters is that no token or secret is on one.
       expect(r.probe.cmdlineHits).toBe(0);
       // Two runs of one agent share its home and harness state (accepted, DR-040); another agent's home is fenced off.
