@@ -181,6 +181,10 @@ export function judgePermission(question: string, command: string | null, ownFol
   for (const t of toolTargets(forTargets)) addTarget(t);
   // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
   if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || usesScratchUnsafely(c)) return result("outside");
+  // A tool run through pnpm/npm/yarn/npx, or a find -exec program, that names a path leaving the checkout runs code or reads
+  // config the judge can't see (BOS-638, Jane's round-5 findings for BOS-378): the program word and any folder flag are
+  // judged wherever they appear among the flags.
+  if (toolingOrExecLeaves(c, inOwn)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
@@ -838,6 +842,71 @@ function setsUnknownEnvironment(assigns: string[], sh: string, args: string[]): 
  * cmd`) is code the judge can't read. pnpm/npm/yarn/git may name a /tmp path but not a path the command wrote, and not with an
  * exec-style word. Over-denial (generate a file, then feed it to a checked-in script) is accepted.
  */
+const TOOL_RUNNER = /^(?:pnpm|npm|yarn|npx|pnpx|bunx)$/;
+// Options whose value names a file or folder a package manager runs from or reads config from. Judged wherever they stand
+// (`--silent -C /tmp/p`, `--script-shell=/tmp/x.sh`), with the value attached (`-C/tmp`, `--prefix=/tmp`) or in the next word.
+const TOOL_PATH_OPT = /^(?:-C|--dir|--prefix|--cwd|--config|--git-dir|--work-tree|--workspace-dir|--userconfig|--globalconfig|--use-yarnrc|--require|-r|--loglevel-file|--root|--script-shell)$/;
+/** True when `w` is a relative path that climbs out of the checkout with `..` (`../x.ts`, `../../x.test.ts`). */
+function climbsOut(w: string): boolean {
+  const p = w.replace(/^['"]+|['"]+$/g, "");
+  if (p.startsWith("/") || /\$|\x60|^~/.test(p)) return false; // absolute or unknown: judged elsewhere
+  return /(?:^|\/)\.\.(?:\/|$)/.test(p);
+}
+/** True when `w` names a file or folder outside the checkout: an absolute path (a /tmp shell or config included) or a climb. */
+function pathLeaves(w: string, inOwn: (p: string) => boolean): boolean {
+  const p = w.replace(/^['"]+|['"]+$/g, "");
+  if (p === "" || p === "-" || /\$|\x60|^~/.test(p)) return false; // unknown value: left to the other checks
+  if (p.startsWith("/")) return !inOwn(p); // /tmp is outside: a shell, config or script there is code the judge can't read
+  return climbsOut(p);
+}
+/**
+ * BOS-638 (split from BOS-378 by the CEO): a package-manager run or a `find -exec` that names a path leaving the checkout gets
+ * no Allow. Jane's round-5 review found a folder flag after another flag, an npm setting that names a file, a tool argument
+ * from outside the checkout, and a `find -exec` script there. The judge is only in "watch"; this closes the four before any
+ * company switches it to "advise". Over-denial of a tool argument that climbs out is accepted.
+ */
+function toolingOrExecLeaves(c: string, inOwn: (p: string) => boolean): boolean {
+  const bad = { v: false };
+  const segs = shellSegments(c, bad);
+  if (bad.v) return true; // the parser can't tell where a heredoc or arithmetic ends: fail closed
+  const wrappers = /^(?:env|nohup|time|sudo|command|nice|setsid|stdbuf|exec|timeout|-exec|-execdir|-ok|-okdir|then|do|else|if|while|until|!|\{)$/;
+  for (const s of segs) {
+    let k = 0;
+    while (k < s.words.length && (/^\w+\+?=/.test(s.words[k]!) || wrappers.test(s.words[k]!))) { if (s.words[k] === "timeout") k++; k++; }
+    const head = (s.words[k] ?? "").replace(/^.*\//, "");
+    const args = s.words.slice(k + 1);
+    // find's `-exec`/`-execdir`/`-ok`/`-okdir` program: a path that leaves the checkout is code from elsewhere.
+    if (head === "find") {
+      for (let i = 0; i < args.length; i++) {
+        if (!/^-(?:exec|execdir|ok|okdir)$/.test(args[i]!)) continue;
+        const prog = args[i + 1] ?? "";
+        // A bare name (`grep`, `rm`) runs from PATH; only a word naming a path (`../x.sh`, `/tmp/x.sh`, `./x.sh`) is judged.
+        if (prog.includes("/") && (climbsOut(prog) || pathLeaves(prog, inOwn))) return true;
+      }
+      continue;
+    }
+    if (!TOOL_RUNNER.test(head)) continue;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!;
+      const eq = a.indexOf("=");
+      // A folder/config/shell option: its value (`--opt=v`, `-C/v`, or the next word) must stay inside the checkout or /tmp,
+      // wherever the option stands among the flags.
+      const opt = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+      if (TOOL_PATH_OPT.test(opt)) {
+        const val = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : /^-[A-Za-z]./.test(a) ? a.slice(2) : args[i + 1];
+        if (val !== undefined && pathLeaves(val, inOwn)) return true;
+        continue;
+      }
+      // A tool argument that is a relative path climbing out of the checkout (`npx vitest run ../../x.test.ts`,
+      // `pnpm dlx tsx ../x.ts`). An absolute /tmp output (`--outDir /tmp/out`) is allowed as before; a /tmp input to run is
+      // already denied by usesScratchUnsafely. A package name (`@scope/pkg`) has no `..`, so it is not caught.
+      const val = a.startsWith("--") && eq > 0 ? a.slice(eq + 1) : a;
+      if (!val.startsWith("-") && climbsOut(val)) return true;
+    }
+  }
+  return false;
+}
+
 function usesScratchUnsafely(c: string): boolean {
   const bad = { v: false };
   const segs = shellSegments(c, bad);
