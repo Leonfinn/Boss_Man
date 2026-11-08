@@ -1431,6 +1431,38 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     ]);
   });
 
+  // BOS-718 (Jane's review of BOS-717): yarn under its file names, yarn global, npm create/innit.
+  describe("A9. yarn.js, yarn global, npm create/innit (BOS-718)", () => {
+    deny([
+      "cd /tmp/p && /opt/yarn-v1.22.22/bin/yarn.js install",
+      "cd /tmp/p && yarn.js",
+      "cd /tmp/p && yarn.cmd install",
+      "cd /tmp/p && yarnpkg.cmd list",
+      "cd /tmp/p && yarn.cjs install",
+      "cd /tmp/p && ./yarn.js",
+      "yarn global add x",
+      "yarnpkg global add x",
+      "yarn.js global add x",
+      "yarn --silent global add x",
+      "npm -- init x",
+      "npm --loglevel info -- init x",
+      "npm create x",
+      "npm innit x",
+      "npm --loglevel info create x",
+      "npm --loglevel info innit x",
+      "npm -- create x",
+      "pnpm create x",
+      "pnpm --silent create x",
+    ]);
+    allows([
+      "npm create",
+      "npm innit -y",
+      "cd packages/shared && yarn install",
+      "yarn add global-agent",
+      "yarn install",
+    ]);
+  });
+
   describe("B. node-options by flag", () => {
     deny([
       "npm --node-options=--require=../x.js run build",
