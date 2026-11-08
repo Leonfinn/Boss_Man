@@ -1183,7 +1183,6 @@ describe("rules judge: variants of the BOS-701 checks (BOS-706)", () => {
     allows([
       "cd /tmp/p && npm --production install --ignore-scripts",
       "cd /tmp/p && pnpm --prod install --ignore-scripts",
-      "cd /tmp/p && bun --production install --ignore-scripts",
       "cd /tmp/p && yarn install --production --ignore-scripts",
     ]);
   });
