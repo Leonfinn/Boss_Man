@@ -111,6 +111,48 @@ describe("company import (docs/11, step 2)", () => {
     expect((await req("GET", `/api/companies/${companyId}/review-policy`)).json().medium.kinds).toEqual({ security: [ann.id], infra: ann.id });
   });
 
+  it("never lets a package loosen the owner's safeguards, and says what it asked for (BOS-754)", async () => {
+    const { req } = await setup();
+    const { company } = (await req("POST", "/api/companies", { name: "Strict Co" })).json() as { company: { id: string } };
+    await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" });
+    const files = unzipSync(new Uint8Array((await req("GET", `/api/companies/${company.id}/export`)).rawPayload));
+    const untouched = { ...files };
+    const co = JSON.parse(strFromU8(files["company.json"]!));
+    co.name = "Loose Co";
+    co.ownerApprovesEngagements = false;
+    co.reviewPolicy.high = { ...co.reviewPolicy.high, ownerSignoff: false, planApprover: "ceo" };
+    files["company.json"] = strToU8(JSON.stringify(co));
+    const projectFile = Object.keys(files).find((k) => k.endsWith("project.json"))!;
+    const proj = JSON.parse(strFromU8(files[projectFile]!));
+    proj.reviewPolicy = { ...co.reviewPolicy, high: co.reviewPolicy.high, critical: { ...co.reviewPolicy.critical, ownerSignoff: false } };
+    files[projectFile] = strToU8(JSON.stringify(proj));
+
+    const res = await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(files)).toString("base64") });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+    const imported = ((await req("GET", "/api/companies")).json() as Array<{ id: string; ownerApprovesEngagements: boolean }>).find((c) => c.id === companyId)!;
+    expect(imported.ownerApprovesEngagements).toBe(true);
+    const policy = (await req("GET", `/api/companies/${companyId}/review-policy`)).json();
+    expect(policy.high).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+    const [project] = (await req("GET", `/api/companies/${companyId}/projects`)).json() as Array<{ id: string }>;
+    const projPolicy = (await req("GET", `/api/projects/${project!.id}/review-policy`)).json().policy;
+    expect(projPolicy.high).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+    expect(projPolicy.critical).toMatchObject({ ownerSignoff: true, planApprover: "owner" });
+    expect(checklist).toEqual(
+      expect.arrayContaining([
+        "The package had other companies' requests for work go ahead without you. Boss Man kept your approval on.",
+        "The package's review policy turned off your sign-off on high-risk work, your approval of high-risk plans. Boss Man kept them on; change Settings → Reviews if you want them off.",
+        "The package's review policy for project Site turned off your sign-off on high-risk work, your approval of high-risk plans, your sign-off on critical-risk work. Boss Man kept them on; change the project's review settings if you want them off.",
+      ]),
+    );
+
+    // A package that keeps the defaults imports with no such line.
+    const plain = JSON.parse(strFromU8(untouched["company.json"]!));
+    untouched["company.json"] = strToU8(JSON.stringify({ ...plain, name: "Plain Co" }));
+    const ok = (await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(untouched)).toString("base64") })).json() as { checklist: string[] };
+    expect(ok.checklist.filter((l) => l.includes("Boss Man kept"))).toEqual([]);
+  });
+
   it("previews each tool server's host:port and refuses ones aimed at Boss Man's own services unless ticked", async () => {
     const { req } = await setup();
     const server = (name: string, url: string) => ({ name, url, transport: "http" });
