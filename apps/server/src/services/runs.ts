@@ -156,12 +156,14 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
       return { delivered: input.interrupt ? ("interrupted" as const) : ("queued" as const) };
     },
 
-    async cancel(runId: string, companyId?: string) {
+    /** `reason` is for a stop Boss Man starts itself (the run time limit, BOS-846): the run then ends as "stopped: <reason>". */
+    async cancel(runId: string, companyId?: string, reason?: string) {
       const { run, runnerId } = await load(runId, companyId);
       if (run.endedAt) throw new RunError(409, "That run has already ended.");
+      if (reason) await db.update(runs).set({ stopReason: reason }).where(eq(runs.id, runId));
       if (!runnerId || !deps.runners.send(runnerId, { type: "run.cancel", runId })) {
         // Nobody can confirm, so the server ends the run itself.
-        await deps.runners.endRun(runId, "stopped: runner offline", now());
+        await deps.runners.endRun(runId, reason ? `stopped: ${reason}` : "stopped: runner offline", now());
         return { cancelled: true, endedHere: true };
       }
       await db.update(runs).set({ cancelRequestedAt: now() }).where(eq(runs.id, runId));

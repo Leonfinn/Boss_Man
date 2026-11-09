@@ -78,6 +78,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
 
   /** Marks a run ended and logs it. Runs inside the caller's transaction so a failed apply rolls the stored event back. */
   async function markEnded(tx: Tx, runId: string, at: Date, outcome: string | null, usage?: { inputTokens: number; outputTokens: number; cachedReadTokens: number; cachedWriteTokens: number }) {
+    // A run Boss Man stopped on purpose (the run time limit, BOS-846) says why, unless it ended in an error or was lost.
+    if (!outcome?.startsWith("error") && !outcome?.startsWith("lost") && outcome !== "interrupted") {
+      const [r] = await tx.select({ stopReason: runs.stopReason }).from(runs).where(eq(runs.id, runId));
+      if (r?.stopReason) outcome = `stopped: ${r.stopReason}`;
+    }
     const [ended] = await tx
       .update(runs)
       .set({
