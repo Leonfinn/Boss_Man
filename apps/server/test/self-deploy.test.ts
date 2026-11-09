@@ -261,6 +261,28 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: true, pending: true, status: { result: "deployed" } });
   });
 
+  // BOS-835: the merge gate runs in the runner, so a server update alone leaves it on old code (BOS-690's
+  // renumbering was on main and live on the server, yet BOS-619 and BOS-708 still bounced).
+  it("names Build and update runners and the stale merge gate on a server card whose update changes runner code", async () => {
+    const c = (ctx = await setup());
+    await c.available({ runnerChanged: true });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.question).toContain("Settings → Server and runner → Updates → Build and update runners");
+    expect(d!.question).toContain("the merge gate keeps running the old code");
+    const risks = (d!.context as { update: { risks: string[] } }).update.risks;
+    expect(risks.some((r) => r.includes("Build and update runners") && r.includes("merge gate"))).toBe(true);
+  });
+
+  it("says nothing about the runners on a server card whose update leaves runner code alone", async () => {
+    const c = (ctx = await setup());
+    await c.available({ runnerChanged: false });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.question).not.toContain("Build and update runners");
+    expect(d!.question).not.toContain("merge gate");
+  });
+
   it("pages the owner when a deploy fails, and flags a refusal", async () => {
     const c = (ctx = await setup());
     await c.status({ id: "", result: "failed", message: "server not healthy after 120s" });
