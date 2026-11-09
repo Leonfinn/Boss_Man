@@ -17,7 +17,7 @@ import { DraftTextarea } from "../components/DraftTextarea";
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
 type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
-type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; report?: CompanyReport | null }) & { launcher?: Launched };
+type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; sandbox?: { guard?: { state: "on" | "absent"; reason: string } } | null; report?: CompanyReport | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
 type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
@@ -190,6 +190,14 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             <>
               <dt>Image</dt>
               <dd className="mono">{s.imageVersion}</dd>
+            </>
+          )}
+          {s?.registered && (
+            <>
+              <dt>Network guard</dt>
+              <dd data-testid="runner-guard-row">
+                launcher: {c ? c.guard ?? "not reported" : "no container"} · runner: {s.sandbox?.guard ? (s.sandbox.guard.state === "on" ? "on" : `absent (${s.sandbox.guard.reason})`) : "not reported yet"}
+              </dd>
             </>
           )}
         </dl>
@@ -1852,7 +1860,7 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
         <p style={{ fontSize: 14 }} data-testid="network-guard-line">
           {sb.guard.state === "on"
             ? "Network guard: on. The runner tried to reach its own gateway and was refused at once."
-            : `Network guard: absent. The runner could reach its own gateway (${sb.guard.reason}), so private addresses on this network are not blocked.`}
+            : `Network guard: absent. The runner's own gateway was not refused (${sb.guard.reason}), so private addresses on this network are not blocked.`}
         </p>
       ) : sb ? (
         <p className="muted" style={{ fontSize: 14 }}>Network guard: not reported yet (this runner is older than the check).</p>

@@ -40,7 +40,8 @@ export function tryConnect(host: string, port: number, timeoutMs: number): Promi
 
 /** Classifies one connect: only an immediate EHOSTUNREACH is the guard's refusal. */
 export function classify(r: { outcome: string; errno: string | null; ms: number }): GuardReport["state"] {
-  return r.outcome === "error" && r.errno === "EHOSTUNREACH" ? "on" : "absent";
+  // Under 1 s: an unguarded host whose gateway doesn't answer ARP also gives EHOSTUNREACH, but after about 3 s.
+  return r.outcome === "error" && r.errno === "EHOSTUNREACH" && r.ms < 1000 ? "on" : "absent";
 }
 
 export async function probeGuard(opts: { routeFile?: string; port?: number; timeoutMs?: number } = {}): Promise<GuardReport> {
@@ -53,6 +54,6 @@ export async function probeGuard(opts: { routeFile?: string; port?: number; time
   if (!gateway) return { state: "absent", reason: "no default gateway found", errno: null, ms: 0 };
   const r = await tryConnect(gateway, opts.port ?? 9, opts.timeoutMs ?? 3000);
   const state = classify(r);
-  const reason = state === "on" ? "connect to the gateway was refused at once (EHOSTUNREACH)" : r.outcome === "connected" ? "connect to the gateway succeeded" : r.outcome === "timeout" ? "connect to the gateway timed out" : `connect to the gateway failed with ${r.errno}`;
+  const reason = state === "on" ? "connect to the gateway was refused at once (EHOSTUNREACH)" : r.outcome === "connected" ? "connect to the gateway succeeded" : r.outcome === "timeout" ? "connect to the gateway timed out, so it was not refused" : `connect to the gateway failed with ${r.errno}`;
   return { state, reason, errno: r.errno, ms: r.ms };
 }

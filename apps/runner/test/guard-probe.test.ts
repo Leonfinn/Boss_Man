@@ -28,6 +28,7 @@ describe("default gateway from the routing table", () => {
 describe("classification", () => {
   it("only an EHOSTUNREACH error is the guard", () => {
     expect(classify({ outcome: "error", errno: "EHOSTUNREACH", ms: 1 })).toBe("on");
+    expect(classify({ outcome: "error", errno: "EHOSTUNREACH", ms: 3000 })).toBe("absent"); // slow = ARP failure, not the guard
     expect(classify({ outcome: "error", errno: "ECONNREFUSED", ms: 1 })).toBe("absent");
     expect(classify({ outcome: "error", errno: "ENETUNREACH", ms: 1 })).toBe("absent");
     expect(classify({ outcome: "timeout", errno: null, ms: 3000 })).toBe("absent");
