@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions } from "../src/db/schema.js";
+import { decisions, runs } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { checkAsk } from "../src/services/decisions.js";
 import { lintOwnerSteps, sh, step, type CardLint, type SelfDeployFacts } from "../src/services/steps.js";
@@ -481,7 +481,10 @@ async function setup() {
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const clients: Client[] = [];
   const mcp = async (agentId: string) => {
-    const token = await issueRunToken(db, { companyId: company.id, agentId, runId: randomUUID() });
+    const runId = randomUUID();
+    // A token works only while its own run is live (BOS-513): give it a live run row.
+    await db.insert(runs).values({ id: runId, companyId: company.id, agentId });
+    const token = await issueRunToken(db, { companyId: company.id, agentId, runId });
     const c = new Client({ name: "t", version: "0" });
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     clients.push(c);
