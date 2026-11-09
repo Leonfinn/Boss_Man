@@ -1427,7 +1427,10 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
           await tx.update(agents).set({ duty: null }).where(and(eq(agents.companyId, companyId), eq(agents.duty, SCRUM_MASTER_DUTY)));
           if (scrumMasterAgentId) await tx.update(agents).set({ duty: SCRUM_MASTER_DUTY }).where(eq(agents.id, scrumMasterAgentId));
         }
-        if (next.enabled) {
+        // Switching it on needs somebody to wake (BOS-762 keeps it on by default, but a company that is on
+        // by default and has not picked a Scrum Master yet reaches nobody; the sweep leaves its flags open).
+        // Only refuse an explicit "on"; a company already on by default may still edit its limits freely.
+        if (rest.enabled === true) {
           const [sm] = await tx.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, SCRUM_MASTER_DUTY), isNull(agents.retiredAt)));
           if (!sm) throw new WatchdogError(422, "Pick the Scrum Master before switching the watchdog on.");
         }

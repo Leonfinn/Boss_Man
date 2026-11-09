@@ -47,7 +47,11 @@ export const WatchdogSettings = z.object({
 export type WatchdogSettings = z.infer<typeof WatchdogSettings>;
 
 export const DEFAULT_WATCHDOG: WatchdogSettings = {
-  enabled: false,
+  // On for a new or imported company (BOS-762, DR-041: the safe value is the default). It is a
+  // liveness check and spends no model tokens, and until the owner picks a Scrum Master it reaches
+  // nobody, so switching it on costs nothing and a company is never left without it by accident.
+  // An existing company keeps whatever it has stored; the owner switches it off in Settings.
+  enabled: true,
   recordOnly: false,
   unassignedMinutes: 15,
   inProgressHours: 2,
