@@ -48,6 +48,7 @@ import {
 import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
+import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { type CardLint, type HostFacts, type SelfDeployFacts, NOT_OVERRIDABLE, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
@@ -1040,7 +1041,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
     const open = deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
     if (open) return null;
-    const [t] = await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, ticketId), eq(tickets.systemState, "blocked"))).returning();
+    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "what it waited on is resolved", now: now() });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
   }

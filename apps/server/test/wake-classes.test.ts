@@ -70,6 +70,9 @@ describe("wake classes: the table", () => {
     "another company",
     "not open",
     "unknown",
+    // The reasons written on a ticket's history row by a system move (BOS-898), not wakes.
+    "what it waited on is resolved",
+    "what it waited on finished",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {

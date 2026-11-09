@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { decisions, tickets, ticketDependencies } from "../db/schema.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
+import { systemMoveTicket } from "./ticket-transition.js";
 
 export class WorkError extends Error {
   constructor(
@@ -83,10 +84,12 @@ export async function addTicketDependency(db: Db, input: DependencyWrite) {
     })
     .returning();
   if (input.hold) {
-    await db
-      .update(tickets)
-      .set({ systemState: "blocked", lastActivityAt: (input.now ?? (() => new Date()))() })
-      .where(eq(tickets.id, input.blockedTicketId));
+    await systemMoveTicket(db, {
+      ticketId: input.blockedTicketId,
+      to: "blocked",
+      reason: input.blockerTicketId ? "held by a ticket it depends on" : input.blockerDecisionId ? "held by a decision" : "held by an engagement",
+      now: (input.now ?? (() => new Date()))(),
+    });
   }
   return dep!;
 }

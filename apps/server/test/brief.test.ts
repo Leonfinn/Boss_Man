@@ -97,7 +97,7 @@ describe("activity log (R83)", () => {
     await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Follow-up" } });
     await c.close();
     const kinds = (await log()).map((r) => r.kind).sort();
-    expect(kinds).toEqual(["decision_raised", "dependency", "message", "message", "ticket_created"]);
+    expect(kinds).toEqual(["decision_raised", "dependency", "message", "message", "state", "ticket_created"]);
     expect((await log()).find((r) => r.summary.startsWith("Replied: x"))!.summary).toHaveLength(300);
     expect((await log()).find((r) => r.summary.startsWith("Owner wrote"))).toMatchObject({ agentId: null, ticketId: a.id });
   });
