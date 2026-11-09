@@ -2196,7 +2196,30 @@ type SelfDeployView = {
   /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
   deployer?: { reportedAt: string | null; late: boolean };
   lateAfterMinutes?: number;
+  /** The runner trial, with the real time it ends (BOS-953). Null/absent when no trial is running. */
+  trial?: { endsAt: string; seconds: number } | null;
+  /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
+  deployWait?: { until: string } | null;
 };
+
+/** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
+function atTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+/** "in about 6 minutes", or "in less than a minute", from now to an instant (BOS-953). */
+function inAbout(iso: string, now: number): string {
+  const mins = Math.ceil((Date.parse(iso) - now) / 60_000);
+  return mins <= 0 ? "now" : mins === 1 ? "in about 1 minute" : `in about ${mins} minutes`;
+}
+/** A clock that ticks every 15 s, so a countdown on the page moves without waiting for the next poll (BOS-953). */
+function useNow(everyMs = 15_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(timer);
+  }, [everyMs]);
+  return now;
+}
 
 /** The line under "Last deploy" when the host has no offer to show (BOS-753): "not reported" only when it really is overdue. */
 function deployerLine(v: SelfDeployView): string {
@@ -2245,11 +2268,38 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
   );
 }
 
+/**
+ * The runner trial and any rate-limit wait (BOS-953), both counted from their own time so they never show the
+ * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
+ * Pure, so a layout test can render it on its own.
+ */
+export function TrialLines({ trial, wait, now }: { trial?: { endsAt: string } | null; wait?: { until: string } | null; now: number }) {
+  const trialOver = trial ? Date.parse(trial.endsAt) <= now : false;
+  const waitOver = wait ? Date.parse(wait.until) <= now : false;
+  return (
+    <>
+      {trial && !trialOver && (
+        <p className="error" role="status" data-testid="runner-trial" style={{ fontSize: 14 }}>
+          The server update is still in its trial, so the runners can't be updated yet. Runners can be updated from {atTime(trial.endsAt)}, {inAbout(trial.endsAt, now)}.
+          Boss Man offers the runner update by itself then, so you don't need to press again.
+        </p>
+      )}
+      {wait && (
+        <p className={waitOver ? "muted" : "error"} role="status" data-testid="deploy-wait" style={{ fontSize: 14 }}>
+          {waitOver ? "You can deploy now." : `A server deploy was refused to keep one every 10 minutes. You can deploy again from ${atTime(wait.until)}, ${inAbout(wait.until, now)}.`}
+        </p>
+      )}
+    </>
+  );
+}
+
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
   const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const act = useAction();
+  // A clock so the trial and rate-limit lines count down between polls (BOS-953).
+  const now = useNow();
   const v = view.data;
   if (!v?.enabled) return null;
   const s = v.status;
@@ -2265,6 +2315,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       <p className="muted" style={{ fontSize: 14 }}>
         {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
+      <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} />
       {waiting && <WaitingChanges commits={v.available?.commits} />}
       <div>
         <button
