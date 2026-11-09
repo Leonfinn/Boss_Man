@@ -101,6 +101,7 @@ const bg = createBackground(
 );
 // Background work follows leadership; runner sockets are closed by buildApp on demotion.
 // A server that takes charge holds no merges: it restarts every approved, unmerged one (DR-026). The loop below keeps asking until the update hold is off and the runners are connected.
+// shortcut: real cross-request state, but lost on restart harmlessly: a restarted leader promotes again and resets this to now, then resumes merges from then (BOS-907).
 let resumeMergesSince: Date | null = null;
 leader.onPromote(() => {
   resumeMergesSince = new Date();

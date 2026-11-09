@@ -15,6 +15,7 @@ import { activity, agents, companies, costEvents, decisions, engagements, fundin
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
+import { systemMoveTicket } from "./ticket-transition.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
@@ -98,8 +99,6 @@ export const IDLE_SLOT_REASON = "idle slot";
 export const IDLE_AGENTS_REASON = "idle agents";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
-/** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
-export const DECISION_REASON = "decision";
 /** Tickets moved to review, gathered into one CEO run (R85). */
 export { REVIEW_REASON };
 /** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
@@ -1929,7 +1928,7 @@ export function schedulerService(
         if (!deps.length) return false;
         // A blocked ticket has always gone to ready here, assignee or not; keep that.
         if (cur.systemState === "blocked") {
-          await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, ticketId), eq(tickets.systemState, "blocked")));
+          await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "what it waited on finished", now: now() });
           return true;
         }
         const rows = await db
@@ -1947,11 +1946,7 @@ export function schedulerService(
           .returning({ id: decisions.id });
         return rows.length > 0;
       }
-      const [t] = await db
-        .update(tickets)
-        .set({ systemState: "ready", lastActivityAt: now() })
-        .where(and(eq(tickets.id, ticketId), inArray(tickets.systemState, ["backlog", "blocked"])))
-        .returning();
+      const t = await systemMoveTicket(db, { ticketId, from: ["backlog", "blocked"], to: "ready", reason: "what it waited on finished", now: now() });
       if (!t?.assigneeAgentId) return false;
       await this.notify(t.assigneeAgentId, { ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
       return true;
