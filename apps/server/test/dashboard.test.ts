@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, runs, tickets } from "../src/db/schema.js";
+import { decisions, runners, runs, tickets } from "../src/db/schema.js";
 import { dashboardService, runResult } from "../src/services/dashboard.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -115,5 +115,21 @@ describe("dashboard (R74)", () => {
     expect(board.columns.find((col) => col.systemState === "review")!.tickets.map((x) => x.id)).toEqual([t.id]);
     expect(board.columns.find((col) => col.systemState === "backlog")!.tickets).toEqual([]);
     expect((await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats).toMatchObject({ inProgress: 0, inReview: 1 });
+  });
+});
+
+describe("QA: home screen 'Need your answer' equals the Decisions menu badge (BOS-969)", () => {
+  it("counts only the cards the owner can act on now: not superseded, CEO-tier or lesson ones", async () => {
+    const c = (ctx = await setup());
+    const ask = (question: string) => c.decisions.raise({ companyId: c.company.id, agentId: null, question, options: ["A", "B"], recommended: "A" });
+    await ask("Plain one?");
+    await ask("Another plain one?");
+    const stale = await ask("Superseded one?");
+    await c.db.update(decisions).set({ staleAt: new Date(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", tier: "owner", question: "Lesson?", options: ["Apply", "Skip"], recommendedOption: "Skip", context: { type: "lesson", lesson: "Say it plainly." } as never });
+    const tally = (await c.req("GET", "/api/decisions/tally")).json() as { open: number; waiting: number };
+    expect(tally).toEqual({ open: 2, waiting: 1 });
+    const data = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json();
+    expect(data.stats.decisionsWaiting).toBe(tally.open);
   });
 });
