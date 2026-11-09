@@ -373,7 +373,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       // deploy.sh's own git checkout/merge write the checkout, so both run in the umask subshell (DR-028).
       expect(commands(x.handSteps!)).toContain("(umask 022 && cd /srv/bm/src && scripts/deploy.sh --commit " + B + ")");
       expect(text).not.toContain("rebuild-live.sh");
-      expect(text).not.toContain("/mnt/NVME_Apps");
+      expect(text).not.toContain("/mnt/tank/apps/boss-man");
       expect(commands([x.rollback!])).toEqual(["(umask 022 && cd /srv/bm/src && scripts/deploy.sh --rollback)"]);
     });
 
@@ -393,7 +393,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const text = [...x.handSteps!, x.rollback!].join("\n");
       expect(commands(x.handSteps!)).toEqual([]);
       expect(text).not.toContain("```");
-      expect(text).not.toContain("/mnt/NVME_Apps");
+      expect(text).not.toContain("/mnt/tank/apps/boss-man");
       expect(text).toContain("can't tell where it is installed");
       expect(text).toContain("can't tell whether this install runs blue/green");
       expect(x.rollback).toContain("no command is shown");

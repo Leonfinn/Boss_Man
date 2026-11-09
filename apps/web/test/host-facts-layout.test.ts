@@ -13,7 +13,7 @@ const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 // Long enough to overflow any window: the host's own compose files and every address it listens on.
 const COMPOSE = Array.from({ length: 9 }, (_, i) => `deploy/truenas-${["deployer", "bluegreen", "tailscale", "loki", "grafana", "prometheus", "alerts", "backups", "web"][i]}.yml`).join(",");
 const ADDRESSES = [
-  "192.168.68.25",
+  "192.168.1.25",
   "fd01:9689:a583:bbe:dc10:aa6:91cb:ae19",
   "172.19.0.1",
   "172.18.0.1",
@@ -44,7 +44,7 @@ const facts: [string, string][] = [
   ["memory.availableKb", "26904756"],
   ["memory.totalKb", "41011056"],
   ["network.addresses", ADDRESSES],
-  ["network.port.BOSSMAN_BIND", "192.168.68.25"],
+  ["network.port.BOSSMAN_BIND", "192.168.1.25"],
   ["network.port.BOSSMAN_HOST_PORT", "3101"],
   ["paths.deployer", "/srv/apps/boss-man/deployer"],
   ["paths.install", "/srv/apps/boss-man"],
