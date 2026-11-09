@@ -114,9 +114,19 @@ export function decisionRev(d: Decision): string {
 export const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 const TOKEN_SHAPE = /^[A-Za-z0-9_-]{43}$/;
 
-/** The text of a push about this card (rules 2 and N4): the question, then what Approve does. */
+/** The largest message a push carries (notifications.ts push() cuts the body to this many bytes). */
+export const PUSH_BODY_MAX = 3500;
+
+/**
+ * The text of a push about this card (rules 2 and N4): the question, then what Approve does. The Approve
+ * line is what the owner approves on, so it is never cut: when the two together are over the push limit
+ * (a 1000-character question in 4-byte characters is 4000 bytes) the question is trimmed to make room
+ * for it whole, so the owner can't tap a button without seeing the summary and option it sends (BOS-943).
+ */
 export function approveMessage(d: Decision): string {
-  return `${plainText(d.question).trim()}\n\nApprove = ${plainText(summaryOf(d) ?? "")} ('${plainText(d.recommendedOption)}')`;
+  const approve = `Approve = ${plainText(summaryOf(d) ?? "")} ('${plainText(d.recommendedOption)}')`;
+  const room = PUSH_BODY_MAX - new TextEncoder().encode(`\n\n${approve}`).length;
+  return `${fitBytes(plainText(d.question).trim(), room)}\n\n${approve}`;
 }
 
 export type Outcome = "approved" | "already_answered" | "being_applied" | "try_again" | "no_longer_works" | "too_many_taps";

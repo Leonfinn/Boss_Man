@@ -219,6 +219,21 @@ describe("rule 2: the owner never approves blind", () => {
     expect(push!.body.message).toBe("Use deSEC for DNS?\n\nApprove = Use deSEC for DNS on the website ('Yes')");
     expect(push!.body.markdown).toBe(false);
   });
+
+  it("keeps the whole Approve line when a 1000-character question of 4-byte characters would push it past the limit (BOS-943)", async () => {
+    const c = await setup();
+    // 1000 emoji: 1000 characters, 4000 bytes, so the question alone is over the 3500-byte push limit.
+    const question = "🙂".repeat(1000);
+    await c.ask({ question, approveSummary: "Use deSEC for DNS on the website" });
+    const { push, token } = await c.sync();
+    expect(token).not.toBeNull();
+    const message = push!.body.message as string;
+    // What the phone receives is what Boss Man sent, already within the limit (nothing was cut off).
+    expect(new TextEncoder().encode(message).length).toBeLessThanOrEqual(3500);
+    expect(message.endsWith("Approve = Use deSEC for DNS on the website ('Yes')")).toBe(true);
+    expect(message.startsWith("🙂")).toBe(true);
+    expect(message).toContain("...\n\nApprove = ");
+  });
 });
 
 describe("rule 3: the token only ever in the POST body", () => {
