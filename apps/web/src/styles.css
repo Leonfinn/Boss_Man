@@ -512,6 +512,11 @@ label.chip:focus-within { outline: 2px solid var(--accent); outline-offset: 2px;
 .insight-list li:last-child { border-bottom: 0; padding-bottom: 0; }
 table.features td, table.features th { padding: 8px 10px; vertical-align: middle; }
 table.features tr.group th { padding-top: 16px; font-family: var(--sans); font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--ink); background: var(--ground); }
+/* A feature's tasks fold behind its arrow, and the WORK summary opens them too (BOS-956). */
+.feature-fold { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px; margin: 0 -4px; background: none; border: 0; border-radius: 6px; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.feature-fold:hover { text-decoration: underline; }
+.feature-work { white-space: nowrap; }
+.feature-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input.search { flex: 1; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--field); color: var(--ink); }
 
 .inbox { display: grid; grid-template-columns: minmax(260px, 380px) minmax(0, 1fr); gap: 20px; align-items: start; }
@@ -788,6 +793,18 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .ticket-layout.props-collapsed > .ticket-main { grid-column: 1; grid-row: 1; }
 .ticket-layout.props-collapsed > .ticket-props { grid-column: 2; grid-row: 1; min-width: 0; }
 .ticket-props small { font-size: 12px; }
+/* Settings → This host (BOS-924): the reported facts fold away behind a one-line header. Long values
+   (compose files, IP lists) wrap inside their column instead of running past the panel; the label column
+   stays aligned because it is a `max-content` track and the value keeps the rest, never the other way. */
+.host-facts { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.host-facts-toggle { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 40px; padding: 0; background: none; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.host-facts-toggle:hover { text-decoration: underline; }
+.host-facts-toggle .tag { text-transform: none; letter-spacing: 0; }
+.host-facts-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; font-size: 14px; min-width: 0; }
+.host-facts-list dt { min-width: 0; overflow-wrap: anywhere; }
+.host-facts-list dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+/* A last resort: a comma list breaks after its commas, and a single over-long word breaks anywhere. */
+.host-fact-value { overflow-wrap: anywhere; word-break: break-word; }
 .fold { padding: 0; }
 .fold > summary { display: flex; gap: 10px; align-items: flex-start; padding: 14px 18px; cursor: pointer; list-style: none; }
 .fold > summary::-webkit-details-marker { display: none; }

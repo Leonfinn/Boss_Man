@@ -1,5 +1,5 @@
 import path from "node:path";
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
@@ -103,7 +103,8 @@ import { diskService, type DiskLimits } from "./services/disk.js";
 import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { NotifySettings, notificationsService } from "./services/notifications.js";
+import { NotifySettings, NtfyUrl, notificationsService } from "./services/notifications.js";
+import { phoneApproveService } from "./services/phone-approve.js";
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
 const OWNER_TZ = timeZoneOr(process.env.TZ);
@@ -124,7 +125,8 @@ export type AppOptions = {
   secureCookies?: boolean | "auto";
   /** Exact addresses of the proxies whose X-Forwarded-* headers are believed (BOS-242). Never "true". */
   trustedProxies?: string[];
-  logger?: boolean;
+  /** Fastify's logger: on, off, or options (tests pass a stream to read what is logged). */
+  logger?: FastifyServerOptions["logger"];
   /** Quiet time before a wiki page is embedded after a write. Default 30s. */
   semanticDebounceMs?: number;
   /** Runner heartbeat interval; tests shorten it. */
@@ -321,6 +323,16 @@ export async function buildApp(opts: AppOptions) {
     } });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
+  // Phone Approve (BOS-243): the decision push asks it for an Approve button; a tap answers through decisionsSvc.
+  const phoneApprove = phoneApproveService(db, {
+    getSettings: () => notes.getSettings(),
+    reveal: (id) => secretsSvc.reveal(id),
+    pushPlain: (n) => notes.pushPlain(n),
+    answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
+    now: opts.now,
+    fetch: opts.fetch,
+  });
+  notes.setApproveHook(phoneApprove);
   // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
   const secondOpinion = secondOpinionService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
   decisionsSvc.setSecondOpinion(secondOpinion);
@@ -394,6 +406,17 @@ export async function buildApp(opts: AppOptions) {
         const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, r.companyId));
         if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
       }
+    },
+    // BOS-988: the same message, only to the runs the drain has not told yet, answering with the ones it reached.
+    tellRuns: async (text, runIds) => {
+      const reached: string[] = [];
+      for (const runId of runIds) {
+        const [r] = await db.select({ companyId: runsTable.companyId }).from(runsTable).where(and(eq(runsTable.id, runId), isNull(runsTable.endedAt)));
+        if (!r) continue;
+        const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, r.companyId));
+        if (runner && runners.send(runner.id, { type: "run.message", runId, text: `Message from Boss Man: ${text}`, interrupt: false })) reached.push(runId);
+      }
+      return reached;
     },
     // `sweeps` is built further down; this only runs when a hold lifts.
     afterHold: (since) => sweeps.resumeAfterUpdate(since),
@@ -502,7 +525,7 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => semantic.stop());
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
-  const dashboard = dashboardService(db, { now: opts.now });
+  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc });
   const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
@@ -1011,6 +1034,35 @@ export async function buildApp(opts: AppOptions) {
     return { username: owner.username };
   });
 
+  // Phone Approve (BOS-243 rules 3, 4, 8): an ntfy http action posts {"token": "..."} here, with no
+  // session. JSON in and out, never a page; request logging is off and the body is never logged or
+  // echoed, so the token can't reach a log, the error buffer or a response. Its own parsers, in their
+  // own scope, so a bad body gets a plain JSON answer rather than the error handler's message.
+  await app.register(async (phone) => {
+    phone.removeAllContentTypeParsers();
+    phone.addContentTypeParser("application/json", { parseAs: "string", bodyLimit: 1024 }, (_req, body, done) => done(null, { json: body }));
+    phone.addContentTypeParser("*", { parseAs: "string", bodyLimit: 1024 }, (_req, _body, done) => done(null, { json: null }));
+    phone.setErrorHandler((err, _req, reply) => {
+      const status = (err as { statusCode?: number }).statusCode;
+      if (status && status >= 400 && status < 500) return reply.code(status).send({ ok: false, error: "bad_request" });
+      // A fixed line only: the error itself could quote the request.
+      app.log.warn("phone approve: a tap failed inside the server");
+      return reply.code(500).send({ ok: false, error: "internal_error" });
+    });
+    phone.post("/api/phone/approve", { logLevel: "silent" }, async (req, reply) => {
+      const raw = (req.body as { json?: string | null } | undefined)?.json;
+      if (typeof raw !== "string") return reply.code(415).send({ ok: false, error: "json_only" });
+      let token: unknown;
+      try {
+        token = (JSON.parse(raw) as { token?: unknown } | null)?.token;
+      } catch {
+        return reply.code(400).send({ ok: false, error: "bad_request" });
+      }
+      const r = await phoneApprove.redeem(token, req.ip);
+      return reply.code(r.status).send(r.body);
+    });
+  });
+
   app.post("/api/logout", async (req, reply) => {
     const token = req.cookies[SESSION_COOKIE];
     if (token) await db.delete(sessions).where(eq(sessions.tokenHash, hashToken(token)));
@@ -1291,6 +1343,11 @@ export async function buildApp(opts: AppOptions) {
       await db.insert(settings).values({ key: "run_limits", value: merged }).onConflictDoUpdate({ target: settings.key, set: { value: merged } });
       return runLimits();
     });
+    /** Whether phone Approve buttons are on, and if not why, for Settings → Notifications (BOS-243). */
+    const approveStatus = async (s: NotifySettings) => {
+      const { gate: g } = await phoneApprove.gate(s);
+      return g.on ? { on: true } : { on: false, why: g.why };
+    };
     // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
     // Owner only: no agent tool or route writes these settings.
     const checkQueueView = async () => {
@@ -1337,12 +1394,12 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
-      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null };
+      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s) };
     });
     owner.put("/api/notification-settings", async (req) => {
       const b = NotifySettings.omit({ ntfy: true })
         .extend({
-          ntfy: z.object({ url: z.string().url(), topic: z.string(), token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
+          ntfy: z.object({ url: NtfyUrl, topic: z.string(), token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
         })
         .parse(req.body);
       const current = await notes.getSettings();
@@ -1355,7 +1412,7 @@ export async function buildApp(opts: AppOptions) {
           : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: b.ntfy.token })).secret.id;
       }
       const saved = await notes.setSettings({ ...b, ntfy: b.ntfy ? { url: b.ntfy.url, topic: b.ntfy.topic, tokenSecretId } : null });
-      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null };
+      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved) };
     });
     owner.post("/api/notification-settings/test", async (_req, reply) => {
       try {
@@ -1830,7 +1887,12 @@ export async function buildApp(opts: AppOptions) {
         return importErrors(reply)(err);
       }
       for (const pageId of done.wikiPageIds) semantic.enqueue(done.companyId, pageId);
-      await decisionsSvc.raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" });
+      // The company is already saved and its id is what the caller needs. A failure while raising the
+      // checklist card must not turn a successful import into an error reply with no company id (BOS-927):
+      // log it and still return the import's result.
+      await decisionsSvc
+        .raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" })
+        .catch((err) => app.log.error({ err, companyId: done.companyId }, "import checklist card failed"));
       if (launch.enabled)
         void launch.start(done.companyId).catch((err) =>
           notes.notify({ companyId: done.companyId, agentId: null, level: "flag", title: `${done.name}'s runner didn't start`, body: (err as Error).message, link: "#/settings" }).catch(() => {}),
@@ -2009,6 +2071,7 @@ export async function buildApp(opts: AppOptions) {
       milestoneId: Uuid.nullable(),
       objectiveId: Uuid.nullable(),
       portalVisible: z.boolean(),
+      keepOffPortal: z.boolean(),
       publicSummary: z.string().trim().max(2000).nullable(),
       showPublicly: z.boolean(),
     });
@@ -2337,6 +2400,19 @@ export async function buildApp(opts: AppOptions) {
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
+    // The number for the menu badge (BOS-969): how many cards need the owner now, and how many are
+    // folded into "Waiting, nothing to do yet", from the same rows and rule as the queue above. The
+    // screen passes what it is showing by company (open, waiting) so its own heading agrees with it.
+    owner.get("/api/decisions/tally", async (req) => {
+      const q = z
+        .object({ companyId: z.string().uuid().optional(), includeAll: z.string().optional(), open: z.coerce.number().int().min(0).max(10_000).optional(), waiting: z.coerce.number().int().min(0).max(10_000).optional() })
+        .parse(req.query ?? {});
+      return decisionsSvc.queueTally({
+        ...(q.companyId ? { companyId: q.companyId } : {}),
+        ...(q.includeAll ? { includeAll: true } : {}),
+        ...(q.open !== undefined && q.waiting !== undefined ? { visible: { open: q.open, waiting: q.waiting } } : {}),
+      });
+    });
     // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.
     owner.get("/api/decisions/with-team", async () => decisionsSvc.withTeam());
 

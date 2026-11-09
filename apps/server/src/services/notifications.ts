@@ -10,6 +10,18 @@ import type { Db } from "../db/client.js";
 import { companies, decisions, notifications, settings } from "../db/schema.js";
 import type { DecisionContext } from "./decisions.js";
 
+/**
+ * The ntfy server's address. Pushes go to it with its path kept (BOS-243 rule 8), so one served under
+ * a path such as https://host/ntfy works; a query or # part would be dropped silently, so it is refused.
+ */
+export const NtfyUrl = z
+  .string()
+  .url()
+  .refine((u) => {
+    const p = new URL(u);
+    return !p.search && !p.hash && !u.includes("?") && !u.includes("#");
+  }, "Use the ntfy server's address without a ? or # part, e.g. https://ntfy.example.ts.net or https://host/ntfy");
+
 export const NotifySettings = z.object({
   quietHours: z
     .object({
@@ -21,13 +33,40 @@ export const NotifySettings = z.object({
   /** Notifications per agent per hour before the rest become notes. */
   agentHourlyCap: z.number().int().min(1).max(100),
   /** Phone push through the owner's own ntfy server; the token is held as a secret. */
-  ntfy: z.object({ url: z.string().url(), topic: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "Letters, digits, - and _ only"), tokenSecretId: z.string().uuid().nullable() }).nullable(),
+  ntfy: z.object({ url: NtfyUrl, topic: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "Letters, digits, - and _ only"), tokenSecretId: z.string().uuid().nullable() }).nullable(),
   /** Levels that go to the phone. */
   pushLevels: z.array(z.enum(NOTIFY_LEVELS)),
   /** Boss Man's address as the phone should open it, e.g. https://bossman.tailnet.ts.net. */
   publicUrl: z.string().url().nullable(),
+  /** The owner's off switch for phone Approve buttons (BOS-243); on unless set to false. */
+  approveButtons: z.boolean().optional(),
 });
 export type NotifySettings = z.infer<typeof NotifySettings>;
+
+/** An ntfy action button: "view" opens a page, "http" sends a request from the phone. */
+export type PushAction =
+  | { action: "view"; label: string; url: string; clear?: boolean }
+  | { action: "http"; label: string; url: string; method: "POST"; headers: Record<string, string>; body: string; clear: boolean };
+
+/**
+ * Phone Approve (services/phone-approve.ts), wired in from app.ts like the alert ladder. Asked only
+ * when a decision push is really about to go out, so quiet hours and demoted levels mint nothing.
+ * It returns the Approve button, the push text it needs, and how to kill the link if the push fails.
+ */
+export type ApproveHook = { forPush(decisionId: string, s: NotifySettings): Promise<{ action: PushAction; message: string; revoke(): Promise<unknown> } | null> };
+
+/** Where a push goes: the ntfy URL with its path kept and a trailing slash (rule 8), never just the host's root. */
+export function ntfyPublishUrl(url: string): string {
+  const u = new URL(url);
+  if (!u.pathname.endsWith("/")) u.pathname += "/";
+  // Settings refuse these now; an address saved before that still posts where it always did.
+  u.search = "";
+  u.hash = "";
+  return u.toString();
+}
+
+/** A link in the app as the phone opens it on the public URL. */
+export const appUrl = (publicUrl: string, link: string) => `${publicUrl.replace(/\/$/, "")}/${link}`;
 export const DEFAULT_NOTIFY_SETTINGS: NotifySettings = { quietHours: null, agentHourlyCap: 6, ntfy: null, pushLevels: ["page", "ask"], publicUrl: null };
 
 const KEY = "notifications";
@@ -59,17 +98,21 @@ export type NotifyInput = { companyId: string | null; agentId?: string | null; l
 export function notificationsService(db: Db, deps: { reveal: (secretId: string) => Promise<string | null>; fetch?: typeof fetch; now?: () => Date; log?: (msg: string) => void }) {
   const now = deps.now ?? (() => new Date());
   const doFetch = deps.fetch ?? fetch;
+  let approveHook: ApproveHook | null = null;
 
   async function getSettings(): Promise<NotifySettings> {
     const [row] = await db.select().from(settings).where(eq(settings.key, KEY));
     return { ...DEFAULT_NOTIFY_SETTINGS, ...((row?.value as Partial<NotifySettings> | undefined) ?? {}) };
   }
 
-  /** Publishes to ntfy as JSON (to the server's root URL), so titles needn't fit in a header. */
-  async function push(s: NotifySettings, n: { title: string; body: string | null; link: string; level: NotifyLevel }) {
+  /**
+   * Publishes to ntfy as JSON (to the server's URL, path kept), so titles needn't fit in a header.
+   * `plain` turns markdown off, for text that is shown exactly as stored (BOS-243).
+   */
+  async function push(s: NotifySettings, n: { title: string; body: string | null; link: string; level: NotifyLevel; actions?: PushAction[]; plain?: boolean }) {
     if (!s.ntfy) throw new Error("Phone push isn't set up.");
     const token = s.ntfy.tokenSecretId ? await deps.reveal(s.ntfy.tokenSecretId) : null;
-    const res = await doFetch(new URL("/", s.ntfy.url), {
+    const res = await doFetch(ntfyPublishUrl(s.ntfy.url), {
       method: "POST",
       headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify({
@@ -79,11 +122,28 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         message: fitBytes(n.body ?? n.title, 3500),
         priority: PRIORITY[n.level],
         tags: [n.level === "ask" ? "question" : n.level === "page" ? "rotating_light" : "bell"],
-        ...(s.publicUrl ? { click: `${s.publicUrl.replace(/\/$/, "")}/${n.link}` } : {}),
+        ...(s.publicUrl ? { click: appUrl(s.publicUrl, n.link) } : {}),
+        ...(n.actions?.length ? { actions: n.actions } : {}),
+        ...(n.plain ? { markdown: false } : {}),
       }),
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`ntfy answered ${res.status}`);
+  }
+
+  /** The buttons on a decision push: Open always (with a public URL), Approve when phone-approve allows it. */
+  async function decisionButtons(s: NotifySettings, decisionId: string, link: string) {
+    const actions: PushAction[] = [];
+    if (s.publicUrl) actions.push({ action: "view", label: "Open in Boss Man", url: appUrl(s.publicUrl, link), clear: false });
+    let approve: Awaited<ReturnType<ApproveHook["forPush"]>> = null;
+    try {
+      approve = approveHook ? await approveHook.forPush(decisionId, s) : null;
+    } catch (err) {
+      // Approve is an extra: if it can't be offered, the push still goes out with Open only.
+      deps.log?.(`phone approve skipped: ${(err as Error).message}`);
+    }
+    if (approve) actions.push(approve.action);
+    return { actions, approve };
   }
 
   async function notify(input: NotifyInput) {
@@ -105,11 +165,14 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       .returning();
     if (!row) return null;
     if (s.ntfy && s.pushLevels.includes(level)) {
+      const { actions, approve } = row.decisionId ? await decisionButtons(s, row.decisionId, row.link) : { actions: [], approve: null };
       try {
-        await push(s, row);
+        await push(s, { ...row, actions, ...(approve ? { body: approve.message, plain: true } : {}) });
         await db.update(notifications).set({ pushedAt: now() }).where(eq(notifications.id, row.id));
       } catch (err) {
         const msg = (err as Error).message;
+        // A link the phone never received must not stay live.
+        await approve?.revoke().catch(() => undefined);
         deps.log?.(`phone push failed: ${msg}`);
         await db.update(notifications).set({ pushError: msg.slice(0, 500) }).where(eq(notifications.id, row.id));
       }
@@ -138,6 +201,26 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     },
 
     notify,
+
+    setApproveHook(hook: ApproveHook) {
+      approveHook = hook;
+    },
+
+    /**
+     * A push with no notification row (the table holds one per decision): the phone Approve outcome
+     * replies (BOS-243). Plain text, sent whatever the push levels, since the owner has just tapped.
+     */
+    async pushPlain(n: { title: string; body: string; link: string; actions?: PushAction[] }) {
+      const s = await getSettings();
+      if (!s.ntfy) return false;
+      try {
+        await push(s, { ...n, level: "flag", plain: true });
+        return true;
+      } catch (err) {
+        deps.log?.(`phone push failed: ${(err as Error).message}`);
+        return false;
+      }
+    },
 
     /**
      * Tells the owner about each open decision once: an ask when it's theirs to answer (a flag

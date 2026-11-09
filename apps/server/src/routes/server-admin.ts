@@ -59,6 +59,16 @@ export function serverAdminRoutes(
     return maintenance.status();
   });
   owner.post("/api/maintenance/cancel", async () => ({ cancelled: await maintenance.cancel() })); // leader-only
+  // "Ask agents to wrap up" (BOS-929): the owner's clean stop before an update. A mode of the same hold, so it
+  // needs no launcher: it swaps nothing, it only messages every live work run and holds new ones until cancelled.
+  // While an update waits it joins that hold instead of being refused (BOS-988): the update stays and goes ahead
+  // when the runs end; the wrap-up adds the message, the still-running list, and Cancel wrap-up.
+  owner.post("/api/maintenance/wrapup", async () => {
+    await maintenance.start({ kind: "wrapup" }); // leader-only
+    return maintenance.status();
+  });
+  // "Cancel wrap-up" while an update waits (BOS-988): take back only the owner's ask; the update is untouched.
+  owner.post("/api/maintenance/cancel-wrap", async () => ({ cancelled: await maintenance.cancelWrap() })); // leader-only
 
   // Self-deploy: what the host deployer last reported, and the "Deploy latest" button.
   owner.get("/api/self-deploy", async () => selfDeploy.overview());

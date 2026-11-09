@@ -7,7 +7,8 @@ import { BUILT_IN_RULES, type RunnerCommand, type RunnerEvent } from "@boss-man/
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, ceoChapters, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
-import { issueRunToken, READ_ONLY_TOOLS, TRACED_TOOLS } from "../src/mcp.js";
+import { issueRunToken } from "../src/mcp.js";
+import { READ_ONLY_TOOLS, TRACED_TOOLS } from "../src/mcp-trace.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {

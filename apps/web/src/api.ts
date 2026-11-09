@@ -207,6 +207,10 @@ export type Decision = {
   evidence?: StallEvidence | null;
 };
 
+/** (BOS-969) The Decisions menu badge and page heading: how many cards need the owner now, and how
+ * many are folded into "Waiting, nothing to do yet". One server figure, so the two never drift. */
+export type DecisionTally = { open: number; waiting: number };
+
 export type StallEvidence = {
   runId: string;
   agent: string | null;
@@ -394,6 +398,10 @@ export type NotifySettings = {
   ntfy: { url: string; topic: string; hasToken: boolean } | null;
   pushLevels: NotifyLevel[];
   publicUrl: string | null;
+  /** Phone Approve buttons (BOS-243): on unless switched off. */
+  approveButtons?: boolean;
+  /** Whether Approve buttons are actually offered, and if not why. */
+  approve?: { on: true } | { on: false; why: string };
 };
 
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
@@ -482,8 +490,12 @@ export type Feature = {
   milestoneId: string | null;
   objectiveId: string | null;
   portalVisible: boolean;
+  /** Marked "keep off the portal (sensitive)"; the default never overrides it. */
+  keepOffPortal: boolean;
   publicSummary: string | null;
   showPublicly: boolean;
+  /** Why the feature is on or off the portal: onPortal, or the reason it is held off (BOS-957). */
+  portal?: { onPortal: boolean; reason: "sensitive" | "security" | "needs public summary" | null };
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;
