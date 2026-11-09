@@ -906,7 +906,7 @@ export async function buildApp(opts: AppOptions) {
       return reply.code(400).send({ error: "invalid_request", message: i ? `${i.path.length ? `${i.path.join(".")}: ` : ""}${i.message}` : "The request isn't valid.", issues: err.issues });
     }
     if (err instanceof SecretRejected) return reply.code(422).send({ error: "secret_rejected", problems: err.problems });
-    if (err instanceof WorkError || err instanceof FeedbackError) return reply.code(err.status).send({ error: "rejected", message: err.message });
+    if (err instanceof WorkError || err instanceof FeedbackError) return reply.code(err.status).send({ error: err instanceof WorkError && err.field ? "conflict" : "rejected", message: err.message, ...(err instanceof WorkError && err.field ? { field: err.field } : {}) });
     const code = pgCode(err);
     if (code === "23505") return reply.code(409).send({ error: "already_exists" });
     if (code === "23503") return reply.code(422).send({ error: "unknown_reference" });
@@ -1679,6 +1679,10 @@ export async function buildApp(opts: AppOptions) {
       planFirst: z.boolean(),
       featureId: Uuid.nullable(),
       overLimit: z.boolean(),
+      // What the page loaded for a text field it is saving, so a change landing since is refused, not overwritten (BOS-905).
+      titleLoaded: z.string().max(200).nullable(),
+      bodyLoaded: z.string().max(OWNER_MESSAGE_MAX).nullable(),
+      acceptanceCriteriaLoaded: acceptanceCriteriaSchema,
     });
 
     owner.get("/api/companies/:id/projects", async (req) => {
