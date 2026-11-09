@@ -39,7 +39,7 @@ describe("owner moves a ticket's state", () => {
     expect(done).toMatchObject({ systemState: "done", outcome: "completed" });
     const [freed] = await c.db.select().from(tickets).where(eq(tickets.id, b.id));
     expect(freed!.systemState).toBe("ready");
-    expect((await c.db.select().from(activity).where(eq(activity.ticketId, a.id))).map((x) => x.summary)).toContain("Owner moved it to Done");
+    expect((await c.db.select().from(activity).where(eq(activity.ticketId, a.id))).map((x) => x.summary)).toContain("in_progress -> done: Owner moved it to Done");
     // Its waiting wake-ups are dropped, so nobody starts work on a closed ticket.
     expect((await c.db.select().from(wakes).where(eq(wakes.ticketId, a.id))).filter((w) => w.status === "queued" || w.status === "deferred")).toEqual([]);
   });
