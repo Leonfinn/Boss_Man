@@ -2688,6 +2688,7 @@ type ImportPreview = {
   secrets: Array<{ name: string; envName: string; agents: string[] }>;
   projects: Array<{ name: string; verifyCommand: string | null; deepVerifyCommand: string | null }>;
   toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
+  gitHosts: Array<{ project: string; url: string; opens: string | null; stackService: boolean }>;
   warnings: string[];
 };
 
@@ -2748,6 +2749,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
   const nameChanged = !!preview && name.trim() !== preview.company.name;
   const scripts = preview?.skills.filter((s) => s.scripts.length) ?? [];
   const stackTools = preview?.toolServers.filter((t) => t.stackService) ?? [];
+  const stackGit = preview?.gitHosts.filter((g) => g.stackService) ?? [];
   return (
     <Section id="import-h" title="Import a company">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -2834,12 +2836,25 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                   </li>
                 ))}
               </ul>
-              {stackTools.length > 0 && (
-                <label>
-                  <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
-                </label>
-              )}
             </div>
+          )}
+          {preview.gitHosts.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Project git addresses.</strong> Each is opened past the runner's network guard for this company so its agents can clone:
+              <ul>
+                {preview.gitHosts.map((g) => (
+                  <li key={g.project}>
+                    {g.project}: <code>{g.opens ?? "nothing (no address the guard can allow)"}</code> ({g.url})
+                    {g.stackService && <span className="error"> This is one of Boss Man's own services or a private-network address.</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(stackTools.length > 0 || stackGit.length > 0) && (
+            <label>
+              <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
+            </label>
           )}
           {preview.secrets.length > 0 && (
             <div style={{ fontSize: 14 }}>
