@@ -403,7 +403,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // When the earliest of those runs began, so the card can say how long the work has been going.
         workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
-        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && doneIds.has(d.blockerTicketId))).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
         quotaHeldReason: heldFor(t)?.reason ?? null,
         quotaHeldAgent: heldByAgent(t),
@@ -708,7 +708,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     },
 
     /** A ticket can wait on another ticket in its company, or on an engagement its company requested (R25). */
-    async addDependency(ticketId: string, blocker: { ticketId?: string; engagementId?: string }, byAgentId: string | null = null) {
+    async addDependency(ticketId: string, blocker: { ticketId?: string; engagementId?: string; until?: "merged" | "done" }, byAgentId: string | null = null) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
       if (!!blocker.ticketId === !!blocker.engagementId) throw new WorkError(422, "Give exactly one blocker: a ticket or an engagement.");
@@ -721,15 +721,37 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const [e] = await db.select().from(engagements).where(and(eq(engagements.id, blocker.engagementId!), eq(engagements.requesterCompanyId, t.companyId)));
         if (!e) throw new WorkError(422, "Only an engagement this company requested can block its tickets.");
       }
+      // The same link again only changes when it is released (BOS-989), so a repeat call can't stack two rows.
+      if (blocker.ticketId) {
+        const [same] = await db.select().from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerTicketId, blocker.ticketId)));
+        if (same) {
+          const until = blocker.until ?? same.until;
+          if (until === same.until) return same;
+          const [changed] = await db.update(ticketDependencies).set({ until }).where(eq(ticketDependencies.id, same.id)).returning();
+          await record(db, { companyId: t.companyId, ticketId, kind: "dependency", summary: `Waits on ticket ${blocker.ticketId} until it is ${until}`, at: now() });
+          return changed!;
+        }
+      }
       const dep = await addTicketDependency(db, {
         companyId: t.companyId,
         blockedTicketId: ticketId,
         blockerTicketId: blocker.ticketId ?? null,
         blockerEngagementId: blocker.engagementId ?? null,
+        until: blocker.until,
         actor: { type: "agent", agentId: byAgentId },
       });
-      await record(db, { companyId: t.companyId, ticketId, kind: "dependency", summary: blocker.ticketId ? `Now waits on ticket ${blocker.ticketId}` : `Now waits on engagement ${blocker.engagementId}`, at: now() });
+      await record(db, { companyId: t.companyId, ticketId, kind: "dependency", summary: blocker.ticketId ? `Now waits on ticket ${blocker.ticketId} until it is ${blocker.until ?? "done"}` : `Now waits on engagement ${blocker.engagementId}`, at: now() });
       return dep;
+    },
+
+    /** Takes a "waits on" link off a ticket (BOS-989). True if there was one. */
+    async removeDependency(ticketId: string, blockerTicketId: string, byAgentId: string | null = null) {
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+      if (!t) throw new WorkError(404, "No such ticket.");
+      const gone = await db.delete(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerTicketId, blockerTicketId))).returning({ id: ticketDependencies.id });
+      if (!gone.length) return false;
+      await record(db, { companyId: t.companyId, ticketId, agentId: byAgentId ?? undefined, kind: "dependency", summary: `No longer waits on ticket ${blockerTicketId}`, at: now() });
+      return true;
     },
 
     /** True if `blocker` already (transitively) waits on `ticket`. */

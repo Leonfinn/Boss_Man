@@ -514,6 +514,8 @@ export const ticketDependencies = pgTable(
     blockerTicketId: uuid("blocker_ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     blockerEngagementId: uuid("blocker_engagement_id").references(() => engagements.id, { onDelete: "cascade" }),
     blockerDecisionId: uuid("blocker_decision_id").references(() => decisions.id, { onDelete: "cascade" }),
+    /** When a ticket blocker counts as finished: its merge commit on main ("merged") or its done state ("done", BOS-989). */
+    until: text("until", { enum: ["merged", "done"] }).notNull().default("done"),
   },
   (t) => [
     check(
