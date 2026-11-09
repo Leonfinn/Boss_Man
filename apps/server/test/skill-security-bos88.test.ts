@@ -9,7 +9,8 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, decisions, skills, tickets } from "../src/db/schema.js";
 import { scriptFilesOf } from "../src/services/skill-proposals.js";
-import { isPrivateAddress, skillsService } from "../src/services/skills.js";
+import { skillsService } from "../src/services/skills.js";
+import { evaluatePermission, isPrivateAddress } from "@boss-man/shared";
 
 // Fixes for the security review (BOS-88) of the add-a-skill flow.
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -105,10 +106,33 @@ describe("BOS-88 finding 2: inline commands in SKILL.md count as a script", () =
   });
 });
 
+describe("BOS-886: one non-public address table, so the permission check and the skill fetcher agree", () => {
+  // The same list through both checks. "Private" means refusable: the skill fetcher refuses, the permission check says privateNet.
+  const ADDRESSES: Array<[string, boolean]> = [
+    ["10.1.2.3", true], ["127.0.0.1", true], ["169.254.1.1", true], ["100.64.0.1", true], ["192.0.0.1", true], ["198.18.0.1", true], ["224.0.0.251", true],
+    ["::1", true], ["fd00::1", true], ["ff02::1", true], ["::ffff:192.168.0.1", true], ["::ffff:c0a8:1", true],
+    ["8.8.8.8", false], ["2606:4700::1", false],
+  ];
+  it("both refuse the private addresses and both allow the public ones", async () => {
+    const { db } = ctx ?? (await setup());
+    const svc = skillsService(db, { lookup: async () => [], fetch: (async () => new Response("ok")) as typeof fetch });
+    for (const [ip, expected] of ADDRESSES) {
+      // The permission check, through a fetch to the address as a URL: an IPv6 literal in brackets.
+      const url = ip.includes(":") ? `http://[${ip}]/` : `http://${ip}/`;
+      expect(evaluatePermission({ title: "WebFetch", kind: "fetch", rawInput: { url } }, []).outcome === "deny", ip).toBe(expected);
+      // The skill fetcher, through the same address: a literal is refused before any request (the stub fetch would answer ok).
+      expect(isPrivateAddress(ip), ip).toBe(expected);
+      const refused = await svc.fetchBytes(`https://${url.slice(7)}x`).then(() => false, (err: unknown) => (err as { status?: number }).status === 400);
+      expect(refused, ip).toBe(expected);
+    }
+  });
+});
+
 describe("BOS-88 finding 3: skill links can't reach private hosts or stream without end", () => {
   it("knows the private ranges", () => {
     for (const ip of ["127.0.0.1", "10.0.0.5", "169.254.169.254", "172.16.0.1", "192.168.1.1", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"]) expect(isPrivateAddress(ip), ip).toBe(true);
-    for (const ip of ["8.8.8.8", "140.82.112.3", "2606:4700::1111"]) expect(isPrivateAddress(ip), ip).toBe(false);
+    for (const ip of ["224.0.0.251", "239.255.255.250", "192.0.0.8", "198.18.0.1", "198.19.255.255", "ff02::1", "::ffff:224.0.0.251", "::ffff:e000:fb"]) expect(isPrivateAddress(ip), ip).toBe(true);
+    for (const ip of ["8.8.8.8", "140.82.112.3", "2606:4700::1111", "223.255.255.255", "198.20.0.1"]) expect(isPrivateAddress(ip), ip).toBe(false);
   });
   it("refuses a literal private address, a host that resolves to one, and a redirect to one", async () => {
     const c = (ctx = await setup());

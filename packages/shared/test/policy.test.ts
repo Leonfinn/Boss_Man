@@ -219,6 +219,16 @@ describe("home-network guard", () => {
     expect(evaluatePermission(tool("mcp__scrapling__get", { url: "not a url http://" }), allowAll).outcome).not.toBe("deny");
   });
 
+  it("refuses the ranges the skill fetcher already refuses, from the one shared table (BOS-886)", () => {
+    // Multicast, 192.0.0.0/24 and the 198.18.0.0/15 benchmark range were refused by the skill fetcher alone, so the permission check let them through.
+    for (const url of ["http://224.0.0.251/", "http://239.255.255.250:1900/", "http://[ff02::1]/", "http://192.0.0.8/", "http://198.18.0.1/", "http://198.19.255.255/", "http://[::ffff:224.0.0.251]/", "http://[::ffff:e000:fb]/", "http://[::ffff:10.0.0.5]/"]) {
+      expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "deny" });
+    }
+    expect(evaluatePermission(tool("WebFetch", { url: "http://224.0.0.251/" }, "fetch"), []).outcome).toBe("deny");
+    // The next ranges over are public and stay allowed.
+    for (const url of ["http://223.255.255.255/", "http://198.20.0.1/", "http://192.0.2.1/"]) expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "allow" });
+  });
+
   it("leaves public addresses and Boss Man's own tools to the rules", () => {
     expect(evaluatePermission(tool("mcp__crawl4ai__md", { url: "https://docs.truenas.com/scale/" }), allowAll).outcome).toBe("allow");
     expect(evaluatePermission(tool("mcp__crawl4ai__md", { url: "http://172.32.0.1" }), allowAll).outcome).toBe("allow");
