@@ -98,8 +98,6 @@ export const IDLE_SLOT_REASON = "idle slot";
 export const IDLE_AGENTS_REASON = "idle agents";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
-/** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
-export const DECISION_REASON = "decision";
 /** Tickets moved to review, gathered into one CEO run (R85). */
 export { REVIEW_REASON };
 /** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
