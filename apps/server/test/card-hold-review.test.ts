@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, decisions, projects, ticketDependencies, tickets } from "../src/db/schema.js";
+import { activity, agents, decisions, projects, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { ReviewHeldError } from "../src/services/review.js";
 
 // BOS-919 (DR-047 point 3): an owner card only knocks work that hasn't been handed in into blocked. A ticket in
@@ -47,6 +47,26 @@ describe("an owner card on handed-in work (BOS-919)", () => {
     await ctx.scheduler.releaseIfUnblocked(t.id);
     expect(await stateOf(t.id)).toBe("review");
     expect(await stateRows(t.id)).toEqual([]);
+  });
+
+  it("answering wakes the asker on the review ticket, and its assignee with the answer when that is someone else", async () => {
+    const [dev] = await ctx.db.insert(agents).values({ companyId: ctx.co.company.id, name: "Dev", role: "worker", agentKind: "claude" }).returning();
+    const own = await ctx.ticket({ systemState: "review" });
+    const other = await ctx.ticket({ systemState: "review", assigneeAgentId: dev!.id });
+    const c1 = await ctx.raise(own.id);
+    const c2 = await ctx.raise(other.id);
+    await ctx.decisions.answer(c1.id, "Stripe");
+    await ctx.decisions.answer(c2.id, "Mollie");
+    const woken = await ctx.db.select({ agentId: wakes.agentId, ticketId: wakes.ticketId, reason: wakes.reason, note: wakes.note }).from(wakes).where(eq(wakes.reason, "decision answered"));
+    // The asker (the CEO) on the ticket it asked about, as it was before the card stopped blocking review tickets.
+    expect(woken.filter((w) => w.agentId === ctx.co.ceo.id).map((w) => w.ticketId).sort()).toEqual([own.id, other.id].sort());
+    // The other ticket's assignee hears the answer too.
+    const devWake = woken.filter((w) => w.agentId === dev!.id);
+    expect(devWake).toHaveLength(1);
+    expect(devWake[0]!.ticketId).toBe(other.id);
+    expect(devWake[0]!.note).toContain("Mollie");
+    expect(await stateOf(own.id)).toBe("review");
+    expect(await stateOf(other.id)).toBe("review");
   });
 
   it("a done ticket stays done", async () => {

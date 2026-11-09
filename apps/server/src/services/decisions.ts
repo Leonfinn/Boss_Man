@@ -2994,17 +2994,22 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const asked = settled && d.question.length > 120 ? `${d.question.slice(0, 119)}…` : d.question;
       await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
+      // Linked tickets the card never moved (BOS-919: one in review keeps its state): not released, but still
+      // the ticket the answer is about, so the asker is woken on it and its assignee hears the answer too.
+      let kept: Array<typeof tickets.$inferSelect> = [];
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         for (const f of freed) {
           const t = await releaseIfFree(f.ticketId, false);
           if (t) unblocked.push(t);
         }
+        const rest = [...new Set(freed.map((f) => f.ticketId))].filter((tid) => !unblocked.some((u) => u.id === tid));
+        if (rest.length) kept = await db.select().from(tickets).where(and(inArray(tickets.id, rest), eq(tickets.systemState, "review")));
       }
       // The agent that asked is woken with the answer (on the ticket it blocked, if any).
       // A rule proposal answered with a button needs nothing more from the CEO.
       if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords) && !(ctx.type === "lesson_replace" && ownWords)) {
-        const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
+        const onTicket = [...unblocked, ...kept].find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0] ?? kept[0];
         // An answer in the owner's own words can carry pictures or files (BOS-759): say so plainly, so
         // the agent opens them with open_attachment instead of reading the links as part of the answer.
         const pictures = ownWords && ATTACHMENT_LINK.test(answer) ? " It includes picture(s) or file(s) they attached; open each with open_attachment." : "";
@@ -3012,6 +3017,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
+      }
+      for (const t of kept) {
+        if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `The card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });
       }
       return { id, answer, delivered, endedHere };
     },
