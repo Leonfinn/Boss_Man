@@ -175,6 +175,15 @@ describe("owner sign-off cards (BOS-503)", () => {
     expect(await c.cards(t.id, "open")).toHaveLength(1);
   });
 
+  it("restores the missing card for a CEO reply too, and the reply then posts (BOS-901)", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    const out = textOf(await (await c.mcp(c.ceo.id)).callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "All reviews passed. Please review and approve it, or send it back." } }));
+    expect(await c.cards(t.id, "open")).toHaveLength(1);
+    expect(out).toContain("Boss Man raised it");
+    expect(out).toContain("Posted on the ticket's conversation.");
+  });
+
   it("shows a ticket waiting on sign-off in Your review even with no card (DR-021)", async () => {
     const c = await setup();
     const t = await c.approvedHighRisk();

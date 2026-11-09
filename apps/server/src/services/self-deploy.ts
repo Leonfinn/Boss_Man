@@ -542,6 +542,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         }
       }
     }
+    if (row && target === "runner") {
+      // BOS-947: one runner card at a time. Any older runner card, the button's included, is replaced by this one (the host
+      // builds from the version the server runs, which has everything the older card named).
+      const label = `Update the runners to ${short(commit)}`;
+      for (const d of await openFor("runner")) {
+        const dc = d.context as SelfDeployContext;
+        if (d.id === row.id || dc.commit === commit) continue;
+        await withdrawOpen(d.id, (steps) => newerNotice({ newerId: row.id, label, steps, now: new Date() }));
+      }
+    }
     return row ?? null;
   }
 
@@ -733,8 +743,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const companyId = await homeCompany();
       const onlyTickets = companyId && s.to_commit ? await runnerOnlyTickets(db, companyId, s.to_commit) : [];
       const ticketNeeds = onlyTickets.at(-1)?.mergeCommit;
-      const needs = wants ? s.to_commit : old?.needs ?? ticketNeeds;
-      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held || onlyTickets.length > 0, ...(needs ? { needs } : {}) } satisfies RunnerDue);
+      // BOS-947: an open automatic runner card for an older commit means the runners still lack that change: the live
+      // version carries it, so the card is replaced by one for the live version once the trial is over (never left stale).
+      const staleCards = (await openFor("runner")).filter((o) => { const c = o.context as SelfDeployContext; return !!c.commit && c.commit !== s.to_commit; });
+      const cardNeeds = (staleCards[0]?.context as SelfDeployContext | undefined)?.commit;
+      const needs = wants ? s.to_commit : old?.needs ?? ticketNeeds ?? cardNeeds;
+      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held || onlyTickets.length > 0 || staleCards.length > 0, ...(needs ? { needs } : {}) } satisfies RunnerDue);
     }
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));

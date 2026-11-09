@@ -810,6 +810,23 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(cards[0]!.context).toMatchObject({ commit: C, fromCommit: A });
     });
 
+    it("replaces an open runner card for an older commit by one for the live version, never leaving two (BOS-947)", async () => {
+      const { c } = await deployedInTrial();
+      vi.setSystemTime(new Date("2026-11-03T01:18:01Z"));
+      await c.selfDeploy.sync();
+      expect(await runnerCards(c, B)).toHaveLength(1);
+      // A later server update to C with no runner change of its own, while the card for B is still open.
+      vi.setSystemTime(new Date("2026-11-03T01:30:00Z"));
+      await c.status({ id: "", result: "deployed", message: "Switched in.", from_commit: B, to_commit: C, ended: "2026-11-03T01:30:00Z" });
+      await c.available({ deployed: C, tip: C });
+      await c.selfDeploy.sync();
+      vi.setSystemTime(new Date("2026-11-03T01:50:00Z"));
+      await c.selfDeploy.sync();
+      expect(await runnerCards(c, C)).toHaveLength(1);
+      expect(await runnerCards(c, B)).toHaveLength(0);
+      expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(1);
+    });
+
     it("withdraws runner cards and drops the held offer when the server is switched back", async () => {
       const { c, server } = await deployedInTrial();
       // Switched back two minutes in; the host may name the commits either way round.

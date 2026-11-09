@@ -104,6 +104,35 @@ describe("Synthetic Infinite mode (BOS-279)", () => {
     expect(rows.find((w) => w.agentId === normal.id)!.status).toBe("launched");
   });
 
+  // BOS-934: an account with paid top-up credit can carry on past the weekly allowance, if the owner chooses.
+  it("holds a Synthetic plan at 100% by default, and lets routine work run on top-up credit once the owner chooses it", async () => {
+    const fetch = (async (input: string | URL | Request) => {
+      if (String(input) !== "https://api.synthetic.new/v2/quotas") return new Response("{}", { status: 404 });
+      return new Response(JSON.stringify({ planWeeklyLimit: { nextRegenAt: new Date(Date.now() + 3_600_000).toISOString(), percentRemaining: 0, nextRegenPercent: 2 } }), { status: 200 });
+    }) as typeof globalThis.fetch;
+    ctx = await setup({ limits: { agent: 5 }, fetch });
+    const { secret } = (await ctx.req("POST", "/api/secrets", { name: "Synthetic key", kind: "generic", value: "sk-syn-test" })).json() as { secret: { id: string } };
+    await ctx.req("POST", `/api/secrets/${secret.id}/grants`, { companyId: ctx.company.id, envName: "SYNTHETIC_API_KEY" });
+    const p = await ctx.plan();
+    const normal = await ctx.worker("Normal");
+    await ctx.req("PATCH", `/api/agents/${normal.id}`, { fundingSourceId: p.id, model: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" });
+    await ctx.refreshSyntheticQuota(); // the weekly allowance is used up
+
+    // The default ("hold") is today's behaviour: routine work waits, and the note says how to use top-up credit.
+    await ctx.req("POST", `/api/agents/${normal.id}/wake`, { priority: 2 });
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(wakes)).find((w) => w.agentId === normal.id)!.status).toBe("deferred");
+    await ctx.scheduler.slow();
+    const paused = (await ctx.db.select().from(notifications)).find((n) => /Routine work paused/.test(n.title));
+    expect(paused!.body).toContain('set "I have top-up credit" to "Keep all work running"');
+
+    // The owner says the account has top-up credit: the same wake now runs.
+    expect((await ctx.req("PATCH", `/api/funding-sources/${p.id}`, { quotaOverage: "all" })).statusCode).toBeLessThan(300);
+    // A wake held by the quota is looked at again on every tick, so the change takes effect at once.
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(wakes)).find((w) => w.agentId === normal.id)!.status).toBe("launched");
+  });
+
   it("gives infinite-mode runs their own background slots instead of the normal ones", async () => {
     ctx = await setup({ limits: { instance: 8, company: 8, agent: 5, background: 1 } });
     const p = await ctx.plan();

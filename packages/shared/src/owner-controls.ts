@@ -64,6 +64,8 @@ export const OWNER_CONTROLS = {
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
     "Mark urgent", "Marked urgent", "Edit steps", "Save steps", "Discard draft",
+    // A text field someone else changed was refused: the owner's draft stays and this brings in the latest (BOS-905).
+    "Reload the latest",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // The Scrum Master's log of this ticket.
@@ -125,6 +127,8 @@ export const OWNER_CONTROLS = {
     "Restart the server",
     // This host: confirm a fact only the owner can give.
     "Confirm",
+    // This host (BOS-924): the reported facts fold away behind a one-line header; the arrow opens them.
+    "Reported facts",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
   ],
@@ -173,6 +177,7 @@ export const OWNER_FIELDS = {
     "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
+    "Offer an Approve button on simple agent questions",
   ],
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",
@@ -246,7 +251,8 @@ export const OWNER_FIELDS = {
     "I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway",
   ],
   Funding: [
-    "Hold routine work at", "I have extra usage", "Can trigger the hold",
+    // "I have top-up credit" is the same setting on a Synthetic plan's card (BOS-934).
+    "Hold routine work at", "I have extra usage", "I have top-up credit", "Can trigger the hold",
     "Order (1 is used first; leave empty to keep this account out of the list)", "Login for this account",
   ],
   Rules: ["Rules for", "What should this rule do", "New rule", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of"],

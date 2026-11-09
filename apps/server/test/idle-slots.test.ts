@@ -245,13 +245,14 @@ describe("free run slots go to idle in-progress work (BOS-574)", () => {
     expect(await c.sweeps.run()).toMatchObject({ idleSlots: { woken: 0 } });
 
     // That sweep also raised a card for the CEO about the hour-long runs; someone waits on it, so it goes first.
-    const [card] = await c.wakesOf("decision");
+    const [card] = await c.wakesOf("ceo reply");
     expect(card).toMatchObject({ status: "queued" });
 
-    // Two runs end: the slots they free go to the card and to the held wake, none to a new filler.
+    // Two runs end: the held wake takes one slot. The card is a reply-lane wake (DR-048 part A), which
+    // uses no work slot and reserves none, so the other slot stays free.
     for (const id of busy.slice(0, 2)) await c.emit({ type: "run.ended", runId: id, stopReason: "end_turn", error: null });
     await c.flush();
-    expect(await c.scheduler.freeSlots(c.company.id)).toBe(0);
+    expect(await c.scheduler.freeSlots(c.company.id)).toBe(1);
     await c.scheduler.tickOnce();
     expect((await c.db.select().from(wakes).where(eq(wakes.id, card!.id)))[0]!.status).toBe("launched");
     expect((await c.db.select().from(wakes).where(eq(wakes.id, held!.id)))[0]!.status).toBe("launched");

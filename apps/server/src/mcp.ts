@@ -9,10 +9,10 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { ageWords, FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
+import { ageWords, FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, tickets as ticketsTable, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, tickets as ticketsTable, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
@@ -31,28 +31,32 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { staleVersionMessage, startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import type { skillsService } from "./services/skills.js";
 import { reviewTicketWriteRefusal, type skillProposalsService } from "./services/skill-proposals.js";
 import { AgentError, type agentsService } from "./services/agents.js";
-import { describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
 import { resolveReviewer } from "./services/review-policy.js";
 import { activeRows, latestRows } from "./services/review-kinds.js";
 import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
-import { markSearched, remember, type paService } from "./services/pa.js";
+import type { paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
 import type { alertLadder } from "./services/alert-ladder.js";
-import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
+import { RetroError, type retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
 import { ADDONS, type AddonFacts } from "./services/addons.js";
-import { CAP, cut, fail, text, type Scope } from "./mcp-common.js";
+import { CAP, cut, fail, managerIn, refsOf, text, withNote, type Scope } from "./mcp-common.js";
 import { registerAgentAdminTools } from "./mcp-agent-admin.js";
+import { buildPaServer } from "./mcp-pa.js";
+import { registerRetro, registerWatchdog } from "./mcp-watchdog.js";
+import { traceCalls } from "./mcp-trace.js";
+import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -76,7 +80,7 @@ const OWNER_ASK = /\b(please|you(?:'ll| will)? (?:need|have|must|should)|could y
  * After a ticket reply, say when the owner has to act but nothing on their queue asks them to (BOS-122):
  * the owner doesn't watch tickets, so a reply alone doesn't reach them. Returns null when no hint applies.
  */
-async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: string): Promise<string | null> {
+async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: string): Promise<{ uncovered: boolean; message: string } | null> {
   if (!OWNER_ASK.test(body)) return null;
   // An open decision covers it when it blocks this ticket, or this agent already asked about it.
   const covering = await db
@@ -90,9 +94,11 @@ async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: str
   // the warning in the agent's run (BOS-503). Agents can't see decision state, so they couldn't act on it.
   const [t] = await db.select().from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
   const restored = t ? await restoreSignoffCard(db, t, "an agent's reply asked the owner to review it") : null;
-  if (restored) return `This ticket passed every review and waits on the owner's sign-off, but its card was missing, so Boss Man raised it (card ${restored}). It is in the owner's Decisions and the board's Your review lane; you don't need to raise one.`;
-  return "This reply asks the owner to do something, but no open decision covers it — the owner doesn't watch tickets, so this won't reach their queue or the Your review lane. Call raise_decision with blocksTicketId set to this ticket, with what you tried first and the steps they need. The reply is still posted.";
+  if (restored) return { uncovered: false, message: `This ticket passed every review and waits on the owner's sign-off, but its card was missing, so Boss Man raised it (card ${restored}). It is in the owner's Decisions and the board's Your review lane; you don't need to raise one.` };
+  return { uncovered: true, message: "This reply asks the owner to do something, but no open decision covers it — the owner doesn't watch tickets, so this won't reach their queue or the Your review lane. Call raise_decision with blocksTicketId set to this ticket, with what you tried first and the steps they need. The reply is still posted." };
 }
+/** What the CEO is told when a reply asking the owner to act is held (BOS-901). */
+const CEO_ASK_HELD = "Not posted. This reply asks the owner to do something, but no open decision covers it, and the owner doesn't watch tickets, so the ask would be lost. Call raise_decision with blocksTicketId set to this ticket (what you tried first, and the steps they need), then send the reply again. If the reply only reports status and asks nothing of the owner, send it again with notAnAsk set to true and it will post.";
 export { cut };
 const OUTLINE_OVER = 8000;
 
@@ -107,20 +113,10 @@ export type McpHooks = {
 };
 
 /** The ticket row for an agent, with its state note shown with its age (R85). */
-/** Shows a company's ticket numbers as references (HOL-12). */
-async function refsOf(db: Db, companyId: string) {
-  const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
-  return <T extends { number: number | null }>({ number, ...r }: T) => ({ ref: ticketRef(c?.prefix, number), ...r });
-}
 /** A reference like HOL-12 (any prefix: an old one still finds the number). */
 const REF = /^[A-Za-z0-9]{1,10}-(\d{1,9})$/;
 /** The first 8 characters of a ticket's id, as the web app and wiki show it (BOS-435). */
 const ID_PREFIX = /^[0-9a-f]{8}$/i;
-
-const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null }>({ stateNote, stateNoteAt, stateNoteStaleAt, ...r }: T) => {
-  const note = stateNoteLine({ stateNote, stateNoteAt, stateNoteStaleAt, lastActivityAt: r.lastActivityAt }, new Date());
-  return note ? { ...r, stateNote: note } : r;
-};
 
 export type Services = {
   decisions: ReturnType<typeof decisionsService>;
@@ -482,10 +478,19 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "ticket_reply",
     {
-      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. Ask the owner only after you have tried every way to do it yourself. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
-      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000) },
+      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. Ask the owner only after you have tried every way to do it yourself. If you are the CEO, a reply that asks the owner to act is not posted until an open decision covers it; a status-only reply that trips this can be sent again with notAnAsk true. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
+      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000), notAnAsk: z.boolean().optional().describe("CEO only: send a reply that only reports status and asks nothing of the owner, even though its wording looks like an ask. Without it, a CEO reply that asks the owner to act is held (not posted) until an open decision covers it.") },
     },
-    async ({ ticketId, text: body }) => {
+    async ({ ticketId, text: body, notAnAsk }) => {
+      // The CEO's owner-ask is held, not posted, until a card covers it (BOS-901): the hint after posting is too late for them.
+      let hint: { uncovered: boolean; message: string } | null = null;
+      if (scope.agentId) {
+        const [me] = await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId)));
+        if (me?.role === "ceo") {
+          hint = await ownerActionHint(db, scope, ticketId, body);
+          if (hint?.uncovered && !notAnAsk) return fail(CEO_ASK_HELD);
+        }
+      }
       try {
         await ticketChat.agentSays({ companyId: scope.companyId, ticketId, agentId: scope.agentId, runId: scope.runId, text: body });
       } catch (err) {
@@ -499,9 +504,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
       // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
-      const hint = await ownerActionHint(db, scope, ticketId, body);
+      hint ??= await ownerActionHint(db, scope, ticketId, body);
       const links = await missingPageNote(db, scope.companyId, body);
-      return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint}` : ""}`);
+      return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint.message}` : ""}`);
     },
   );
 
@@ -523,7 +528,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "raise_decision",
     {
-      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. Each fence line must say where the command runs and as which account: sh host=\"<name>\" as=\"root\" or as=\"login\". For the command that runs on the server Boss Man itself runs on, write host=\"{{host}}\": Boss Man fills it with the name the host deployer reports (the same name server_status gives as the host), so never an old name from memory, an old runbook or a compose file, as the owner would be sent to a machine that no longer runs Boss Man. A card that names another host is refused and names the one Boss Man has on record; leave the host out and Boss Man fills in the reported name; with no host report yet {{host}} is refused and a named host is raised unconfirmed. A card that sets up a new host Boss Man has no record for yet passes newHost with that name; only the CEO may pass it, and only that one name may be unrecorded on the card. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. A command that waits for typed input (read, read -p, sudo -S, passwd, ssh-keygen without -N, docker login without --password-stdin) is refused: give the value in the command, or for a secret an editor step naming the exact line or Boss Man's Secrets screen. So is a pager (psql without -P pager=off, git log/diff/show without --no-pager, systemctl status or journalctl without --no-pager, less, more, man), a database or container-shell prompt the owner would type into (psql with no -c, docker exec -it … bash; use psql -P pager=off -c \"…\"), and a command that never returns by itself (docker stats without --no-stream, docker logs -f, tail -f, watch, top, ping without -c); none of these can be overridden. A command block that prints nothing when it works (only assignments, cd, export, or cp/mv/install/mkdir/chmod/chown/ln/touch/rm without -v) must say so in its sentence (\"This prints nothing.\") or show the result (D=$(…); echo \"$D\"). Steps with a host command (docker, docker compose, systemctl, tailscale, chown, chmod, anything naming .env) need proof (DR-024): \"rehearsed <script> @ <commit>\" when the CI rehearsal under scripts/rehearse/ passed on that commit, or \"not rehearsed: <what hasn't been tried and why>\", and then the last step must be a look-only check (docker compose ps, docker logs, tailscale status, curl...) saying what to paste back. The card shows the proof as a banner. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety, unfilled tokens, and typed input, pagers and commands that never return. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again.",
+      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. Each fence line must say where the command runs and as which account: sh host=\"<name>\" as=\"root\" or as=\"login\". For the command that runs on the server Boss Man itself runs on, write host=\"{{host}}\": Boss Man fills it with the name the host deployer reports (the same name server_status gives as the host), so never an old name from memory, an old runbook or a compose file, as the owner would be sent to a machine that no longer runs Boss Man. A card that names another host is refused and names the one Boss Man has on record; leave the host out and Boss Man fills in the reported name; with no host report yet {{host}} is refused and a named host is raised unconfirmed. A card that sets up a new host Boss Man has no record for yet passes newHost with that name; only the CEO may pass it, and only that one name may be unrecorded on the card. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. A command that waits for typed input (read, read -p, sudo -S, passwd, ssh-keygen without -N, docker login without --password-stdin) is refused: give the value in the command, or for a secret an editor step naming the exact line or Boss Man's Secrets screen. So is a pager (psql without -P pager=off, git log/diff/show without --no-pager, systemctl status or journalctl without --no-pager, less, more, man), a database or container-shell prompt the owner would type into (psql with no -c, docker exec -it … bash; use psql -P pager=off -c \"…\"), and a command that never returns by itself (docker stats without --no-stream, docker logs -f, tail -f, watch, top, ping without -c); none of these can be overridden. A command block that prints nothing when it works (only assignments, cd, export, or cp/mv/install/mkdir/chmod/chown/ln/touch/rm without -v) must say so in its sentence (\"This prints nothing.\") or show the result (D=$(…); echo \"$D\"). Steps with a host command (docker, docker compose, systemctl, tailscale, chown, chmod, anything naming .env) need proof (DR-024): \"rehearsed <script> @ <commit>\" when the CI rehearsal under scripts/rehearse/ passed on that commit, or \"not rehearsed: <what hasn't been tried and why>\", and then the last step must be a look-only check (docker compose ps, docker logs, tailscale status, curl...) saying what to paste back. The card shows the proof as a banner. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety, unfilled tokens, and typed input, pagers and commands that never return. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again. approveSummary (optional, one line, up to 120 characters, plain text) says what choosing your recommended option does, e.g. \"Use deSEC for DNS on the website\": with it, the owner's phone notification can offer an Approve button that answers with your recommended option. Approve is offered only on a plain question with 2 to 4 options and no blocksTicketId, steps, ownerMustDo, stillNeeded, setsUp or doAfter, so write the summary so it can be approved without opening the card.",
       // Ordering (BOS-551): when this card must come before or after another owner card, pass doAfter/doBefore
       // (the other card's id and a short label) so the owner's queue numbers them and says which to do first.
       inputSchema: {
@@ -539,6 +544,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         setsUp: z.enum(ADDONS).optional(),
         // The host a CEO-raised card is setting up, which Boss Man has no record for yet (DR-046): only that one name may be unrecorded.
         newHost: z.string().min(1).max(64).optional(),
+        approveSummary: z.string().max(SUMMARY_MAX).optional(),
         proof: z.string().max(300).optional(),
         // Ordering against other owner cards (BOS-551): the ids of the cards this one must be done after or before, each with a short label.
         doAfter: z.array(z.object({ decisionId: z.string().uuid(), label: z.string().min(1).max(120) })).max(10).optional(),
@@ -548,8 +554,11 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         resetsOnRestart: z.boolean().optional(),
       },
     },
-    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, proof, doAfter, doBefore, resetsOnRestart }) => {
+    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
+      // Stored cleaned, so the phone shows exactly what is stored (BOS-243 rule 2).
+      const summary = approveSummary === undefined ? undefined : cleanSummary(approveSummary);
+      if (summary === null) return fail("approveSummary is empty once line breaks and control characters are taken out. Write one plain line saying what your recommended option does, or leave it out.");
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
       const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}) });
       if (ask.error) return fail(ask.error);
@@ -579,7 +588,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[] };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, doAfter, doBefore, resetsOnRestart });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary });
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
@@ -2067,616 +2076,6 @@ async function moveRefusal(db: Db, scope: Scope, ticketId: string, cancelling: b
   return "That ticket isn't yours: you can move only tickets assigned to you and sub-tasks of them. If it needs to move, tell its assignee or your CEO (ticket_reply on it, or nudge them).";
 }
 
-async function managerIn(db: Db, scope: Scope) {
-  const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-  return me?.role === "ceo" || me?.role === "manager";
-}
-
-/** The roadmap tool, in ticket runs and the owner chat alike. */
-function registerRoadmap(server: McpServer, db: Db, work: Services["work"], scope: Scope) {
-  server.registerTool(
-    "roadmap",
-    {
-      description:
-        "For CEOs and managers: the company's roadmap, as the owner sees it on the Roadmap and Plan pages. action list (objectives with their ids, priority and milestones with dates), add_objective (title, priority 1 most important to 5, optional project by name or id), add_milestone (objectiveId, title, targetDate YYYY-MM-DD, optional horizon now, next or later) and set (ticketId, milestoneId or null: put a ticket in a milestone or take it out). Give a reason up to 240 characters for any change; it is kept in the activity log. List first, and reuse an objective or milestone that already fits rather than adding a near-duplicate.",
-      inputSchema: {
-        action: z.enum(["list", "add_objective", "add_milestone", "set"]),
-        title: z.string().trim().min(1).max(200).optional(),
-        priority: z.number().int().min(1).max(5).optional(),
-        project: z.string().min(1).optional(),
-        objectiveId: z.string().uuid().optional(),
-        targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD").optional(),
-        horizon: z.enum(HORIZONS).optional(),
-        ticketId: z.string().uuid().optional(),
-        milestoneId: z.string().uuid().nullable().optional(),
-        reason: z.string().trim().min(1).max(240).optional(),
-      },
-    },
-    async ({ action, title, priority, project, objectiveId, targetDate, horizon, ticketId, milestoneId, reason }) => {
-      if (!(await managerIn(db, scope))) return fail("Only your company's CEO or a manager can change the roadmap.");
-      if (action === "list") {
-        const tree = await work.objectivesTree(scope.companyId);
-        return text(JSON.stringify(tree.map((o) => ({ id: o.id, title: o.title, priority: o.priority, projectId: o.projectId, milestones: o.milestones.map((m) => ({ id: m.id, title: m.title, targetDate: m.targetDate, horizon: m.horizon })) }))));
-      }
-      if (!reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
-      const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-      const log = (summary: string, ticket?: string) => record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: ticket ?? null, kind: "roadmap", summary: `${me?.name ?? "An agent"} ${summary}: ${reason}` });
-      try {
-        if (action === "add_objective") {
-          if (!title) return fail("Give the objective a title.");
-          const p = project !== undefined ? (await db.select().from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt)))).find((x) => x.id === project || x.name.toLowerCase() === project.toLowerCase()) ?? null : null;
-          if (project !== undefined && !p) return fail(`No open project called ${project} in your company.`);
-          const o = await work.createObjective(scope.companyId, { title, priority, ...(p ? { projectId: p.id } : {}) });
-          await log(`added the objective "${o.title}"`);
-          return text(`Added the objective "${o.title}" (id ${o.id}, priority ${o.priority}).`);
-        }
-        if (action === "add_milestone") {
-          if (!objectiveId || !title) return fail("Give objectiveId and a title (and a targetDate if it has one).");
-          const [o] = await db.select({ title: objectives.title }).from(objectives).where(and(eq(objectives.id, objectiveId), eq(objectives.companyId, scope.companyId)));
-          if (!o) return fail("No objective with that id in your company. Call roadmap list for the ids.");
-          const m = await work.addMilestone(objectiveId, { title, targetDate, horizon });
-          await log(`added the milestone "${m.title}"${targetDate ? ` (${targetDate})` : ""} under "${o.title}"`);
-          return text(`Added the milestone "${m.title}" (id ${m.id}) under "${o.title}".`);
-        }
-        if (!ticketId || milestoneId === undefined) return fail("Give ticketId and milestoneId (or null to take it out).");
-        const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
-        if (!t) return fail("No ticket with that ID in your company.");
-        await work.updateTicket(ticketId, { milestoneId });
-        await log(milestoneId ? "put it in a milestone" : "took it out of its milestone", ticketId);
-        return text(milestoneId ? `Ticket ${ticketId} is in the milestone now.` : `Ticket ${ticketId} has no milestone now.`);
-      } catch (err) {
-        if (err instanceof WorkError) return fail(err.message);
-        throw err;
-      }
-    },
-  );
-}
-
-/**
- * The CEO's lasting notes (BOS-85), in the owner chat and its runs. Each save or update quotes the
- * owner: in the chat, from that chat; in a run (BOS-95), an owner-written ticket message. So agent
- * text on a ticket, feedback or a page can't plant one; removing one needs the chat;
- * other agents can only ask (request_note), and the CEO's explicit accept, in any run, is the one
- * way a request becomes a note. The owner sees every new or changed note in the chat.
- */
-function registerNotes(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope, chat: boolean, { ticketChat }: Pick<Services, "ticketChat">) {
-  const notes = notesService(db);
-  const isCeo = async () => (scope.agentId ? (await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)))[0]?.role === "ceo" : false);
-  server.registerTool(
-    "notes",
-    {
-      description: `CEO only. Your lasting notes: corrections, preferences and working rules the owner gave you in chat, and colleagues' requests you accepted; shown at the start of every later chat and run. list shows them with their ids. In the owner chat: save (title, text, why), update (id, why, and title or text to change) or remove (id, reason); why must quote the owner's own words from this chat. In a ticket run: save or update when the owner corrected you in a message on a ticket; why must quote that owner message exactly. Never save an agent's ticket text, feedback or a page. Quotes are at least ${MIN_QUOTE} characters. Save one when the owner corrects you or states a lasting preference; update the note you have rather than adding a duplicate, and remove one that turns out wrong. In any run: requests lists colleagues' note requests; accept (requestId, optionally a reworded title, text or why) or decline (requestId, reason) each one after checking it against what actually happened on its ticket. At most ${NOTE_LIMITS.count} notes (title ${NOTE_LIMITS.title}, text ${NOTE_LIMITS.text}, why ${NOTE_LIMITS.why} characters); when full, a save or accept is refused until you update or remove one. The owner is told of every new or changed note and can edit or delete notes. These don't change your standing instructions.`,
-      inputSchema: {
-        action: z.enum(["list", "save", "update", "remove", "requests", "accept", "decline"]),
-        id: z.string().uuid().optional(),
-        requestId: z.string().uuid().optional(),
-        title: z.string().max(NOTE_LIMITS.title).optional(),
-        text: z.string().max(NOTE_LIMITS.text).optional(),
-        why: z.string().max(NOTE_LIMITS.why).optional(),
-        reason: z.string().max(300).optional(),
-      },
-    },
-    async (input) => {
-      if (!(await isCeo()) || !scope.agentId) return fail("Notes are only for your company's CEO for now. To suggest one, use request_note.");
-      const agentId = scope.agentId;
-      const tell = (t: string) => notes.tellOwner(scope.companyId, agentId, scope.runId, `${t} You can see, change or delete your CEO's notes on the Agents page.`);
-      try {
-        if (input.action === "list") {
-          const all = await notes.withOrigin(scope.companyId, agentId);
-          return text(all.length ? `${all.length} of ${NOTE_LIMITS.count} notes:\n${all.map((n) => `- [${n.id}] ${describeNote(n)}, ${originOf(n)}`).join("\n")}` : `No notes yet (up to ${NOTE_LIMITS.count}).`);
-        }
-        if (input.action === "requests") {
-          const waiting = await notes.pending(scope.companyId, agentId);
-          return text(waiting.length ? requestLines(waiting).slice(1).join("\n") : "No note requests waiting.");
-        }
-        if (input.action === "accept" || input.action === "decline") {
-          if (!input.requestId) return fail(`${input.action} needs the requestId (notes requests).`);
-          const reply = (ticketId: string, t: string) => ticketChat.agentSays({ companyId: scope.companyId, ticketId, agentId, runId: scope.runId, text: t }).catch(() => undefined);
-          if (input.action === "decline") {
-            if (!input.reason?.trim()) return fail("decline needs a one-line reason.");
-            const r = await notes.decline(scope.companyId, agentId, input.requestId, input.reason);
-            await reply(r.ticketId, `I declined the note request "${r.title}": ${r.declineReason}`);
-            return text(`Declined. The requester is told on the ticket.`);
-          }
-          const { request: r, note: n } = await notes.accept(scope.companyId, agentId, input.requestId, { title: input.title, text: input.text, why: input.why }, scope.runId);
-          const [o] = (await notes.withOrigin(scope.companyId, agentId)).filter((x) => x.id === n.id);
-          await tell(`Saved a note: ${describeNote(n)}, ${originOf(o ?? n)}.`);
-          await reply(r.ticketId, `I accepted the note request "${r.title}"${n.title !== r.title || n.text !== r.text ? `, reworded as "${n.title}": ${n.text}` : ""}. It's now one of my notes.`);
-          return text(`Accepted: saved note ${n.id}. The owner and the requester are told.`);
-        }
-        // Outside the chat (BOS-95) a save or update must quote an owner-written ticket message; removing still needs the chat.
-        if (!chat && input.action === "remove") return fail("Notes are removed only from the owner chat. Ask the owner there, or raise_decision.");
-        const by = { owner: false, runId: scope.runId };
-        // The owner sees the whole message that backs the note, and, if it's a ticket's, on that ticket too.
-        const quoted = async (why: string) => notes.checkQuote(scope.companyId, agentId, why, chat ? "chat" : "tickets");
-        const announce = async (said: { text: string; ticketId: string | null }, t: string) => {
-          await tell(`${t} You said: "${said.text}".`);
-          if (said.ticketId) await ticketChat.agentSays({ companyId: scope.companyId, ticketId: said.ticketId, agentId, runId: scope.runId, text: `${t} It rests on your message here: "${said.text}". You can see, change or delete my notes on the Agents page.` }).catch(() => undefined);
-        };
-        if (input.action === "save") {
-          if (!input.title || !input.text || !input.why) return fail("save needs title, text and why.");
-          const said = await quoted(input.why);
-          const n = await notes.save(scope.companyId, agentId, { title: input.title, text: input.text, why: input.why }, said.ticketId ? { source: "ticket", runId: scope.runId, ticketId: said.ticketId } : { source: "chat", runId: scope.runId });
-          await announce(said, `Saved a note: ${describeNote(n)}.`);
-          return text(`Saved note ${n.id}. It shows in your next chats and runs.`);
-        }
-        if (!input.id) return fail(`${input.action} needs the note's id (notes list).`);
-        // A note from another company or agent reads as missing.
-        const n = await notes.get(scope.companyId, input.id);
-        if (n.agentId !== agentId) return fail("No such note.");
-        if (input.action === "update") {
-          // A changed note must rest on something the owner said now, like a new one.
-          if (!input.why) return fail(`update needs why: the owner's words ${chat ? "from this chat" : "from one of their ticket messages"} that call for the change.`);
-          const said = await quoted(input.why);
-          const { after } = await notes.update(scope.companyId, n.id, { title: input.title, text: input.text, why: input.why }, by, { source: said.ticketId ? "ticket" : "chat", ticketId: said.ticketId });
-          await announce(said, `Updated a note. Was ${describeNote(n)}. Now ${describeNote(after)}.`);
-          return text(`Updated note ${after.id}.`);
-        }
-        if (!input.reason?.trim()) return fail("remove needs a reason.");
-        await notes.remove(scope.companyId, n.id, by);
-        await tell(`Removed a note (${input.reason.trim()}): ${describeNote(n)}.`);
-        return text(`Removed note ${n.id}.`);
-      } catch (err) {
-        if (err instanceof NoteError) return fail(err.message);
-        throw err;
-      }
-    },
-  );
-}
-
-/** Other agents ask the CEO to keep a note (BOS-85); they have no tool that writes one. Ticket runs only. */
-function registerRequestNote(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope, hooks: McpHooks) {
-  const notes = notesService(db);
-  server.registerTool(
-    "request_note",
-    {
-      description: `Ask your CEO to keep a lasting note: a lesson, correction or working rule from a ticket that the CEO should remember in every chat and run. Give a short title, the text, why (what happened, briefly) and the ticket it came from. The CEO checks it against the ticket and accepts it (maybe reworded) or declines it with a reason; you're told on the ticket. You can't save notes yourself. At most ${REQUEST_LIMITS.perHour} requests an hour and ${REQUEST_LIMITS.perDay} a day; title ${NOTE_LIMITS.title}, text ${NOTE_LIMITS.text}, why ${NOTE_LIMITS.why} characters.`,
-      inputSchema: {
-        ticketId: z.string().uuid(),
-        title: z.string().min(1).max(NOTE_LIMITS.title),
-        text: z.string().min(1).max(NOTE_LIMITS.text),
-        why: z.string().min(1).max(NOTE_LIMITS.why),
-      },
-    },
-    async ({ ticketId, title, text: body, why }) => {
-      if (!scope.agentId) return fail("Only an agent's run can ask for a note.");
-      try {
-        const { request: r, ceoId } = await notes.request(scope.companyId, scope.agentId, { ticketId, title, text: body, why });
-        // Woken now; the request also waits in the CEO's next run or chat, should this wake be held.
-        await hooks.wake?.(ceoId, { reason: "note request", note: `A colleague asked you to keep a note ("${r.title}"). See notes requests, check it against its ticket, then accept or decline it.` });
-        return text(`Asked the CEO (request ${r.id}). You'll be told the answer on the ticket.`);
-      } catch (err) {
-        if (err instanceof NoteError) return fail(err.message);
-        throw err;
-      }
-    },
-  );
-}
-
-function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
-  server.registerTool(
-    "board",
-    { description: "See the company's board: projects, objectives with their milestones, agents (with the reviews each does under the company's Settings > Reviews, e.g. \"Code (all levels), Security (High+)\"; a project can override them), and open tickets with their ids.", inputSchema: {} },
-    async () => {
-      const ps = await db.select({ id: projects.id, name: projects.name }).from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt))).orderBy(asc(projects.name));
-      const os = await db.select({ id: objectives.id, title: objectives.title, priority: objectives.priority }).from(objectives).where(and(eq(objectives.companyId, scope.companyId), eq(objectives.status, "active")));
-      const ms = os.length ? await db.select({ id: milestones.id, objectiveId: milestones.objectiveId, title: milestones.title, targetDate: milestones.targetDate }).from(milestones).where(inArray(milestones.objectiveId, os.map((o) => o.id))) : [];
-      const as = await db.select({ id: agents.id, name: agents.name, role: agents.role, template: agents.template }).from(agents).where(eq(agents.companyId, scope.companyId));
-      const [co] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, scope.companyId));
-      const withReviews = ({ template, ...a }: (typeof as)[number]) => {
-        const r = co && a.role !== "ceo" ? reviewRolesOf(co.policy, a.id, template === SENIOR_DEV_TEMPLATE) : [];
-        return r.length ? { ...a, reviews: describeRoles(r) } : a;
-      };
-      const ts = await db
-        .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, projectId: tickets.projectId, milestoneId: tickets.milestoneId, assigneeAgentId: tickets.assigneeAgentId, risk: tickets.risk })
-        .from(tickets)
-        .where(and(eq(tickets.companyId, scope.companyId), ne(tickets.systemState, "done")))
-        .orderBy(asc(tickets.createdAt))
-        .limit(300);
-      const ref = await refsOf(db, scope.companyId);
-      return text(JSON.stringify({ projects: ps, objectives: os.map((o) => ({ ...o, milestones: ms.filter((m) => m.objectiveId === o.id) })), agents: as.map(withReviews), openTickets: ts.map(ref) }));
-    },
-  );
-}
-
-function registerListMyWork(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
-  server.registerTool(
-    "list_my_work",
-    { description: "List the open tickets assigned to you.", inputSchema: {} },
-    async () => {
-      if (!scope.agentId) return text("[]");
-      const rows = await db
-        .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, due: tickets.dueDate, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, lastActivityAt: tickets.lastActivityAt })
-        .from(tickets)
-        .where(and(eq(tickets.assigneeAgentId, scope.agentId), ne(tickets.systemState, "done")));
-      const ref = await refsOf(db, scope.companyId);
-      return text(JSON.stringify(rows.map((r) => withNote(ref(r)))));
-    },
-  );
-}
-
-// shortcut: one run's record is held in memory and dropped when the run ends; lost on restart, harmless because a chat run dies with the restart (BOS-758).
-type RunTrace = { changes: string[]; tickets: string[] };
-const traces = new Map<string, RunTrace>();
-/** What a chat run changed and the tickets it touched (created or read), read by chat.ts under its reply. */
-export const runTrace = (runId: string): RunTrace => traces.get(runId) ?? { changes: [], tickets: [] };
-export function forgetRunTrace(runId: string) {
-  traces.delete(runId);
-}
-
-/**
- * The chat tools that never change anything: reads and lookups only (BOS-806). Every other tool in the
- * chat's list must have a case in changeTrace, so the "Done in this reply" line names what it changed.
- * chat.test.ts walks the live chat tool list against these two sets, so a new tool cannot be added
- * silently: it is either a read (add it here) or a change (add a case in changeTrace).
- */
-export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
-  "agent_instructions", "board", "devices", "features", "list_my_work", "model_options", "open_attachment",
-  "server_status", "sizing_guide", "tickets", "whats_new",
-]);
-
-/**
- * Every tool with a case in changeTrace, which may return null for its read actions (notes list,
- * roadmap list, review diff). Kept in step with the switch below by a guard there and by chat.test.ts.
- */
-export const TRACED_TOOLS: ReadonlySet<string> = new Set([
-  "notes", "create_ticket", "create_feature", "log_feedback", "set_ticket_state", "update_ticket", "set_ticket_risk",
-  "assign_ticket", "link_tickets", "set_milestone", "raise_decision", "withdraw_decision", "decisions", "nudge", "wiki",
-  "update_instructions", "rename_agent", "set_agent_picture", "standing_rules", "propose_hire", "propose_team",
-  "propose_model_change", "propose_rule", "attach_image", "ticket_reply", "notify_owner", "roadmap", "report_key_result",
-  "schedule_check", "clear_check", "request_check", "request_engagement", "engagement", "handoff", "deploy", "submit_plan",
-  "review", "request_note", "feedback", "skills", "pa_verdict", "runs",
-]);
-
-/**
- * A changing tool call, as one item for the "Done in this reply" line; null for a call that is not one
- * (a read action of a tool that also writes, such as notes list or roadmap list). `ref` names a ticket
- * by its BOS-style reference (BOS-806), so "created a ticket" also says which one; a created ticket's id
- * comes from the tool's own result (returnId), since create_ticket takes none.
- */
-async function changeTrace(name: string, input: Record<string, unknown>, ref: (id: string) => Promise<string | null>, returnId?: string): Promise<string | null> {
-  const s = (v: unknown, n = 60) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
-  const action = String(input.action ?? "");
-  const ticket = async (id: unknown) => {
-    const r = typeof id === "string" ? await ref(id) : null;
-    return r ? ` ${r}` : "";
-  };
-  // A name with no case below has no business being in TRACED_TOOLS; the test guard keeps them in step,
-  // and this stops an untraced tool from ever being silently counted as a change.
-  if (!TRACED_TOOLS.has(name)) return null;
-  switch (name) {
-    case "notes":
-      return action === "save" || action === "update" || action === "accept" ? `saved note "${s(input.title)}"` : action === "remove" || action === "decline" ? "removed a note" : null;
-    case "create_ticket":
-      return `created a ticket${await ticket(returnId)}`;
-    case "create_feature":
-      return `created a feature request "${s(input.title)}"`;
-    case "log_feedback":
-      return "filed feedback";
-    case "set_ticket_state":
-      return `moved a ticket${await ticket(input.ticketId)}`;
-    case "update_ticket":
-      return `updated a ticket${await ticket(input.ticketId)}`;
-    case "set_ticket_risk":
-      return "set a ticket's risk";
-    case "assign_ticket":
-      return `handed a ticket to ${s(input.agent)}`;
-    case "link_tickets":
-      return "made a ticket wait on another";
-    case "set_milestone":
-      return "put a ticket in a milestone";
-    case "raise_decision":
-      return "raised a decision for the owner";
-    case "withdraw_decision":
-      return "withdrew a decision";
-    case "decisions":
-      return ["answer", "withdraw", "escalate", "advise"].includes(action) ? "settled a decision" : null;
-    case "nudge":
-      return `nudged ${s(input.agent)}`;
-    case "wiki":
-      return action === "write" || action === "append"
-        ? `wrote the wiki page "${s(input.title || input.slug)}"`
-        : action === "restore"
-          ? `restored the wiki page "${s(input.slug)}"`
-          : action === "attach"
-            ? "attached something to a ticket"
-            : null;
-    case "update_instructions":
-      return `changed ${s(input.agent)}'s instructions`;
-    case "rename_agent":
-      return `renamed an agent to ${s(input.newName)}`;
-    case "set_agent_picture":
-      return "set an agent's picture";
-    case "standing_rules":
-      return action === "write" ? "changed the standing rules" : null;
-    case "propose_hire":
-      return `proposed hiring ${s(input.name)}`;
-    case "propose_team":
-      return "proposed a team";
-    case "propose_model_change":
-      return `proposed a model change for ${s(input.agent)}`;
-    case "propose_rule":
-      return "proposed a permission rule";
-    case "attach_image":
-      return "attached an image to a ticket";
-    // BOS-806: the tools a CEO chat run can call that change something and were left out of the line.
-    case "ticket_reply":
-      return "replied on a ticket";
-    case "notify_owner":
-      return `sent the owner a ${s(input.level) === "page" ? "page" : s(input.level) === "flag" ? "flag" : "note"}`;
-    case "roadmap":
-      return action === "add_objective" ? `added the objective "${s(input.title)}"` : action === "add_milestone" ? `added the milestone "${s(input.title)}"` : action === "set" ? "put a ticket in a milestone" : null;
-    case "report_key_result":
-      return "reported a key result";
-    case "schedule_check":
-      return "scheduled a check";
-    case "clear_check":
-      return "cleared a check";
-    case "request_check":
-      return "asked the runner for a check";
-    case "request_engagement":
-      return `asked ${s(input.providerCompany)} to do work`;
-    case "engagement":
-      return ["accept", "reject", "counter", "accept_counter", "withdraw", "sign_off", "request_revision", "deliver"].includes(action) ? "moved an engagement on" : null;
-    case "handoff":
-      return "wrote the handoff";
-    case "deploy":
-      return action === "request" ? `asked to deploy ${s(input.ref)}` : action === "report" ? "reported a deploy" : null;
-    case "submit_plan":
-      return "submitted the plan";
-    case "review":
-      return action === "submit"
-        ? `reviewed a ticket (${input.verdict === "approved" ? "approved" : "asked for changes"})`
-        : action === "sequence" || action === "overrule" || action === "retry_merge"
-          ? "arranged a ticket's reviews"
-          : null;
-    case "request_note":
-      return "asked for a lasting note";
-    case "feedback":
-      return ["log", "link", "create_feature", "mark", "size", "update_feature"].includes(action) ? "updated the feature requests" : null;
-    case "skills":
-      return ["give", "take", "propose", "review_verdict"].includes(action) ? "changed the skill library" : null;
-    case "pa_verdict":
-      return "marked a PA answer";
-    case "runs":
-      return action === "message" ? "messaged another run" : action === "stop" ? "stopped a run" : null;
-    default:
-      return null;
-  }
-}
-
-const UUID_ANYWHERE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
-
-/**
- * Records a chat run's changing calls, and every ticket id any of its tools returned (BOS-758), so the
- * reply can be checked against what the run actually did. Wraps the server's registerTool: only the
- * chat's server gets here, and a failed call (isError) records nothing.
- */
-function traceCalls(server: McpServer, db: Db, runId: string, companyId: string): McpServer {
-  const register = server.registerTool.bind(server);
-  // Names a ticket by its BOS-style reference (BOS-806), looked up once per id. The lookup runs after the
-  // tool already succeeded: if it fails, the change is still made and still named, just without the number
-  // (BOS-820), so a failed lookup can never turn a good call into an error the agent would retry.
-  const refOf = async (id: string) => {
-    try {
-      const [t] = await db.select({ number: tickets.number }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
-      if (!t) return null;
-      return (await refsOf(db, companyId))(t).ref;
-    } catch {
-      return null;
-    }
-  };
-  server.registerTool = ((name: string, config: never, cb: (input: Record<string, unknown>, extra: never) => Promise<unknown>) =>
-    register(name, config, (async (input: Record<string, unknown>, extra: never) => {
-      const out = (await cb(input, extra)) as { isError?: boolean };
-      if (!out?.isError) {
-        const trace = traces.get(runId) ?? { changes: [], tickets: [] };
-        const returned = JSON.stringify(out).match(UUID_ANYWHERE) ?? [];
-        for (const id of returned) if (!trace.tickets.includes(id)) trace.tickets.push(id);
-        // A created ticket has no id in its input, so take the one the tool returned.
-        const change = await changeTrace(name, input, refOf, name === "create_ticket" ? returned[0] : undefined);
-        if (change && !trace.changes.includes(change)) trace.changes.push(change);
-        if (trace.changes.length || trace.tickets.length) traces.set(runId, trace);
-      }
-      return out;
-    }) as never)) as never;
-  return server;
-}
-
-/** The tools a PA may have (R87): all reads. Anything else is never registered for it. */
-const PA_READS = new Set(["tickets", "decisions", "list_my_work", "wiki", "whats_new", "board"]);
-
-/**
- * A view of the server that registers only the PA's read tools. What they return is remembered
- * for the run, since pa_reply may cite only that; a wiki write is refused.
- */
-function readOnly(server: McpServer, runId: string): Pick<McpServer, "registerTool"> {
-  return {
-    registerTool: ((name: string, config: never, cb: (input: { action?: string }, extra: never) => Promise<unknown>) => {
-      if (!PA_READS.has(name)) return undefined;
-      return server.registerTool(name, config, (async (input: { action?: string }, extra: never) => {
-        if (name === "wiki" && input.action !== "list" && input.action !== "read") return fail("You can only read the wiki.");
-        const r = await cb(input, extra);
-        // Only a search can show "nothing found"; reading one ticket can't.
-        if ((name === "tickets" && input.action === "find") || (name === "decisions" && input.action === "list")) markSearched(runId);
-        if (name !== "wiki" && input.action !== "file") remember(runId, JSON.stringify(r));
-        return r;
-      }) as never);
-    }) as never,
-  };
-}
-
-/** The PA's server: the read tools plus pa_reply and pa_escalate, and nothing that writes (R87). */
-function buildPaServer(db: Db, { notes, wiki, skills, skillProposals, review, agents: team, pa, images }: Services, scope: Scope) {
-  const server = new McpServer({ name: "bossman", version: "0.1.0" });
-  const reads = readOnly(server, scope.runId);
-  registerSharedTools(reads as McpServer, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
-  registerViewImage(server, images, scope);
-  registerBoard(reads, db, scope);
-  registerListMyWork(reads, db, scope);
-  reads.registerTool(
-    "decisions",
-    { description: "Decisions that are waiting on the owner or the CEO: id, question, options and who raised it.", inputSchema: { action: z.literal("list") } },
-    async () => {
-      const open = await db.select().from(decisionsTable).where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"))).orderBy(decisionsTable.createdAt).limit(40);
-      return text(open.length ? JSON.stringify(open.map((d) => ({ id: d.id, question: d.question, options: d.options, recommended: d.recommendedOption, waitingOn: d.tier, raisedAt: d.createdAt }))) : "No decisions are waiting.");
-    },
-  );
-
-  server.registerTool(
-    "pa_reply",
-    {
-      description:
-        "Answer the owner's last message. The only way you answer them. text is the answer, in plain words, from what your tools returned. cites lists every ticket or decision it rests on, each with its id (ids your tools returned in this run only). An empty list is allowed for a \"nothing found\" answer, but only after you searched with the tickets or decisions tool. confidence is high only when the tools show the answer plainly. Boss Man checks the reply and may hand the question to the CEO instead; the result says so.",
-      inputSchema: {
-        text: z.string().min(1).max(4000),
-        cites: z.array(z.object({ kind: z.enum(["ticket", "decision", "run"]), id: z.string().uuid() })).max(20),
-        confidence: z.enum(["high", "low"]),
-      },
-    },
-    async (input) => {
-      const r = await pa.reply(scope.runId, input);
-      return r.posted ? text(r.note) : fail(r.note);
-    },
-  );
-
-  server.registerTool(
-    "pa_escalate",
-    { description: "Pass the owner's last message to the CEO when you can't answer it from your tools or it needs judgement. summary is what you found, for the CEO. The owner is told it's with the CEO.", inputSchema: { summary: z.string().min(1).max(2000) } },
-    async ({ summary }) => ((await pa.escalate(scope.runId, summary)).ok ? text("Passed to the CEO; the owner was told. Don't answer it yourself.") : fail("There's no unanswered owner message to pass on.")),
-  );
-
-  return server;
-}
-
-/** The workflow retro agent's tools (docs/19 parts 2 and 3): the company's configured retro agent only, and checked again on every call. */
-function registerRetro(server: McpServer, retro: Services["retro"], scope: Scope) {
-  const guarded = (run: () => Promise<string>) => async () => {
-    if (!scope.agentId || !(await retro.isRetroAgent(scope.companyId, scope.agentId))) return fail("Only the agent that runs this company's workflow retro can use this.");
-    try {
-      return text(await run());
-    } catch (err) {
-      if (err instanceof RetroError) return fail(err.message);
-      if (err instanceof z.ZodError) return fail(err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
-      throw err;
-    }
-  };
-  const agentId = () => scope.agentId!;
-  server.registerTool(
-    "workflow_scorecard",
-    { description: "Workflow retro only. The numbers for the retro's period against the one before (per role, handoffs, features waiting on their last tasks), digests of up to 10 of the worst tickets, and the workflow changes already proposed or applied. Start here.", inputSchema: {} },
-    guarded(() => retro.scorecardText(scope.companyId)),
-  );
-  server.registerTool(
-    "save_retro",
-    {
-      description: "Workflow retro only. Save what the retro found, once: findings ranked by how often they recur. Each has a failure label, the handoff where it went wrong (from and to roles, if it fits), the tickets it was seen on (references like HOL-12 or ids), how many tickets in all, and a note of up to 240 characters. Blame handoffs and patterns, never one agent on one ticket.",
-      inputSchema: FindingsShape,
-    },
-    async (input) => guarded(async () => `Saved ${(await retro.save(scope.companyId, agentId(), input)).saved} findings.`)(),
-  );
-  server.registerTool(
-    "propose_workflow_change",
-    {
-      description:
-        "Workflow retro only. Propose one small change; at most 3 per retro, and only one live change per kind and target. It becomes a decision with Apply and Skip; nothing changes until it is answered. Needs evidence (at least 2 tickets), a metric it should move, and what you expect. lever and what target and change hold: playbook (CEO approves the nomination) target = a role, change = {name, description, body}, a skill for that role's agents; Apply sends it to the add-a-skill flow, where the Security Reviewer checks it and the owner decides before any agent gets it. lesson (CEO approves) target = a project name, change = {lesson}, one line for the project's brief. instructions (owner approves) target = an agent name, change = {instructions}, the whole new text. review_policy (owner) target = a risk tier, change = any of {planApprover, reviewer, ownerSignoff}. watchdog (owner) target = watchdog, change = any of the numeric watchdog limits; it is replayed over 14 days first. model (owner) target = an agent name, change = {model}. thinking (owner) target = an agent name, change = {thinking}. metric is one of firstPassRate, meanRework, medianCycleMs, costPerDoneMicros, watchdogFlags (scope: a role or an agent name; defaults to the target), medianWaitMs or bounceRate (scope: from and to roles, optional kind), tailLagMs (whole company).",
-      inputSchema: ProposeShape,
-    },
-    async (input) =>
-      guarded(async () => {
-        const r = await retro.propose(scope.companyId, agentId(), input);
-        return `Proposed as change ${r.changeId}. It is waiting for ${r.approver === "ceo" ? "the CEO" : "the owner"} (decision ${r.decisionId}); nothing changes until it is answered.`;
-      })(),
-  );
-}
-
-/** The Scrum Master's watchdog actions (BOS-58). Each needs a one-line reason, is logged and can be undone. */
-function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], alerts: Services["alerts"], scope: Scope) {
-  server.registerTool(
-    "watchdog",
-    {
-      description:
-        "Your only way to act on the problems the watchdog hands you. Every action needs reason: one line saying why. list: the open flags. nudge (ticketId): ask the assignee to pick it up or say why it's stuck. assign (ticketId, to): an unassigned ticket only, to the obvious colleague by name, or \"ceo\" if none is obvious. rewake (ticketId): wake the assignee again after their run crashed or ended without moving the ticket. chase_review (ticketId): wake the pending reviewers. snooze (flagId, hours up to 48): the flag is fine for now; a third snooze in a row is refused and the ticket goes to the CEO. escalate (ticketId): hand it to the CEO. raise_decision (ticketId, question, options, recommended, triedFirst, ownerMustDo, steps, and proof when the steps have host commands, checked like raise_decision's): when only the owner can unblock it. Boss Man's own alerts come to you first: alerts lists yours. For a plain alert resolve_alert (alertId, optional rewake: true to wake the dropped agent again with a fresh chain) once you've dealt with it. Stalled-run alerts are also yours, even while the watchdog is switched off: resolve_alert with answer \"Keep waiting\" or \"Cancel run\" (add nudge: true to ask the agent why it is quiet), or pass_alert (alertId) when it needs the CEO. A review that keeps being woken without a verdict goes straight to the CEO, not you. Act only on the problems the watchdog handed you, each action at most once per problem until it is handed to you again. The owner can undo any of your actions. You can't do the work, change risk or priority, or close or cancel tickets. Actions are capped per hour; past the cap the watchdog switches off and the owner is told.",
-      inputSchema: {
-        action: z.enum(["list", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "alerts", "resolve_alert", "pass_alert"]),
-        alertId: z.string().uuid().optional(),
-        rewake: z.boolean().optional(),
-        answer: z.string().min(1).max(200).optional(),
-        nudge: z.boolean().optional(),
-        reason: z.string().max(400).optional(),
-        ticketId: z.string().uuid().optional(),
-        flagId: z.string().uuid().optional(),
-        to: z.string().min(1).max(100).optional(),
-        hours: z.number().positive().max(48).optional(),
-        question: z.string().min(1).max(1000).optional(),
-        options: z.array(z.string().min(1).max(200)).min(2).max(6).optional(),
-        recommended: z.string().optional(),
-        triedFirst: z.string().max(1000).optional(),
-        ownerMustDo: z.boolean().optional(),
-        steps: z.array(z.string().min(1).max(500)).max(12).optional(),
-        stillNeeded: z.string().max(500).optional(),
-        proof: z.string().max(300).optional(),
-      },
-    },
-    async (input) => {
-      if (!scope.agentId) return fail("Only the Scrum Master's run can use the watchdog.");
-      const { companyId, agentId, runId } = { companyId: scope.companyId, agentId: scope.agentId, runId: scope.runId };
-      const need = <K extends keyof typeof input>(...keys: K[]) => {
-        const missing = keys.filter((k) => input[k] === undefined);
-        if (missing.length) throw new WatchdogError(422, `${input.action} needs ${missing.join(", ")}.`);
-      };
-      const reason = input.reason ?? "";
-      const done = (a: { id: string }) => text(`Done and logged as action ${a.id}.`);
-      try {
-        switch (input.action) {
-          case "list": {
-            // Only flags the actions below accept: the owner's waits, escalated and already-actioned ones are left out.
-            const open = await watchdog.actionableFlags(companyId, 50);
-            return text(open.length ? JSON.stringify(open.map((f) => ({ flagId: f.id, ticketId: f.ticketId, title: f.ticketTitle, rule: f.rule, openedAt: f.openedAt, snoozedUntil: f.snoozedUntil, snoozeCount: f.snoozeCount, escalatedAt: f.escalatedAt, detail: f.detail }))) : "No open flags.");
-          }
-          case "nudge":
-            need("ticketId");
-            return done(await watchdog.nudge(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
-          case "assign":
-            need("ticketId", "to");
-            return done(await watchdog.assign(companyId, agentId, runId, { ticketId: input.ticketId!, to: input.to!, reason }));
-          case "rewake":
-            need("ticketId");
-            return done(await watchdog.rewake(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
-          case "chase_review":
-            need("ticketId");
-            return done(await watchdog.chaseReview(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
-          case "snooze":
-            need("flagId", "hours");
-            return done(await watchdog.snooze(companyId, agentId, runId, { flagId: input.flagId!, hours: input.hours!, reason }));
-          case "escalate":
-            need("ticketId");
-            return done(await watchdog.escalate(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
-          case "raise_decision":
-            need("ticketId", "question", "options", "recommended", "triedFirst");
-            return done(await watchdog.raiseDecision(companyId, agentId, runId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, reason, stillNeeded: input.stillNeeded, proof: input.proof }));
-          case "alerts": {
-            const mine = await alerts.mine(companyId, agentId);
-            return text(mine.length ? JSON.stringify(mine) : "No alerts are waiting for you.");
-          }
-          case "resolve_alert":
-            need("alertId");
-            await alerts.resolve(companyId, agentId, { alertId: input.alertId!, reason, rewake: input.rewake, answer: input.answer, nudge: input.nudge, runId });
-            return text(`Settled and logged${input.rewake ? ", and the agent was woken again" : ""}.`);
-          case "pass_alert": {
-            need("alertId");
-            const r = await alerts.pass(companyId, agentId, { alertId: input.alertId!, reason });
-            return text(`Passed on: it's with ${r.to === "ceo" ? "the CEO" : "the owner"} now.`);
-          }
-        }
-      } catch (err) {
-        if (err instanceof WatchdogError) return fail(err.message);
-        throw err;
-      }
-    },
-  );
-}
-
 const NUDGE_DESCRIPTION =
   "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, none back and forth about the same ticket, and a company-wide limit each hour.";
 const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
@@ -2857,7 +2256,7 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
     const ceo = me?.role === "ceo";
     const server =
       me?.duty === "assistant"
-        ? buildPaServer(db, services, scope)
+        ? buildPaServer(db, services, scope, { registerSharedTools, registerViewImage, registerBoard, registerListMyWork })
         : run?.purpose === "chat"
           ? buildChatServer(db, services, scope, hooks, ceo)
           : me?.duty === SCRUM_MASTER_DUTY

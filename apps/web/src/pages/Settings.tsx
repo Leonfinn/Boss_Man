@@ -2645,20 +2645,84 @@ const OWNER_FACT_LABELS: Record<string, string> = {
   "repo.deployKeyAdded": "Deploy key added to the code host (yes or no)",
 };
 
+/** Kept in the browser (BOS-924): the owner folds the reported facts away, and the choice stays as they left it. */
+const HOST_FACTS_OPEN_KEY = "bossman.hostFacts.open";
+const readHostFactsOpen = () => {
+  try {
+    return localStorage.getItem(HOST_FACTS_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
+/** A check fact that is a count of things wrong or of something that went wrong: a non-zero value is a problem.
+ * These keep their plain meaning, so `check.restart_counts.max` of 1 is not read as a failure. */
+const CHECK_TROUBLE = /^(unhealthy|notRunning|stale|ageSeconds|lastExitCode)$/;
+/** The host's own answer to "can Boss Man reach the code host": any value but "ok" is a failing check. */
+const CHECK_OK = /(^|\.)(probe|health)$/;
+/** An add-on state saying it is not up (host-deployer.sh's states: running, stopped, needs_login, not installed). */
+const ADDON_RUNNING = "running";
+
+/**
+ * What is wrong with the reported facts, for the folded header, so folding never hides a problem (BOS-924):
+ * a fact a card needs that is missing, a check that is failing, or an add-on that isn't running.
+ */
+function reportedProblems(d: HostFactsView): { missing: string[]; failing: string[]; addonsDown: string[] } {
+  const missing: string[] = [];
+  const failing: string[] = [];
+  const addonsDown: string[] = [];
+  for (const [k, f] of Object.entries(d.facts)) {
+    const v = f.value.trim();
+    if (!v) missing.push(k);
+    else if (k.startsWith("addon.") && v.toLowerCase() !== ADDON_RUNNING) addonsDown.push(k.slice("addon.".length));
+    else if (k.startsWith("check.")) {
+      const last = k.slice(k.lastIndexOf(".") + 1);
+      const wrong = CHECK_TROUBLE.test(last)
+        ? v !== "0"
+        : CHECK_OK.test(k)
+          ? !/^(ok|pass|passed|healthy)$/i.test(v)
+          : false;
+      if (wrong) failing.push(k);
+    }
+  }
+  for (const k of d.ownerFacts) if (!d.facts[k]?.value.trim()) missing.push(OWNER_FACT_LABELS[k] ?? k);
+  return { missing, failing, addonsDown };
+}
+
+/** The folded header's one line: what the problems are, in plain words, or nothing when all is well. */
+function problemLine(p: { missing: string[]; failing: string[]; addonsDown: string[] }): string | null {
+  const bits: string[] = [];
+  if (p.missing.length) bits.push(`${p.missing.length} missing`);
+  if (p.failing.length) bits.push(`${p.failing.length} check${p.failing.length === 1 ? "" : "s"} failing`);
+  if (p.addonsDown.length) bits.push(`${p.addonsDown.length} add-on${p.addonsDown.length === 1 ? "" : "s"} not running`);
+  return bits.length ? bits.join(" · ") : null;
+}
+
 /** Settings → This host (BOS-419): what the host deployer reported, and the facts only the owner can confirm. */
 export function ThisHost() {
   const facts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 30_000, "host-facts");
   const act = useAction();
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [open, setOpen] = useState(readHostFactsOpen);
   const d = facts.data;
   if (!d) return null;
   const keys = Object.keys(d.facts).sort();
+  const problems = reportedProblems(d);
+  const trouble = problemLine(problems);
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    try {
+      localStorage.setItem(HOST_FACTS_OPEN_KEY, next ? "1" : "0");
+    } catch {}
+  };
   const save = (key: string) =>
     act.run(async () => {
       await api("/api/host-facts", { method: "PUT", body: { key, value: draft[key] ?? "" } });
       facts.reload();
       return "Saved.";
     });
+  const summary = `${d.hostName ? `${d.hostName}, ` : ""}${when(d.reportedAt)}`;
   return (
     <Section id="this-host-h" title="This host">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -2667,25 +2731,45 @@ export function ThisHost() {
           : "The host hasn't reported yet. Once its deployer runs, its facts show up here."}
       </p>
       {keys.length > 0 && (
-        <dl data-testid="host-facts" style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 16px", fontSize: 14 }}>
-          {keys.map((k) => {
-            const f = d.facts[k]!;
-            return (
-              <Fragment key={k}>
-                <dt className="mono">{k}</dt>
-                <dd>
-                  <span className="mono">{f.value}</span> <span className="muted">({f.source === "host" ? "reported by the host" : "confirmed by you"})</span>
-                  {f.conflict && (
-                    <span className="error" role="alert">
-                      {" "}
-                      You confirmed "{f.conflict.confirmed}" but the host reports "{f.conflict.reported}". The host's value is used.
-                    </span>
-                  )}
-                </dd>
-              </Fragment>
-            );
-          })}
-        </dl>
+        <div className="host-facts">
+          <button type="button" className="host-facts-toggle" aria-expanded={open} aria-controls="host-facts-body" onClick={toggle}>
+            <span className="pl-arrow" aria-hidden="true">{open ? "▾" : "▸"}</span>
+            <span>
+              Reported facts ({keys.length}) — {summary}
+            </span>
+            {trouble && (
+              <span className="tag amber" data-testid="host-facts-problems">
+                {trouble}
+              </span>
+            )}
+          </button>
+          <div id="host-facts-body" hidden={!open} style={open ? undefined : { display: "none" }}>
+            {trouble && (
+              <p className="muted" data-testid="host-facts-problem-detail" style={{ fontSize: 13 }}>
+                Worth a look: {[...problems.missing, ...problems.failing, ...problems.addonsDown.map((a) => `addon.${a}`)].join(", ")}.
+              </p>
+            )}
+            <dl data-testid="host-facts" className="host-facts-list">
+              {keys.map((k) => {
+                const f = d.facts[k]!;
+                return (
+                  <Fragment key={k}>
+                    <dt className="mono">{k}</dt>
+                    <dd>
+                      <span className="mono host-fact-value">{f.value}</span> <span className="muted">({f.source === "host" ? "reported by the host" : "confirmed by you"})</span>
+                      {f.conflict && (
+                        <span className="error" role="alert">
+                          {" "}
+                          You confirmed "{f.conflict.confirmed}" but the host reports "{f.conflict.reported}". The host's value is used.
+                        </span>
+                      )}
+                    </dd>
+                  </Fragment>
+                );
+              })}
+            </dl>
+          </div>
+        </div>
       )}
       <h3 style={{ fontSize: 15, fontWeight: 600 }}>Facts only you can give</h3>
       {d.ownerFacts.map((k) => (

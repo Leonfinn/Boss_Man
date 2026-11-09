@@ -1412,7 +1412,17 @@ main() {
     fi
   else
     # Runners are built from what is checked out, which is what the server deploy put there.
-    [[ $COMMIT == "$head" ]] || finish rejected "The runners were not updated. They can only be rebuilt from the version the server runs, which is ${head:0:8}, and you asked for ${COMMIT:0:8} (the server update to it may still be running, or was switched back). Nothing is broken and nothing needs doing now: once the server runs the version you want, use Build and update runners in Settings."
+    # BOS-947: the server may have moved past the card's commit (a newer checked commit was deployed). When the card's
+    # commit is part of what the server runs now, build from the running version: it has everything the card asked for.
+    if [[ $COMMIT != "$head" ]]; then
+      if g cat-file -e "$COMMIT^{commit}" 2>/dev/null && g merge-base --is-ancestor "$COMMIT" "$head"; then
+        REQ_KV=(requested_commit="$COMMIT")
+        ASKED_SHORT=${COMMIT:0:8}
+        COMMIT=$head
+      else
+        finish rejected "The runners were not updated. They can only be rebuilt from the version the server runs, which is ${head:0:8}, and the card named ${COMMIT:0:8}, which is not part of it (the server was probably switched back, or its update is still running). Nothing is broken. Open Settings → Server and runner → Updates and press Build and update runners there: it builds from the version the server runs now."
+      fi
+    fi
   fi
 
   # A restart shares the server's limit, so it can't come right on top of an update (or another restart).
@@ -1473,7 +1483,7 @@ main() {
   if ((rc == 0)); then
     [[ $result == nothing_new ]] || result=deployed
     if [[ $TARGET == restart ]]; then msg="Restarted at ${COMMIT:0:8}: the server was rebuilt from what is checked out and is healthy again."
-    elif [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="New runner image ready (commit ${COMMIT:0:8}); Boss Man is waiting for runs to finish, then swaps the runners and reports the result."; fi
+    elif [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="New runner image ready (commit ${COMMIT:0:8}${REQ_KV[0]:+, built from the version the server runs now; the card named ${ASKED_SHORT}, which that includes}); Boss Man is waiting for runs to finish, then swaps the runners and reports the result."; fi
   else
     case $result in partial | rolled_back) ;; *) result=failed ;; esac
     msg="${msg:-The $TARGET action stopped with an error (exit $rc).} See $LOG on the host."

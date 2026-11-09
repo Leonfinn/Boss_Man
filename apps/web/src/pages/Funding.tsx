@@ -117,6 +117,7 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
   const [overage, setOverage] = useState<"pause" | "urgent" | "all">(s.source.quotaOverage ?? "pause");
   const [off, setOff] = useState<string[]>(s.source.quotaDisabledWindows ?? []);
   const claude = s.source.provider === "anthropic";
+  const synthetic = s.source.provider === "synthetic";
   const [rank, setRank] = useState<string>(s.source.fallbackRank ? String(s.source.fallbackRank) : "");
   const [secretId, setSecretId] = useState<string>(s.source.secretId ?? "");
   const tokens = usePoll((signal) => (claude ? api<Array<{ id: string; name: string; kind: string }>>("/api/secrets", { signal }) : Promise.resolve([])), 60_000, "secrets-for-funding");
@@ -145,18 +146,26 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
           <span>%</span>
         </span>
       </label>
+      {/* The same setting as Claude's extra usage (BOS-227): Synthetic spends paid top-up credit once the weekly allowance is used (BOS-934). */}
       <label className="field-stack">
-        <span>I have extra usage</span>
-        <select aria-label="Extra usage" className="fill" value={overage} onChange={(e) => setOverage(e.target.value as "pause" | "urgent" | "all")}>
+        <span>{synthetic ? "I have top-up credit" : "I have extra usage"}</span>
+        <select aria-label={synthetic ? "Top-up credit" : "Extra usage"} className="fill" value={overage} onChange={(e) => setOverage(e.target.value as "pause" | "urgent" | "all")}>
           <option value="pause">Hold everything at the limit (urgent tickets run until then)</option>
-          <option value="urgent">Keep urgent work running past the limit</option>
-          <option value="all">Keep all work running</option>
+          <option value="urgent">{synthetic ? "Keep urgent work running on top-up credit" : "Keep urgent work running past the limit"}</option>
+          <option value="all">{synthetic ? "Keep all work running on top-up credit" : "Keep all work running"}</option>
         </select>
       </label>
-      {overage !== "pause" && (
-        <span className="muted" style={{ fontSize: 12 }}>
-          Extra usage is billed by Anthropic. Boss Man can't see the balance, so set a spending limit in your Claude account.
-        </span>
+      {(synthetic || overage !== "pause") && (
+      <span className="muted" style={{ fontSize: 12 }}>
+        {synthetic
+          ? overage === "pause"
+            ? `Routine work is held at ${holdAt}% of the weekly allowance and nothing spends top-up credit, except chats and reviews, which always run. Use this if the account has no top-up credit.`
+            : overage === "urgent"
+              ? `Routine work is held at ${holdAt}%. Urgent tickets, chats and reviews carry on past the weekly allowance, paid from your Synthetic top-up credit.`
+              : "Nothing is held: once the weekly allowance is used, Synthetic pays for all work from your top-up credit. You get one note a week when that starts."
+          : "Extra usage is billed by Anthropic. Boss Man can't see the balance, so set a spending limit in your Claude account."}
+        {synthetic && overage !== "pause" ? " Synthetic doesn't report the balance, so Boss Man can't stop before it runs out; check it at synthetic.new." : null}
+      </span>
       )}
       {windows.length > 0 && (
         <fieldset style={{ border: 0, margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -252,6 +261,10 @@ function ProviderQuotaBlock({ q }: { q: NonNullable<FundingStatus["providerQuota
         </>
       )}
       <Trend q={q} />
+      {/* api.synthetic.new has no balance field or route (checked 9 Nov 2026, BOS-934), so this can only say so. */}
+      <span className="muted" style={{ fontSize: 12 }}>
+        Top-up credit: not shown. Synthetic's API doesn't report the balance; see it at synthetic.new. Whether work uses it is your choice under "I have top-up credit" below.
+      </span>
       <span className="muted" style={{ fontSize: 12 }}>
         Checked {ago(q.ageSeconds)}{q.warned.length ? ` · you've been warned at ${q.warned.join("% and ")}%` : ""}
       </span>
