@@ -233,7 +233,7 @@ export type Ticket = {
   assigneeAgentId: string | null;
   assignedToOwner: boolean;
   dueDate: string | null;
-  blockedBy: Array<{ ticketId: string | null; ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
+  blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];
   /** When the earliest of those runs began. */
@@ -453,12 +453,12 @@ export type PlanNode = {
 };
 export type Plan = { nodes: PlanNode[]; edges: Array<{ id: string; from: string; to: string }>; columns: string[][] };
 export type TicketLinks = {
-  waitsOn: Array<{ dependencyId: string; kind: "ticket" | "engagement" | "decision"; id: string; title: string; state: string; open: boolean; link: string }>;
+  waitsOn: Array<{ dependencyId: string; kind: "ticket" | "engagement" | "decision"; id: string; title: string; state: string; open: boolean; until?: "merged" | "done"; link: string }>;
   blocks: Array<{ dependencyId: string; id: string; title: string; state: string; link: string }>;
 };
 
 /** One ticket in the ticket page's Related section. */
-export type RelatedTicket = { id: string; ref: string | null; title: string; state: string; cancelled: boolean };
+export type RelatedTicket = { id: string; ref: string | null; title: string; state: string; cancelled: boolean; /** On a "Waits on" row: when the wait ends (BOS-989). */ until?: "merged" | "done" };
 export type TicketRelated = { feature: { id: string; title: string; status: string } | null; parent: RelatedTicket | null; subtasks: RelatedTicket[]; peers: RelatedTicket[]; waitsOn: RelatedTicket[]; blocks: RelatedTicket[]; mentioned: RelatedTicket[] };
 
 /** Today's date in the browser's time zone, YYYY-MM-DD. */

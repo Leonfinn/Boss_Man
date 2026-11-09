@@ -88,6 +88,22 @@ export const CAP = 40_000;
 /** A reference like HOL-12 (any prefix: an old one still finds the number). */
 export const REF = /^[A-Za-z0-9]{1,10}-(\d{1,9})$/;
 
+/**
+ * Write-time advice only (BOS-989): a summary that names another ticket (BOS-12, or a ticket id) close to "wait",
+ * "after" or "blocked" is an ordering written as prose, which nothing acts on. Returns the one line to add to the
+ * tool's reply, or "" when there is nothing to say. Never a refusal.
+ */
+export function waitsOnAdvice(summary: string | undefined | null): string {
+  if (!summary) return "";
+  const ticket = /\b[A-Za-z][A-Za-z0-9]{0,9}-\d{1,9}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+  const cue = /\b(waits?|waiting|after|blocked)\b/i;
+  for (const m of summary.matchAll(ticket)) {
+    const near = summary.slice(Math.max(0, m.index! - 30), m.index! + m[0].length + 30);
+    if (cue.test(near)) return "\nTip: use update_ticket waitsOn to make this a real link, so you are woken when it is merged or done.";
+  }
+  return "";
+}
+
 /** One line per criterion with the author's verdict, the after-merge ones marked so they read as skippable (DR-024 #5). */
 export function criterionLines(criteria: readonly Criterion[], note: string | null): string[] {
   return readVerdicts(criteria, note).map((r, i) => `- [${r.verdict ?? "not reported"}] ${r.criterion}${isAfterMerge(criteria[i]!) ? " (checked after merge; don't fail the review on it)" : ""}`);
