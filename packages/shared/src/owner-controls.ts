@@ -28,6 +28,8 @@ export const OWNER_CONTROLS = {
     "Actual size", "Fit to window",
     // The banner shown when Boss Man was updated after the page was opened (BOS-550).
     "Reload",
+    // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
+    "Resume",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -71,6 +73,8 @@ export const OWNER_CONTROLS = {
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
   Projects: ["Open …", "Unarchive", "Re-detect"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
+  // The Runs page's emergency stop: every run going now, in every company (BOS-837).
+  Runs: ["End all running runs", "Ending"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
   Plan: ["Refresh"],
   Wiki: [
@@ -106,6 +110,8 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
+    "Stop all work",
     // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
     "Restart the server",
     // This host: confirm a fact only the owner can give.
@@ -113,8 +119,8 @@ export const OWNER_CONTROLS = {
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
   ],
-  // Tool servers and funding sources (a new funding source is added here, not on the Funding tab).
-  "Access and funding": ["Remove", "Add tool server", "Edit", "Delete", "Save", "Add", "Cancel"],
+  // Tool servers, deploy targets and funding sources (a new funding source is added here, not on the Funding tab).
+  "Access and funding": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Add", "Cancel"],
   "Reviews and CEO": [
     "Reset to defaults", "Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours", "Run a retro now",
     "Cancel", "Edit", "Test", "Start a new chapter",
@@ -209,9 +215,14 @@ export const OWNER_FIELDS = {
   "Server and runner": [
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background (infinite mode) runs at once (0 to 16)",
+    // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
+    "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
   ],
   "Access and funding": [
     "Server name", "Server URL", "Transport", "Token secret", "Header name", "Header value",
+    // Deploy targets (BOS-619), with the tag that moves after a successful deploy.
+    "Name", "Address", "Production (you approve every deploy, and high-risk work must deploy to staging first)",
+    "Requires approval (you approve each deploy here too)", "After a successful deploy, move tag", "Tag name", "In the repo of",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
   ],
   "Reviews and CEO": [

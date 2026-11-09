@@ -323,6 +323,10 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => decisionsSvc.drainSecondOpinions());
   const deploysSvc = deploysService(db, {
     now: opts.now,
+    // DR-033: the runner resolves a deploy's commit and moves its tag; a tag it can't move goes to the CEO (`alerts` is built below).
+    runners,
+    alert: (input) => alerts.raise(input),
+    log: (m) => app.log.warn(m),
     onShipped: async (ticketId) => {
       const [t] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(t?.featureId);
@@ -2684,6 +2688,8 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/scheduler/queue", async () => scheduler.queue());
     owner.post("/api/scheduler/tick", async () => scheduler.tick());
+    // Read by Settings → "Stop all work" and the every-page banner, so a reload shows the real hold (BOS-836).
+    owner.get("/api/kill-switch", async () => ({ paused: await scheduler.globallyPaused() }));
     owner.post("/api/kill-switch", async (req) => {
       const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
       await scheduler.setGlobalPause(paused);
@@ -2832,12 +2838,21 @@ export async function buildApp(opts: AppOptions) {
       endpoint: z.string().trim().min(1).max(500),
       isProduction: z.boolean().optional(),
       requiresApproval: z.boolean().optional(),
+      /** DR-033: the tag to move after a successful deploy; null turns it off. Owner-only, like every target setting. */
+      liveTag: z.object({ projectId: Uuid, name: z.string().trim().min(1).max(100) }).nullable().optional(),
     });
     const deployErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
       if (err instanceof DeployError) return reply.code(err.status).send({ error: "deploy", message: err.message });
       throw err;
     };
-    owner.get("/api/companies/:id/deploy-targets", async (req) => deploysSvc.listTargets(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/deploy-targets", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const [targets, last] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id)]);
+      return targets.map((t) => {
+        const d = last.get(t.id);
+        return { ...t, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
+      });
+    });
     owner.post("/api/companies/:id/deploy-targets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       return deploysSvc
@@ -2972,6 +2987,8 @@ export async function buildApp(opts: AppOptions) {
       const q = z.object({ after: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(1000).optional() }).parse(req.query);
       return runsSvc.transcript(id, q).catch(runErrors(reply));
     });
+    // End every run going now, in every company (BOS-837): the owner's emergency stop, behind the Runs page's confirm.
+    owner.post("/api/runs/cancel-all", async () => runsSvc.cancelAll());
     owner.post("/api/runs/:id/cancel", async (req, reply) => runsSvc.cancel(IdParam.parse(req.params).id).catch(runErrors(reply)));
 
     // Stale-blocker, stalled-run and missed-work sweeps (R21, R32, R82); also run on a timer.

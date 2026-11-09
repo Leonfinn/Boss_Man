@@ -1,7 +1,7 @@
 // The runner's own git in a ticket's clone, fenced (BOS-323 step 4): every workspace and merge test
 // again with clones and the fence on, then what the fence adds. A program the clone's own config
-// names (a clean filter, an fsmonitor) still runs for the runner's git there, so it's held to the
-// clone; and an agent fenced in a clone can't write the shared repo at all. Needs Landlock.
+// names (a clean filter, an fsmonitor) is held to the clone if it runs (BOS-332's config guard now
+// removes the known ones first, fenced or not); and an agent fenced in a clone can't write the shared repo at all. Needs Landlock.
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,10 +83,14 @@ describe.skipIf(!live)("the runner's git in a clone, fenced (BOS-323)", () => {
     expect(readdirSync(path.join(ws.root, "tmp"))).toEqual([]);
   });
 
-  it("the same planted filter reaches outside the clone when the runner's git isn't fenced", async () => {
+  // Before BOS-332 this was the control (unfenced, the filter ran). Now the config guard removes the planted keys
+  // before the runner's git runs, so even unfenced (an `unavailable` host) nothing runs, and every job still works.
+  it("the same planted filter doesn't run when the runner's git isn't fenced either: the config guard removes it (BOS-332)", async () => {
     const { ws, spec, dir } = await ticket(false);
-    const { out: outside } = await lifecycle(ws, spec, dir, () => plant(dir));
-    expect(existsSync(path.join(outside, "filter"))).toBe(true);
+    const { out: outside, cp, savedPatch } = await lifecycle(ws, spec, dir, () => plant(dir));
+    expect(readdirSync(outside)).toEqual([]);
+    expect(cp?.files).toBe(1);
+    expect(savedPatch).toBe(true);
   });
 
   // Jane's finding on BOS-321: an agent swaps its clone's `.git` for a pointer at a git dir it controls (outside the clone)
@@ -111,13 +115,16 @@ describe.skipIf(!live)("the runner's git in a clone, fenced (BOS-323)", () => {
     expect(readdirSync(await pointed(true))).toEqual([]);
   });
 
-  it("(control) the same swapped pointer runs the planted filter when the runner's git isn't fenced", async () => {
-    expect(existsSync(path.join(await pointed(false), "filter"))).toBe(true);
+  // Was the control before BOS-332: the runner's git no longer follows a ticket folder's .git pointer at all
+  // (a .git file must lead to a worktree admin folder the repo confirms), so unfenced it's refused and nothing runs.
+  it("the same swapped pointer runs nothing when the runner's git isn't fenced either: the pointer isn't followed (BOS-332)", async () => {
+    expect(readdirSync(await pointed(false))).toEqual([]);
   });
 
+  // BOS-332's own check comes first now (git only in one of the runner's repos), so the error is that one; either way it's refused.
   it("refuses git in a clone without the shared repo to fence it with", async () => {
     const { ws, dir } = await ticket(true);
-    await expect((ws as unknown as { git(a: string[], o: object): Promise<string> }).git(["status"], { cwd: dir })).rejects.toThrow(/can't be fenced/);
+    await expect((ws as unknown as { git(a: string[], o: object): Promise<string> }).git(["status"], { cwd: dir })).rejects.toThrow(/can't be fenced|only runs in one of its own repos/);
   });
 
   it("gives an agent fenced in a clone no write to the shared repo, where a worktree's agent may write objects", async () => {

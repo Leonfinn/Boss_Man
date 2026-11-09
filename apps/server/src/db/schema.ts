@@ -797,6 +797,15 @@ export const deploys = pgTable("deploys", {
   /** The run that carries the deploy out; only it receives the target's secrets. */
   runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
   outcome: text("outcome"),
+  /** The full sha `ref` resolved to when the deploy was asked for (DR-033); null when it isn't a git ref or couldn't be read. */
+  commit: text("commit"),
+  /** The deploy tag (DR-033): the target's tag name, the remote's sha before and after the move, when, and how it went. */
+  tagName: text("tag_name"),
+  tagFrom: text("tag_from"),
+  tagTo: text("tag_to"),
+  tagAt: timestamp("tag_at", { withTimezone: true }),
+  /** "pending", "moved", "unchanged", or "skipped: <why>" / "failed: <git's text>". Null: the target has no tag, or the deploy hasn't finished. */
+  tagResult: text("tag_result"),
   createdAt: createdAt(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
 });
