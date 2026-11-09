@@ -40,9 +40,9 @@ import { reviewTicketWriteRefusal, type skillProposalsService } from "./services
 import { AgentError, type agentsService } from "./services/agents.js";
 import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
 import type { paService } from "./services/pa.js";
-import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
+import { SCRUM_MASTER_DUTY, type watchdogService } from "./services/watchdog.js";
 import type { alertLadder } from "./services/alert-ladder.js";
-import { RetroError, type retroService } from "./services/retro.js";
+import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
 import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
