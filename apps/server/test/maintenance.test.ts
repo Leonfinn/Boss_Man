@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,8 +7,8 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { companies, decisions, notifications, runners, settings, tickets, wakes } from "../src/db/schema.js";
-import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
+import { companies, decisions, notifications, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { MISSED_REASON } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -611,5 +611,76 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(await getHold(c.db)).toBeNull();
     expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/app-co/recreate"]);
     expect(await c.titles()).toContain("note: Runners updated");
+  });
+});
+
+describe("Ask agents to wrap up while an update waits (BOS-988)", () => {
+  it("messages every still-running run, shows them, and leaves the update waiting so it goes ahead as normal", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    expect(c.commands).toHaveLength(1);
+    // The owner presses Build and update runners: an update hold starts and its own message goes out.
+    await c.maintenance.start();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update" });
+
+    // The owner then presses "Ask agents to wrap up": it is allowed while the update waits, and the run is told.
+    const r = (await c.req("POST", "/api/maintenance/wrapup", {})).json() as { on: boolean; kind: string; wrapAsked?: boolean; runsList?: unknown[] };
+    expect(r).toMatchObject({ on: true, kind: "update", wrapAsked: true });
+    expect(r.runsList).toHaveLength(1);
+    const told = c.messages.map((m) => m.text);
+    expect(told).toEqual([`Message from Boss Man: ${WRAP_UP}`, `Message from Boss Man: ${WRAP_UP_DURING_UPDATE}`]);
+
+    // The update hold is still there (it did not cancel or replace it), waiting for the same run.
+    const hold = (await getHold(c.db))!;
+    expect(hold.kind).toBe("update");
+    expect(hold.wrapSince).toBeTruthy();
+
+    // Pressing again tells nobody twice.
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(c.messages).toHaveLength(2);
+
+    // The run ends: the update goes ahead by itself, as though the wrap-up had not been asked.
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/app-co/recreate"]);
+    expect(await c.titles()).toContain("note: Runners updated");
+  });
+
+  it("Cancel wrap-up during an update takes back only the ask, never the update", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect((await getHold(c.db))!.wrapSince).toBeTruthy();
+
+    expect((await c.req("POST", "/api/maintenance/cancel-wrap", {})).json()).toEqual({ cancelled: true });
+    const hold = (await getHold(c.db))!;
+    expect(hold.kind).toBe("update");
+    expect(hold.wrapSince).toBeUndefined();
+    expect(hold.wrapTold).toBeUndefined();
+    // No "wrap-up cancelled" or "update cancelled" notice: the update is untouched and still swaps when the run ends.
+    expect(await c.titles()).not.toContain("note: Wrap-up cancelled");
+    expect(await c.titles()).not.toContain("note: Runner update cancelled");
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+  });
+
+  it("the update's own message reaches a run that starts just after the hold (it is told on the next pass), once", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.maintenance.start();
+    expect(c.messages).toHaveLength(0); // nothing running yet
+    // A run whose start was already on its way when the hold began (BOS-988): it appears after the start message.
+    await c.db.insert(runs).values({ id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: null, model: "m", startedAt: new Date(0) });
+    await c.maintenance.step();
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP}`]);
+    await c.maintenance.step();
+    expect(c.messages).toHaveLength(1); // once per run, as before
   });
 });

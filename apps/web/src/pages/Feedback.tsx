@@ -342,7 +342,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
         Feedback portal
       </h2>
       <p className="muted" style={{ fontSize: 14 }}>
-        A page for people outside: they see the features you choose (tick "Show on the feedback portal" on a feature), vote on how much each matters to them, comment, and suggest ideas. What they send arrives here marked "from outside". Anyone with the link can use it, so share it only where you mean to.
+        A page for people outside: they see the features on the portal (new features go on by default unless they look like security work), vote on how much each matters to them, comment, and suggest ideas. What they send arrives here marked "from outside". Anyone with the link can use it, so share it only where you mean to.
       </p>
       <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
         <input type="checkbox" checked={d.portalEnabled} onChange={(e) => run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { enabled: e.target.checked } }))} />

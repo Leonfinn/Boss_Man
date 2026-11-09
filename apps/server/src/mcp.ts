@@ -9,7 +9,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, portalVerdict, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
@@ -31,7 +31,7 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { staleVersionMessage, startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, failedAfterMerge, isAfterMerge, missingVerdicts, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -94,6 +94,28 @@ async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: str
 const CEO_ASK_HELD = "Not posted. This reply asks the owner to do something, but no open decision covers it, and the owner doesn't watch tickets, so the ask would be lost. Call raise_decision with blocksTicketId set to this ticket (what you tried first, and the steps they need), then send the reply again. If the reply only reports status and asks nothing of the owner, send it again with notAnAsk set to true and it will post.";
 export { cut };
 const OUTLINE_OVER = 8000;
+
+/**
+ * What a raiser is told when it puts a card in front of the owner for a merged ticket's live check (BOS-963).
+ * The answer records against the after-merge criterion the card names (by number or text via `criterion`)
+ * or, failing that, one named in its own question or options; a card worded its own way settles nothing and
+ * the ticket can never close on it, so say so now, not after three answers. Empty when the ticket is
+ * unmerged, has no after-merge checks left, or the card settles one.
+ */
+async function afterMergeCardNote(db: Db, ticketId: string, question: string, options: readonly string[], criterionIndexes?: number[]): Promise<string> {
+  const [t] = await db.select({ criteria: tickets.acceptanceCriteria, note: tickets.stateNote, merged: tickets.mergeCommit }).from(tickets).where(eq(tickets.id, ticketId));
+  if (!t?.merged) return "";
+  const criteria = readCriteria(t.criteria);
+  const waiting = unreportedAfterMerge(criteria, t.note);
+  if (!waiting.length) return "";
+  if (criterionIndexes?.length) return "";
+  if (criteriaForCard(criteria, question, options).length) return "";
+  const said = `${question}\n${options.join("\n")}`;
+  const closest = waiting.flatMap((text) => criteria.flatMap((c) => (criterionText(c) === text ? [{ text, hit: criterionOverlap(text, said) }] : []))).sort((a, b) => b.hit - a.hit)[0];
+  const named = closest ? ` The closest is "${closest.text}" (${closest.hit ? `${closest.hit} of its words` : "none of its words"} in this card).` : "";
+  const list = waiting.map((w) => `"${w}"`).join(", ");
+  return `Heads up: this ticket is merged and still has after-merge checks unreported (${list}), and this card names none of them in its question or options, so the owner's answer won't record one and the ticket can't close on it.${named} Raise the card with criterion set to the check's number or its exact text, or ask about it in the criterion's own words, and withdraw this one if it was meant to settle the check.`;
+}
 
 export type McpHooks = {
   onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown>;
@@ -311,7 +333,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "raise_decision",
     {
-      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. Each fence line must say where the command runs and as which account: sh host=\"<name>\" as=\"root\" or as=\"login\". For the command that runs on the server Boss Man itself runs on, write host=\"{{host}}\": Boss Man fills it with the name the host deployer reports (the same name server_status gives as the host), so never an old name from memory, an old runbook or a compose file, as the owner would be sent to a machine that no longer runs Boss Man. A card that names another host is refused and names the one Boss Man has on record; leave the host out and Boss Man fills in the reported name; with no host report yet {{host}} is refused and a named host is raised unconfirmed. A card that sets up a new host Boss Man has no record for yet passes newHost with that name; only the CEO may pass it, and only that one name may be unrecorded on the card. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. A command that waits for typed input (read, read -p, sudo -S, passwd, ssh-keygen without -N, docker login without --password-stdin) is refused: give the value in the command, or for a secret an editor step naming the exact line or Boss Man's Secrets screen. So is a pager (psql without -P pager=off, git log/diff/show without --no-pager, systemctl status or journalctl without --no-pager, less, more, man), a database or container-shell prompt the owner would type into (psql with no -c, docker exec -it … bash; use psql -P pager=off -c \"…\"), and a command that never returns by itself (docker stats without --no-stream, docker logs -f, tail -f, watch, top, ping without -c); none of these can be overridden. A command block that prints nothing when it works (only assignments, cd, export, or cp/mv/install/mkdir/chmod/chown/ln/touch/rm without -v) must say so in its sentence (\"This prints nothing.\") or show the result (D=$(…); echo \"$D\"). Steps with a host command (docker, docker compose, systemctl, tailscale, chown, chmod, anything naming .env) need proof (DR-024): \"rehearsed <script> @ <commit>\" when the CI rehearsal under scripts/rehearse/ passed on that commit, or \"not rehearsed: <what hasn't been tried and why>\", and then the last step must be a look-only check (docker compose ps, docker logs, tailscale status, curl...) saying what to paste back. The card shows the proof as a banner. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety, unfilled tokens, and typed input, pagers and commands that never return. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again. approveSummary (optional, one line, up to 120 characters, plain text) says what choosing your recommended option does, e.g. \"Use deSEC for DNS on the website\": with it, the owner's phone notification can offer an Approve button that answers with your recommended option. Approve is offered only on a plain question with 2 to 4 options and no blocksTicketId, steps, ownerMustDo, stillNeeded, setsUp or doAfter, so write the summary so it can be approved without opening the card.",
+      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. Each fence line must say where the command runs and as which account: sh host=\"<name>\" as=\"root\" or as=\"login\". For the command that runs on the server Boss Man itself runs on, write host=\"{{host}}\": Boss Man fills it with the name the host deployer reports (the same name server_status gives as the host), so never an old name from memory, an old runbook or a compose file, as the owner would be sent to a machine that no longer runs Boss Man. A card that names another host is refused and names the one Boss Man has on record; leave the host out and Boss Man fills in the reported name; with no host report yet {{host}} is refused and a named host is raised unconfirmed. A card that sets up a new host Boss Man has no record for yet passes newHost with that name; only the CEO may pass it, and only that one name may be unrecorded on the card. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. A command that waits for typed input (read, read -p, sudo -S, passwd, ssh-keygen without -N, docker login without --password-stdin) is refused: give the value in the command, or for a secret an editor step naming the exact line or Boss Man's Secrets screen. So is a pager (psql without -P pager=off, git log/diff/show without --no-pager, systemctl status or journalctl without --no-pager, less, more, man), a database or container-shell prompt the owner would type into (psql with no -c, docker exec -it … bash; use psql -P pager=off -c \"…\"), and a command that never returns by itself (docker stats without --no-stream, docker logs -f, tail -f, watch, top, ping without -c); none of these can be overridden. A command block that prints nothing when it works (only assignments, cd, export, or cp/mv/install/mkdir/chmod/chown/ln/touch/rm without -v) must say so in its sentence (\"This prints nothing.\") or show the result (D=$(…); echo \"$D\"). Steps with a host command (docker, docker compose, systemctl, tailscale, chown, chmod, anything naming .env) need proof (DR-024): \"rehearsed <script> @ <commit>\" when the CI rehearsal under scripts/rehearse/ passed on that commit, or \"not rehearsed: <what hasn't been tried and why>\", and then the last step must be a look-only check (docker compose ps, docker logs, tailscale status, curl...) saying what to paste back. The card shows the proof as a banner. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety, unfilled tokens, and typed input, pagers and commands that never return. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again. approveSummary (optional, one line, up to 120 characters, plain text) says what choosing your recommended option does, e.g. \"Use deSEC for DNS on the website\": with it, the owner's phone notification can offer an Approve button that answers with your recommended option. Approve is offered only on a plain question with 2 to 4 options and no blocksTicketId, steps, ownerMustDo, stillNeeded, setsUp or doAfter, so write the summary so it can be approved without opening the card. When the card is how the owner checks a merged ticket's after-merge acceptance criterion, pass criterion with that check's number (as listed on the ticket, 1-based) or its exact text: the owner's answer then records that criterion's pass or fail however the card is worded, and the ticket can close on it. Without criterion the answer only records a check the card's own question or options name, and the tool tells you when it names none.",
       // Ordering (BOS-551): when this card must come before or after another owner card, pass doAfter/doBefore
       // (the other card's id and a short label) so the owner's queue numbers them and says which to do first.
       inputSchema: {
@@ -335,9 +357,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // A restart of the server resets what this card measures (a memory reading, say), so the next
         // update card lists it to do first (BOS-551).
         resetsOnRestart: z.boolean().optional(),
+        // Which of the ticket's after-merge acceptance criteria this card settles (BOS-963): its number (1, 2, ...)
+        // or its text. The owner's answer then records that criterion's pass or fail however the card is worded.
+        criterion: z.union([z.number().int(), z.string().min(1).max(500)]).optional(),
       },
     },
-    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart }) => {
+    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       // Stored cleaned, so the phone shows exactly what is stored (BOS-243 rule 2).
       const summary = approveSummary === undefined ? undefined : cleanSummary(approveSummary);
@@ -352,6 +377,18 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // Second layer: the service refuses too, but the tool should give the reason (BOS-86 round 12).
         const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, blocksTicketId, scope.agentId);
         if (reviewWrite) return fail(reviewWrite);
+      }
+      // A card can name the after-merge criterion it settles (BOS-963), by number or by its text. Refuse now
+      // if it points at nothing, or at a criterion that isn't checked after merge, rather than after an answer.
+      let criterionIndexes: number[] | undefined;
+      if (criterion !== undefined) {
+        if (!blocksTicketId) return fail("criterion says which acceptance criterion this card settles, so it goes with blocksTicketId set to that ticket.");
+        const [owner] = await db.select({ criteria: tickets.acceptanceCriteria }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
+        const list = readCriteria(owner?.criteria);
+        const at = typeof criterion === "number" ? criterion - 1 : list.findIndex((c) => criterionText(c).toLowerCase() === criterion.trim().toLowerCase());
+        if (!(at >= 0 && at < list.length)) return fail(`No criterion ${JSON.stringify(criterion)} on this ticket. Its criteria are:${list.length ? list.map((c, i) => ` ${i + 1}. ${criterionText(c)}${isAfterMerge(c) ? " (checked after merge)" : ""}`).join(";") : " none"}. Pass its number or its exact text.`);
+        if (!isAfterMerge(list[at]!)) return fail(`Criterion ${at + 1} ("${criterionText(list[at]!)}") is checked before merge, so a review reports it, not an owner card.`);
+        criterionIndexes = [at];
       }
       // Safe to repeat (R42): the same open question from the same agent isn't raised twice.
       if (scope.agentId) {
@@ -371,7 +408,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[] };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, criterionIndexes, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary });
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
@@ -379,7 +416,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const links = await missingPageNote(db, scope.companyId, `${question}\n${options.join("\n")}\n${steps?.join("\n") ?? ""}`);
       // A link the raiser asked for that wasn't stored is named, with the reason (BOS-625).
       const skipped = (d.droppedLinks ?? []).map((l) => `${l.link} link ${l.decisionId} ignored: ${l.reason === "another company" ? "not an open card in your company" : l.reason === "not open" ? "the card is already answered" : "no such card"}.`);
-      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${links ? `\n\n${links}` : ""}`);
+      // Say now, not after the owner answers, whether this card's answer can settle an after-merge check (BOS-963):
+      // the answer records against the criteria the card names, so a card worded differently would record nothing.
+      const settle = blocksTicketId ? await afterMergeCardNote(db, blocksTicketId, question, options, criterionIndexes) : "";
+      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${settle ? `\n\n${settle}` : ""}${links ? `\n\n${links}` : ""}`);
     },
   );
 
@@ -679,7 +719,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, showPublicly, and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. showPublicly puts the summary on the public roadmap; it needs a publicSummary, so write the summary first.",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, showPublicly, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. showPublicly puts the summary on the public roadmap; it needs a publicSummary, so write the summary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
       inputSchema: {
         action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark", "size", "update_feature"]),
         effort: z.number().int().min(1).max(5).optional(),
@@ -693,7 +733,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         objectiveId: z.string().uuid().nullable().optional(),
         milestoneId: z.string().uuid().nullable().optional(),
         publicSummary: z.string().trim().max(2000).nullable().optional(),
+        publicTitle: z.string().trim().max(200).nullable().optional(),
         showPublicly: z.boolean().optional(),
+        portalVisible: z.boolean().optional(),
+        keepOffPortal: z.literal(true).optional(),
         importance: z.enum(IMPORTANCE).optional(),
         highlight: z.string().max(2000).optional(),
         title: z.string().min(1).max(200).optional(),
@@ -737,6 +780,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
           if (!me || (me.role !== "ceo" && me.role !== "manager" && me.template !== "product-manager")) return fail("Only the CEO, a manager or a product manager can place features on the roadmap.");
           if (!input.featureId) return fail("Give featureId.");
+          // update_feature never saves a feature's title or description, so a title/description here would be silently
+          // ignored; worse, it could be used as decoy text to slip a security-worded feature onto the portal (BOS-991).
+          if (input.title !== undefined || input.description !== undefined) return fail("update_feature does not change a feature's title or description. Leave them out.");
           const changes = {
             ...(input.objectiveId !== undefined ? { objectiveId: input.objectiveId } : {}),
             ...(input.milestoneId !== undefined ? { milestoneId: input.milestoneId } : {}),
@@ -744,10 +790,30 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             ...(input.horizon !== undefined ? { horizon: input.horizon } : {}),
             ...(input.status !== undefined ? { status: input.status } : {}),
             ...(input.publicSummary !== undefined ? { publicSummary: input.publicSummary } : {}),
+            ...(input.publicTitle !== undefined ? { publicTitle: input.publicTitle } : {}),
             ...(input.showPublicly !== undefined ? { showPublicly: input.showPublicly } : {}),
+            ...(input.portalVisible !== undefined ? { portalVisible: input.portalVisible } : {}),
+            // An agent may mark a feature sensitive, but only the owner clears that mark: these agents read outside
+            // feedback during triage, so a hostile note must not be able to talk one into publishing a marked feature.
+            ...(input.keepOffPortal === true ? { keepOffPortal: true } : {}),
           };
-          if (!Object.keys(changes).length) return fail("Nothing to change: give objectiveId, milestoneId, rank (1 to 5), horizon (now, next or later), status, publicSummary or showPublicly.");
+          if (!Object.keys(changes).length) return fail("Nothing to change: give objectiveId, milestoneId, rank (1 to 5), horizon (now, next or later), status, publicSummary, publicTitle, showPublicly, portalVisible or keepOffPortal (true only).");
           if (!input.reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
+          // A feature the portal rule calls security work stays off the portal: agents read hostile feedback during
+          // triage, so a note must not talk one into publishing it. Only the owner can tick it on in the app (BOS-991).
+          if (input.portalVisible === true) {
+            const target = await feedback.feature(input.featureId, scope.companyId);
+            const facts = await feedback.portalFacts(scope.companyId, target.areaId, target.driverScores as Record<string, number | null>);
+            // Judge the stored feature: update_feature never saves title/description, so input values must not be used here.
+            const verdict = portalVerdict({
+              title: target.title,
+              description: target.description,
+              ...facts,
+              keepOffPortal: input.keepOffPortal ?? target.keepOffPortal,
+              hasPublicSummary: true,
+            });
+            if (verdict.reason === "security") return fail("This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.");
+          }
           const f = await feedback.updateFeature(input.featureId, changes, scope.companyId);
           const parts = [
             input.objectiveId !== undefined ? (input.objectiveId ? "linked it to an objective" : "unlinked its objective") : null,
@@ -756,7 +822,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             input.horizon !== undefined ? `column ${input.horizon ?? "automatic"}` : null,
             input.status !== undefined ? `status ${input.status}` : null,
             input.publicSummary !== undefined ? (input.publicSummary ? "wrote its public summary" : "cleared its public summary") : null,
+            input.publicTitle !== undefined ? (input.publicTitle ? "wrote its public title" : "cleared its public title") : null,
             input.showPublicly !== undefined ? (input.showPublicly ? "shows it publicly" : "hides it from the public roadmap") : null,
+            input.portalVisible !== undefined ? (input.portalVisible ? "put it on the feedback portal" : "took it off the feedback portal") : null,
+            input.keepOffPortal === true ? "kept it off the portal (sensitive)" : null,
           ].filter(Boolean);
           await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "feature_updated", summary: `${me.name} placed "${f.title}" on the roadmap: ${parts.join(", ")}. ${input.reason}` });
           return text(`Updated "${f.title}": ${parts.join(", ")}.`);

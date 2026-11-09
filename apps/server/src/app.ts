@@ -407,6 +407,17 @@ export async function buildApp(opts: AppOptions) {
         if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
       }
     },
+    // BOS-988: the same message, only to the runs the drain has not told yet, answering with the ones it reached.
+    tellRuns: async (text, runIds) => {
+      const reached: string[] = [];
+      for (const runId of runIds) {
+        const [r] = await db.select({ companyId: runsTable.companyId }).from(runsTable).where(and(eq(runsTable.id, runId), isNull(runsTable.endedAt)));
+        if (!r) continue;
+        const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, r.companyId));
+        if (runner && runners.send(runner.id, { type: "run.message", runId, text: `Message from Boss Man: ${text}`, interrupt: false })) reached.push(runId);
+      }
+      return reached;
+    },
     // `sweeps` is built further down; this only runs when a hold lifts.
     afterHold: (since) => sweeps.resumeAfterUpdate(since),
     dir: opts.deployerDir,
@@ -514,7 +525,7 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => semantic.stop());
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
-  const dashboard = dashboardService(db, { now: opts.now });
+  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc });
   const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
@@ -2069,7 +2080,12 @@ export async function buildApp(opts: AppOptions) {
         return importErrors(reply)(err);
       }
       for (const pageId of done.wikiPageIds) semantic.enqueue(done.companyId, pageId);
-      await decisionsSvc.raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" });
+      // The company is already saved and its id is what the caller needs. A failure while raising the
+      // checklist card must not turn a successful import into an error reply with no company id (BOS-927):
+      // log it and still return the import's result.
+      await decisionsSvc
+        .raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" })
+        .catch((err) => app.log.error({ err, companyId: done.companyId }, "import checklist card failed"));
       if (launch.enabled)
         void launch.start(done.companyId).catch((err) =>
           notes.notify({ companyId: done.companyId, agentId: null, level: "flag", title: `${done.name}'s runner didn't start`, body: (err as Error).message, link: "#/settings" }).catch(() => {}),
@@ -2248,7 +2264,9 @@ export async function buildApp(opts: AppOptions) {
       milestoneId: Uuid.nullable(),
       objectiveId: Uuid.nullable(),
       portalVisible: z.boolean(),
+      keepOffPortal: z.boolean(),
       publicSummary: z.string().trim().max(2000).nullable(),
+      publicTitle: z.string().trim().max(200).nullable(),
       showPublicly: z.boolean(),
     });
     owner.get("/api/companies/:id/feedback-settings", async (req) => {
@@ -2578,6 +2596,19 @@ export async function buildApp(opts: AppOptions) {
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
+    // The number for the menu badge (BOS-969): how many cards need the owner now, and how many are
+    // folded into "Waiting, nothing to do yet", from the same rows and rule as the queue above. The
+    // screen passes what it is showing by company (open, waiting) so its own heading agrees with it.
+    owner.get("/api/decisions/tally", async (req) => {
+      const q = z
+        .object({ companyId: z.string().uuid().optional(), includeAll: z.string().optional(), open: z.coerce.number().int().min(0).max(10_000).optional(), waiting: z.coerce.number().int().min(0).max(10_000).optional() })
+        .parse(req.query ?? {});
+      return decisionsSvc.queueTally({
+        ...(q.companyId ? { companyId: q.companyId } : {}),
+        ...(q.includeAll ? { includeAll: true } : {}),
+        ...(q.open !== undefined && q.waiting !== undefined ? { visible: { open: q.open, waiting: q.waiting } } : {}),
+      });
+    });
     // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.
     owner.get("/api/decisions/with-team", async () => decisionsSvc.withTeam());
 

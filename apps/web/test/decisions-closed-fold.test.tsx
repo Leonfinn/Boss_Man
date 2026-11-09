@@ -210,7 +210,7 @@ describe.skipIf(!browser)("closed Decisions cards fold away (BOS-809)", () => {
       expect(m.updateListItems).toBe(4);
       expect(m.moreButton).toBe("+9 more");
       // Closed cards are not counted as waiting.
-      expect(m.waiting).toContain("1 decision waiting");
+      expect(m.waiting).toContain("1 decision to do");
       // No sideways overflow.
       expect(m.scrollWidth).toBeLessThanOrEqual(m.innerWidth + 1);
     } finally {

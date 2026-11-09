@@ -207,6 +207,10 @@ export type Decision = {
   evidence?: StallEvidence | null;
 };
 
+/** (BOS-969) The Decisions menu badge and page heading: how many cards need the owner now, and how
+ * many are folded into "Waiting, nothing to do yet". One server figure, so the two never drift. */
+export type DecisionTally = { open: number; waiting: number };
+
 export type StallEvidence = {
   runId: string;
   agent: string | null;
@@ -486,8 +490,14 @@ export type Feature = {
   milestoneId: string | null;
   objectiveId: string | null;
   portalVisible: boolean;
+  /** Marked "keep off the portal (sensitive)"; the default never overrides it. */
+  keepOffPortal: boolean;
   publicSummary: string | null;
+  /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
+  publicTitle: string | null;
   showPublicly: boolean;
+  /** Why the feature is on or off the portal: onPortal, or the reason it is held off (BOS-957). */
+  portal?: { onPortal: boolean; reason: "sensitive" | "security" | "needs public summary" | null };
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;

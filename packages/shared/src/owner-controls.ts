@@ -93,7 +93,7 @@ export const OWNER_CONTROLS = {
   ],
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
-    "Save summary", "Delete feature", "Discard draft",
+    "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all",
   ],
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Back to the list", "Unlink",
@@ -208,7 +208,8 @@ export const OWNER_FIELDS = {
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
     "New feature", "Area", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
-    "Show on the feedback portal, where visitors can vote on it", "Public summary", "Show publicly",
+    "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Public title (optional)", "Public summary", "Show publicly",
+    "On portal",
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",

@@ -512,6 +512,11 @@ label.chip:focus-within { outline: 2px solid var(--accent); outline-offset: 2px;
 .insight-list li:last-child { border-bottom: 0; padding-bottom: 0; }
 table.features td, table.features th { padding: 8px 10px; vertical-align: middle; }
 table.features tr.group th { padding-top: 16px; font-family: var(--sans); font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--ink); background: var(--ground); }
+/* A feature's tasks fold behind its arrow, and the WORK summary opens them too (BOS-956). */
+.feature-fold { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px; margin: 0 -4px; background: none; border: 0; border-radius: 6px; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.feature-fold:hover { text-decoration: underline; }
+.feature-work { white-space: nowrap; }
+.feature-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input.search { flex: 1; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--field); color: var(--ink); }
 
 .inbox { display: grid; grid-template-columns: minmax(260px, 380px) minmax(0, 1fr); gap: 20px; align-items: start; }

@@ -1,5 +1,5 @@
 {
-  "id": "cab4741f-4926-4f7d-8858-ccab942bfb3a",
+  "id": "ad890ac5-9d8b-400a-8d9b-9c93c116b8e7",
   "prevId": "aea8609f-b2ca-4e56-8295-1ac16193ab9f",
   "version": "7",
   "dialect": "postgresql",
@@ -3233,6 +3233,13 @@
           "notNull": true,
           "default": false
         },
+        "keep_off_portal": {
+          "name": "keep_off_portal",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "public_summary": {
           "name": "public_summary",
           "type": "text",
@@ -3698,18 +3705,6 @@
         },
         "portal_intro": {
           "name": "portal_intro",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "portal_back_url": {
-          "name": "portal_back_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "portal_back_text": {
-          "name": "portal_back_text",
           "type": "text",
           "primaryKey": false,
           "notNull": false
