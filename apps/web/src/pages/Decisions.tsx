@@ -5,7 +5,7 @@ import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
-import { raisedAgo } from "../age";
+import { ageLabel, raisedAgo } from "../age";
 import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
@@ -84,11 +84,6 @@ const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { ho
 const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Checking and merging", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted" };
 const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
 const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
-
-const minutesAgo = (iso: string) => {
-  const m = Math.max(1, Math.floor((Date.now() - new Date(iso).getTime()) / 60_000));
-  return m >= 120 ? `${Math.floor(m / 60)} hours` : m === 1 ? "1 minute" : `${m} minutes`;
-};
 
 /** The facts behind a stalled-run alert, in plain words: who, since when, the last sign of life, the runner, the last steps. */
 const PREVIEW_LINES = 8;
@@ -296,7 +291,7 @@ function StallEvidenceView({ e }: { e: StallEvidence }) {
         {e.agent ?? "An agent"} on {e.ticketId ? <a href={`#/tickets/${e.ticketId}`}>{e.ticket ?? "a task"}</a> : (e.ticket ?? "no task")}. Run started {when(e.startedAt)}.
       </p>
       <p>
-        {e.lastEventAt ? `Last activity ${minutesAgo(e.lastEventAt)} ago${last ? `: ${last.label}${last.body && last.tone !== "text" ? ` ${last.body.slice(0, 100)}` : ""}` : "."}` : "No sign of life since it was sent to the runner."}
+        {e.lastEventAt ? `Last activity ${ageLabel(Date.now() - new Date(e.lastEventAt).getTime())}${last ? `: ${last.label}${last.body && last.tone !== "text" ? ` ${last.body.slice(0, 100)}` : ""}` : "."}` : "No sign of life since it was sent to the runner."}
       </p>
       <p>{e.runner.connected ? "Runner: connected." : `Runner: offline${e.runner.lastSeenAt ? ` since ${when(e.runner.lastSeenAt)}` : ""}.`}</p>
       <p>{e.waitingOnOwner ? "It is waiting on you for a permission answer." : "It is not waiting on you."}</p>

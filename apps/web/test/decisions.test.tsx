@@ -348,7 +348,7 @@ describe("decision queue", () => {
       />,
     );
     expect(screen.getByRole("link", { name: "Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
-    expect(screen.getByText("Last activity 14 minutes ago: Run npm test in_progress")).toBeTruthy();
+    expect(screen.getByText("Last activity 14 min ago: Run npm test in_progress")).toBeTruthy();
     expect(screen.getByText("Runner: offline since", { exact: false })).toBeTruthy();
     expect(screen.getByText("It is not waiting on you.")).toBeTruthy();
     expect(screen.getByText("Cancel run: stops it; message the agent on the task to start again.")).toBeTruthy();
@@ -356,6 +356,19 @@ describe("decision queue", () => {
     expect((await screen.findByRole("link", { name: "See the whole run" })).getAttribute("href")).toBe("#/runs/r1");
     expect(screen.queryByText("Step 1")).toBeNull();
     expect(screen.getByText("Step 6")).toBeTruthy();
+  });
+
+  it("gives a stalled run's age in one wording, the same as its Raised line (BOS-888)", () => {
+    // 119 minutes: the card used to say "for 119 minutes" and "119 min ago" is "1h ago" (age.ts floors).
+    const at = new Date(Date.now() - 119 * 60_000).toISOString();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ run: { id: "r1", endedAt: null }, items: [], next: 0, more: false }), { status: 200 })));
+    const evidence = { runId: "r1", agent: "CEO", ticketId: null, ticket: null, startedAt: at, lastEventAt: at, lastStep: null, runner: { connected: true, lastSeenAt: null }, waitingOnOwner: false };
+    render(<Decisions decisions={[decision({ kind: "stalled_run", createdAt: at, question: "CEO has sent nothing for 119 minutes.", options: ["Keep waiting", "Cancel run"], recommendedOption: "Keep waiting", evidence })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("Last activity 1h ago", { exact: false })).toBeTruthy();
+    // The Raised line is the same age in its long words, and both floor 119 minutes to the same hour.
+    expect(screen.getByText("Raised", { exact: false }).textContent).toContain("1h ago");
+    expect(screen.queryByText(/119 minutes ago/)).toBeNull();
+    expect(screen.queryByText(/2 hours ago/)).toBeNull();
   });
 
   it("says when a stalled run never gave a sign of life", () => {

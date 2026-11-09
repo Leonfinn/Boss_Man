@@ -51,8 +51,18 @@ describe("workingFor", () => {
     expect(workingFor("2026-10-27T11:37:00Z", now)).toBe("23m");
     expect(workingFor("2026-10-27T09:00:00Z", now)).toBe("3h");
     expect(workingFor("2026-10-27T11:59:40Z", now)).toBe("now");
+    expect(workingFor("2026-10-27T11:59:01Z", now)).toBe("now");
+    // Either end of the first minute is "now", as age.ts says "just now".
+    expect(workingFor("2026-10-27T12:00:00Z", now)).toBe("now");
     // An older server sends no start time.
     expect(workingFor(undefined, now)).toBe("now");
+    expect(workingFor(null, now)).toBe("now");
+  });
+
+  it("floors minutes like age.ts, so it never runs a minute ahead of the Decisions card (BOS-888)", () => {
+    // 59 min 40 s is still 59 minutes here; the old footer rounded it to "1h".
+    expect(workingFor("2026-10-27T11:00:20Z", now)).toBe("59m");
+    expect(workingFor("2026-10-27T10:00:20Z", now)).toBe("1h");
   });
 });
 

@@ -17,6 +17,7 @@ import { ArchiveProject, ProjectBrief, ProjectRow } from "./Settings";
 import { Avatar } from "../components/Avatar";
 import { RunLabelLink } from "./Runs";
 import { ago } from "./Dashboard";
+import { ageShort } from "../age";
 
 const DONE_SHOWN = 8;
 const PROJECT_TABS = [
@@ -42,14 +43,11 @@ const iconProps = { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", 
 
 /** "25m", "3h", "2d": how long since the ticket last moved (there is no per-column timestamp, so this is its last activity). */
 function age(iso: string | undefined, now = Date.now()) {
-  if (!iso) return "";
-  const m = Math.max(0, Math.round((now - new Date(iso).getTime()) / 60_000));
-  return m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
+  return iso ? ageShort(now - new Date(iso).getTime()) : "";
 }
 /** The card footer's time: how long the run has been going ("23m"), or "now" in its first minute. */
 export function workingFor(since: string | null | undefined, now = Date.now()) {
-  const a = age(since ?? undefined, now);
-  return !a || a === "0m" ? "now" : a;
+  return age(since ?? undefined, now) || "now";
 }
 /** "today", "3 days ago": for the done list. */
 function when(iso: string | undefined, now = Date.now()) {
