@@ -334,17 +334,33 @@ function kindOf(d: Decision) {
   return KIND[key] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
 }
 
-/** The score in words: what each part added. */
+/** The score in words: what each part added. A zero score tells the owner nothing, so it says nothing (BOS-804). */
 function why(d: { score: number; parts: { blocking: number; liveRun: number; urgency: number; age: number } }) {
+  if (Math.round(d.score) === 0) return null;
   const n = (x: number) => Math.round(x * 10) / 10;
   const bits = [
     d.parts.liveRun ? `${n(d.parts.liveRun)} for a paused agent` : null,
     d.parts.blocking ? `${n(d.parts.blocking)} for the tasks it blocks` : null,
     d.parts.urgency ? `${n(d.parts.urgency)} for being due soon` : null,
-    `${n(d.parts.age)} for waiting`,
+    d.parts.age ? `${n(d.parts.age)} for waiting` : null,
   ].filter(Boolean);
   return `Score ${Math.round(d.score)}: ${bits.join(" + ")}.`;
 }
+
+/** How long ago a card was raised, in the same words the Plan page uses (BOS-804). */
+function raisedAgo(iso: string, now = Date.now()) {
+  const m = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 60_000));
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
+}
+
+/** The rank's age reason ("Raised just now", "Waiting 3 h", "Waiting 2 days"). The "Raised" line shows
+ * the age in the Plan page's words now, so repeating it here contradicts it ("Raised 8 min ago · Raised
+ * just now") and tells the owner nothing new (BOS-804). */
+const AGE_REASON = /^(Raised just now|Waiting \d+ (h|days?))$/;
+const otherReasons = (reasons: string[]) => reasons.filter((r) => !AGE_REASON.test(r));
 
 /** Current vs proposed harness, provider, model and paid from on a model-change card (BOS-128). */
 function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Decision; editing: boolean; onEdit: () => void; onCancel: () => void; onSubmit: (config: ModelConfigView) => void; busy: boolean }) {
@@ -741,15 +757,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const staleCheck = land?.state === "running" && !!land.stale;
               return (
                 <li className="decision" key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined}>
-                  <div className="score" title={why(d)}>
-                    <b style={{ color: d.score >= 60 ? "var(--ink)" : "var(--muted)" }} aria-label={`Score ${Math.round(d.score)}`}>
-                      {Math.round(d.score)}
-                    </b>
-                    <div className="parts" aria-hidden="true">
-                      <span style={{ width: w(d.parts.blocking + d.parts.liveRun), background: "var(--accent)" }} />
-                      <span style={{ width: w(d.parts.urgency), background: "var(--amber)" }} />
-                      <span style={{ width: w(d.parts.age), background: "#8a94a3" }} />
-                    </div>
+                  <div className="score" title={why(d) ?? undefined}>
+                    {Math.round(d.score) > 0 && (
+                      <>
+                        <b style={{ color: d.score >= 60 ? "var(--ink)" : "var(--muted)" }} aria-label={`Score ${Math.round(d.score)}`}>
+                          {Math.round(d.score)}
+                        </b>
+                        <div className="parts" aria-hidden="true">
+                          <span style={{ width: w(d.parts.blocking + d.parts.liveRun), background: "var(--accent)" }} />
+                          <span style={{ width: w(d.parts.urgency), background: "var(--amber)" }} />
+                          <span style={{ width: w(d.parts.age), background: "#8a94a3" }} />
+                        </div>
+                      </>
+                    )}
                   </div>
                   <div className="body">
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
@@ -907,7 +927,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </div>
                     )}
                     {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled or withdrawn by the team" with what it asked.</p>}
-                    <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
+                    {why(d) && <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>}
                     <div className="meta">
                       {d.blocks.length > 0 && (
                         <span>
@@ -917,9 +937,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           ))}
                         </span>
                       )}
-                      <span>Raised <time dateTime={d.createdAt}>{when(d.createdAt)}</time></span>
+                      <span>Raised <time dateTime={d.createdAt} title={when(d.createdAt)}>{raisedAgo(d.createdAt)}</time></span>
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
-                      {d.reasons.map((r) => (
+                      {otherReasons(d.reasons).map((r) => (
                         <span key={r}>{r}</span>
                       ))}
                     </div>
