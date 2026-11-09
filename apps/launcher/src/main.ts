@@ -22,7 +22,7 @@ import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, sibli
 import { dockerClient } from "./docker.js";
 import { watchGuardEvents } from "./guard-events.js";
 import { launcher, launcherServer } from "./launcher.js";
-import { LABEL, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, type LauncherConfig } from "./spec.js";
+import { listLabel, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
 
 const env = process.env;
 const dataRoot = env.BOSSMAN_DATA;
@@ -36,6 +36,7 @@ const cfg: LauncherConfig = {
   cpuPlan,
   ...(cpuPlan.on ? { cpuset: formatCpuList(cpuPlan.runnerThreads) } : {}),
   dataRoot,
+  stack: parseStack(env.BOSSMAN_STACK),
   network: env.BOSSMAN_RUNNER_NETWORK ?? "boss-man_default",
   serverUrl: env.BOSSMAN_RUNNER_URL ?? "ws://server:3100/api/runner/connect",
   memoryBytes: parseMemory(env.BOSSMAN_RUNNER_MEMORY),
@@ -98,11 +99,18 @@ const guardWatch = watchGuardEvents({
   docker,
   // The filter matches the runner containers' own label (`boss-man.launcher=1`), not just its name, so nothing else that
   // happens to carry the key is watched (BOS-335).
-  label: `${LABEL}=1`,
+  label: listLabel(cfg.stack),
   reconcile,
   log: (level, entry) => console[level](JSON.stringify({ at: new Date().toISOString(), ...entry })),
 });
 setInterval(() => reconcile("timer"), 5_000).unref();
+// Self-heal (BOS-467): a runner removed because its guard failed is made again, with a growing wait between tries.
+const heal = () =>
+  api.healMissing().then(
+    (healed) => healed.length && console.log(JSON.stringify({ at: new Date().toISOString(), msg: "runner made again after it was removed", companies: healed })),
+    (err: unknown) => console.error(JSON.stringify({ at: new Date().toISOString(), msg: "could not make runner again; will retry", error: String((err as Error)?.message ?? err) })),
+  );
+setInterval(() => void heal(), 5_000).unref();
 const stop = () => {
   guardWatch.stop();
   server.close(() => process.exit(0));

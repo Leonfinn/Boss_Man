@@ -47,7 +47,11 @@ export const WatchdogSettings = z.object({
 export type WatchdogSettings = z.infer<typeof WatchdogSettings>;
 
 export const DEFAULT_WATCHDOG: WatchdogSettings = {
-  enabled: false,
+  // On for a new or imported company (BOS-762, DR-041: the safe value is the default). It is a
+  // liveness check and spends no model tokens, and until the owner picks a Scrum Master it reaches
+  // nobody, so switching it on costs nothing and a company is never left without it by accident.
+  // An existing company keeps whatever it has stored; the owner switches it off in Settings.
+  enabled: true,
   recordOnly: false,
   unassignedMinutes: 15,
   inProgressHours: 2,
@@ -110,7 +114,6 @@ export const WATCHDOG_RECORD_KINDS: readonly WatchdogActionKind[] = ["record_swe
 export const WATCHDOG_NON_CAPPED_KINDS: readonly WatchdogActionKind[] = [...WATCHDOG_RECORD_KINDS, "urgent_alert", "alert_hop", "alert_resolved", "tripped", "undo", "daily_summary", "quota_held_alert", "spare_capacity_alert"];
 
 /** True for a rehearsal entry, written while record-only mode was on. */
-export const isRecordedAction = (kind: string) => (WATCHDOG_RECORD_KINDS as readonly string[]).includes(kind);
 
 /** Actions that reach another agent or the owner; they count toward maxNudgesPerHour (an undone one still counts, so undo can't refill the cap). */
 export const WATCHDOG_NUDGE_KINDS: readonly WatchdogActionKind[] = ["nudge", "assign", "rewake", "chase_review", "escalate", "auto_escalate", "raise_decision"];
@@ -121,6 +124,18 @@ export const BLOCKED_UNTIL_REASON_MAX = 240;
 /** "Blocked until" may be at most this many days ahead, so a ticket can't hide from the watchdog (BOS-77). */
 export const BLOCKED_UNTIL_MAX_DAYS = 30;
 export const BLOCKED_UNTIL_MAX_MS = BLOCKED_UNTIL_MAX_DAYS * 24 * 3_600_000;
+
+/**
+ * Whether a ticket was parked on purpose, so a finished blocker must not start it (BOS-742): a
+ * "blocked until" time still ahead, or a state note that says "parked". Plain words only: the note
+ * is what the CEO or the owner wrote when they meant to hold the ticket back.
+ */
+const PARKED_NOTE = /\bparked\b/i;
+
+export function parkedOnPurpose(t: { stateNote?: string | null; blockedUntil?: Date | null }, at: Date): boolean {
+  if (t.blockedUntil && t.blockedUntil.getTime() > at.getTime()) return true;
+  return !!t.stateNote && PARKED_NOTE.test(t.stateNote);
+}
 
 /** Plain-English heading for each logged action, as the owner reads it in the Scrum Master's log and a ticket's activity. A new action kind must have one (the type enforces it). */
 export const WATCHDOG_ACTION_LABEL: Record<WatchdogActionKind, string> = {

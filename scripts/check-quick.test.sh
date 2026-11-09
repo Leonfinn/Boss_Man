@@ -170,6 +170,34 @@ if command -v flock >/dev/null; then
   notlogged "typecheck" "signalled run"
 fi
 
+# A path-reading test (BOS-881): a change to the paths it reads runs it, even though it imports none of them, and from the
+# package the test lives in. Its entry reads apps/web/src/pages/, apps/web/src/components/ and packages/shared/src/owner-controls.ts.
+own="pnpm --filter @boss-man/server exec vitest related --run test/owner-control-list.test.ts"
+g checkout -q -B pathpages origin/main; commit apps/web/src/pages/Plan.tsx
+run 0 "web page change runs the owner-controls list" env
+logged "$own" "web page"
+logged "pnpm --filter @boss-man/server typecheck" "web page typecheck"
+grep -q "^PASS  path-reading test owner-control-list.test.ts (apps/server)" "$t/out" || fail "no PASS line: $(cat "$t/out")"
+g checkout -q -B pathcomponents origin/main; commit apps/web/src/components/Sidebar.tsx
+run 0 "web component change runs it" env
+logged "$own" "web component"
+g checkout -q -B pathshared origin/main; commit packages/shared/src/owner-controls.ts
+run 0 "owner-controls list change runs it" env
+logged "$own" "shared owner-controls"
+# A web change that is neither a page nor a component, and other shared code, leave it out.
+g checkout -q -B pathother origin/main; commit apps/web/src/lib/format.ts packages/shared/src/other.ts
+run 0 "an unrelated web and shared change leaves it out" env
+notlogged "owner-control-list" "unrelated web change"
+# A page change on top of a broad server list still runs it (the broad list is skipped, the path-reading test is not).
+g checkout -q -B pathbroad origin/main; commit apps/web/src/pages/Decisions.tsx apps/server/src/mcp.ts
+run 0 "a page change beside a broad server change" env
+grep -qF "SKIP related tests: too broad" "$t/out" || fail "expected the broad list skipped: $(cat "$t/out")"
+logged "$own" "broad beside page"
+notlogged "vitest related --run src/mcp.ts" "broad beside page"
+# The merge gate never skips it either.
+run 0 "merge check runs it" env BOSSMAN_MERGE_CHECK=1
+logged "$own" "merge check"
+
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.
 g checkout -q -B broad origin/main; commit apps/server/src/mcp.ts
 run 0 "mcp.ts is broad" env
@@ -190,6 +218,48 @@ g checkout -q -B few origin/main
 many=(); for i in $(seq 1 15); do many+=("apps/server/src/m$i.ts"); done; commit "${many[@]}"
 run 0 "15 files is not broad" env
 logged "vitest related" "15 files"
+
+# A fresh tree with no node_modules (BOS-952: the server-owned check queue runs check-quick in a new worktree) installs the
+# packages first, before typecheck, the related tests and the web build; a tree that has node_modules does not.
+inst="pnpm install --frozen-lockfile --prefer-offline"
+g checkout -q -B fresh origin/main; commit apps/web/src/f.ts
+run 0 "fresh tree installs" env
+logged "$inst" "fresh tree"
+grep -q "^PASS  install packages (fresh tree, no node_modules)" "$t/out" || fail "fresh tree: no install PASS line: $(cat "$t/out")"
+[ "$(grep -n "^pnpm install" "$LOG" | head -n 1 | cut -d: -f1)" -lt "$(grep -n "^pnpm --filter @boss-man/web typecheck" "$LOG" | cut -d: -f1)" ] \
+  || fail "fresh tree: install did not come before typecheck: $(cat "$LOG")"
+logged "pnpm --filter @boss-man/web build" "fresh tree still builds"
+mkdir "$repo/node_modules"; echo node_modules >"$repo/.git/info/exclude"
+run 0 "tree with node_modules does not install" env
+notlogged "pnpm install" "node_modules present"
+logged "pnpm --filter @boss-man/web typecheck" "node_modules present"
+rm -rf "$repo/node_modules"
+# The install failing is reported, and the steps that need packages are skipped rather than queued for a slot.
+run 1 "failed install" env FAIL_ON=install
+grep -q "^FAIL  install packages" "$t/out" || fail "failed install: no FAIL line: $(cat "$t/out")"
+grep -q "^SKIP  typecheck, related tests, web build: the install failed" "$t/out" || fail "failed install: no SKIP line: $(cat "$t/out")"
+for s in typecheck "vitest related" build; do notlogged "$s" "failed install"; done
+grep -q "check-quick: FAILED" "$t/out" || fail "failed install: no FAILED summary: $(cat "$t/out")"
+# A change with no pnpm step (a shell script only) installs nothing.
+g checkout -q -B freshsh origin/main; commit scripts/only.sh
+run 0 "shell-only change does not install" env
+notlogged "pnpm install" "shell only"
+# The full check runs next (it installs itself): no install here.
+g checkout -q fresh
+run 0 "full check next does not install" env BOSSMAN_MERGE_CHECK=1 BOSSMAN_FULL_CHECK_NEXT=1
+notlogged "pnpm install" "full check next"
+# The install runs before the slot wait, so it never holds a check slot.
+if command -v flock >/dev/null; then
+  : >"$LOG"
+  hold_slot
+  (cd "$repo" && ./scripts/check-quick.sh >"$t/out" 2>&1) & cq=$!
+  wait_for_slot_wait "install before the slot"
+  logged "$inst" "install before the slot"
+  notlogged "typecheck" "install before the slot"
+  release_slot
+  rc=0; wait "$cq" || rc=$?
+  [ "$rc" -eq 0 ] || fail "install before the slot: rc $rc: $(cat "$t/out")"
+fi
 
 # Reuse (BOS-666): a pass on a clean tree is written to the slot log; the next run of the same tree and base reuses it.
 sl="$t/lock.slotlog"; npass() { grep -c " quick-pass " "$sl" || true; }

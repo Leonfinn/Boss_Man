@@ -29,19 +29,26 @@ export function attachmentName(markdown: string) {
   return markdown.match(/^!?\[([^\]]*)\]/)?.[1] ?? "file";
 }
 
-export function useImageAttach(companyId: string | undefined, ticketId?: string) {
+/**
+ * A box's attachments. `ticketId` is the ticket they belong to (absent: the company's); pass
+ * `{ ticketIdOf }` when that differs from box to box (the decision cards, BOS-759).
+ */
+export function useImageAttach(companyId: string | undefined, ticketId?: string, opts: { ticketIdOf?: () => string | undefined } = {}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [attached, setAttached] = useState<string[]>([]);
   const input = useRef<HTMLInputElement>(null);
+  /** Where this upload belongs: the card being answered, else the box's own ticket. */
+  const where = () => opts.ticketIdOf?.() ?? ticketId;
   const upload = async (files: File[]) => {
     if (!companyId || !files.length) return;
+    const forTicket = where();
     setBusy(true);
     setError(null);
     try {
       for (const f of files) {
         if (f.size > MAX_BYTES) throw new Error(`${f.name || "That file"} is over 10 MB.`);
-        const r = await api<{ markdown: string }>(`/api/companies/${companyId}/images`, { method: "POST", body: { data: await base64(f), ...(f.name ? { name: f.name } : {}), ...(ticketId ? { ticketId } : {}) } });
+        const r = await api<{ markdown: string }>(`/api/companies/${companyId}/images`, { method: "POST", body: { data: await base64(f), ...(f.name ? { name: f.name } : {}), ...(forTicket ? { ticketId: forTicket } : {}) } });
         setAttached((all) => [...all, r.markdown]);
       }
     } catch (err) {
@@ -62,11 +69,12 @@ export function useImageAttach(companyId: string | undefined, ticketId?: string)
   /** Attaches text as a .txt file, for what is too long to send as a message. Returns the text file's Markdown. */
   const uploadText = async (text: string, name = "message.txt"): Promise<string> => {
     if (!companyId) throw new Error("Can't attach a file yet: the company isn't loaded.");
+    const forTicket = where();
     setBusy(true);
     setError(null);
     try {
       const data = await base64(new Blob([text], { type: "text/plain" }));
-      const r = await api<{ markdown: string }>(`/api/companies/${companyId}/images`, { method: "POST", body: { data, name, ...(ticketId ? { ticketId } : {}) } });
+      const r = await api<{ markdown: string }>(`/api/companies/${companyId}/images`, { method: "POST", body: { data, name, ...(forTicket ? { ticketId: forTicket } : {}) } });
       return r.markdown;
     } finally {
       setBusy(false);

@@ -9,6 +9,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Which field a save conflict is about (BOS-905): title, body or acceptanceCriteria. */
+    readonly field?: string,
   ) {
     super(message);
   }
@@ -63,7 +65,7 @@ export async function apiOnce<T>(path: string, init: { method?: string; body?: u
   if (!res.ok) {
     // A rejected secret lists what's wrong with it; other errors carry a message.
     const problems = Array.isArray(data.problems) ? (data.problems as string[]).join(" ") : null;
-    const failed = new ApiError(res.status, problems ?? String(data.message ?? plainStatus(res.status, data.error)));
+    const failed = new ApiError(res.status, problems ?? String(data.message ?? plainStatus(res.status, data.error)), typeof data.field === "string" ? data.field : undefined);
     reportFailure(failed);
     throw failed;
   }
@@ -73,7 +75,7 @@ export async function apiOnce<T>(path: string, init: { method?: string; body?: u
 // ---------- Shapes the screens use ----------
 
 export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; template?: string | null; avatarAt?: string | null };
-export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; fenceMode?: "off" | "watch" | "enforce"; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
+export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; maxRunMinutes?: number | null; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; fenceMode?: "off" | "watch" | "enforce"; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
   companyId: string;
@@ -111,7 +113,7 @@ export type PushReading = {
   warnings: string[];
   dangerous: boolean;
 };
-export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; scratch?: { note: string; unchecked: string[] }; push?: PushReading };
+export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; ownerWhy?: string; scratch?: { note: string; unchecked: string[] }; push?: PushReading };
 
 /** One of Boss Man's alerts the Scrum Master or the CEO still holds (BOS-64): not the owner's yet. */
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */
@@ -124,9 +126,26 @@ export type AdvisedDecision = {
   about?: Array<{ ticketId: string; ref: string | null; title: string }>;
   advice?: Advice;
   settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean };
-  withdrawn?: { by: string; note: string };
+  withdrawn?: { by: string; note: string; /** The closed-card notice a card Boss Man closed by itself left (BOS-740). */ notice?: string };
 };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
+/** A card Boss Man closed by itself in the last couple of hours (BOS-739): the notice, and the steps it showed. */
+export type ClosedNotice = {
+  why: "live" | "newer";
+  text: string;
+  at: string;
+  until: string;
+  commit?: string;
+  newer?: { decisionId: string; label: string };
+};
+export type ClosedNoticeCard = {
+  id: string;
+  companyId: string;
+  question: string;
+  /** A hand-apply card keeps its steps as `handSteps`; a hand-apply to-do as `steps` (BOS-739). */
+  context: { steps?: string[]; handSteps?: string[]; check?: string; rollback?: string };
+  notice: ClosedNotice;
+};
 
 /** An agent's harness/provider/model/paid-from setup on a model-change card (BOS-128). */
 export type ModelConfigView = { harness: string; provider: string; model: string; fundingSourceId: string; fundingSourceName?: string };
@@ -172,6 +191,8 @@ export type Decision = {
   score: number;
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];
+  /** The rank reason that is only the card's age; the card shows the age itself and hides this one (BOS-869). */
+  ageReason: string;
   dueDate: string | null;
   /** (BOS-551) For a card that needs your hands: its place in the do-this-next order, 1-based. */
   step?: number | null;
@@ -181,10 +202,14 @@ export type Decision = {
   doAfter?: string[];
   /** (BOS-551) A short label for the card this one must be done before, for each one. */
   doBefore?: string[];
-  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; handoverRanOut?: { at: string }; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the owner-step lint flagged (BOS-417), and a CEO override with its reason. */ lint?: { warn: Array<{ step: number; problem: string }>; override?: { reason: string; findings: Array<{ step: number; problem: string }> }; /** How the host commands were proven (R11, DR-024): shown as a banner. */ proof?: { rehearsed: true; script: string; commit: string } | { rehearsed: false; part: string } }; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; /** A standing-rules change: the exact text that will be saved (already stripped and capped). */ text?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A Boss Man update carrying the fix for a live problem (BOS-639): its heading leads the card. */ urgent?: { heading: string; fixes: Array<{ ticketId: string; ref: string; symptom: string }>; repeat?: boolean }; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string; /** The model second opinion (BOS-338); `reason` is the model's cleaned line, or why it failed. */ second?: { state: "pending" | "allow" | "deny" | "failed"; reason?: string } }; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; handoverRanOut?: { at: string }; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the owner-step lint flagged (BOS-417), and a CEO override with its reason. */ lint?: { warn: Array<{ step: number; problem: string }>; override?: { reason: string; findings: Array<{ step: number; problem: string }> }; /** How the host commands were proven (R11, DR-024): shown as a banner. */ proof?: { rehearsed: true; script: string; commit: string } | { rehearsed: false; part: string } }; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; /** A standing-rules change: the exact text that will be saved (already stripped and capped). */ text?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A hire: the proposal the owner is being asked to approve. */ proposal?: { skills?: string[] }; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A Boss Man update carrying the fix for a live problem (BOS-639): its heading leads the card. */ urgent?: { heading: string; fixes: Array<{ ticketId: string; ref: string; symptom: string }>; repeat?: boolean }; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string; /** The model second opinion (BOS-338); `reason` is the model's cleaned line, or why it failed. */ second?: { state: "pending" | "allow" | "deny" | "failed"; reason?: string } }; always?: Array<{ label: string; what?: string }>; /** The agent an "always" rule is limited to unless the owner widens it (BOS-294). */ alwaysAgent?: { id: string; name: string }; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
   /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
   evidence?: StallEvidence | null;
 };
+
+/** (BOS-969) The Decisions menu badge and page heading: how many cards need the owner now, and how
+ * many are folded into "Waiting, nothing to do yet". One server figure, so the two never drift. */
+export type DecisionTally = { open: number; waiting: number };
 
 export type StallEvidence = {
   runId: string;
@@ -242,14 +267,18 @@ export type Ticket = {
   /** Who an open agent review waits on and why, e.g. "Sam is busy on BOS-7". */
   reviewWait?: string | null;
   /** In review and not the owner's to act on: still with its reviewers, or approved by all of them and only merging (BOS-667). */
-  reviewStage?: "awaiting_review" | "merging" | null;
+  reviewStage?: "awaiting_review" | "merging" | "held" | null;
+  /** A reviewer passed it but holds the merge (BOS-808). */
+  hold?: ReviewHold | null;
   /** Where an approved ticket's merge is, in plain words ("Waiting for a check slot."). */
   mergeNote?: string | null;
   /** An open owner decision this ticket waits on, outside review sign-off. */
   ownerQuestion?: string | null;
   approvedBy?: string | null;
 };
-export type TicketDetail = Ticket & { ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: Criterion[]; ownerSetup: string | null; /** "Fixes live" (BOS-639): the live symptom this ticket fixes, set by the CEO, its author or a reviewer. */ fixesLive?: string | null; noCode: boolean; urgent: boolean; quotaHeldUntil?: string | null; quotaHeldReason?: string | null; /** The account the ticket's agent is paid from, by name (BOS-471). */ quotaHeldSource?: string | null; /** When another ticket really holds the agent, which one (BOS-471). */ quotaHeldOther?: { ref: string; title: string } | null; /** The owner's sign-off card for this ticket is open (BOS-471). */ signoffWaiting?: boolean; /** Where it stands on the owner's sign-off (BOS-503): waiting (card open), missing (owed, card being raised again), signed_off, or null when not needed. */ signoff?: "waiting" | "missing" | "signed_off" | null; stateNote: string | null; /** When an agent last posted on it, a reply or a state note (BOS-314). */ lastPostAt?: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
+/** A reviewer's "Passed, hold merge" (BOS-808): why, what it waits on, and the line the badge shows. */
+export type ReviewHold = { id: string; reason: string; reviewer: string | null; releaseAt: string | null; ready: boolean; label: string; waits: Array<{ kind: "ticket" | "decision"; id: string; label: string; closed: boolean }> };
+export type TicketDetail = Ticket & { /** What the merged ticket's after-merge checks still wait for (BOS-1021). */ goLiveWait?: "server" | "runner" | "both" | null; hold?: ReviewHold | null; ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: Criterion[]; ownerSetup: string | null; /** "Fixes live" (BOS-639): the live symptom this ticket fixes, set by the CEO, its author or a reviewer. */ fixesLive?: string | null; noCode: boolean; urgent: boolean; quotaHeldUntil?: string | null; quotaHeldReason?: string | null; /** The account the ticket's agent is paid from, by name (BOS-471). */ quotaHeldSource?: string | null; /** When another ticket really holds the agent, which one (BOS-471). */ quotaHeldOther?: { ref: string; title: string } | null; /** The owner's sign-off card for this ticket is open (BOS-471). */ signoffWaiting?: boolean; /** Where it stands on the owner's sign-off (BOS-503): waiting (card open), missing (owed, card being raised again), signed_off, or null when not needed. */ signoff?: "waiting" | "missing" | "signed_off" | null; stateNote: string | null; /** When an agent last posted on it, a reply or a state note (BOS-314). */ lastPostAt?: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
 export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean; turn?: { number: number; at: string } };
 /** A run going now that no card on the board shows (BOS-155). */
 export type UnticketedRun = { id: string; agent: string | null; ticketId: string | null; ticket: string | null; purpose: string | null; origin: string | null; originFrom: string | null; originNote: string | null; wakeNote: string | null; runTicketId: string | null; startedAt: string };
@@ -265,8 +294,8 @@ export type FundingStatus = {
   windowsSeen: string[];
   /** Whether new runs are going to this account right now (the owner's ranked Claude accounts, BOS-383). */
   claudeActive?: boolean;
-  /** Per window: when it runs out at the recent rate (R78); null with no readings. */
-  forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
+  /** Per window: when it runs out at its pace so far (R78, BOS-1012); null with no readings. */
+  forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutPerHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
   /** Synthetic's own used/limit reading, cached on the server; null for other providers, null counts mean unknown. */
   providerQuota?: {
     used: number | null;
@@ -369,6 +398,10 @@ export type NotifySettings = {
   ntfy: { url: string; topic: string; hasToken: boolean } | null;
   pushLevels: NotifyLevel[];
   publicUrl: string | null;
+  /** Phone Approve buttons (BOS-243): on unless switched off. */
+  approveButtons?: boolean;
+  /** Whether Approve buttons are actually offered, and if not why. */
+  approve?: { on: true } | { on: false; why: string };
 };
 
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
@@ -457,8 +490,14 @@ export type Feature = {
   milestoneId: string | null;
   objectiveId: string | null;
   portalVisible: boolean;
+  /** Marked "keep off the portal (sensitive)"; the default never overrides it. */
+  keepOffPortal: boolean;
   publicSummary: string | null;
+  /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
+  publicTitle: string | null;
   showPublicly: boolean;
+  /** Why the feature is on or off the portal: onPortal, or the reason it is held off (BOS-957). */
+  portal?: { onPortal: boolean; reason: "sensitive" | "security" | "needs public summary" | null };
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;
@@ -475,7 +514,7 @@ export type Feature = {
   tickets: { total: number; done: number; items: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null }> };
 };
 export type ScoredFeatures = { settings: { demandWeight: number; ceoTriage: boolean }; drivers: Driver[]; maxDemand: number; features: Feature[] };
-export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; hasLogo: boolean; portalUrl: string | null; drivers: Driver[]; areas: FeatureArea[] };
+export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; portalUrl: string | null; drivers: Driver[]; areas: FeatureArea[] };
 export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number };
 export type Insight = { id: string; noteId: string; featureId: string; importance: Importance; highlight: string | null; createdBy: string; createdAt: string };
 export type NoteDetail = {

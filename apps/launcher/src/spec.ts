@@ -25,6 +25,8 @@ export const DEFAULT_CPU_SHARES = 512;
 export type LauncherConfig = {
   /** BOSSMAN_DATA: the host folder, mounted at the same path in the launcher, so binds name real host paths. */
   dataRoot: string;
+  /** BOSSMAN_STACK: names a second stack on this host (BOS-69). Unset = today's names, labels and images. */
+  stack?: string;
   /** The compose network the server is on, e.g. boss-man_default. Never host. */
   network: string;
   /** Where runners dial the server. */
@@ -72,8 +74,35 @@ export function parseAllow(v: string | string[] | undefined): string[] {
   return [...new Set(list)];
 }
 
-export const containerName = (slug: string) => `boss-man-runner-${slug}`;
-export const netguardName = (slug: string) => `boss-man-netguard-${slug}`;
+/**
+ * The host:ports the owner trusted for private addresses (BOS-708): each is checked as an allow entry.
+ * The guard keeps their private addresses, and drops any other entry's.
+ */
+export function parseTrusted(v: string[] | undefined): Set<string> {
+  const list = parseAllow(v ?? []);
+  return new Set(list);
+}
+
+/** BOSSMAN_STACK (BOS-69): a short name for a second Boss Man on the same Docker host, e.g. "staging". Empty = the one and only stack. */
+export const STACK_LABEL = "boss-man.stack";
+const STACK = /^[a-z0-9][a-z0-9]{0,15}$/;
+export function parseStack(v: string | undefined): string | undefined {
+  const s = (v ?? "").trim();
+  if (!s) return undefined;
+  if (!STACK.test(s)) throw new Error(`BOSSMAN_STACK should be 1 to 16 lowercase letters or digits, like staging, not ${v}`);
+  // "runner" and "netguard" would make names that clash with the default stack's (boss-man-runner-runner-x).
+  if (s === "runner" || s === "netguard") throw new Error(`BOSSMAN_STACK can't be ${s}; pick another name, like staging`);
+  return s;
+}
+/** The prefix of everything this launcher makes: "boss-man" for the one stack, "boss-man-<stack>" for another, so two never share a name. */
+const prefix = (stack?: string) => (stack ? `boss-man-${stack}` : "boss-man");
+export const containerName = (slug: string, stack?: string) => `${prefix(stack)}-runner-${slug}`;
+export const netguardName = (slug: string, stack?: string) => `${prefix(stack)}-netguard-${slug}`;
+export const runnerImage = (stack?: string) => `${prefix(stack)}-runner:current`;
+export const guardImage = (stack?: string) => `${prefix(stack)}-netguard:current`;
+/** What the launcher asks Docker to list: a named stack lists only its own containers; the default lists as before. */
+export const listLabel = (stack?: string) => (stack ? `${STACK_LABEL}=${stack}` : `${LABEL}=1`);
+const stackLabels = (stack?: string): Record<string, string> => (stack ? { [STACK_LABEL]: stack } : {});
 export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.dataRoot, "companies", slug);
 /** Where the launcher keeps a company's tool-server allow list; only the guard (read-only) mounts it, never the runner. */
 export const netguardDir = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "netguard");
@@ -85,7 +114,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
   if (cfg.network === "host" || cfg.network === "none" || cfg.network.startsWith("container:")) throw new Error("bad network");
   const dir = companyDir(cfg, slug);
   return {
-    Image: IMAGE,
+    Image: runnerImage(cfg.stack),
     User: "1000:1000",
     Env: [
       `BOSSMAN_URL=${cfg.serverUrl}`,
@@ -94,7 +123,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
       ...(cfg.opencodeSessionDays !== undefined ? [`BOSSMAN_OPENCODE_SESSION_DAYS=${cfg.opencodeSessionDays}`] : []),
       ...(cfg.pnpmStoreDir ? [`PNPM_STORE_DIR=${cfg.pnpmStoreDir}`] : []),
     ],
-    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug },
+    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {
       Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${tokenFile(cfg, slug)}:${TOKEN_TARGET}:ro`],
       NetworkMode: cfg.network,
@@ -203,11 +232,11 @@ export function netguardSpec(cfg: LauncherConfig, slug: string, runnerId: string
   if (!SLUG.test(slug)) throw new Error("bad slug");
   if (!/^[A-Za-z0-9_.-]{1,64}$/.test(runnerId)) throw new Error("bad runner id");
   return {
-    Image: NETGUARD_IMAGE,
+    Image: guardImage(cfg.stack),
     Env: [`NETGUARD_ALLOW=${serverAddress(cfg.serverUrl)}`, ...(cfg.guardAllow?.length ? [`NETGUARD_EXTRA=${cfg.guardAllow.join(" ")}`] : [])],
     // Healthy once the table is loaded: the launcher waits for it before it counts the runner as guarded.
     Healthcheck: { Test: ["CMD", "nft", "list", "table", "inet", "bossman_netguard"], Interval: 1_000_000_000, Timeout: 3_000_000_000, Retries: 3 },
-    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug },
+    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {
       Binds: [`${netguardDir(cfg, slug)}:/etc/netguard:ro`],
       NetworkMode: `container:${runnerId}`,

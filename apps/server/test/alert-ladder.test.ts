@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, notifications, quotaSamples, runs, tickets, wakes, watchdogActions } from "../src/db/schema.js";
+import { activity, agents, decisions, notifications, quotaSamples, runners, runs, tickets, wakes, watchdogActions } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { alertLadder, type Ladder } from "../src/services/alert-ladder.js";
 
@@ -31,8 +31,14 @@ async function setup() {
   const [ticket] = await db.insert(tickets).values({ companyId, projectId: project.id, title: "Export the designs", systemState: "in_progress", assigneeAgentId: dev.id }).returning();
   const advance = (minutes: number) => (clock = new Date(clock.getTime() + minutes * 60_000));
   const switchOn = async (settings: Record<string, unknown> = {}) => expect((await req("PATCH", `/api/companies/${companyId}/watchdog`, { scrumMasterAgentId: sm.id, enabled: true, ...settings })).statusCode).toBe(200);
+  // A fake runner the tests drive by hand, so a permission request is the same request a real one sends.
+  const reg = (await req("POST", `/api/companies/${companyId}/runner`)).json() as { runnerId: string };
+  const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
+  let seq = 0;
+  const emit = (event: Parameters<typeof built.runners.ingest>[1]["event"]) => built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event });
+  const switchOff = async () => expect((await req("PATCH", `/api/companies/${companyId}/watchdog`, { scrumMasterAgentId: sm.id, enabled: false })).statusCode).toBe(200);
   await db.delete(wakes);
-  return { ...built, db, close, base, req, companyId, sm, dev, qa, ceo: ceo!, ticket: ticket!, advance, switchOn, now: () => clock };
+  return { ...built, db, close, base, req, companyId, sm, dev, qa, ceo: ceo!, ticket: ticket!, runner: runner!, emit, advance, switchOn, switchOff, now: () => clock };
 }
 
 beforeEach(async () => {
@@ -71,7 +77,7 @@ const handRaise = (input: Parameters<typeof ctx.alerts.raise>[0]) => ctx.alerts.
 const ownerRaise = (why = "only the owner can act on it") =>
   handRaise({ companyId: ctx.companyId, kind: "owner", question: `Owner card: ${why}`, ticketId: ctx.ticket.id, from: "scrum_master", options: ["Got it"] });
 const ladderOf = async (id: string) => ((await ctx.db.select().from(decisions).where(eq(decisions.id, id)))[0]!.context as { ladder: Ladder; triedFirst?: string; steps?: string[] });
-const alertWakes = () => ctx.db.select().from(wakes).where(inArray(wakes.reason, ["alert", "decision"]));
+const alertWakes = () => ctx.db.select().from(wakes).where(inArray(wakes.reason, ["alert", "decision", "ceo reply"]));
 const ownerNotified = async (id: string) => {
   await ctx.notes.syncDecisions();
   return ctx.db.select().from(notifications).where(eq(notifications.decisionId, id));
@@ -241,6 +247,7 @@ describe("the alert ladder (BOS-64)", () => {
 
   describe("fall-through", () => {
     it("watchdog off: straight to the CEO", async () => {
+      await ctx.switchOff();
       const d = await wakeChain();
       expect(d).toMatchObject({ tier: "ceo", forAgentId: null });
       expect((d.context as { ladder: Ladder }).ladder.hops).toEqual([expect.objectContaining({ to: "ceo", why: expect.stringContaining("the watchdog is off") })]);
@@ -650,5 +657,77 @@ describe("permission cards carry the CEO's advice (BOS-233)", () => {
         denyStops: expect.stringContaining("blocked"),
       },
     });
+  });
+});
+
+// DR-048 #3 (BOS-933): the runner denies an unanswered permission request after 10 minutes. An agent that
+// asks again for the same command gets a new card. This checks whether that new card restarts the 20-minute
+// clock that hands a card with the CEO to the owner, so a card the CEO can't settle could be held for ever.
+describe("a re-asked permission card and the CEO's handover clock (DR-048 #3)", () => {
+  // Temp-file cleanup: a destructive command whose only paths are entries directly in /tmp, so the built-in
+  // guard sends it to the CEO first (TEMP_CLEANUP_RULE). This is the shape of card DR-048 describes.
+  const CMD = "rm -rf /tmp/kit-0aefe522-export /tmp/kit-0aefe522-export.log";
+  // The runners deny a request after 10 minutes (session-manager.ts); the ladder's outer cap is 20 minutes from
+  // the raise (CEO_OUTER_CAP_MINUTES), which is the one that must reach the owner when the CEO never settles it.
+
+  it("the first card reaches the owner on its own 20-minute clock", async () => {
+    const runId = randomUUID();
+    await ctx.emit({ type: "run.started", runId, agentId: ctx.dev.id, acpSessionId: "s", model: null });
+    const requestId = randomUUID();
+    await ctx.emit({ type: "run.permission_request", runId, requestId, title: CMD, kind: "execute", rawInput: { command: CMD }, optionKinds: ["allow_once", "reject_once"] });
+    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
+    expect(card).toBeDefined();
+    expect(card!).toMatchObject({ tier: "ceo", status: "open" });
+    expect((await ladderOf(card!.id)).ladder).toMatchObject({ rung: "ceo", minutes: 5 });
+    // Before the cap it stays with the CEO.
+    ctx.advance(19);
+    expect((await ctx.alerts.sweep()).moved).toBe(0);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, card!.id)))[0]!.tier).toBe("ceo");
+    // At the cap it goes to the owner, marked as tried by the CEO first.
+    ctx.advance(2);
+    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, card!.id)))[0]!.tier).toBe("owner");
+  });
+
+  // This is the DR-048 #3 case: card 1, the runner's 10-minute deny, then the same command asked again in the
+  // same run (a new requestId, as a harness retry sends). Question: does card 2's new raise restart the
+  // 20-minute clock for this run and command, so the owner is never reached by the first card's timer?
+  it("shows whether a re-ask for the same run and command restarts the 20-minute handover clock", async () => {
+    const runId = randomUUID();
+    await ctx.emit({ type: "run.started", runId, agentId: ctx.dev.id, acpSessionId: "s", model: null });
+    // Card 1's request. The runner denies it at 10 minutes, unnoticed by the server.
+    const first = randomUUID();
+    await ctx.emit({ type: "run.permission_request", runId, requestId: first, title: CMD, kind: "execute", rawInput: { command: CMD }, optionKinds: ["allow_once", "reject_once"] });
+    const [card1] = await ctx.db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${first}`));
+    expect(card1).toBeDefined();
+    // Ten minutes pass; the server sweeps, but card 1 is still with the CEO (its 20-minute cap hasn't run out).
+    ctx.advance(10);
+    await ctx.alerts.sweep();
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, card1!.id)))[0]!.tier).toBe("ceo");
+    // The agent asks again for the same command: a new request with a fresh tool call id, the way a retried
+    // call comes back. It is a card of its own unless it is a repeat of card 1.
+    const second = randomUUID();
+    await ctx.emit({ type: "run.permission_request", runId, requestId: second, title: CMD, kind: "execute", rawInput: { command: CMD }, optionKinds: ["allow_once", "reject_once"], toolCallId: "call-retry" });
+    const [card2] = await ctx.db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${second}`));
+    // Ruled out on today's code: the re-ask is a repeat of card 1's ask while card 1 is still open, so it rides
+    // on it (one ask, one card, BOS-376). There is no second raise, so there is no second clock to start, and the
+    // CEO card keeps card 1's own 20-minute clock from when it was first raised.
+    expect(card2).toBeUndefined();
+    const [rode] = await ctx.db.select().from(decisions).where(eq(decisions.id, card1!.id));
+    expect((rode!.context as { repeats?: Array<{ requestId: string }> }).repeats?.map((r) => r.requestId)).toEqual([second]);
+    // Sweep once a minute and record the first minute card 1 is seen at the owner's tier, from its raise.
+    let reachedAt: number | null = null;
+    for (let minute = 11; minute <= 40; minute++) {
+      await ctx.alerts.sweep();
+      const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, card1!.id));
+      if (row!.tier === "owner") {
+        reachedAt = minute;
+        break;
+      }
+      ctx.advance(1);
+    }
+    // Reached at its own 20-minute cap (the first sweep after), not pushed back by the re-ask: if the re-ask had
+    // started a fresh clock at +10, the card would still be with the CEO at +20 and only reach the owner at +30.
+    expect(reachedAt).toBe(21);
   });
 });

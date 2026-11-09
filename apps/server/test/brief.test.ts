@@ -69,12 +69,28 @@ describe("activity log (R83)", () => {
     const c = await agent(ctx.dev.id);
     await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Limiter added; tests pass." } });
     await c.close();
-    expect((await log()).filter((r) => r.kind !== "run_started")).toEqual([expect.objectContaining({ companyId: cid(), agentId: ctx.dev.id, ticketId: t.id, kind: "state", summary: "-> review: Limiter added; tests pass." })]);
+    expect((await log()).filter((r) => r.kind !== "run_started")).toEqual([expect.objectContaining({ companyId: cid(), agentId: ctx.dev.id, ticketId: t.id, kind: "state", summary: "in_progress -> review: Limiter added; tests pass." })]);
 
     const [d] = await ctx.db.insert(decisions).values({ companyId: cid(), kind: "question", question: "Which provider?", options: ["Stripe", "Adyen"], recommendedOption: "Stripe", raisedByAgentId: ctx.dev.id }).returning();
     await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
     await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Adyen" });
     expect((await log()).find((r) => r.kind === "decision_answered")).toMatchObject({ ticketId: t.id, agentId: null, summary: 'Owner answered "Which provider?": Adyen' });
+
+    // BOS-951 criterion 3: a long question doesn't push the option out of the whats_new line. Only the question is
+    // shortened, so the option chosen is still there in the 100-character change line the brief shows.
+    const t2 = await ctx.ticket("Check the board on a phone", { assigneeAgentId: ctx.dev.id });
+    const [d2] = await ctx.db
+      .insert(decisions)
+      .values({ companyId: cid(), kind: "question", question: `${"Does the board open and the details fold open on your machine? ".repeat(6)}`.trim(), options: ["Works", "Broken"], recommendedOption: "Works", raisedByAgentId: ctx.dev.id })
+      .returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t2.id, blockerDecisionId: d2!.id, blockerTicketId: null });
+    await ctx.req("POST", `/api/decisions/${d2!.id}/answer`, { answer: "Broken" });
+    const answered = (await log()).find((r) => r.kind === "decision_answered" && r.summary.includes("Broken"));
+    expect(answered?.summary).toContain(': Broken');
+    // The brief's change line cuts at 100 characters, so the summary has to be short enough for the answer to show.
+    expect(answered!.summary.length).toBeLessThanOrEqual(140);
+    const line = (await brief(ctx.dev.id, "worker")).split("\n").find((l) => l.includes("Broken"));
+    expect(line).toContain("Broken");
 
     await ctx.db.delete(runs).where(eq(runs.agentId, ctx.dev.id)); // BOS-513: the test token's stand-in run is still open and would block the wake
     await ctx.scheduler.wake({ agentId: ctx.dev.id, reason: "assigned", ticketId: t.id });
@@ -97,7 +113,7 @@ describe("activity log (R83)", () => {
     await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Follow-up" } });
     await c.close();
     const kinds = (await log()).map((r) => r.kind).sort();
-    expect(kinds).toEqual(["decision_raised", "dependency", "message", "message", "ticket_created"]);
+    expect(kinds).toEqual(["decision_raised", "dependency", "message", "message", "state", "ticket_created"]);
     expect((await log()).find((r) => r.summary.startsWith("Replied: x"))!.summary).toHaveLength(300);
     expect((await log()).find((r) => r.summary.startsWith("Owner wrote"))).toMatchObject({ agentId: null, ticketId: a.id });
   });

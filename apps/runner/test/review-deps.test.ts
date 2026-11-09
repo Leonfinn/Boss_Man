@@ -58,6 +58,22 @@ describe("a review copy's packages (BOS-693)", () => {
     expect(existsSync(path.join(copy.path, "node_modules", ".stub"))).toBe(true);
   });
 
+  it("installs the branch's lockfile, not the base's, so a changed dependency is picked up (BOS-713)", async () => {
+    // The stub records the lockfile pnpm was pointed at, so the test can see which one the install would read.
+    const body = "mkdir -p node_modules; cat pnpm-lock.yaml > node_modules/.stub";
+    const { ws, spec } = setup({ body });
+    const dev = await ws.ensure(spec);
+    // The author changes the lockfile on the ticket's work (a new dependency, a new version).
+    writeFileSync(path.join(dev.path, "pnpm-lock.yaml"), "lockfileVersion: '9.1'\n");
+    git(dev.path, "add", "pnpm-lock.yaml");
+    git(dev.path, "commit", "-qm", "bump lockfile");
+    const copy = await ws.ensureReview({ ...spec, review: true });
+    // The copy carries the branch's lockfile, not main's (9.0).
+    expect(readFileSync(path.join(copy.path, "pnpm-lock.yaml"), "utf8")).toBe("lockfileVersion: '9.1'\n");
+    expect(await ws.installReviewDeps(spec)).toEqual({ installed: true, detail: "installed" });
+    expect(stubLog(copy.path)).toBe("lockfileVersion: '9.1'\n");
+  });
+
   it("does nothing for a project without a pnpm lockfile", async () => {
     const { ws, spec } = setup({ lockfile: false });
     await ws.ensure(spec);

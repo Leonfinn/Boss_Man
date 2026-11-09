@@ -1,14 +1,14 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications, runners, settings, tickets, wakes } from "../src/db/schema.js";
-import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
+import { companies, decisions, notifications, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { MISSED_REASON } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -74,6 +74,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
 
   const commands: Array<Extract<RunnerCommand, { type: "run.start" }> & { company: string }> = [];
   const messages: Array<Extract<RunnerCommand, { type: "run.message" }>> = [];
+  const decides: Array<Extract<RunnerCommand, { type: "permission.decide" }>> = [];
   let seq = 0;
   /** A company with its runner (connected unless said otherwise) and a launcher slug. */
   const company = async (name: string, slug: string, connect = true) => {
@@ -84,6 +85,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
       built.runners.connect(reg.runnerId, (cmd) => {
         if (cmd.type === "run.start") commands.push({ ...cmd, company: name });
         if (cmd.type === "run.message") messages.push(cmd);
+        if (cmd.type === "permission.decide") decides.push(cmd);
         return true;
       });
     await db.insert(settings).values({ key: `runner-slug:${c.id}`, value: slug }).onConflictDoUpdate({ target: settings.key, set: { value: slug } });
@@ -106,7 +108,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   const maint = () => req("GET", "/api/maintenance").then((r) => r.json());
   const open = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "maintenance");
   const titles = async () => (await db.select().from(notifications)).map((n) => `${n.level}: ${n.title}`);
-  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, advance, maint, open, titles };
+  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, decides, advance, maint, open, titles };
 }
 
 describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
@@ -231,6 +233,30 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await c.open()).toHaveLength(0);
   });
 
+  it("pages once when no runner has been swapped for twice the reconnect time, and says plainly the wait is for running work (BOS-497)", async () => {
+    const c = (ctx = await setup({ reconnectMs: 5 * MIN }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 60 });
+    await c.maintenance.step();
+    c.advance(9 * MIN);
+    await c.maintenance.step();
+    expect((await c.titles()).filter((t) => t.includes("Runner update is"))).toHaveLength(0);
+    c.advance(2 * MIN);
+    await c.maintenance.step();
+    await c.maintenance.step();
+    const all = await c.db.select().from(notifications);
+    // The only company waited on has a work run going: that wait is on purpose, so it is not called stuck.
+    expect(all.filter((n) => n.title === "Runner update is stuck")).toHaveLength(0);
+    const waiting = all.filter((n) => n.title === "Runner update is waiting for running work");
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]).toMatchObject({ level: "page" });
+    expect(waiting[0]!.body).toContain("app-co still has work runs going");
+    expect(waiting[0]!.body).toContain("on purpose");
+    expect(await getHold(c.db)).not.toBeNull(); // the hold stays; the owner decides
+  });
+
   it("cancel lifts the hold and lets queued wakes run", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
@@ -278,9 +304,13 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     c.fake.broken.add("broken-co");
     await c.maintenance.start();
     await c.maintenance.step();
-    expect(await getHold(c.db)).not.toBeNull(); // Silent Co has been given time to dial in
-    c.advance(5_000);
+    expect(await getHold(c.db)).not.toBeNull(); // Silent Co has been given time to dial in; Broken Co is tried again, not given up on
+    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
+    c.advance(31_000);
     await c.maintenance.step();
+    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
+    c.advance(31_000);
+    await c.maintenance.step(); // third failed try: now it counts as failed
     expect(await getHold(c.db)).toBeNull();
     const page = (await c.db.select().from(notifications)).find((n) => n.title === "Runner update finished with problems");
     expect(page).toMatchObject({ level: "page" });
@@ -294,6 +324,10 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     c.fake.broken.add("app-co");
     await c.maintenance.start();
     await c.maintenance.step();
+    c.advance(31_000);
+    await c.maintenance.step();
+    c.advance(31_000);
+    await c.maintenance.step(); // third failed try: now it counts as failed
     expect(await getHold(c.db)).toBeNull();
     expect(await c.maint()).toMatchObject({ on: false, last: { ok: false }, healthy: false });
     c.fake.runnersBySlug.get("app-co")!.current = true; // it came back by itself (compose recreated it)
@@ -433,5 +467,301 @@ describe("setting change drain and restart reasons (BOS-594)", () => {
     expect(restarts).toEqual(["note: Runner restarted: setting change", "flag: Runner restarted: crash or out of memory"]);
     const status = (await c.serverStatus.status(b.id)) as { runner: { lastRestart: { reason: string; bootId: string } } };
     expect(status.runner.lastRestart).toMatchObject({ reason: "crash or out of memory", bootId: "boot-3" });
+  });
+});
+
+describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
+  it("messages each running work run once, and holds new runs until cancelled, with none lost", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Home Lab", "home-lab");
+    await c.wake(a);
+    await c.scheduler.tick();
+    expect(c.commands).toHaveLength(1);
+
+    // The button: every live work run gets exactly one wrap-up message, the same way the update tells them.
+    expect((await c.req("POST", "/api/maintenance/wrapup", {})).statusCode).toBe(200);
+    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP_ASKED}`, interrupt: false }]);
+    // Pressing it again does not tell them twice.
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(c.messages).toHaveLength(1);
+    expect(await c.maint()).toMatchObject({ on: true, kind: "wrapup", runs: 1, notRespondingAfter: 10 });
+
+    // Nothing new starts anywhere while wrap-up is on; the wake waits, and is not dropped.
+    await c.wake(b);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0, waiting: 1 });
+    expect(c.commands).toHaveLength(1);
+    const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
+    expect(held.map((w) => w.statusReason)).toContain(HOLD_REASON);
+
+    // Cancelling lets the waiting wake run: nothing was lost.
+    expect((await c.req("POST", "/api/maintenance/cancel", {})).json()).toEqual({ cancelled: true });
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("note: Wrap-up cancelled");
+    expect(c.commands.map((x) => x.company)).toEqual(["App Co", "Home Lab"]);
+  });
+
+  it("lists each run still going with its ticket, and names one waiting on a card as waiting, not stuck", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const project = (await c.req("POST", `/api/companies/${a.id}/projects`, { name: "Site" })).json() as { id: string };
+    const t = (await c.req("POST", `/api/projects/${project.id}/tickets`, { title: "Add a footer" })).json() as { id: string };
+    await c.db.update(tickets).set({ assigneeAgentId: a.ceo, systemState: "ready" }).where(eq(tickets.id, t.id));
+    await c.scheduler.wake({ agentId: a.ceo, reason: "woken by owner", ticketId: t.id });
+    await c.scheduler.tick();
+    const run = c.commands[0]!;
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    const [ticketRow] = await c.db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, t.id));
+    const [companyRow] = await c.db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, a.id));
+    const ref = `${companyRow?.prefix ?? "T"}-${ticketRow!.number}`;
+
+    const list = (await c.maint()) as { runsList: Array<{ runId: string; agent: string | null; ticket: string | null; waitingOn: unknown }> };
+    expect(list.runsList).toHaveLength(1);
+    expect(list.runsList[0]).toMatchObject({ runId: run.runId, agent: "CEO", ticket: ref });
+    expect(list.runsList[0]!.waitingOn).toBeNull();
+
+    // An open permission card for the run makes it "waiting for an answer", even past the not-responding time.
+    c.advance(11 * MIN);
+    await c.db.insert(decisions).values({
+      companyId: a.id,
+      kind: "permission",
+      question: "May I run the full test suite?",
+      options: ["Allow once", "Deny"],
+      recommendedOption: "Allow once",
+      tier: "ceo",
+      context: { type: "permission", runnerId: "r", runId: run.runId, requestId: "req-1" },
+    });
+    const waiting = (await c.maint()) as { runsList: Array<{ sinceWrapUpMinutes: number; waitingOn: { question: string } | null }> };
+    expect(waiting.runsList[0]!.sinceWrapUpMinutes).toBeGreaterThanOrEqual(10);
+    expect(waiting.runsList[0]!.waitingOn).toMatchObject({ question: "May I run the full test suite?" });
+  });
+
+  it("never stops a run by itself, even well past the not-responding time", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    c.advance(120 * MIN);
+    // Passes of the drain do nothing for a wrap-up: no swap, no page, and the run is still there.
+    await c.maintenance.step();
+    await c.maintenance.step();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual([]);
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup" });
+    expect(await c.open()).toHaveLength(0); // no "stop them now?" question for a wrap-up
+    expect(c.commands).toHaveLength(1); // not stopped, not restarted
+    const list = (await c.maint()) as { runsList: unknown[] };
+    expect(list.runsList).toHaveLength(1);
+  });
+
+  it("a permission request raised during a wrap-up can still be answered and reaches the run, so the drain can't deadlock", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const run = c.commands[0]!;
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup" });
+    // The run asks for permission to finish its step, while the wrap-up holds new work everywhere.
+    const [runnerRow] = await c.db.select().from(runners).where(eq(runners.companyId, a.id));
+    const requestId = "req-wrap-1";
+    await c.runners.ingest(runnerRow!, { seq: 9001, at: new Date().toISOString(), event: { type: "run.permission_request", runId: run.runId, requestId, title: "Run a command", kind: "execute", rawInput: { command: "rm -rf /tmp/opencode/probe" }, optionKinds: ["allow_once", "reject_once"] } as never });
+    const [card] = await c.db.select().from(decisions).where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open")));
+    expect(card, "a card is raised during the wrap-up").toBeTruthy();
+    // Answering it gets the verdict to the run, so it can go on and wrap up.
+    const answer = (card!.options as string[])[0]!;
+    expect((await c.req("POST", `/api/decisions/${card!.id}/answer`, { answer })).statusCode).toBe(200);
+    expect(c.decides.find((d) => d.runId === run.runId && d.requestId === requestId)?.verdict).toBe("allow");
+    // The wrap-up is still on: answering a card did not quietly start the world again.
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup" });
+  });
+
+  it("a real update asked for during a wrap-up takes the hold over and swaps as usual", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup" });
+    // The owner presses "Build and update runners": the hold becomes an update, and the update message goes out.
+    expect((await c.req("POST", "/api/maintenance/start", {})).statusCode).toBe(200);
+    expect(await getHold(c.db)).toMatchObject({ kind: "update" });
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP_ASKED}`, `Message from Boss Man: ${WRAP_UP}`]);
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("note: Runners updated");
+  });
+
+  it("an update-runner.sh trigger file during a wrap-up takes the hold over, swaps, and lifts by itself", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup" });
+    // The script asks for the update through drain.json, not the button: the hold must still take it over (BOS-929).
+    await writeFile(path.join(c.dir, "inbox", "drain.json"), JSON.stringify({ by: "update-runner.sh" }));
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update" });
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP_ASKED}`, `Message from Boss Man: ${WRAP_UP}`]);
+    // The run ends, the drain swaps the idle company's runner and lifts the hold by itself: new work is not stuck held.
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/app-co/recreate"]);
+    expect(await c.titles()).toContain("note: Runners updated");
+  });
+});
+
+describe("Ask agents to wrap up while an update waits (BOS-988)", () => {
+  it("messages every still-running run, shows them, and leaves the update waiting so it goes ahead as normal", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    expect(c.commands).toHaveLength(1);
+    // The owner presses Build and update runners: an update hold starts and its own message goes out.
+    await c.maintenance.start();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update" });
+
+    // The owner then presses "Ask agents to wrap up": it is allowed while the update waits, and the run is told.
+    const r = (await c.req("POST", "/api/maintenance/wrapup", {})).json() as { on: boolean; kind: string; wrapAsked?: boolean; runsList?: unknown[] };
+    expect(r).toMatchObject({ on: true, kind: "update", wrapAsked: true });
+    expect(r.runsList).toHaveLength(1);
+    const told = c.messages.map((m) => m.text);
+    expect(told).toEqual([`Message from Boss Man: ${WRAP_UP}`, `Message from Boss Man: ${WRAP_UP_DURING_UPDATE}`]);
+
+    // The update hold is still there (it did not cancel or replace it), waiting for the same run.
+    const hold = (await getHold(c.db))!;
+    expect(hold.kind).toBe("update");
+    expect(hold.wrapSince).toBeTruthy();
+
+    // Pressing again tells nobody twice.
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(c.messages).toHaveLength(2);
+
+    // The run ends: the update goes ahead by itself, as though the wrap-up had not been asked.
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/app-co/recreate"]);
+    expect(await c.titles()).toContain("note: Runners updated");
+  });
+
+  it("Cancel wrap-up during an update takes back only the ask, never the update", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect((await getHold(c.db))!.wrapSince).toBeTruthy();
+
+    expect((await c.req("POST", "/api/maintenance/cancel-wrap", {})).json()).toEqual({ cancelled: true });
+    const hold = (await getHold(c.db))!;
+    expect(hold.kind).toBe("update");
+    expect(hold.wrapSince).toBeUndefined();
+    expect(hold.wrapTold).toBeUndefined();
+    // No "wrap-up cancelled" or "update cancelled" notice: the update is untouched and still swaps when the run ends.
+    expect(await c.titles()).not.toContain("note: Wrap-up cancelled");
+    expect(await c.titles()).not.toContain("note: Runner update cancelled");
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+  });
+
+  it("the update's own message reaches a run that starts just after the hold (it is told on the next pass), once", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.maintenance.start();
+    expect(c.messages).toHaveLength(0); // nothing running yet
+    // A run whose start was already on its way when the hold began (BOS-988): it appears after the start message.
+    await c.db.insert(runs).values({ id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: null, model: "m", startedAt: new Date(0) });
+    await c.maintenance.step();
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP}`]);
+    await c.maintenance.step();
+    expect(c.messages).toHaveLength(1); // once per run, as before
+  });
+});
+
+describe("QA: wrap-up during an update, the cases a regression would slip past (BOS-988)", () => {
+  it("a run that starts after the ask is told the wrap-up on the next pass, once, beside the update's own message", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(c.messages).toHaveLength(0); // nobody was running when the hold and the ask began
+    await c.db.insert(runs).values({ id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: null, model: "m", startedAt: new Date(0) });
+    await c.maintenance.step();
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP}`, `Message from Boss Man: ${WRAP_UP_DURING_UPDATE}`]);
+    await c.maintenance.step();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(c.messages).toHaveLength(2);
+  });
+
+  it("chat and reply runs are never messaged", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.db.insert(runs).values([
+      { id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: "chat", model: "m", startedAt: new Date(0) },
+      { id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: "reply", model: "m", startedAt: new Date(0) },
+    ]);
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await c.maintenance.step();
+    expect(c.messages).toHaveLength(0);
+  });
+
+  it("during a setting-change hold the hold keeps its kind and the run is told the setting message, then the ask", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ kind: "settings" });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect((await getHold(c.db))!.kind).toBe("settings");
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP_SETTINGS}`, `Message from Boss Man: ${WRAP_UP_DURING_UPDATE}`]);
+  });
+
+  it("each run's 'asked N min ago' counts from when that run was told", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start();
+    c.advance(10 * MIN);
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    c.advance(4 * MIN);
+    const m = (await c.maint()) as { runsList: Array<{ sinceWrapUpMinutes: number }> };
+    expect(m.runsList.map((r) => r.sinceWrapUpMinutes)).toEqual([4]);
+  });
+
+  it("Cancel wrap-up: nothing to cancel says so; with no update it lifts the whole wrap-up hold; with an update but no ask it changes nothing", async () => {
+    const c = (ctx = await setup());
+    await c.company("App Co", "app-co");
+    expect((await c.req("POST", "/api/maintenance/cancel-wrap", {})).json()).toEqual({ cancelled: false });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect((await getHold(c.db))!.kind).toBe("wrapup");
+    expect((await c.req("POST", "/api/maintenance/cancel-wrap", {})).json()).toEqual({ cancelled: true });
+    expect(await getHold(c.db)).toBeNull();
+    await c.maintenance.start();
+    expect((await c.req("POST", "/api/maintenance/cancel-wrap", {})).json()).toEqual({ cancelled: false });
+    expect((await getHold(c.db))!.kind).toBe("update");
+  });
+
+  it("after Cancel wrap-up the status drops the wrap-up list and the update is still on the banner", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await c.maint()).toMatchObject({ on: true, kind: "update", wrapAsked: true });
+    await c.req("POST", "/api/maintenance/cancel-wrap", {});
+    const after = (await c.maint()) as Record<string, unknown>;
+    expect(after).toMatchObject({ on: true, kind: "update" });
+    expect(after.wrapAsked).toBeUndefined();
+    expect(after.runsList).toBeUndefined();
   });
 });

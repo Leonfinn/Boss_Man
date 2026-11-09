@@ -467,7 +467,7 @@ describe("proposing a change", () => {
     expect(d!.question).toMatch(/Replayed over the last 14 days: the current limits would have raised \d+ flags? \(\d+ cleared within 30 minutes on their own\); the new limits would have raised \d+/);
     expect((await answer(c, id, "Apply")).statusCode).toBe(200);
     const [co] = await c.db.select({ w: companies.watchdog }).from(companies).where(eq(companies.id, c.company.id));
-    expect(co!.w).toMatchObject({ reviewHours: 6, inProgressHours: 4, enabled: false });
+    expect(co!.w).toMatchObject({ reviewHours: 6, inProgressHours: 4, enabled: true });
   });
 
   it("the CEO never approves its own proposal: with no Product Manager, playbooks go to the owner", async () => {

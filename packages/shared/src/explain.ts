@@ -1,7 +1,8 @@
 // Plain-English explanations of permission requests, worked out from the command itself
 // (no model): what the owner is being asked to allow, and the worst thing it could do.
 
-import { commandOf, DESTRUCTIVE, looksLikeBossmanTool, PUSHING, type PermissionInfo, type PolicyMatch } from "./policy.js";
+import { BUILTIN_GUARDS, commandOf, DESTRUCTIVE, looksLikeBossmanTool, PUSHING, type PermissionInfo, type PolicyMatch } from "./policy.js";
+import { commandRisks } from "./destructive.js";
 
 export type Effect = "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown";
 
@@ -24,10 +25,40 @@ export type PermissionExplanation = {
   scratch?: { note: string; unchecked: string[] };
   /** Where a `git push` goes, and what is dangerous about it (BOS-208). */
   push?: PushReading;
+  /** One plain line on why the card is with the owner and not the CEO (BOS-793). Set only on owner-tier cards. */
+  ownerWhy?: string;
 };
 
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+/**
+ * Why a card went to the owner and not the CEO, in one plain sentence (BOS-793). Display only: it
+ * changes no routing. `rule` is the name of the rule that sent it; `command` is the shell command, if any.
+ */
+export function ownerWhy(command: string | null, rule: string): string {
+  const lead = "Sent to you, not the CEO, because";
+  if (command) {
+    const risks = commandRisks(command);
+    const risk = risks.find((r) => r.kind === "destroys") ?? risks.find((r) => r.kind === "pushes");
+    if (risk) return `${lead} the destructive-command guard caught part of it (${risk.why})${risk.text ? `: ${clip(risk.text, 100)}` : ""}.`;
+    if (new RegExp(DESTRUCTIVE, "i").test(command)) return `${lead} the destructive-command guard matched it.`;
+    if (new RegExp(PUSHING, "i").test(command)) return `${lead} it pushes or publishes.`;
+  }
+  const guard = BUILTIN_GUARDS.find((g) => g.name === rule);
+  return guard ? `${lead} the built-in rule "${rule}" applies.` : `${lead} the rule "${rule}" sends it to you.`;
+}
+
 /** A standing rule the owner can pick instead of "Allow once". */
-export type AlwaysChoice = { label: string; name: string; match: PolicyMatch };
+export type AlwaysChoice = {
+  label: string;
+  name: string;
+  match: PolicyMatch;
+  /** What the rule allows, finishing "Always allow <who> to …"; the card shows the whole sentence before saving. */
+  what: string;
+};
+
+/** Who a saved "always" rule covers: only the agent that asked (the default) or every agent in the company. */
+export type AlwaysScope = "agent" | "company";
 
 /** Shell grammar, not programs: skipped to find the program that follows. */
 const KEYWORDS = new Set("if then else elif fi for do done while until case esac function { } ! [[ ]] (( ))".split(" "));
@@ -35,7 +66,7 @@ const SHELLS = new Set("bash sh zsh dash python python3 node".split(" "));
 const READS = new Set("set export local declare readonly unset shift return exit printf read trap break continue cat grep egrep rg ls head tail wc stat du df free ps which pwd echo cd date whoami uname sort uniq cut tr diff file test [ true sleep".split(" "));
 const CHANGES = new Set("tee mv cp mkdir touch chmod chown ln".split(" "));
 const DELETES = new Set("rm rmdir unlink shred".split(" "));
-const NETWORK = new Set("curl wget ssh scp nc ncat rsync".split(" "));
+const NETWORK = new Set("curl wget ssh scp nc ncat rsync agent-browser".split(" "));
 const GIT_READS = new Set("status log diff show branch rev-parse ls-files blame remote grep describe merge-base show-ref cat-file shortlog rev-list for-each-ref ls-tree reflog name-rev symbolic-ref check-ignore count-objects merge-tree range-diff whatchanged version help fsck cherry".split(" "));
 const GIT_CHANGES = new Set("add commit checkout switch merge reset rebase stash restore cherry-pick tag apply mv revert am notes init gc prune config sparse-checkout bisect format-patch update-ref".split(" "));
 const GIT_NETWORK = new Set(["fetch", "pull", "clone", "ls-remote", "submodule"]);
@@ -70,6 +101,12 @@ function segments(command: string): string[] {
   const heredocs: string[] = [];
   for (let i = 0; i < command.length; i++) {
     const c = command[i]!;
+    // A backslash outside single quotes escapes the next character: \" stays inside the quote, \; is not a separator, and \ at the end of a line joins it to the next (BOS-752).
+    if (c === "\\" && quote !== "'" && i + 1 < command.length) {
+      cur += command[i + 1] === "\n" ? " " : c + command[i + 1];
+      i++;
+      continue;
+    }
     if (quote) {
       if (c === quote) quote = "";
     } else if (c === "'" || c === '"') quote = c;
@@ -173,7 +210,7 @@ function scratchSafe(seg: string, program: string, rest: string[]): boolean {
 const SAFE_FIRST_WORD = /^[a-z0-9_-]+$/;
 
 function explainSegment(seg: string): Part {
-  const all = (seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote);
+  const all = (seg.match(/'[^']*'|"(?:\\.|[^"\\])*"|\S+/g) ?? []).map(unquote);
   const comment = all.findIndex((t) => t.startsWith("#"));
   const inline = all.some((t) => t.startsWith("<<") && !t.startsWith("<<<"));
   const tokens = all.slice(0, comment < 0 ? all.length : comment).filter((t) => !t.startsWith("<<") || t.startsWith("<<<"));
@@ -236,6 +273,8 @@ function explainSegment(seg: string): Part {
   else if (CHANGES.has(program)) p = part("changes", "Changes files", program === "cp" || program === "tee" ? operands.slice(program === "cp" ? -1 : 0) : program === "chmod" || program === "chown" ? operands.slice(1) : operands);
   else if (READS.has(program)) p = part("reads", "", paths);
   else if (inline && SHELLS.has(program)) p = part("unknown", `Runs a script written into the command (${program})`);
+  // A word that is an option, a variable or a piece of quoted text is not a program name: say the command couldn't be read, and don't list it as a program (BOS-752).
+  else if (!/^[\w.+@-]+$/.test(program) || program.startsWith("-")) p = part("unknown", "Runs a command Boss Man couldn't read");
   else p = part("unknown", "Runs a program Boss Man doesn't recognise", [program]);
 
   if (/\$\(|`/.test(nested ? seg.slice(seg.indexOf("$(") + 2) : seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");
@@ -752,8 +791,10 @@ export function explainPermission(info: PermissionInfo, agent: string): Permissi
   return { title: `${agent} wants to ${t.what}`, summary: `${t.verb}${target ? `${noun} ${target}` : ` (no name given)`}.`, effect: t.effect, reason };
 }
 
+/** Paths and words that point at secrets; a command naming one never gets an Always choice. */
+const SECRET_HINT = /(?:^|[\/\s=~])(?:\.ssh|\.aws|\.gnupg|\.netrc|\.npmrc|\.pgpass|\.docker\/config|\.env(?:\.\S*)?|id_(?:rsa|ed25519|ecdsa|dsa))(?:\W|$)|secret|passw(?:or)?d|credential|token|api[_-]?key|private[_-]?key|\.pem\b|\.p12\b|\.key\b|environ\b/i;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const KIND_RULE: Record<string, string> = { read: "read files", edit: "change files", fetch: "fetch web pages" };
+// File reads and edits get no Always choice: a kind-wide rule can't name a safe path, so it would cover secrets and files outside the checkout (BOS-294 security review).
 
 /**
  * The standing rules offered for a request, narrowest first. Shell commands only when they
@@ -765,17 +806,14 @@ export function alwaysChoices(info: PermissionInfo, e: PermissionExplanation): A
   if (mcp) {
     const [, server, tool] = mcp as unknown as [string, string, string];
     if (server === "bossman") return [];
-    return [
-      { label: `Always allow ${server}'s ${tool} tool`, name: `Allow ${server}'s ${tool} tool`, match: { titlePattern: `^${escapeRe(info.title!)}$`, safeOnly: true } },
-      { label: `Always allow every ${server} tool`, name: `Allow every ${server} tool`, match: { titlePattern: `^mcp__${escapeRe(server)}__`, safeOnly: true } },
-    ];
+    // One exact tool only: a server-wide rule would cover destructive tools and ones added later (safeOnly checks shell commands only).
+    return [{ label: `Always allow ${server}'s ${tool} tool`, name: `Allow ${server}'s ${tool} tool`, what: `use ${server}'s ${tool} tool`, match: { titlePattern: `^${escapeRe(info.title!)}$`, safeOnly: true } }];
   }
   if (e.command) {
-    return e.effect === "reads" && !e.summary.includes("secrets") && e.command.length < 250
-      ? [{ label: "Always allow this exact command", name: `Allow the command ${e.command.slice(0, 60)}`, match: { kinds: ["execute"], commandPattern: `^${escapeRe(e.command)}$`, safeOnly: true } }]
+    return e.effect === "reads" && !e.summary.includes("secrets") && !SECRET_HINT.test(e.command) && e.command.length < 250
+      ? [{ label: "Always allow this exact command", name: `Allow the command ${e.command.slice(0, 60)}`, what: `run exactly this command: ${e.command.slice(0, 120)}`, match: { kinds: ["execute"], commandPattern: `^${escapeRe(e.command)}$`, safeOnly: true } }]
       : [];
   }
-  const what = KIND_RULE[info.kind ?? ""];
-  // shortcut: rules have no agent condition, so this is company-wide.
-  return what ? [{ label: `Always allow every agent in this company to ${what}`, name: `Allow agents to ${what}`, match: { kinds: [info.kind!], safeOnly: true } }] : [];
+  // No kind-wide choices: a fetch rule has no address limit, so it would be a standing way to send data out in a URL.
+  return [];
 }

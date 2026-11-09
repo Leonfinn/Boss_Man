@@ -24,7 +24,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, launcher, memory, serverHealth, checks, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
+const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -62,6 +62,8 @@ const bg = createBackground(
     } },
     // Stale-blocker, stalled-run and missed-work sweeps.
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
+    // Deploy tag moves (DR-033) that a restart or a leader change cut off: picked up again; the runner's lease makes a repeat harmless. // leader-only
+    { name: "deploy tags", everyMs: Number(env.BOSSMAN_DEPLOY_TAGS_MS ?? 60_000), run: () => deploys.resumeTags() },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
     { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: () => notes.markAnsweredRead() },
     // The Scrum Master watchdog's rule checks (BOS-58): no model; wakes the Scrum Master only when a rule trips. Off per company until the owner switches it on.
@@ -83,6 +85,8 @@ const bg = createBackground(
     // What each runner's add-ons say about their health (docs/12).
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
+    // Every company's runner stays connected: tells that company's CEO and the owner when one does not, and checks a deploy brought them all back (BOS-467). // leader-only
+    { name: "runner watch", everyMs: Number(env.BOSSMAN_RUNNER_WATCH_MS ?? 30_000), run: () => runnerWatch.step() },
     // The server-owned check queue (DR-003): starts due jobs and marks silent ones stuck, each with a recorded reason. Does nothing while check_queue_mode is legacy.
     { name: "check queue", everyMs: Number(env.BOSSMAN_CHECK_QUEUE_MS ?? 15_000), run: async () => { await checks.sweep(); } },
     // Synthetic's quota, cached and read at most every 5 minutes; warns the owner once per period at 80% and 100% (BOS-239).
@@ -97,6 +101,7 @@ const bg = createBackground(
 );
 // Background work follows leadership; runner sockets are closed by buildApp on demotion.
 // A server that takes charge holds no merges: it restarts every approved, unmerged one (DR-026). The loop below keeps asking until the update hold is off and the runners are connected.
+// shortcut: real cross-request state, but lost on restart harmlessly: a restarted leader promotes again and resets this to now, then resumes merges from then (BOS-907).
 let resumeMergesSince: Date | null = null;
 leader.onPromote(() => {
   resumeMergesSince = new Date();

@@ -14,6 +14,8 @@ const REPLACED = [/^paperclipai\/paperclip\//, /^paperclipai\/bundled\/paperclip
 const NEEDS_ADDON: Record<string, string[]> = { dogfood: ["agent-browser"], "agent-browser": ["agent-browser"] };
 const KIND: Record<string, string> = { claude_local: "claude", opencode_local: "opencode", codex_local: "codex" };
 const TEMPLATE: Record<string, string> = { engineer: "engineer", researcher: "researcher", qa: "qa", pm: "product-manager", designer: "designer", writer: "writer" };
+/** The import's own rule for a secret name (company-import.ts's Secret). */
+const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 type Files = Map<string, Uint8Array>;
 type Obj = Record<string, unknown>;
@@ -84,6 +86,7 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
 
   // Agents.
   const holders = new Map<string, string[]>(); // skill → agent folders. lost on restart, harmless: one import call.
+  const skippedSecrets = new Set<string>(); // lowercase secret names, for one note. lost on restart, harmless: one import call.
   const secrets = new Map<string, string[]>(); // env name → agent folders. lost on restart, harmless: one import call.
   const agentDirs = [...new Set([...files.keys()].filter((p) => /^agents\/[^/]+\/AGENTS\.md$/.test(p)).map((p) => p.split("/")[1]!))].sort();
   const paperclipy: string[] = [];
@@ -120,8 +123,24 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
       else missing.push(ref.split("/").at(-1)!);
     }
     if (missing.length) notes.push(`${str(md.meta.name) ?? slug} had skills that aren't in the export: ${missing.join(", ")}.`);
-    for (const [env, v] of Object.entries(obj(obj(cfg.inputs).env))) if (obj(v).kind === "secret" && /^[A-Z][A-Z0-9_]{0,63}$/.test(env)) secrets.set(env, [...(secrets.get(env) ?? []), slug]);
+    for (const [env, v] of Object.entries(obj(obj(cfg.inputs).env))) {
+      if (obj(v).kind !== "secret") continue;
+      if (SECRET_NAME.test(env)) secrets.set(env, [...(secrets.get(env) ?? []), slug]);
+      else skippedSecrets.add(env);
+    }
   }
+  if (skippedSecrets.size)
+    notes.push(
+      `Secret names must be upper case, so these weren't imported: ${[...skippedSecrets]
+        .map((n) => {
+          const upper = n.toUpperCase();
+          if (secrets.has(upper)) return `${n} (already imported as ${upper}: change scripts to read ${upper})`;
+          // The upper-case name may still break the rule (a dash, a leading digit); suggest one that doesn't, X before a leading digit.
+          const suggested = upper.replace(/[^A-Z0-9_]/g, "_").replace(/^[0-9]/, "X$&").slice(0, 64);
+          return SECRET_NAME.test(suggested) ? `${n} (add it as ${suggested})` : `${n} (can't be made valid; rename it before importing)`;
+        })
+        .join(", ")}. Scripts that read the old name will get an empty value; change them to read the upper-case name.`,
+    );
   if (paperclipy.length)
     notes.push(
       `${paperclipy.length === 1 ? "1 agent's instructions describe" : `${paperclipy.length} agents' instructions describe`} working in Paperclip (the paperclip skill, heartbeats, its API or /paperclip paths), which Boss Man doesn't have: ${paperclipy.join(", ")}. After importing, ask your CEO to revise them (it can read and update every agent's instructions), or edit them under Agents.`,

@@ -9,7 +9,7 @@
 // deleted when they resolved are gone. Scheduled checks are read back from the "scheduled a check" and
 // "carry on" activity rows; a check the history doesn't show is the one gap left.
 import { and, asc, eq, gte, inArray, isNotNull } from "drizzle-orm";
-import { ticketRef, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
+import { HOUR_MS, ticketRef, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, reviewRequests, runs, ticketDependencies, ticketReviews, tickets, wakes } from "../db/schema.js";
 import { backoffGapMs, evaluate, type SnapHold, type SnapTicket } from "./watchdog-rules.js";
@@ -259,7 +259,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
   let busiest = 0;
   let tripAt: number | null = null;
   for (let i = 0, j = 0; i < wakesAt.length; i++) {
-    while (wakesAt[i]! - wakesAt[j]! >= 3_600_000) j++;
+    while (wakesAt[i]! - wakesAt[j]! >= HOUR_MS) j++;
     busiest = Math.max(busiest, i - j + 1);
     if (tripAt === null && i - j + 1 > s.maxSmRunsPerHour) tripAt = wakesAt[i]!;
   }

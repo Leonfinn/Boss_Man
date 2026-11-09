@@ -70,6 +70,9 @@ describe("wake classes: the table", () => {
     "another company",
     "not open",
     "unknown",
+    // The reasons written on a ticket's history row by a system move (BOS-898), not wakes.
+    "what it waited on is resolved",
+    "what it waited on finished",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {
@@ -311,10 +314,12 @@ describe("wake classes: callers of wake() and notify()", () => {
   const DROP_RECORDED = "an agent-started wake: a drop is on the wake row, and the owner is alerted once";
   const CALLERS: Record<string, string> = {
     "app.ts": DROP_RECORDED + " (assigned, feedback, skill decided); owner and rule wakes are never dropped",
+    "routes/server-admin.ts": "the owner's wake-an-agent route: an owner wake is never dropped",
     "mcp.ts": DROP_RECORDED + " (hooks.wake: note request, ...)",
     "services/alert-ladder.ts": CHECKS_OUTCOME + " (a dropped rung is not counted as sent)",
     "services/check-dispatcher.ts": NEVER_DROPPED + " (check_result is scheduled)",
     "services/chat.ts": NEVER_DROPPED,
+    "services/closed-notice.ts": NEVER_DROPPED + " (a flag note to an engaged owner, passed in as a dep)",
     "services/pa.ts": NEVER_DROPPED,
     "services/decisions.ts": NEVER_DROPPED + "; chased and engagement are " + DROP_RECORDED,
     "services/deploys.ts": NEVER_DROPPED,
@@ -328,6 +333,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/runs.ts": NEVER_DROPPED,
     "services/scheduler.ts": CHECKS_OUTCOME + " (check due retries next tick; nudge reports the drop)",
     "services/stale-requests.ts": CHECKS_OUTCOME + " (a dropped check is skipped)",
+    "services/review-holds.ts": NEVER_DROPPED,
     "services/sweeps.ts": NEVER_DROPPED,
     "services/owner-replies.ts": CHECKS_OUTCOME + " (a dropped re-wake still counts as the one try; the 10-minute ask does not need it to land)",
     "services/ticket-chat.ts": NEVER_DROPPED,
@@ -338,8 +344,8 @@ describe("wake classes: callers of wake() and notify()", () => {
     const callers = walk(SRC)
       .filter((f) => /\b(scheduler|deps|self|this)\.(wake|notify)\(|\bwake\(\{|\.setWakeHook\(|\bnotify: \(agentId/.test(readFileSync(f, "utf8")))
       .map((f) => path.relative(SRC, f))
-      // These two call a notes notifier of the same name, which tells the owner and wakes nobody.
-      .filter((f) => f !== "services/maintenance.ts" && f !== "services/self-deploy.ts");
+      // These call a notes notifier of the same name, which tells the owner and wakes nobody.
+      .filter((f) => f !== "services/maintenance.ts" && f !== "services/self-deploy.ts" && f !== "services/runner-watch.ts" && f !== "services/merge-jam.ts");
     const unlisted = callers.filter((f) => !(f in CALLERS));
     expect(unlisted).toEqual([]);
   });

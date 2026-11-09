@@ -104,7 +104,7 @@ describe("CEO-tier cards on the alert ladder (BOS-119)", () => {
     expect(await queueIds()).not.toContain(d.id);
     expect(await teamIds()).toContain(d.id);
     expect(await ownerNotified(d.id)).toEqual([]);
-    expect(await ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.ceo.id), eq(wakes.reason, "decision")))).toEqual([expect.objectContaining({ priority: 3 })]);
+    expect(await ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.ceo.id), eq(wakes.reason, "ceo reply")))).toEqual([expect.objectContaining({ priority: 4 })]);
 
     // The 5 minutes start when a CEO run does (BOS-180), not when the card was raised.
     ctx.advance(10);
@@ -160,7 +160,7 @@ describe("CEO-tier cards on the alert ladder (BOS-119)", () => {
   it("several cards waiting on the CEO wake it once (BOS-180)", async () => {
     await ctx.ask();
     await ctx.ask();
-    expect(await ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.ceo.id), eq(wakes.reason, "decision")))).toHaveLength(1);
+    expect(await ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.ceo.id), eq(wakes.reason, "ceo reply")))).toHaveLength(1);
   });
 
   it("a plan addressed to the CEO also waits 5 minutes on the ladder, then reaches the owner", async () => {

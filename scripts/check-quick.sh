@@ -82,6 +82,29 @@ step() { # step <label> <command...>
 }
 has() { grep -Eq "$1" <<<"$changed"; }
 
+# Tests that find their source files by path (readFileSync, readdirSync) instead of importing them: vitest related can't
+# see a change to those files, so only an entry here makes the test run for it (BOS-881). Add an entry when a test reads
+# files by path; one line per test, its package and the path prefixes it reads:
+#   "<package dir> <test file under that package> <path prefix> [<path prefix>...]"
+path_reads=(
+  "apps/server test/owner-control-list.test.ts apps/web/src/pages/ apps/web/src/components/ packages/shared/src/owner-controls.ts"
+)
+path_read_tests() { # path_read_tests <package dir>: the path-reading tests of that package whose paths the branch changed
+  local d=$1 f p hit
+  for entry in "${path_reads[@]}"; do
+    # shellcheck disable=SC2086  # split the entry into its words: package dir, test file, then its path prefixes
+    set -- $entry
+    [ "$1" = "$d" ] || continue
+    f=$2 hit=0
+    for p in "${@:3}"; do
+      if [ -d "$p" ]; then has "^${p%/}/" && hit=1
+      else has "^${p}$" && hit=1; fi
+    done
+    [ "$hit" -eq 1 ] && echo "$f"
+  done
+  return 0
+}
+
 # Packages with changed files; a change to the root config (lockfile, tsconfig, package.json) or to shared code touches all of them.
 pkgs=()
 for d in apps/launcher apps/runner apps/server apps/web packages/shared; do
@@ -90,6 +113,12 @@ done
 if has '^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig[^/]*\.json)$' || has '^packages/shared/'; then
   pkgs=(apps/launcher apps/runner apps/server apps/web packages/shared)
 fi
+# A path-reading test lives in a package the branch may not have touched (the owner-controls test reads web pages from
+# apps/server), so its package joins the list whenever one of its paths changed.
+for d in apps/launcher apps/runner apps/server apps/web packages/shared; do
+  [ -z "$(path_read_tests "$d")" ] && continue
+  [[ " ${pkgs[*]} " == *" $d "* ]] || pkgs+=("$d")
+done
 
   if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
   step "merge with $base is clean" git merge-tree --write-tree "$base" HEAD
@@ -124,6 +153,14 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     # shellcheck disable=SC2086  # one argument per file; paths have no spaces
     step "tests related to $name changes" pnpm --filter "$name" exec vitest related --run $files
   done
+  # A path-reading test the related list can't reach runs on its own, from its package (same slot, its setup files apply).
+  for d in "${pkgs[@]}"; do
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      name="$(node -p "require('./$d/package.json').name")"
+      step "path-reading test ${f##*/} ($d)" pnpm --filter "$name" exec vitest related --run "$f"
+    done <<<"$(path_read_tests "$d")"
+  done
   return "$failed"
 fi
 
@@ -141,10 +178,25 @@ need_slot=0
 [ "${#pkgs[@]}" -eq 0 ] || need_slot=1
 for d in "${pkgs[@]}" apps/site; do
   files="$(related_files "$d")"
+  [ -n "$(path_read_tests "$d")" ] && need_slot=1
   [ -n "$files" ] || continue
   if broad "$files"; then echo "SKIP related tests: too broad for a hand run, the merge gate runs them ($d; CHECK_QUICK_FORCE_RELATED=1 runs them anyway)"; partial=1
   else need_slot=1; fi
 done
+# A fresh tree has no packages (BOS-952): the server-owned check queue runs this script in a new detached worktree, and
+# typecheck, vitest and the web build then fail with "tsc: not found". Install them first, here before the slot wait so
+# the install never holds a check slot. The queue job sets the shared pnpm store (BOS-655), so this is quick when warm.
+# A tree that already has node_modules (an agent's checkout) is left as it is.
+web_build=0; ! has '^apps/web/|^packages/shared/' || web_build=1
+if { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ ! -d node_modules ]; then
+  before=$failed failed=0
+  step "install packages (fresh tree, no node_modules)" pnpm install --frozen-lockfile --prefer-offline
+  install_failed=$failed failed=$((before | failed))
+  # Without packages every later pnpm step fails too: don't take a check slot just to say so again.
+  if [ "$install_failed" -ne 0 ]; then
+    echo "SKIP  typecheck, related tests, web build: the install failed"; need_slot=0 web_build=0
+  fi
+fi
 if [ "$need_slot" -eq 1 ]; then
   # The slot wait streams through, so the agent sees "waiting for a free check slot (place N of M ...)".
   rc=0
@@ -157,7 +209,7 @@ if [ "$need_slot" -eq 1 ]; then
   elif [ "$rc" -ne 0 ]; then failed=1; fi
 fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
-if has '^apps/web/|^packages/shared/'; then step "build web" pnpm --filter @boss-man/web build; fi
+if [ "$web_build" -eq 1 ]; then step "build web" pnpm --filter @boss-man/web build; fi
 
 if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
 if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; return 75; fi

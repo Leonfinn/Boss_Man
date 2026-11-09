@@ -9,6 +9,7 @@ type Runners = ReturnType<typeof runnersService>;
 
 // Runner events received and not yet stored (the one being stored included), across every socket on this process (BOS-410). A
 // slow database makes these pile up in memory; the memory sampler logs the count.
+// lost on restart, harmless because it is only a live gauge of this process's in-flight stores, not a value anything reads later.
 let ingestWaiting = 0;
 export const runnerIngestWaiting = () => ingestWaiting;
 
@@ -16,7 +17,7 @@ export async function runnerSocketRoutes(
   app: FastifyInstance,
   runners: Runners,
   secrets: ReturnType<typeof secretsService>,
-  opts: { heartbeatMs?: number; isLeader?: () => boolean; checks?: Pick<ReturnType<typeof import("../services/check-dispatcher.js").checkDispatcher>, "onHello" | "onDone" | "onProgress"> } = {},
+  opts: { heartbeatMs?: number; isLeader?: () => boolean; /** A runner said hello with its image commit (BOS-1021): checks that waited for the rebuild can start. */ onImage?: (companyId: string) => Promise<unknown>; checks?: Pick<ReturnType<typeof import("../services/check-dispatcher.js").checkDispatcher>, "onHello" | "onDone" | "onProgress"> } = {},
 ) {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
 
@@ -28,9 +29,9 @@ export async function runnerSocketRoutes(
     const runId = (req.query as { runId?: string }).runId;
     const validRunId = runId && /^[0-9a-f-]{36}$/i.test(runId) ? runId : undefined;
     reply.header("cache-control", "no-store");
-    // Outside a run, a runner needs secrets only to push a merge (R46) or check the setup-token (R58).
+    // Outside a run, a runner needs secrets only to push a merge (R46), check the setup-token (R58) or move a deploy tag (DR-033).
     const asked = (req.query as { purpose?: string }).purpose;
-    const purpose = !validRunId && (asked === "merge" || asked === "check") ? asked : "run";
+    const purpose = !validRunId && (asked === "merge" || asked === "check" || asked === "deploy_tag") ? asked : "run";
     return { env: await secrets.resolveCompanyEnv(runner.companyId, purpose, validRunId) };
   });
 
@@ -83,7 +84,8 @@ export async function runnerSocketRoutes(
               return;
             }
             queue = queue.then(async () => {
-              await runners.touch(runner, msg.imageVersion, msg.harnessVersions);
+              await runners.touch(runner, msg.imageVersion, msg.harnessVersions, msg.imageCommit);
+              if (msg.imageCommit) void opts.onImage?.(runner.companyId)?.catch((err) => app.log.warn({ err, runnerId: runner.id }, "starting go-live checks failed"));
               await runners.bootSeen(runner, msg.bootId, { previousExit: msg.previousExit, hostBootAt: msg.hostBootAt }).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "waking parked checks after a restart failed"));
               release = runners.connect(runner.id, (command) => {
                 if (socket.readyState !== socket.OPEN) return false;

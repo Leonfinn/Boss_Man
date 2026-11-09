@@ -44,6 +44,9 @@ describe("watchdog rules (BOS-58)", () => {
     expect(rules([ticket({ state: "review", stateChangedAt: ago(120) })])).toEqual(["t1:stale_review"]);
     // Approved by everyone and waiting for the merge sweep: not chased as stale review (BOS-362).
     expect(rules([ticket({ state: "review", stateChangedAt: ago(240), mergeWaiting: true })])).toEqual([]);
+    // A reviewer's hold on the merge (BOS-808) is quiet too, even if the other reviews are still open.
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(240), held: true })])).toEqual([]);
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(240), held: false })])).toEqual(["t1:stale_review"]);
     expect(rules([ticket({ state: "blocked", stateChangedAt: ago(479) })])).toEqual([]);
     expect(rules([ticket({ state: "blocked", stateChangedAt: ago(480) })])).toEqual(["t1:stale_blocked"]);
     // Limits come from settings. A run that moved it to in-progress, then stalled: the long rule reads its setting.
@@ -79,6 +82,19 @@ describe("watchdog rules (BOS-58)", () => {
     // Waiting on a scheduled check or a plan approval is a plan, not an idle slot.
     expect(rules([ticket({ stateChangedAt: ago(600), scheduled: true })])).toEqual([]);
     expect(rules([ticket({ stateChangedAt: ago(600), awaitingPlan: true })])).toEqual([]);
+  });
+
+  it("rule 1 (BOS-659 live follow-up): an agent that picked the ticket up and whose run then ended is idle at the short limit too", () => {
+    // The real shape: the scheduler moves the ticket in progress, the run starts just after and ends normally.
+    // It used to fall through to the 45-minute grace and the long rule, so half the slots sat empty for hours.
+    const picked = run({ startedAt: ago(29), endedAt: ago(20), outcome: "end_turn" });
+    expect(rules([ticket({ stateChangedAt: ago(30) })], [picked])).toEqual(["t1:idle_agent"]);
+    // Not before the short limit.
+    expect(rules([ticket({ stateChangedAt: ago(30) })], [{ ...picked, endedAt: ago(5) }])).toEqual([]);
+    // A crash is not this rule's: Boss Man's free recovery goes first, then its own rule.
+    expect(rules([ticket({ stateChangedAt: ago(30) })], [{ ...picked, outcome: "error: out of memory" }])).toEqual([]);
+    // Past the grace the long rule owns it, so the two don't both wake the assignee for one idle spell.
+    expect(rules([ticket({ stateChangedAt: ago(60) })], [{ ...picked, startedAt: ago(59), endedAt: ago(50) }])).toEqual(["t1:run_ended_unmoved"]);
   });
 
   it("rule 2 (BOS-659): flags a ready, assigned ticket whose blockers are all finished and which nothing has run on", () => {

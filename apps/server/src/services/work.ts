@@ -1,6 +1,6 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
@@ -8,7 +8,9 @@ import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.
 import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, WorkError } from "./ticket-links.js";
+import { moveTicket, staleVersionMessage } from "./ticket-moves.js";
 import { derivedSignoff } from "./signoff.js";
+import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
 import { fixesLiveProblem } from "./decisions.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
@@ -74,15 +76,26 @@ type TicketPatch = {
   urgent?: boolean;
   /** Move past a full column anyway. */
   overLimit?: boolean;
+  /** A move into review: "new" opens a review round (the owner's move), "keep" (the default here) leaves it to the caller (review.ts moves tickets into review itself). */
+  reviewRound?: "new" | "keep";
+  /** Why it moved, for the one history line (the owner's move says "Owner moved it to Done"). Defaults to the state note. */
+  moveReason?: string;
   /** Boss Man's own move (a review sent back, a landing): not an agent starting work, so the start check (BOS-254) does not apply. */
   internal?: boolean;
+  /** Write only if the ticket is still at this version (R81, BOS-897): checked in the UPDATE itself, so a change landing after the caller's read is not overwritten. */
+  expectedVersion?: number;
+  /** The title the page loaded: refuse the edit if the stored one changed since (BOS-905). */
+  titleLoaded?: string | null;
+  /** The description the page loaded: refuse the edit if the stored one changed since (BOS-905). Absent means not checked. */
+  bodyLoaded?: string | null;
+  /** The acceptance criteria the page loaded: refuse the edit if the stored ones changed since (BOS-905). */
+  acceptanceCriteriaLoaded?: Criterion[];
 };
+
+export { staleVersionMessage };
 
 /** Roles that may move a ticket into work whatever it waits on (BOS-254): the CEO, a manager, or the owner (no agent). */
 const START_OVERRIDE_ROLES = new Set(["ceo", "manager"]);
-
-/** Reopening a merged no-code ticket for code: moving it back into one of these clears the stale mark (BOS-532). The review state is left to review.ts: only a commit there is real code work. */
-const REOPEN_STATES = new Set<SystemState>(["ready", "in_progress"]);
 
 /**
  * Why a ticket may not start (BOS-254): it still waits on an unfinished ticket or engagement, or it is
@@ -112,9 +125,42 @@ export function startRefusal(
   return null;
 }
 
+/** The text fields a page can edit, each one checked on its own so an unrelated change doesn't hold it up (BOS-905). */
+const EDIT_FIELDS = ["title", "body", "acceptanceCriteria"] as const;
+type EditField = (typeof EDIT_FIELDS)[number];
+export type EditConflict = { field: EditField; message: string };
+const FIELD_NOUN: Record<EditField, string> = { title: "title", body: "description", acceptanceCriteria: "acceptance criteria" };
+
+/** What was stored for a text field, as the page compares it. */
+function storedEditField(t: typeof tickets.$inferSelect, field: EditField): string | null {
+  if (field === "title") return t.title;
+  if (field === "body") return t.body ?? null;
+  return JSON.stringify(readCriteria(t.acceptanceCriteria));
+}
+
+/**
+ * A save that would overwrite someone else's change to the same field (BOS-905, BOS-298 step 13): the page
+ * sends what it loaded for each text field it edits, and a mismatch refuses the save with a 409. Only the
+ * edited field is compared, because the version moves on every state change and would refuse unrelated edits.
+ * A field sent without its loaded value (an older client, another caller) is not checked.
+ */
+export function editConflicts(t: typeof tickets.$inferSelect, patch: TicketPatch): EditConflict[] {
+  const loaded: Partial<Record<EditField, string | null>> = {
+    title: patch.title !== undefined && "titleLoaded" in patch ? (patch.titleLoaded ?? null) : undefined,
+    body: patch.body !== undefined && "bodyLoaded" in patch ? (patch.bodyLoaded ?? null) : undefined,
+    acceptanceCriteria: patch.acceptanceCriteria !== undefined && patch.acceptanceCriteriaLoaded !== undefined ? JSON.stringify(patch.acceptanceCriteriaLoaded) : undefined,
+  };
+  return EDIT_FIELDS.filter((f) => loaded[f] !== undefined && loaded[f] !== storedEditField(t, f)).map((field) => ({
+    field,
+    message: `The ${FIELD_NOUN[field]} was changed by someone else after you opened it, so your save was refused and nothing was overwritten. Your edit is still here. Reload the ticket to see the latest, then save again if you still want your change.`,
+  }));
+}
+
 export type WorkHooks = {
   onAssigned?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
   onDone?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
+  /** A move into review that asks for a round (the owner's): request the reviews and wake the reviewers. */
+  onReview?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
   /** A task of this feature started, finished, reopened, moved or was added: its status may need to follow. */
   onFeature?: (featureId: string) => Promise<unknown>;
   /** The merges this process is running, with their phase (the review service's markers), so an approved card can say where it is. */
@@ -293,6 +339,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Approved by every reviewer, so only the merge is left (BOS-667): the board shows these apart from
       // tickets still waiting on a reviewer, so a long merge line doesn't read as a reviewer shortage.
       const passed = await passedReviewTickets(db, inReview);
+      const holds = new Map<string, HoldView>();
+      for (const id of await heldTicketIds(db, inReview)) {
+        const v = await holdView(db, id);
+        if (v) holds.set(id, v);
+      }
       const merging = new Map((hooks.runningMerges?.() ?? []).map((m) => [m.ticketId, m.phase ?? "checking"] as const));
       const mergeNote = (t: typeof tickets.$inferSelect) => {
         const phase = merging.get(t.id);
@@ -319,11 +370,14 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const askedId = t.systemState === "done" ? null : (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && (questions.has(d.blockerDecisionId) || (t.systemState !== "review" && signoffs.has(d.blockerDecisionId))))?.blockerDecisionId ?? null);
         const waitingOnOwner = !!waitingDecisionId || signoffWaiting.has(t.id) || unreviewed.has(t.id) || !!askedId;
         // Only for a ticket in review that isn't the owner's to act on: those are in Your review.
-        const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
+        // A reviewer's hold (BOS-808): passed, but kept from merging on purpose. Its own stage, apart from waiting for a reviewer or merging.
+        const hold = t.systemState === "review" ? (holds.get(t.id) ?? null) : null;
+        const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : hold ? ("held" as const) : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
         return {
         ...t,
         waitingOnOwner,
         reviewStage,
+        hold,
         mergeNote: reviewStage === "merging" ? mergeNote(t) : null,
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
         noReviewer: unreviewed.has(t.id),
@@ -527,11 +581,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     async updateTicket(ticketId: string, patch: TicketPatch) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
+      const expected = patch.expectedVersion;
+      if (expected !== undefined && t.version !== expected) throw new WorkError(409, await staleVersionMessage(db, t.companyId, ticketId, expected));
+      // Someone else changed the text the page is saving: refuse it before anything is written (BOS-905).
+      const conflict = editConflicts(t, patch)[0];
+      if (conflict) throw new WorkError(409, conflict.message, conflict.field);
       if (patch.assigneeAgentId) await assertAgentInCompany(patch.assigneeAgentId, t.companyId);
       if (patch.milestoneId) await assertLinkInCompany("milestone", patch.milestoneId, t.companyId);
       if (patch.keyResultId) await assertLinkInCompany("keyResult", patch.keyResultId, t.companyId);
       if (patch.featureId) await assertFeatureInCompany(patch.featureId, t.companyId);
-      const { overLimit: _ignored, internal: _internal, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
+      const { overLimit: _ignored, internal: _internal, reviewRound: _round, moveReason: _why, expectedVersion: _v, titleLoaded: _tl, bodyLoaded: _bl, acceptanceCriteriaLoaded: _acl, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
       const dest = patch.projectId && patch.projectId !== t.projectId ? await project(patch.projectId) : null;
       const kids = dest || newParent ? await db.select().from(tickets).where(eq(tickets.parentTicketId, t.id)) : [];
       if (dest) {
@@ -557,12 +616,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       }
       const reparent = newParent !== undefined && newParent !== t.parentTicketId;
       if (reparent) Object.assign(fields, { parentTicketId: newParent });
-      const moves = patch.columnId !== undefined || patch.state !== undefined || !!dest;
-      // A move between projects keeps the state, in the new board's column for it.
-      const col = moves ? await placement(dest?.id ?? t.projectId, { columnId: patch.columnId, state: patch.state ?? (dest ? t.systemState : undefined) }, { ticketId, overLimit: patch.overLimit || !!dest }) : null;
+      // The state the ticket ends in: a column's own state wins over `state`; a move between projects keeps the state.
+      const wanted = patch.columnId ? (await columnsOf(dest?.id ?? t.projectId)).find((c) => c.id === patch.columnId) : null;
+      if (patch.columnId && !wanted) throw new WorkError(422, "That column isn't on this project's board.");
+      const target: SystemState = wanted?.systemState ?? patch.state ?? t.systemState;
       // Starting work (BOS-254): a run can't begin a ticket that still waits on something unfinished,
       // or one in the Backlog nobody handed it. The owner, the CEO and managers override.
-      if (col?.systemState === "in_progress" && t.systemState !== "in_progress" && !patch.internal) {
+      if (target === "in_progress" && t.systemState !== "in_progress" && !patch.internal) {
         const deps = await db
           .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
           .from(ticketDependencies)
@@ -586,27 +646,28 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         fields.fixesLive = patch.fixesLive?.trim() || null;
       }
       if (dest) Object.assign(fields, { projectId: dest.id });
-      // A merged ticket goes back to its assignee as no-code so a live check can be reported and it can
-      // close (DR-024 #5). If it is then reopened for real work (BOS-532), the flag is stale: moving a
-      // *merged* ticket back into ready or in_progress by hand clears it, so review and done ask for a diff
-      // again. Plain no-code tickets (never merged) keep it, and so do Boss Man's own move back from the
-      // merge (internal). A move into review is left to review.ts, where only a real commit clears it.
-      if (t.noCode && t.mergeCommit && patch.noCode === undefined && !patch.internal && col?.systemState && REOPEN_STATES.has(col.systemState) && col.systemState !== t.systemState) fields.noCode = false;
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
       // starts and before a plan is approved turns it on for high and critical, off otherwise.
       if (patch.risk !== undefined && patch.planFirst === undefined && !t.planApprovedAt && (t.systemState === "backlog" || t.systemState === "ready"))
         fields.planFirst = patch.risk ? planFirstByDefault(patch.risk) : false;
-      const [updated] = await db
-        .update(tickets)
-        .set({
-          ...fields,
-          ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? (t.systemState === "done" ? t.outcome : null) ?? "completed") : null, ...(col.systemState === "done" ? { monitorAt: null } : {}) } : {}),
-          lastActivityAt: now(),
-          ...(patch.stateNote ? { stateNoteAt: now(), stateNoteStaleAt: null } : {}),
-        })
-        .where(eq(tickets.id, ticketId))
-        .returning();
-      if (updated!.systemState !== t.systemState) await record(db, { companyId: t.companyId, ticketId: t.id, kind: "state", summary: `${t.systemState} -> ${updated!.systemState}`, at: now() });
+      // Every state change, and the write of the other fields with it, goes through moveTicket (DR-047): the
+      // column, the WIP limit, the no-code reopen rule (BOS-532), the history line, the merge line's "left"
+      // event (BOS-769), and the done, review and feature steps after a real change.
+      const { ticket: updated } = await moveTicket(db, ticketId, target, {
+        by: patch.byAgentId,
+        expectedVersion: expected,
+        outcome: patch.outcome,
+        note: patch.moveReason ?? patch.stateNote,
+        // A move to another project keeps the state in that board's column and never stops at a limit.
+        overLimit: patch.overLimit,
+        internal: patch.internal,
+        reviewRound: patch.reviewRound ?? "keep",
+        columnId: patch.columnId,
+        projectId: dest?.id,
+        fields: { ...fields, ...(patch.stateNote ? { stateNoteAt: now(), stateNoteStaleAt: null } : {}) },
+        hooks,
+        now: now(),
+      });
       if (dest) {
         const [from] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, t.projectId));
         for (const k of kids) {
@@ -628,9 +689,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (updated!.assigneeAgentId && updated!.assigneeAgentId !== t.assigneeAgentId && updated!.systemState !== "done") await hooks.onAssigned?.(updated!);
       if ((updated!.ownerSetup ?? null) !== (t.ownerSetup ?? null))
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: "reorganised", agentId: patch.byAgentId ?? undefined, summary: `${patch.byAgentId ? ((await db.select({ name: agents.name }).from(agents).where(eq(agents.id, patch.byAgentId)))[0]?.name ?? "An agent") : "The owner"} changed the owner's setup steps`, at: now() });
-      if (updated!.systemState === "done" && t.systemState !== "done") await hooks.onDone?.(updated!);
-      for (const fid of new Set([t.featureId, updated!.featureId])) if (fid) await hooks.onFeature?.(fid);
-      return updated!;
+      return updated;
     },
 
     /** A ticket can wait on another ticket in its company, or on an engagement its company requested (R25). */

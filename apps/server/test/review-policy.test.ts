@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { and, eq, like } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { DEFAULT_REVIEW_POLICY, type ReviewPolicy, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
@@ -9,6 +10,7 @@ import { openPglite } from "../src/db/client.js";
 import { activity, agents, checkResults, decisions, reviewRequests, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { resolveReviewer } from "../src/services/review-policy.js";
+import { requestReviews } from "../src/services/review-kinds.js";
 import { MERGE_ACTIVITY_MS, setInfraRetryBase } from "../src/services/review.js";
 import { raiseMergeStuck } from "../src/services/decisions.js";
 
@@ -304,8 +306,17 @@ describe("the review tool", () => {
     const call = async (agentId: string) => textOf(await (await c.mcp(agentId)).callTool({ name: "review", arguments: { action: "diff", ticketId: t.id } }));
     expect(await call(c.senior.id)).toContain("Base ");
     expect(await call(c.ceo.id)).toContain("Base ");
-    expect(await call(c.other.id)).toBe("Only your company's CEO or this ticket's reviewer reviews it.");
+    // The refusal names who holds the review, so the agent can nudge them (BOS-298 step 12).
+    expect(await call(c.other.id)).toBe("This ticket's code review is with Sam. Nudge them, or ask the CEO to add you.");
     expect(await call(c.worker.id)).toBe("You can't review a ticket assigned to you.");
+  });
+
+  it("names every open review's reviewer in the refusal (BOS-900)", async () => {
+    const c = await setup();
+    const t = await c.ticket({ state: "review", risk: "high" });
+    await requestReviews(c.db, await c.row(t.id));
+    const out = textOf(await (await c.mcp(c.other.id)).callTool({ name: "review", arguments: { action: "diff", ticketId: t.id } }));
+    expect(out).toBe("This ticket's code review is with Sam and its security review is with CEO. Nudge them, or ask the CEO to add you.");
   });
 
   it("labels the reviewer with name and title, and sign-off decides between an owner decision and a merge", async () => {
@@ -386,6 +397,33 @@ describe("review policy API", () => {
     expect((await c.req("PUT", `/api/projects/${c.project.id}/review-policy`, p)).statusCode).toBe(400);
     expect((await c.req("PUT", `/api/companies/${c.company.id}/review-policy`, { low: {} })).statusCode).toBe(400);
     expect((await c.req("GET", `/api/companies/${c.company.id}/review-policy`)).json()).toEqual(DEFAULT_REVIEW_POLICY);
+  });
+
+  it("gives a new company a security review on high and critical work, and leaves existing companies alone (BOS-824)", async () => {
+    const c = await setup();
+    // The column default, not just the constant: a company row made without a policy gets it.
+    const res = (await c.db.execute(sql`insert into companies (name) values ('Bare Co') returning review_policy as p`)) as unknown as { rows: { p: ReviewPolicy }[] };
+    const [row] = res.rows;
+    expect(row!.p.high.kinds).toEqual({ security: "ceo" });
+    expect(row!.p.critical.kinds).toEqual({ security: "ceo" });
+    expect(row!.p.medium.kinds).toBeUndefined();
+    // The migration only changes the default for new rows; stored policies are not rewritten (DR-041).
+    const migration = readFileSync(new URL("../drizzle/0127_default_security_review.sql", import.meta.url), "utf8");
+    expect(migration).toMatch(/^ALTER TABLE "companies" ALTER COLUMN "review_policy" SET DEFAULT /);
+    expect(migration).not.toMatch(/\bUPDATE\b/i);
+    // A high-risk ticket in a new company asks for the security review beside the code review.
+    const t = await c.ticket({ risk: "high" });
+    const rows = await requestReviews(c.db, await c.row(t.id));
+    expect(rows.map((r) => [r.kind, r.reviewerAgentId]).sort()).toEqual([["code", c.senior.id], ["security", c.ceo.id]]);
+  });
+
+  // QA (BOS-848): the SQL default in migration 0127 is a hand-copied string; it must say exactly what the shared constant says.
+  it("keeps the column default equal to DEFAULT_REVIEW_POLICY, and a new company's policy through the API too (BOS-824)", async () => {
+    const c = await setup();
+    const res = (await c.db.execute(sql`insert into companies (name) values ('Drift Co') returning review_policy as p`)) as unknown as { rows: { p: ReviewPolicy }[] };
+    expect(res.rows[0]!.p).toEqual(DEFAULT_REVIEW_POLICY);
+    const made = (await c.req("POST", "/api/companies", { name: "Fresh Co" })).json() as { company: { id: string } };
+    expect((await c.req("GET", `/api/companies/${made.company.id}/review-policy`)).json()).toEqual(DEFAULT_REVIEW_POLICY);
   });
 
   it("makes the risk-tier help follow the company's policy", async () => {

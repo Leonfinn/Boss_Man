@@ -1,7 +1,7 @@
 // The Agents tab (R62): who works for each company, what they cost this month, and every change
 // to them, with what it was before so it can be undone.
 import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, harnessLabel, isClaudeModel, modelFitProblem, providerLabel, speakerNameProblem } from "@boss-man/shared";
+import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, INFINITE_MODEL_CHOICE, isClaudeModel, isInfiniteModel, harnessLabel, modelFitProblem, providerLabel, speakerNameProblem } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
@@ -76,6 +76,14 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     await db.insert(agentChanges).values({ companyId: a.companyId, agentId: a.id, byAgentId, field, before: before ?? null, after: after ?? null });
   }
 
+  /** Refuses a skill or pack the library doesn't have, so a hire never names one that can't be given. */
+  async function checkSkills(companyId: string, names: string[]) {
+    for (const name of names) {
+      const [hit] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), or(eq(skills.name, name), eq(skills.pack, name)))).limit(1);
+      if (!hit) throw new AgentError(422, `There's no skill or pack called ${name} in the library.`);
+    }
+  }
+
   async function approvals(companyId: string): Promise<AgentApprovals> {
     const [row] = await db.select().from(settings).where(eq(settings.key, `agent_approvals:${companyId}`));
     return AGENT_APPROVALS.includes(row?.value as AgentApprovals) ? (row!.value as AgentApprovals) : "hires";
@@ -117,10 +125,20 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     if (opts.catalog) {
       const catalog = await opts.catalog(companyId);
       const offered = [...(catalog.runner[harness]?.models ?? []), ...(catalog.api.find((a) => a.fundingSourceId === fundingSourceId)?.models ?? [])].filter((m) => m.value !== "default");
-      const known = offered.some((m) => m.value === model) || (harness === "claude" && isClaudeModel(model));
+      // Infinite mode is always a valid choice for OpenCode on a Synthetic plan (BOS-279), list or no list.
+      const infiniteOk = harness === "opencode" && provider === "synthetic" && isInfiniteModel(model);
+      const known = infiniteOk || offered.some((m) => m.value === model) || (harness === "claude" && isClaudeModel(model));
       if (offered.length && !known) throw new AgentError(422, `That model (${model}) isn't in the list for ${harnessLabel(harness)} on ${source.name}. Call model_options to see the valid models.`);
     }
     return { harness, provider, model, fundingSourceId, fundingSourceName: source.name };
+  }
+
+  /**
+   * Synthetic's Infinite mode (BOS-279) for OpenCode: a free, slow model the runner adds the provider for,
+   * so it's offered even when the runner's own list (from a stock OpenCode) doesn't have it.
+   */
+  function offerInfinite(agentKind: string, models: ModelChoice[]) {
+    return agentKind === "opencode" && !models.some((m) => isInfiniteModel(m.value)) ? [...models, INFINITE_MODEL_CHOICE] : models;
   }
 
   /** Valid choices for the CEO, with the same names the Agents page shows, and what each agent runs on now. */
@@ -139,10 +157,12 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       providers: FUNDING_PROVIDERS.map((value) => ({ value, label: providerLabel(value) })),
       fundingSources: sources.map((s) => ({ id: s.id, name: s.name, kind: s.kind, provider: s.provider, providerLabel: providerLabel(s.provider) })),
       models: {
-        runner: Object.fromEntries(Object.entries(catalog.runner).map(([kind, list]) => [kind, list.models.filter((m) => m.value !== "default")])),
+        runner: Object.fromEntries(Object.entries(catalog.runner).map(([kind, list]) => [kind, offerInfinite(kind, list.models.filter((m) => m.value !== "default"))])),
         byFundingSource: catalog.api.map((a) => ({ fundingSourceId: a.fundingSourceId, name: a.name, provider: a.provider, providerLabel: providerLabel(a.provider), models: a.models, error: a.error })),
+        // Infinite mode (BOS-279) runs on OpenCode paid from a Synthetic plan, whatever that source's own model list says.
+        infinite: sources.filter((s) => s.provider === "synthetic" && s.kind === "subscription").map((s) => ({ fundingSourceId: s.id, name: s.name, model: INFINITE_MODEL_CHOICE })),
       },
-      note: "Pick a harness, a provider, a model and a funding source whose provider is the same, and a model the funding source serves (Claude models on a Claude account, OpenAI models on OpenAI, and so on). If a model list is empty, the runner or provider hasn't reported one; a valid model ID can still be used. `current` lists what every live agent runs on now. Every hire and model change waits for the owner's approval.",
+      note: "Pick a harness, a provider, a model and a funding source whose provider is the same, and a model the funding source serves (Claude models on a Claude account, OpenAI models on OpenAI, and so on). If a model list is empty, the runner or provider hasn't reported one; a valid model ID can still be used. models.infinite lists Synthetic's Infinite mode for OpenCode (free, slow, background slots; never waits for the quota). `current` lists what every live agent runs on now. Every hire and model change waits for the owner's approval.",
     };
   }
 
@@ -172,6 +192,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       const tpl = p.template ? AGENT_TEMPLATES.find((x) => x.id === p.template) : undefined;
       if (p.template && !tpl) throw new AgentError(422, `There's no template called ${p.template}. Templates: ${AGENT_TEMPLATES.map((x) => x.id).join(", ")}.`);
       const config = await validateModelConfig(companyId, p);
+      await checkSkills(companyId, p.skills ?? []);
       const job = p.title ?? tpl?.title ?? "agent";
       const instructions = p.instructions !== undefined ? p.instructions : (tpl?.instructions ?? null);
       const [d] = await db
@@ -181,7 +202,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
           raisedByAgentId: ceoId,
           kind: "approval",
           tier: "owner",
-          question: [`The CEO wants to hire ${p.name} as ${job}.`, labelConfig(config), p.reason ? `Why: ${p.reason}` : null, instructions ? `Their instructions:\n${instructions.slice(0, 3000)}` : null, "If you want different values, choose Don't hire and ask the CEO to propose it again; you can also change them on the Agents page after hiring."].filter(Boolean).join("\n\n"),
+          question: [`The CEO wants to hire ${p.name} as ${job}.`, labelConfig(config), p.skills?.length ? `Skills: ${p.skills.join(", ")}.` : null, p.reason ? `Why: ${p.reason}` : null, instructions ? `Their instructions:\n${instructions.slice(0, 3000)}` : null, "If you want different values, choose Don't hire and ask the CEO to propose it again; you can also change them on the Agents page after hiring."].filter(Boolean).join("\n\n"),
           options: [HIRE, DONT_HIRE],
           recommendedOption: HIRE,
           context: { type: "hire", proposal: { ...p, ...config, model: config.model, fundingSourceId: config.fundingSourceId, harness: config.harness, provider: config.provider, instructions }, byAgentId: ceoId },
@@ -465,10 +486,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       const hires: TeamHire[] = [];
       for (const h of plan.hires) {
         if (h.template && !AGENT_TEMPLATES.some((x) => x.id === h.template)) throw new AgentError(422, `There's no template called ${h.template}. Templates: ${AGENT_TEMPLATES.map((x) => x.id).join(", ")}.`);
-        for (const name of h.skills ?? []) {
-          const [hit] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), or(eq(skills.name, name), eq(skills.pack, name)))).limit(1);
-          if (!hit) throw new AgentError(422, `There's no skill or pack called ${name} in the library.`);
-        }
+        await checkSkills(companyId, h.skills ?? []);
         const config = await validateModelConfig(companyId, h);
         hires.push({ ...h, ...config, harness: config.harness, provider: config.provider, model: config.model, fundingSourceId: config.fundingSourceId, fundingSourceName: config.fundingSourceName });
       }
@@ -512,13 +530,41 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     },
 
     /** The owner's answer to a hire, instructions, rename or standing-rules decision. */
-    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string } | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string } | { type: "standing_rules"; text: string; byAgentId: string }, companyId: string, approved: boolean) {
+    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string } | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string } | { type: "standing_rules"; text: string; byAgentId: string }, companyId: string, approved: boolean, give?: (agentId: string, skill: string) => Promise<unknown>) {
       if (!approved) return null;
       if (ctx.type === "rename") return this.applyRename(ctx.agentId, ctx.newName, ctx.byAgentId, "The owner approved it.");
       if (ctx.type === "standing_rules") return this.applyStandingRules(companyId, ctx.byAgentId, ctx.text);
       if (ctx.type === "hire") {
         const config = await validateModelConfig(companyId, ctx.proposal);
+        // Check the skills again before hiring, so a throw still means nobody was hired: a card can sit
+        // open while a skill is deleted, and the caller reopens it and says so (BOS-889 review).
+        await checkSkills(companyId, ctx.proposal.skills ?? []);
         const hired = await this.hire(companyId, { ...ctx.proposal, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ctx.byAgentId);
+        // The skills go on before the new agent can be woken, so its first run starts with them (BOS-889).
+        // A give that still fails after the hire never throws: the agent exists, so a retry would hire a
+        // duplicate. The failures are flagged to the owner instead, the way hireTeam does it.
+        const failures: string[] = [];
+        for (const sk of ctx.proposal.skills ?? []) {
+          if (!give) {
+            failures.push(`${hired.name} didn't get ${sk} (skills can't be given here)`);
+            continue;
+          }
+          try {
+            await give(hired.id, sk);
+          } catch (err) {
+            failures.push(`${hired.name} didn't get ${sk}: ${(err as Error).message}`);
+          }
+        }
+        if (failures.length) {
+          await notify({
+            companyId,
+            agentId: ctx.byAgentId,
+            level: "flag",
+            title: `Hired ${hired.name}, but they didn't get every skill`,
+            body: `${failures.join("\n")}\n\nGive the skills on the Skills page, so they're there before ${hired.name}'s next run.`,
+            link: "#/skills",
+          });
+        }
         await opts.assignPlanned?.(companyId, hired, ctx.proposal.forTickets ?? []);
         return hired;
       }

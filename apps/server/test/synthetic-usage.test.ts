@@ -274,6 +274,43 @@ describe("Synthetic quota warnings (BOS-239)", () => {
     expect(await c.db.select().from(notifications)).toHaveLength(2);
   });
 
+  // BOS-934: the warnings said "Boss Man won't pause any runs", wrong since BOS-852 fed the reading into the hold.
+  it("says what the hold will do, and tells the owner once a week when work starts drawing on top-up credit", async () => {
+    const c = (ctx = await setup().build());
+    // The default: held at 95%, so the used-up allowance spends no top-up credit and there's no top-up note.
+    c.answer.body = weekly(100);
+    await c.refreshSyntheticQuota();
+    let flags = await c.db.select().from(notifications);
+    expect(flags.map((f) => f.title).join(" | ")).not.toContain("top-up");
+    expect(flags[0]!.body).toContain("Boss Man pauses routine work at 95%");
+    expect(flags.every((f) => !f.body?.includes("won't pause any runs"))).toBe(true);
+    const before = flags.length;
+
+    // The owner says the account has top-up credit: one note when work carries on past the allowance.
+    expect((await c.req("PATCH", `/api/funding-sources/${c.source.id}`, { quotaOverage: "all" })).statusCode).toBeLessThan(300);
+    await run(c);
+    flags = await c.db.select().from(notifications);
+    expect(flags).toHaveLength(before + 1);
+    expect(flags[before]!.title).toContain("draws on top-up credit");
+    expect(flags[before]!.body).toContain("Work on this plan keeps running");
+    expect(flags[before]!.body).toContain("doesn't tell Boss Man the balance");
+    // Not again in the same week.
+    await run(c);
+    expect(await c.db.select().from(notifications)).toHaveLength(before + 1);
+    // The card lists it with the other warnings.
+    expect((await c.db.select().from(providerQuotaWarnings)).map((w) => w.threshold)).toContain(100);
+  });
+
+  it("names only urgent work in the top-up note when the owner allows just that", async () => {
+    const c = (ctx = await setup().build());
+    await c.req("PATCH", `/api/funding-sources/${c.source.id}`, { quotaOverage: "urgent" });
+    c.answer.body = weekly(100);
+    await c.refreshSyntheticQuota();
+    const flags = await c.db.select().from(notifications);
+    expect(flags.find((f) => f.title.includes("top-up"))!.body).toContain("Urgent tickets, chats and reviews on this plan keep running");
+    expect(flags[0]!.body).toContain("urgent tickets carry on past the limit");
+  });
+
   it("sends nothing when Synthetic can't be reached", async () => {
     const c = (ctx = await setup().build());
     c.answer.status = 401;

@@ -28,6 +28,8 @@ export const OWNER_CONTROLS = {
     "Actual size", "Fit to window",
     // The banner shown when Boss Man was updated after the page was opened (BOS-550).
     "Reload",
+    // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
+    "Resume",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -41,6 +43,8 @@ export const OWNER_CONTROLS = {
     "Show less", "Show all …", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
     "Reassign to the one I picked", "Let the CEO decide", "Back to the options", "Write my own answer", "Use suggestion",
     "Send my answer", "Ask the CEO for advice",
+    // An update card's ticket list (BOS-809): "+N more" opens it, "Show fewer" folds it back.
+    "Show fewer",
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
@@ -51,14 +55,17 @@ export const OWNER_CONTROLS = {
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
     "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Working now", "Show fewer",
-    "Show all done tasks", "Run now",
+    "Show all done tasks", "Run now", "Discard draft",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
+    "Release hold", "Cancel hold and review again",
     "Approve and open a pull request", "Approve and merge", "Request changes", "Run now", "Description", "Edit",
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
-    "Mark urgent", "Marked urgent", "Edit steps", "Save steps",
+    "Mark urgent", "Marked urgent", "Edit steps", "Save steps", "Discard draft",
+    // A text field someone else changed was refused: the owner's draft stays and this brings in the latest (BOS-905).
+    "Reload the latest",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // The Scrum Master's log of this ticket.
@@ -70,16 +77,23 @@ export const OWNER_CONTROLS = {
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
   Projects: ["Open …", "Unarchive", "Re-detect"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
+  // The Runs page's emergency stop: every run going now, in every company (BOS-837).
+  Runs: ["End all running runs", "Ending"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
-  Plan: ["Refresh"],
+  Plan: [
+    "Refresh",
+    // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
+    // the count), and below a long list "Show all …" (with the count) and "Show fewer" open and shorten it.
+    "What's holding work up …", "Show all …", "Show fewer",
+  ],
   Wiki: [
     "Show older versions", "Loading",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
-    "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page",
+    "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
   ],
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
-    "Save summary", "Delete feature",
+    "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all",
   ],
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Back to the list", "Unlink",
@@ -94,7 +108,7 @@ export const OWNER_CONTROLS = {
   ],
   Skills: [
     "Add", "Adding", "Search", "Added", "Add to …", "Edit", "Check for updates", "Delete", "Save", "Cancel", "Remove pack",
-    "Add a skill",
+    "Add a skill", "Discard draft",
   ],
   "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …"],
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
@@ -105,18 +119,26 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
+    "Stop all work",
+    // Ask every running agent to stop cleanly before an update (BOS-929).
+    "Ask agents to wrap up", "Cancel wrap-up", "Stop this run",
+    // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
+    "Restart the server",
     // This host: confirm a fact only the owner can give.
     "Confirm",
+    // This host (BOS-924): the reported facts fold away behind a one-line header; the arrow opens them.
+    "Reported facts",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
   ],
-  // Tool servers and funding sources (a new funding source is added here, not on the Funding tab).
-  "Access and funding": ["Remove", "Add tool server", "Edit", "Delete", "Save", "Add", "Cancel"],
+  // Tool servers, deploy targets and funding sources (a new funding source is added here, not on the Funding tab).
+  "Access and funding": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Add", "Cancel"],
   "Reviews and CEO": [
     "Reset to defaults", "Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours", "Run a retro now",
     "Cancel", "Edit", "Test", "Start a new chapter",
     // Standing rules.
-    "Clear", "Undo last change",
+    "Clear", "Undo last change", "Discard draft",
   ],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
   // Spend, the hold and the Claude accounts' order.
@@ -149,11 +171,13 @@ export const OWNER_FIELDS = {
     "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for the agent (if you send it back)",
     "Why (shown on the Changes table, required)", "Wiki page that explains it (optional)",
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
+    "Every agent in this company",
   ],
   Notifications: [
     "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
+    "Offer an Approve button on simple agent questions",
   ],
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",
@@ -163,7 +187,7 @@ export const OWNER_FIELDS = {
   Ticket: [
     "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
     "What you have to do, one step per line", "What should the agent change",
-    "Lesson learned (optional) — you'll be asked whether to add it to the project brief", "Doesn't need code changes",
+    "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
     "Urgent", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
   ],
   // The project settings (ProjectRow): on a project's Config tab and, for every project, on the Projects page.
@@ -184,11 +208,12 @@ export const OWNER_FIELDS = {
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
     "New feature", "Area", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
-    "Show on the feedback portal, where visitors can vote on it", "Public summary", "Show publicly",
+    "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Public title (optional)", "Public summary", "Show publicly",
+    "On portal",
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
-    "Came in by", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Search feedback",
+    "Came in by", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
   ],
   "Feedback portal": [
     "Your name (optional)", "Email, if you'd like to hear back (optional)", "What would it let you do",
@@ -202,20 +227,33 @@ export const OWNER_FIELDS = {
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
     "Instructions, in Markdown", "A skill folder, its files, or a .zip",
   ],
-  "Server and runner": ["Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)"],
+  "Server and runner": [
+    "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
+    "Background (infinite mode) runs at once (0 to 16)",
+    // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
+    "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
+  ],
   "Access and funding": [
     "Server name", "Server URL", "Transport", "Token secret", "Header name", "Header value",
+    // Deploy targets (BOS-619), with the tag that moves after a successful deploy.
+    "Name", "Address", "Production (you approve every deploy, and high-risk work must deploy to staging first)",
+    "Requires approval (you approve each deploy here too)", "After a successful deploy, move tag", "Tag name", "In the repo of",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
   ],
   "Reviews and CEO": [
     "Prefix", "Record only (rehearse)", "Scrum Master", "Ask after (days)", "Who runs it", "Minutes the CEO has", "Advice",
-    "Ask a model for a second opinion", "Provider address", "Model", "API key", "Nudges per hour", "Disk cap (GB)",
+    "Ask a model for a second opinion", "Provider address", "Model", "API key", "Nudges per hour", "Most minutes per run", "Disk cap (GB)",
     // The agent fence's mode (BOS-325).
     "Fence",
   ],
-  "Import and export": ["Include the wiki", "Tickets", "Package", "Company name", "Funding for every agent"],
+  "Import and export": [
+    "Include the wiki", "Tickets", "Package", "Company name", "Funding for every agent",
+    // The import preview's opt-in for a tool server that reaches the stack or the private network (BOS-335 follow-up).
+    "I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway",
+  ],
   Funding: [
-    "Hold routine work at", "I have extra usage", "Can trigger the hold",
+    // "I have top-up credit" is the same setting on a Synthetic plan's card (BOS-934).
+    "Hold routine work at", "I have extra usage", "I have top-up credit", "Can trigger the hold",
     "Order (1 is used first; leave empty to keep this account out of the list)", "Login for this account",
   ],
   Rules: ["Rules for", "What should this rule do", "New rule", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of"],

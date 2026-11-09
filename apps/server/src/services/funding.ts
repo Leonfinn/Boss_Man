@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, gte, lt, notInArray, sql, type SQL } from "drizzle-orm";
 import {
   billingCycle,
   boundsAsEpoch,
@@ -6,6 +6,7 @@ import {
   creditStatus,
   dateIn,
   forecastQuota,
+  FORECAST_WINDOW_MS,
   formatDate,
   parseClaudeRateLimit,
   parseCodexRateLimits,
@@ -42,6 +43,14 @@ const weeklyReading = (q: Extract<SyntheticQuota, { weekly: unknown }>) => ({
 
 /** How long the newest Synthetic reading is served before asking Synthetic again (BOS-239). */
 export const PROVIDER_QUOTA_REFRESH_MS = 5 * 60_000;
+/**
+ * How long a Synthetic reading keeps counting towards the quota hold when no newer one comes (BOS-852):
+ * three refreshes, so one missed sweep doesn't drop a hold, but an outage at Synthetic can't hold the plan
+ * on an old reading for long (an unknown reading never blocks a run).
+ */
+export const SYNTHETIC_HOLD_SAMPLE_MS = 3 * 5 * 60_000;
+/** The quota_samples windows a Synthetic reading is fed into, so the scheduler's hold sees it (BOS-852). */
+export const SYNTHETIC_WINDOWS = { weekly: "synthetic_weekly", requests: "synthetic_requests" } as const;
 /** Readings older than this are pruned; the history is for the trend, not forever (BOS-239). */
 export const PROVIDER_QUOTA_HISTORY_MS = 30 * 86_400_000;
 /** The newest readings returned as the trend, count and age. */
@@ -53,6 +62,33 @@ const PROVIDER_QUOTA_HISTORY = 20;
 export const PROVIDER_QUOTA_THRESHOLDS = [60, 80, 92] as const;
 /** The old request-window reading warned at these; kept only for accounts that report no weekly credits. */
 export const PROVIDER_QUOTA_REQUEST_THRESHOLDS = [80, 100] as const;
+/** The warning key for "the weekly allowance is used up and work now draws on top-up credit" (BOS-934). */
+export const TOP_UP_NOTICE = 100;
+
+/**
+ * Whether work on a Synthetic plan keeps running once its reading reaches 100%, so Synthetic spends
+ * the account's top-up credit (BOS-934): the owner chose "keep urgent" or "keep all work" under
+ * "I have top-up credit", switched the reading off as a hold trigger, or the plan isn't a subscription
+ * (the scheduler holds subscriptions only).
+ */
+function carriesOnPastLimit(source: FundingRow, measure: "weekly" | "requests") {
+  return source.kind !== "subscription" || source.quotaOverage !== "pause" || (source.quotaDisabledWindows ?? []).includes(SYNTHETIC_WINDOWS[measure]);
+}
+
+/**
+ * What the scheduler will do about this Synthetic reading, in the owner's words, for the warnings. They
+ * used to say "Boss Man won't pause any runs", which stopped being true when BOS-852 fed the reading
+ * into the hold.
+ */
+function holdWords(source: FundingRow, measure: "weekly" | "requests") {
+  const off = source.kind !== "subscription" || (source.quotaDisabledWindows ?? []).includes(SYNTHETIC_WINDOWS[measure]);
+  if (off || source.quotaOverage === "all")
+    return "Boss Man won't pause runs for it (your Funding page settings), so once it's used up Synthetic draws on any top-up credit the account has.";
+  const at = Math.round((source.quotaHoldAt ?? 0.95) * 100);
+  return source.quotaOverage === "urgent"
+    ? `Boss Man pauses routine work at ${at}%. Chats and reviews keep running, and urgent tickets carry on past the limit on any top-up credit.`
+    : `Boss Man pauses routine work at ${at}%. Chats and reviews keep running, and urgent tickets run until the limit. Infinite-mode agents are never paused.`;
+}
 
 /** Credits come back 2% every 202 minutes, so a week is about 49.9 of those ticks. */
 const WEEKLY_REGEN_TICK_MS = 202 * 60_000;
@@ -157,6 +193,32 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return row ?? null;
   }
 
+  /**
+   * Feeds a good Synthetic reading into quota_samples, the only table the scheduler's quota hold reads
+   * (BOS-852), so a Synthetic plan is held at its hold level like a Claude one (Infinite-mode agents stay
+   * exempt in the scheduler). resetsAt is the renewal (for weekly credits the next regeneration, which is
+   * when the share used drops), but never less than SYNTHETIC_HOLD_SAMPLE_MS after the reading: each
+   * 5-minute refresh then replaces the sample before it lapses, and when Synthetic stops answering the
+   * hold lifts on its own instead of sticking on a stale number. An unchanged reading moves the newest
+   * row forward instead of adding one, so the table only grows when usage changes.
+   */
+  async function holdSample(fundingSourceId: string, q: ProviderQuota, takenAt: Date) {
+    if (q.used === null || q.limit === null || q.limit <= 0) return;
+    const window = SYNTHETIC_WINDOWS[q.measure];
+    const utilization = q.used / q.limit;
+    const renews = q.renewsAt ? Date.parse(q.renewsAt) : NaN;
+    const resetsAt = new Date(Math.max(Number.isNaN(renews) ? 0 : renews, takenAt.getTime() + SYNTHETIC_HOLD_SAMPLE_MS));
+    const [last] = await db
+      .select({ id: quotaSamples.id, utilization: quotaSamples.utilization })
+      .from(quotaSamples)
+      .where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), eq(quotaSamples.window, window)))
+      .orderBy(desc(quotaSamples.observedAt))
+      .limit(1);
+    // utilization is a 4-byte real, so it never reads back exactly equal to the JS number.
+    if (last && Math.abs(last.utilization - utilization) < 1e-6) await db.update(quotaSamples).set({ observedAt: takenAt, resetsAt }).where(eq(quotaSamples.id, last.id));
+    else await db.insert(quotaSamples).values({ fundingSourceId, window, utilization, resetsAt, observedAt: takenAt });
+  }
+
   async function refreshProviderQuota(source: FundingRow): Promise<ProviderQuota | null> {
     if (source.provider !== "synthetic") return null;
     const running = refreshing.get(source.id);
@@ -173,6 +235,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         // Weekly credits move 2% at a time, so a refresh between ticks repeats the same point; drop the
         // older copy so the trend counts real changes, not how often the page was refreshed (BOS-260).
         if (previous && previous.used === q.used && previous.limit === q.limit) await db.delete(providerQuotaReadings).where(eq(providerQuotaReadings.id, previous.id));
+        await holdSample(source.id, q, takenAt);
         lastFailed.delete(source.id);
       } else {
         // Store nothing on failure, so remember the attempt: the next few loads reuse the old reading
@@ -264,8 +327,8 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
           ? `${source.name}: the Synthetic request allowance is used up`
           : `${source.name}: ${threshold}% of the Synthetic request allowance is used`;
       const body = weekly
-        ? `About ${usedPercent}% of this week's credits are used, ${leftPercent}% left. Credits come back 2% at a time${regenAt ? ` (next about ${when(regenAt)})` : ""}. Paid from it: ${who}. Boss Man won't pause any runs; move less urgent work or wait for credits to come back.`
-        : `${view.used.toLocaleString()} of ${view.limit.toLocaleString()} requests used (${Math.round(percent)}%). It renews ${when(view.renewsAt)}. Paid from it: ${who}. Boss Man won't pause any runs; move less urgent work or wait for the renewal.`;
+        ? `About ${usedPercent}% of this week's credits are used, ${leftPercent}% left. Credits come back 2% at a time${regenAt ? ` (next about ${when(regenAt)})` : ""}. Paid from it: ${who}. ${holdWords(source, view.measure)}`
+        : `${view.used.toLocaleString()} of ${view.limit.toLocaleString()} requests used (${Math.round(percent)}%). It renews ${when(view.renewsAt)}. Paid from it: ${who}. ${holdWords(source, view.measure)}`;
       try {
         await notify({ title, body });
       } catch {
@@ -274,6 +337,25 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         continue;
       }
       sent.push(threshold);
+    }
+    // Once the allowance is used up and the owner lets work carry on, Synthetic spends the account's
+    // paid top-up credit (BOS-934). Synthetic doesn't report that balance, so this once-a-week note is
+    // the nearest Boss Man can get to "warn when it runs low". Kept under its own key, 100, so it never
+    // displaces the 60/80/92 points; an account held at the limit (the default) never gets it.
+    if (weekly && percent >= 100 && carriesOnPastLimit(source, view.measure)) {
+      const told = await db.insert(providerQuotaWarnings).values({ fundingSourceId: source.id, period, threshold: TOP_UP_NOTICE, warnedAt: now() }).onConflictDoNothing().returning();
+      if (told.length) {
+        const urgentOnly = source.kind === "subscription" && source.quotaOverage === "urgent" && !(source.quotaDisabledWindows ?? []).includes(SYNTHETIC_WINDOWS.weekly);
+        try {
+          await notify({
+            title: `${source.name}: the weekly allowance is used up, so work now draws on top-up credit`,
+            body: `${urgentOnly ? "Urgent tickets, chats and reviews on this plan keep" : "Work on this plan keeps"} running${regenAt ? ` (credits start coming back about ${when(regenAt)})` : ""}, paid from your Synthetic top-up credit. Synthetic doesn't tell Boss Man the balance, so check it at synthetic.new; when it runs out, Synthetic refuses the runs. To stop spending it, set "I have top-up credit" to hold on the Funding page.`,
+          });
+          sent.push(TOP_UP_NOTICE);
+        } catch {
+          await db.delete(providerQuotaWarnings).where(and(eq(providerQuotaWarnings.fundingSourceId, source.id), eq(providerQuotaWarnings.period, period), eq(providerQuotaWarnings.threshold, TOP_UP_NOTICE)));
+        }
+      }
     }
     return sent;
   }
@@ -305,6 +387,15 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return { total, ranges: ranges.map((_, i) => Number(row?.[`r${i}`] ?? 0)) };
   }
 
+  /**
+   * How far back a forecast must read a window's samples to see the whole window so far: a day
+   * (FORECAST_WINDOW_MS), or longer when the window has more of it left than that (a week's reset).
+   */
+  function lookbackFor(quota: (typeof quotaSamples.$inferSelect)[], now: Date) {
+    const left = Math.max(0, ...quota.filter((q) => q.resetsAt && q.resetsAt.getTime() > now.getTime()).map((q) => q.resetsAt!.getTime() - now.getTime()));
+    return Math.max(FORECAST_WINDOW_MS, left);
+  }
+
   async function latestQuota(fundingSourceId: string) {
     // The newest sample per window.
     const rows = await db
@@ -315,11 +406,17 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return rows;
   }
 
-  /** The latest reading per window and when each runs out at the recent rate (R78). */
+  /**
+   * The latest reading per window and when each runs out at its own pace (R78, BOS-1012). The rate
+   * averages over the whole window so far, or its last day, whichever is longer, so one busy hour
+   * can't swing it; the lookback here is wider than that rate's floor so a window starting earlier
+   * still has its first reading to average from.
+   */
   async function quotaForecasts(source: typeof fundingSources.$inferSelect, now: Date) {
     const fundingSourceId = source.id;
     const quota = source.kind === "subscription" ? await latestQuota(fundingSourceId) : [];
-    const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
+    const since = new Date(now.getTime() - lookbackFor(quota, now));
+    const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), gte(quotaSamples.observedAt, since))) : [];
     return { quota, forecasts: Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)])) };
   }
 
@@ -340,7 +437,11 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
       if (!source) return null;
       // Both tables cascade, so deleting would silently erase them.
       const [costs] = await db.select({ n: count() }).from(costEvents).where(eq(costEvents.fundingSourceId, id));
-      const [samples] = await db.select({ n: count() }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id));
+      // Synthetic's hold samples (BOS-852) are copies of readings Synthetic still has, not history only Boss Man holds.
+      const [samples] = await db
+        .select({ n: count() })
+        .from(quotaSamples)
+        .where(and(eq(quotaSamples.fundingSourceId, id), notInArray(quotaSamples.window, Object.values(SYNTHETIC_WINDOWS))));
       if (costs!.n + samples!.n > 0) return "has_history" as const;
       const [agentsOn] = await db.select({ n: count() }).from(agents).where(eq(agents.fundingSourceId, id));
       await db.delete(fundingSources).where(eq(fundingSources.id, id));

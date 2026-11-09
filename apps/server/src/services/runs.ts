@@ -54,7 +54,7 @@ type WakeHook = (input: { agentId: string; reason: string; note: string; ticketI
 /** How long a cancel may go unconfirmed by the runner before Boss Man ends the run itself. */
 export const CANCEL_GUARD_MS = 60_000;
 
-export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersService>; now?: () => Date }) {
+export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersService>; now?: () => Date; log?: (msg: string) => void }) {
   let wake: WakeHook | null = null;
   const now = deps.now ?? (() => new Date());
 
@@ -156,16 +156,45 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
       return { delivered: input.interrupt ? ("interrupted" as const) : ("queued" as const) };
     },
 
-    async cancel(runId: string, companyId?: string) {
+    /** `reason` is for a stop Boss Man starts itself (the run time limit, BOS-846): the run then ends as "stopped: <reason>". */
+    async cancel(runId: string, companyId?: string, reason?: string) {
       const { run, runnerId } = await load(runId, companyId);
       if (run.endedAt) throw new RunError(409, "That run has already ended.");
+      if (reason) await db.update(runs).set({ stopReason: reason }).where(eq(runs.id, runId));
       if (!runnerId || !deps.runners.send(runnerId, { type: "run.cancel", runId })) {
         // Nobody can confirm, so the server ends the run itself.
-        await deps.runners.endRun(runId, "stopped: runner offline", now());
+        await deps.runners.endRun(runId, reason ? `stopped: ${reason}` : "stopped: runner offline", now());
         return { cancelled: true, endedHere: true };
       }
       await db.update(runs).set({ cancelRequestedAt: now() }).where(eq(runs.id, runId));
       return { cancelled: true };
+    },
+
+    /**
+     * Ends every run going now, in every company, through the per-run cancel above (BOS-837): a runner that is
+     * offline ends its run here with the same "stopped: runner offline". This is the owner's emergency stop, so
+     * one run that fails to cancel never stops the rest (BOS-862): every live run is tried, and the failures are
+     * logged with their run ids and returned. Returns how many it cancelled and which runs it could not end.
+     * Runs that ended while this was working are left as they are, not counted.
+     */
+    async cancelAll() {
+      const live = await db.select({ id: runs.id }).from(runs).where(isNull(runs.endedAt));
+      let cancelled = 0;
+      const failed: string[] = [];
+      for (const { id } of live) {
+        const r = await this.cancel(id).catch((err: unknown) => {
+          // It ended on its own between the list and the cancel: exactly what the owner wanted, so not an error.
+          if (err instanceof RunError && err.status === 409) return null;
+          // Keep going: the remaining runs matter more than this one's failure. The message only, never the
+          // whole error, so nothing from the runner's call can carry a token into the log.
+          failed.push(id);
+          deps.log?.(`ending all runs: run ${id} could not be ended: ${err instanceof Error ? err.message : String(err)}`);
+          return null;
+        });
+        if (r) cancelled++;
+      }
+      // `failed` only when there are some, so a clean run answers exactly as it did before (BOS-837).
+      return failed.length ? { cancelled, failed } : { cancelled };
     },
 
     /** Ends runs whose runner was told to stop them but never confirmed within the guard time. Called by the sweep. */

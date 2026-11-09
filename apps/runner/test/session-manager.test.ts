@@ -1,9 +1,10 @@
 // Drives the real claude-agent-acp adapter (and its bundled Claude Code) against the
 // scripted stub model, so no credentials are used. Same scenario as spike S2.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
@@ -239,6 +240,27 @@ describe("runs in a git workspace (R38)", () => {
     expect((await workspaces.lastTurnDiff({ projectId, ticketId })).files.map((f) => f.path)).toEqual(["spike.txt"]);
   }, 90_000);
 
+  it("keeps a ticket's own clone on the project's shared Claude memory (BOS-323)", async () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "bm-remote-"));
+    const g = (...args: string[]) => execFileSync("git", args, { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+    g("init", "-q", "-b", "main");
+    writeFileSync(path.join(repo, "README.md"), "app\n");
+    g("add", ".");
+    g("commit", "-qm", "init");
+    const workspaces = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")), { ...process.env, BOSSMAN_TICKET_COPIES: "clone" });
+    const ticketId = randomUUID();
+    const projectId = randomUUID();
+    const h = harness(null, { workspaces, workspace: { projectId, ticketId, repoUrl: repo, baseRef: "main" } });
+    await h.ended;
+    const slug = (p: string) => p.replace(/[^a-zA-Z0-9]/g, "-");
+    const shared = path.join(h.home, ".claude", "projects", slug(workspaces.repoDir(projectId)), "memory");
+    const mine = path.join(h.home, ".claude", "projects", slug(workspaces.ticketDir(ticketId)), "memory");
+    // Claude Code keys a clone's memory by the clone, and is told that folder; it leads to the shared one.
+    expect(stubLog.some((l) => l.raw?.includes(mine))).toBe(true);
+    expect(readlinkSync(mine)).toBe(shared);
+    expect(existsSync(shared)).toBe(true);
+  }, 90_000);
+
   it("tries again when only the repo lock timed out, and ends the run on any other failure (BOS-331)", async () => {
     let calls = 0;
     const fake = {
@@ -280,4 +302,50 @@ describe("interrupted runs (R42)", () => {
     expect(JSON.parse(readFileSync(stateFile, "utf8"))).toEqual({ runs: [] });
     expect(new SessionManager({ mcpUrl: "x", emit: (e) => events.push(e), resolveEnv: async () => ({}), stateFile }).recoverInterrupted()).toEqual([]);
   });
+});
+
+describe("a coding tool that won't start", () => {
+  it("ends that one run with a clear reason, once, and the process survives", async () => {
+    const events: RunnerEvent[] = [];
+    const stateFile = path.join(mkdtempSync(path.join(tmpdir(), "bm-state-")), "active-runs.json");
+    const adapterBins: Record<string, string> = { claude: path.join(tmpdir(), "bm-no-such-claude-acp") };
+    const m = new SessionManager({
+      mcpUrl: "http://127.0.0.1:1/mcp",
+      stateFile,
+      adapterBins,
+      baseEnv: { PATH: process.env.PATH },
+      resolveEnv: async () => ({}),
+      emit: (e) => events.push(e),
+    });
+    const runId = randomUUID();
+    m.handle({ type: "run.start", runId, agentId: randomUUID(), agentKind: "claude", model: null, fundingSourceId: randomUUID(), cwd: mkdtempSync(path.join(tmpdir(), "bm-ws-")), prompt: "hi", mcpToken: "bm_sess_test" });
+    await new Promise<void>((resolve) => {
+      const t = setInterval(() => {
+        if (events.some((e) => e.type === "run.ended")) {
+          clearInterval(t);
+          resolve();
+        }
+      }, 20);
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const ended = events.filter((e) => e.type === "run.ended");
+    expect(ended).toHaveLength(1);
+    expect(ended[0]).toMatchObject({ runId, stopReason: null });
+    expect(String((ended[0] as { error: string }).error)).toMatch(/couldn't start claude.*not found/i);
+    expect(JSON.parse(readFileSync(stateFile, "utf8"))).toEqual({ runs: [] });
+
+    // The runner stayed up: the same manager starts a second run with the fake harness, and it gets as far as a session.
+    adapterBins.claude = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-acp.mjs");
+    const second = randomUUID();
+    m.handle({ type: "run.start", runId: second, agentId: randomUUID(), agentKind: "claude", model: null, fundingSourceId: randomUUID(), cwd: mkdtempSync(path.join(tmpdir(), "bm-ws-")), prompt: "hi", mcpToken: "bm_sess_test" });
+    await new Promise<void>((resolve) => {
+      const t = setInterval(() => {
+        if (events.some((e) => e.type === "run.started" && e.runId === second)) {
+          clearInterval(t);
+          resolve();
+        }
+      }, 20);
+    });
+    expect(events.some((e) => e.type === "run.started" && e.runId === second)).toBe(true);
+  }, 30_000);
 });

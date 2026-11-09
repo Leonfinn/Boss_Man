@@ -1,10 +1,12 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
-import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed, type TeamAlert, type AdvisedDecision } from "./api";
+import { api, ApiError, type ActiveRun, type Company, type Decision, type DecisionTally, type NoticeFeed, type TeamAlert, type AdvisedDecision, type ClosedNoticeCard } from "./api";
 import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
 import { useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
+import { DRAFT_CHANGED, hasAnyDraft } from "./drafts";
+import { setHold, useHold } from "./hold";
 import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
@@ -95,28 +97,81 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
   if (!m?.on) return null;
+  if (m.kind === "wrapup")
+    return (
+      <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
+        Agents were asked to wrap up{m.runs > 0 ? `; waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} to finish` : ""}. Nothing new starts until you cancel the wrap-up on Settings → Server and runner.
+      </p>
+    );
   const waiting = m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"} to finish` : "swapping the runners now";
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-      Update pending: {waiting}. Nothing new starts until it is done.
+      Update pending: {waiting}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.
     </p>
   );
 }
 
 /** On every page once the server serves newer screens than this tab is running (BOS-550): the owner reloads when ready. */
 export function NewBuildBanner({ newer }: { newer: boolean }) {
+  // BOS-773: if this browser holds any kept text, say plainly that reloading won't lose it, so the
+  // owner isn't warned off by the reload prompt. Kept live: it changes as drafts are typed and cleared.
+  const [kept, setKept] = useState(() => hasAnyDraft());
+  useEffect(() => {
+    if (!newer) return;
+    const update = () => setKept(hasAnyDraft());
+    update();
+    window.addEventListener(DRAFT_CHANGED, update);
+    window.addEventListener("storage", update);
+    return () => {
+      window.removeEventListener(DRAFT_CHANGED, update);
+      window.removeEventListener("storage", update);
+    };
+  }, [newer]);
   if (!newer) return null;
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-      <span>Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.</span>
+      <span>
+        Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.
+        {kept ? " What you've typed is kept: it comes back when the page reloads." : " Nothing you've typed is lost by reloading: every text box keeps a draft."}
+      </span>
       <button className="btn" type="button" onClick={() => window.location.reload()}>
         Reload
       </button>
+    </p>
+  );
+}
+
+/** On every page while the owner's "Stop all work" hold is on (BOS-836), with the one button that lifts it. */
+export function HoldBanner() {
+  const hold = useHold();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (hold.data?.paused !== true) return null;
+  const resume = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setHold(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span>
+        <strong>All work is stopped.</strong> No new agent runs start in any company until you resume; runs already going finish by themselves.
+      </span>
+      <button className="btn" type="button" disabled={busy} onClick={() => void resume()}>
+        Resume
+      </button>
+      {error && <span role="alert" className="error">{error}</span>}
     </p>
   );
 }
@@ -163,6 +218,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const decisions = usePoll((signal) => api<Decision[]>("/api/decisions", { signal }), 10_000, "decisions");
   const advised = usePoll((signal) => api<AdvisedDecision[]>("/api/decisions/advised", { signal }), 30_000, "decisions-advised");
   const teamAlerts = usePoll((signal) => api<TeamAlert[]>("/api/decisions/with-team", { signal }), 30_000, "decisions-team");
+  // Cards Boss Man closed by itself in the last couple of hours, shown where they were (BOS-739).
+  const closedNotices = usePoll((signal) => api<ClosedNoticeCard[]>("/api/decisions/closed-notices", { signal }), 30_000, "decisions-closed");
   const runs = usePoll((signal) => api<ActiveRun[]>("/api/runs", { signal }), 15_000, "runs");
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(notifySupported() ? Notification.permission : "unsupported");
   const feed = usePoll((signal) => api<NoticeFeed>("/api/notifications", { signal }), 10_000, "notifications");
@@ -209,15 +266,26 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
   // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
-  // the badge and the page share one request. A failure just leaves the badge off.
+  // the badge and the page share one request. A failure just leaves the badge off. Its stuck count (BOS-767)
+  // turns the badge to the warning colour when a jam is there to see.
   const mergeQueue = usePoll(
-    (signal) => (current ? api<{ waitingCount: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
+    (signal) => (current ? api<{ waitingCount: number; stuckCount?: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
     20_000,
     `merge-badge-${current?.id}`,
   );
   useEffect(() => {
     if (inRoute && inRoute !== chosen) remember(inRoute, setChosen);
   }, [inRoute, chosen]);
+  // The Decisions menu badge (BOS-969): what needs the owner now, from the server's one count (the
+  // Decisions page heading asks the same function), so the two can't drift. It follows the chosen
+  // company and refreshes on the same poll as the queue, and on every answer.
+  const decisionsTally = usePoll(
+    (signal) =>
+      current ? api<DecisionTally>(`/api/decisions/tally?companyId=${current.id}`, { signal }).catch(() => null) : Promise.resolve(null),
+    10_000,
+    `decisions-tally-${current?.id}`,
+  );
+  useEffect(() => decisionsTally.reload(), [current?.id]);
   const pick = (id: string) => {
     remember(id, setChosen);
     if (COMPANY_SCREENS.has(page)) go(`${page}/${id}`);
@@ -255,15 +323,18 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         onPickCompany={pick}
         onCreateCompany={createCompany}
         decisions={decisions.data ?? []}
+        decisionsTally={decisionsTally.data}
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
         mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
+        mergeStuck={mergeQueue.data?.stuckCount ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <HoldBanner />
         <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
@@ -310,7 +381,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={decisions.reload} banner={<SetupChecklist companyId={current?.id} go={go} />} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={<SetupChecklist companyId={current?.id} go={go} />} />
         ) : (
           <Dashboard company={current} />
         )}

@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
+import { probeGuard } from "./guard-probe.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { CheckJobs } from "./check-jobs.js";
@@ -68,6 +69,10 @@ Object.assign(env, storeEnv(storeDir));
 const workspaces = new Workspaces(workspacesRoot, process.env, coordDir, gateStore, { level: sandbox.level, pnpmStore: storeDir });
 // What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
 // decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
+// The runner's own git in a ticket's clone runs fenced wherever the fence works (BOS-323).
+workspaces.fenceCloneGit = sandbox.level !== "unavailable";
+// A merge check asked to run fenced gets a home of its own beside the agents', and the shared pnpm store.
+if (sandbox.level !== "unavailable") workspaces.checkFence = { home: path.join(dataDir, "agents", "merge-check"), pnpmStore: storeDir };
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
 
 let connection: RunnerConnection;
@@ -102,6 +107,7 @@ connection = new RunnerConnection({
   journal,
   runnerVersion: "0.0.0",
   imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
+  imageCommit: /^[0-9a-f]{40}$/i.test(env.BOSSMAN_IMAGE_COMMIT ?? "") ? env.BOSSMAN_IMAGE_COMMIT : undefined,
   harnessVersions: await harnessVersions(),
   log,
   onCommand: (command) => sessions.handle(command),
@@ -116,7 +122,19 @@ connection = new RunnerConnection({
 const interrupted = sessions.recoverInterrupted();
 if (interrupted.length) log(`reported ${interrupted.length} interrupted run(s) for recovery`);
 connection.start();
-connection.emit({ type: "runner.sandbox", report: sandbox });
+// The network guard proves itself: a connect to our own gateway must be refused at once (DR-049 point 2).
+// Reported with the sandbox report at start and every 5 minutes.
+const reportGuard = async () => {
+  try {
+    sandbox.guard = await probeGuard();
+    log(`network guard: ${sandbox.guard.state} (${sandbox.guard.reason}, ${sandbox.guard.ms} ms)`);
+  } catch (err) {
+    sandbox.guard = { state: "absent", reason: `probe failed: ${(err as Error).message}`.slice(0, 200), errno: null, ms: 0 };
+  }
+  connection.emit({ type: "runner.sandbox", report: sandbox });
+};
+await reportGuard();
+setInterval(() => void reportGuard(), 5 * 60_000).unref();
 
 // Workspace clean-up and disk use (R54): at start-up, then hourly. The report is journalled
 // like any event, so it reaches the server once the connection is up.

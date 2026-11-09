@@ -19,7 +19,7 @@ afterEach(async () => {
 const DIFF = { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "x", added: 1, removed: 0 }], diff: "diff --git a/x b/x", truncated: false };
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
-async function setup() {
+async function setup(o: { covers?: { covers: boolean; reason: string; newCommits: number; handMerges: number } } = {}) {
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
@@ -45,8 +45,9 @@ async function setup() {
     if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
     if (c.type === "workspace.carried") ok({ carried: [] });
     if (c.type === "workspace.migrations") ok({ needed: false, reason: "free" });
+    if (c.type === "workspace.covers" && o.covers) ok(o.covers);
     return true;
-  }, ["carried-check"]);
+  }, o.covers ? ["carried-check", "signoff-covers"] : ["carried-check"]);
   const row = async (id: string) => (await db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
   const mcp = async (agentId: string) => {
     const runId = randomUUID();
@@ -174,6 +175,15 @@ describe("owner sign-off cards (BOS-503)", () => {
     expect(await c.cards(t.id, "open")).toHaveLength(1);
   });
 
+  it("restores the missing card for a CEO reply too, and the reply then posts (BOS-901)", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    const out = textOf(await (await c.mcp(c.ceo.id)).callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "All reviews passed. Please review and approve it, or send it back." } }));
+    expect(await c.cards(t.id, "open")).toHaveLength(1);
+    expect(out).toContain("Boss Man raised it");
+    expect(out).toContain("Posted on the ticket's conversation.");
+  });
+
   it("shows a ticket waiting on sign-off in Your review even with no card (DR-021)", async () => {
     const c = await setup();
     const t = await c.approvedHighRisk();
@@ -277,5 +287,64 @@ describe("owner sign-off cards (BOS-503)", () => {
     expect((await c.req("GET", `/api/tickets/${mid.id}`)).json().signoff).toBeNull();
     expect(await c.sweeps.run()).toMatchObject({ signoffCards: 0 });
     await vi.waitFor(async () => expect((await c.row(mid.id)).systemState).toBe("done"));
+  });
+});
+
+// BOS-734 / DR-038: a card for older code is never left for the owner to press, and a sign-off carries over only a clean main merge.
+describe("a sign-off and the branch moving on (BOS-734)", () => {
+  const COVERS = { covers: true, reason: "main only", newCommits: 0, handMerges: 0 };
+  const NOT = { covers: false, reason: "1 new commit of the ticket's own since the sign-off", newCommits: 1, handMerges: 0 };
+  const openCard = (c: Awaited<ReturnType<typeof setup>>, ticketId: string, head: string) =>
+    c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Merge it, or send it back?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", status: "open", context: { type: "risk_review", ticketId, reviewer: "Sam", head, risk: "high" } }).returning();
+
+  it("merges on a sign-off for an earlier commit when only clean main merges came in", async () => {
+    const c = await setup({ covers: COVERS });
+    const t = await c.approvedHighRisk();
+    await c.signedOffCard(t.id, "d".repeat(40));
+    await c.review.land(t.id, "Boss Man");
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    expect(c.merges()).toBe(1);
+  });
+
+  it("still refuses when the runner says the changes aren't just clean main merges", async () => {
+    const c = await setup({ covers: NOT });
+    const t = await c.approvedHighRisk();
+    await c.signedOffCard(t.id, "d".repeat(40));
+    await expect(c.review.land(t.id, "Boss Man")).rejects.toThrow(/signed off commit dddddddd/);
+    expect(c.merges()).toBe(0);
+  });
+
+  it("pressing a card for older code is refused with the reason, the card is withdrawn and the ticket goes back for review, with no new card", async () => {
+    const c = await setup({ covers: NOT });
+    const t = await c.approvedHighRisk();
+    const [card] = await openCard(c, t.id, "d".repeat(40));
+    const res = await c.req("POST", `/api/decisions/${card!.id}/answer`, { answer: "Approve and merge" });
+    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+    expect(res.body).toMatch(/changed after this card was raised/);
+    expect(c.merges()).toBe(0);
+    // Unreviewed code never gets a fresh "Approve and merge" card: the reviewers must pass it first.
+    expect(await c.cards(t.id, "open")).toHaveLength(0);
+    expect((await c.row(t.id)).systemState).toBe("in_progress");
+    expect(c.merges()).toBe(0);
+  });
+
+  it("the sweep moves a card to the new head when only clean main merges came in, and replaces it otherwise", async () => {
+    const same = await setup({ covers: COVERS });
+    const t1 = await same.approvedHighRisk();
+    const [card] = await openCard(same, t1.id, "d".repeat(40));
+    await same.sweeps.run();
+    const [kept] = await same.cards(t1.id, "open");
+    expect(kept!.id).toBe(card!.id);
+    expect((kept!.context as { head?: string }).head).toBe("b".repeat(40));
+    await ctx?.close();
+    ctx = undefined;
+
+    const diff = await setup({ covers: NOT });
+    const t2 = await diff.approvedHighRisk();
+    const [old] = await openCard(diff, t2.id, "d".repeat(40));
+    await diff.sweeps.run();
+    expect(await diff.cards(t2.id, "open")).toHaveLength(0);
+    expect((await diff.cards(t2.id, "withdrawn")).map((x) => x.id)).toContain(old!.id);
+    expect((await diff.row(t2.id)).systemState).toBe("in_progress");
   });
 });

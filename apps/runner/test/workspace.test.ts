@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS } from "@boss-man/shared";
-import { branchFor, gitAuthEnv, safeGitEnv, Workspaces } from "../src/workspace.js";
+import { branchFor, gitAuthEnv, isClone, safeGitEnv, Workspaces } from "../src/workspace.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
 
@@ -79,9 +79,13 @@ describe("git workspaces (R38)", () => {
     const b = await ws.ensure(specB);
     git(a.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work on A");
     await ws.release(specA);
-    // An agent working on B switches B's folder onto A's branch, so A's branch is taken.
-    git(b.path, "switch", "-q", branchFor(ids.a));
-    writeFileSync(path.join(b.path, "b-note.txt"), "uncommitted\n");
+    // An agent working on B switches B's folder onto A's branch, so A's branch is taken. A clone
+    // (BOS-323) has no other ticket's branch to switch to, so only the half-made folder applies.
+    const worktrees = !isClone(b.path);
+    if (worktrees) {
+      git(b.path, "switch", "-q", branchFor(ids.a));
+      writeFileSync(path.join(b.path, "b-note.txt"), "uncommitted\n");
+    }
     // A half-made folder for A is in the way as well.
     mkdirSync(ws.ticketDir(ids.a), { recursive: true });
     writeFileSync(path.join(ws.ticketDir(ids.a), "junk"), "x");
@@ -91,8 +95,10 @@ describe("git workspaces (R38)", () => {
     expect(git(back.path, "log", "-1", "--format=%s")).toBe("work on A");
     expect(git(back.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branchFor(ids.a));
     // B's folder keeps its files and uncommitted work, now on a detached HEAD.
-    expect(git(b.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
-    expect(readFileSync(path.join(b.path, "b-note.txt"), "utf8")).toBe("uncommitted\n");
+    if (worktrees) {
+      expect(git(b.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+      expect(readFileSync(path.join(b.path, "b-note.txt"), "utf8")).toBe("uncommitted\n");
+    }
   });
 
   it("does not run hooks or a filesystem monitor named in the shared repo's config", async () => {
@@ -125,7 +131,8 @@ describe("git workspaces (R38)", () => {
       ws.ensure({ projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" }),
     ]);
     expect(a.created && b.created).toBe(true);
-    expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
+    if (isClone(a.path)) expect([a.path, b.path].map((p) => git(p, "rev-parse", "--abbrev-ref", "HEAD"))).toEqual([branchFor(ids.a), branchFor(ids.b)]);
+    else expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
   });
 
   it("lets seven runs start at once on one repo and all get a workspace", async () => {
@@ -134,7 +141,8 @@ describe("git workspaces (R38)", () => {
     const tickets = Array.from({ length: 7 }, (_, i) => `${i}0000000-0000-4000-8000-000000000000`);
     const made = await Promise.all(tickets.map((ticketId) => ws.ensure({ projectId: ids.project, ticketId, repoUrl: r.dir, baseRef: "main" })));
     expect(made.every((m) => m.created)).toBe(true);
-    expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(8);
+    if (isClone(made[0]!.path)) expect(made.every((m) => isClone(m.path))).toBe(true);
+    else expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(8);
   });
 
   it("passes a git token through the environment only", () => {
@@ -147,16 +155,21 @@ describe("git workspaces (R38)", () => {
   it("keeps the hook and fsmonitor settings when a git token adds its own config entry", () => {
     const env = safeGitEnv(gitAuthEnv({ GIT_TOKEN: "ghp_x" }));
     expect(env).toMatchObject({
-      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_COUNT: "5",
       GIT_CONFIG_KEY_0: "core.hooksPath",
       GIT_CONFIG_VALUE_0: "/dev/null",
       GIT_CONFIG_KEY_1: "core.fsmonitor",
       GIT_CONFIG_VALUE_1: "false",
-      GIT_CONFIG_KEY_2: "http.extraHeader",
+      GIT_CONFIG_KEY_2: "credential.helper",
+      GIT_CONFIG_VALUE_2: "",
+      GIT_CONFIG_KEY_3: "commit.gpgSign",
+      GIT_CONFIG_VALUE_3: "false",
+      GIT_CONFIG_KEY_4: "http.extraHeader",
+      GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_TERMINAL_PROMPT: "0",
     });
-    expect(env.GIT_CONFIG_VALUE_2).toMatch(/^Authorization: Basic /);
-    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "2" });
+    expect(env.GIT_CONFIG_VALUE_4).toMatch(/^Authorization: Basic /);
+    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "4" });
   });
 
   it("reports a clone that fails", async () => {
@@ -519,6 +532,41 @@ describe("turn checkpoints (R39)", () => {
     // Released: the checkpoints go with the worktree.
     await ws.release(spec);
     expect(git(ws.repoDir(ids.project), "for-each-ref", `refs/bossman/checkpoints/${ids.a}/`)).toBe("");
+  });
+});
+
+// BOS-832: the review-time clash check (BOS-426) must read the same current branch and main the merge gate will.
+describe("the clash check reads a current branch and a current main (BOS-832)", () => {
+  it("reports no clash when the branch already contains origin's main tip", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    // The branch and main both touch the same line. The branch commit reaches the shared repo (a turn
+    // checkpoint), then main moves and the agent merges main in on the branch (the HOL-585 shape): the
+    // branch head holds main's tip and merges clean, but the shared ref is still the pre-merge commit.
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    await ws.checkpoint(spec, "after a turn");
+    r.commit("main side");
+    git(w.path, "fetch", "-q", "origin");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", "-X", "ours", "origin/main");
+    // HOL-585's shape: the branch head already holds main's tip, so no clash is possible.
+    expect(git(w.path, "merge-base", "--is-ancestor", git(r.dir, "rev-parse", "main"), "HEAD")).toBe("");
+    expect(await ws.clash(spec, "main")).toEqual({ clashes: false, files: [] });
+  });
+
+  it("still reports a real clash", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    r.commit("main side");
+    const res = await ws.clash(spec, "main");
+    expect(res.clashes).toBe(true);
+    expect(res.files).toEqual(["README.md"]);
   });
 });
 

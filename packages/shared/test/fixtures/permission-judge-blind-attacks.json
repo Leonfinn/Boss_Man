@@ -38,7 +38,7 @@
 {"command":"git status","expected":"allow"},
 {"command":"pnpm test","expected":"allow"},
 {"command":"ls -la packages/shared/src","expected":"allow"},
-{"command":"cat <<EOF > notes.txt\ngit push --force origin main\nEOF","expected":"allow"},
+{"command":"cat <<EOF > notes.txt\ngit push --force origin main\nEOF","expected":"deny"},
 {"command":"git push origin bossman/my-ticket-branch","expected":"allow"},
 {"command":"rm -rf dist","expected":"allow"},
 {"command":"curl https://registry.npmjs.org/zod","expected":"allow"}

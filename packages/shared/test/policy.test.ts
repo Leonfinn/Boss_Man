@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, looksLikeBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, UNKNOWN_TOOL_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, looksLikeBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, UNKNOWN_TOOL_RULE, UNMATCHED_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -123,8 +123,11 @@ describe("evaluatePermission defaults", () => {
     expect(evaluatePermission({ title: "mcp__frobnicator__run", kind: "other", rawInput: {} }, [rule])).toMatchObject({ outcome: "allow", rule: "Allow frobnicator" });
   });
 
-  it("falls through to the owner for unknown kinds", () => {
+  it("falls through to the CEO first for a command no rule covers, and to the owner for delete/move (BOS-752)", () => {
     expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toMatchObject({ outcome: "owner", rule: "No rule matched" });
+    // A command arriving under a kind that is not "execute" and is not a built-in allow.
+    const info = { title: "bash", kind: "delete", rawInput: { command: `agent-browser --session $A get text "heading Hello"` } };
+    expect(decidePermission(info, [])).toMatchObject({ outcome: "ceo", rule: UNMATCHED_RULE, row: 8 });
   });
 
   it("company rules win over defaults, first match first", () => {
@@ -216,11 +219,38 @@ describe("home-network guard", () => {
     expect(evaluatePermission(tool("mcp__scrapling__get", { url: "not a url http://" }), allowAll).outcome).not.toBe("deny");
   });
 
+  it("refuses the ranges the skill fetcher already refuses, from the one shared table (BOS-886)", () => {
+    // Multicast, 192.0.0.0/24 and the 198.18.0.0/15 benchmark range were refused by the skill fetcher alone, so the permission check let them through.
+    for (const url of ["http://224.0.0.251/", "http://239.255.255.250:1900/", "http://[ff02::1]/", "http://192.0.0.8/", "http://198.18.0.1/", "http://198.19.255.255/", "http://[::ffff:224.0.0.251]/", "http://[::ffff:e000:fb]/", "http://[::ffff:10.0.0.5]/"]) {
+      expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "deny" });
+    }
+    expect(evaluatePermission(tool("WebFetch", { url: "http://224.0.0.251/" }, "fetch"), []).outcome).toBe("deny");
+    // The next ranges over are public and stay allowed.
+    for (const url of ["http://223.255.255.255/", "http://198.20.0.1/", "http://192.0.2.1/"]) expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "allow" });
+  });
+
   it("leaves public addresses and Boss Man's own tools to the rules", () => {
     expect(evaluatePermission(tool("mcp__crawl4ai__md", { url: "https://docs.truenas.com/scale/" }), allowAll).outcome).toBe("allow");
     expect(evaluatePermission(tool("mcp__crawl4ai__md", { url: "http://172.32.0.1" }), allowAll).outcome).toBe("allow");
     expect(evaluatePermission(tool("mcp__bossman__wiki_read", { url: "http://localhost" }), []).outcome).toBe("allow");
     expect(evaluatePermission(exec("curl http://192.168.68.1"), []).outcome).toBe("allow");
+  });
+
+  it("doesn't read an ordinary host name as a private IPv6 address (BOS-896)", () => {
+    // feed.com starts like fec0::/10 and fcbarcelona.com like fc00::/7; before BOS-896 the IPv6 table was applied to any
+    // host name, so these ordinary sites were refused as privateNet. The IPv6 rows apply only to a real IPv6 literal.
+    for (const url of ["http://feed.com/", "http://fcbarcelona.com/", "http://fe80.example.com/", "https://fdic.gov/", "https://ffmpeg.org/"]) {
+      expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "allow" });
+    }
+    expect(evaluatePermission(tool("WebFetch", { url: "http://feed.com/" }, "fetch"), []).outcome).not.toBe("deny");
+    // The same names in a shell command (an ssh/scp host or an http URL) are not private either.
+    for (const c of ["curl http://feed.com/", "ssh user@fcbarcelona.com", "scp x user@fe80.example.com:y"]) {
+      expect(evaluatePermission(exec(c), []), c).not.toMatchObject({ outcome: "deny", rule: "Fetching from your home network or this machine is blocked" });
+    }
+    // Real IPv6 literals, with and without brackets, still count, including the site-local range the names resemble.
+    for (const url of ["http://[fec0::1]/", "http://[fc00::1]/", "http://[fe80::1]/", "http://[fd12:3456::1]/"]) {
+      expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "deny" });
+    }
   });
 });
 

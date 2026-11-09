@@ -14,7 +14,7 @@
 // reason, it parks on the CEO's rung with its clock stopped and is offered again when the reason
 // is gone. Only a kind allowed to reach the owner goes past the CEO.
 import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { readWatchdogSettings, untrusted } from "@boss-man/shared";
+import { readWatchdogSettings, sinceHours, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -22,6 +22,7 @@ import type { ClearWhen } from "./alert-clearing.js";
 import { adviceOf, CANCEL_RUN, checkAsk } from "./decisions.js";
 import type { HostFacts } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
+import { mergeContext } from "./decision-context.js";
 import { type AlertCause, type AlertKind, type AlertRung, isAlertKind, kindCeiling, kindRow, kindStart } from "./alert-kinds.js";
 import { ALERT_REASON, SCRUM_MASTER_DUTY, WATCHDOG_REWAKE_REASON, WatchdogError, watchdogPausedUntil, type watchdogService } from "./watchdog.js";
 
@@ -151,6 +152,9 @@ export function alertLadder(
     clearExpired?: () => Promise<number>;
     /** The host facts Boss Man recorded (BOS-427), for R6 on a CEO escalation with owner steps. Absent: only the host/account check runs. */
     hosts?: () => Promise<HostFacts[]>;
+    /** The name the host deployer reports for the server itself (BOS-774), for the card lint's R6: a CEO escalation
+     * that names another host is refused. Absent: only the name the facts carry stands in. */
+    serverHost?: () => Promise<string | null>;
     /** Add-on facts for the card lint's R9 (DR-023). Absent: R9 is not checked. */
     addons?: () => Promise<AddonFacts>;
     now?: () => Date;
@@ -233,7 +237,7 @@ export function alertLadder(
       const [n] = await db
         .select({ n: sql<number>`count(*)::int` })
         .from(watchdogActions)
-        .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, ["sweep_wake", "alert_hop"]), eq(watchdogActions.targetAgentId, sm.id), gt(watchdogActions.createdAt, new Date(now().getTime() - 3_600_000))));
+        .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, ["sweep_wake", "alert_hop"]), eq(watchdogActions.targetAgentId, sm.id), gt(watchdogActions.createdAt, sinceHours(now()))));
       if ((n?.n ?? 0) >= s.maxSmRunsPerHour) return { skip: "the Scrum Master is at its hourly limit" };
       return { agent: sm };
     }
@@ -249,7 +253,7 @@ export function alertLadder(
     const [n] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(watchdogActions)
-      .where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "alert_hop"), eq(watchdogActions.targetAgentId, ceo.id), gt(watchdogActions.createdAt, new Date(now().getTime() - 3_600_000))));
+      .where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "alert_hop"), eq(watchdogActions.targetAgentId, ceo.id), gt(watchdogActions.createdAt, sinceHours(now()))));
     if ((n?.n ?? 0) >= readWatchdogSettings(c.watchdog).maxCeoAlertsPerHour) return { skip: "the CEO has had its hourly limit of alerts" };
     return { agent: ceo };
   }
@@ -291,7 +295,7 @@ export function alertLadder(
         const next: Ladder = { ...ladder, rung: "ceo", parked: reason, topRung: ladder.topRung, hops: [...ladder.hops, { to: "ceo", at: now().toISOString(), why: reason }] };
         const held = await db
           .update(decisions)
-          .set({ tier: "ceo", forAgentId: null, context: { ...(d.context as object), ...extra, ladder: next } })
+          .set({ tier: "ceo", forAgentId: null, context: mergeContext({ ...extra, ladder: next }) })
           .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
           .returning({ id: decisions.id });
         if (!held.length) return null;
@@ -306,7 +310,7 @@ export function alertLadder(
         const handoverRanOut = !!extra.handoverRanOut;
         const moved = await db
           .update(decisions)
-          .set({ tier: "owner", forAgentId: null, context: { ...(d.context as object), ...extra, ...(tried ? { triedFirst: tried } : {}), ...(handoverRanOut ? { handoverRanOut: { at: now().toISOString() } } : {}), ladder: next } })
+          .set({ tier: "owner", forAgentId: null, context: mergeContext({ ...extra, ...(tried ? { triedFirst: tried } : {}), ...(handoverRanOut ? { handoverRanOut: { at: now().toISOString() } } : {}), ladder: next }) })
           .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
           .returning({ id: decisions.id });
         if (!moved.length) return null;
@@ -323,7 +327,7 @@ export function alertLadder(
       const next = hop(rung, reason);
       const moved = await db
         .update(decisions)
-        .set({ tier: "ceo", forAgentId: rung === "scrum_master" ? h.agent.id : null, context: { ...(d.context as object), ladder: next } })
+        .set({ tier: "ceo", forAgentId: rung === "scrum_master" ? h.agent.id : null, context: mergeContext({ ladder: next }) })
         .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id });
       if (!moved.length) return null;
@@ -337,7 +341,7 @@ export function alertLadder(
           const held: Ladder = { ...ladder, rung: "ceo", parked: reason, topRung: ladder.topRung, hops: [...ladder.hops, { to: "ceo", at: now().toISOString(), why: reason }] };
           const kept = await db
             .update(decisions)
-            .set({ tier: "ceo", forAgentId: null, context: { ...(d.context as object), ladder: held } })
+            .set({ tier: "ceo", forAgentId: null, context: mergeContext({ ladder: held }) })
             .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
             .returning({ id: decisions.id });
           if (!kept.length) return null;
@@ -393,7 +397,7 @@ export function alertLadder(
       const blocked = "skip" in h ? `${LABEL.ceo} was skipped: ${h.skip}` : why;
       if (blocked !== why) {
         const kept: Ladder = { ...ladder, parked: blocked, hops: [...ladder.hops, { to: "ceo", at: now().toISOString(), why: blocked }] };
-        const [row] = await db.update(decisions).set({ context: { ...(d.context as object), ladder: kept } }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open"))).returning({ id: decisions.id });
+        const [row] = await db.update(decisions).set({ context: mergeContext({ ladder: kept }) }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open"))).returning({ id: decisions.id });
         if (!row) return false;
         await log(d.companyId, { kind: "alert_hop", ticketId: ladder.ticketId, targetAgentId: ceo.id, decisionId: d.id, reason: blocked, summary: `Held with the CEO: ${blocked}` });
       }
@@ -403,7 +407,7 @@ export function alertLadder(
     const next: Ladder = { ...ladder, rung: "ceo", since: now().toISOString(), parked: null, hops: [...ladder.hops, { to: "ceo", at: now().toISOString(), why: "the CEO can take it again" }] };
     const [moved] = await db
       .update(decisions)
-      .set({ tier: "ceo", forAgentId: null, context: { ...(d.context as object), ladder: next } })
+      .set({ tier: "ceo", forAgentId: null, context: mergeContext({ ladder: next }) })
       .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
       .returning({ id: decisions.id });
     if (!moved) return false;
@@ -427,7 +431,7 @@ export function alertLadder(
       const question = heading ? heading({ ...input.cause, agents }, items.length) : open.question;
       await db
         .update(decisions)
-        .set({ question, context: { ...(open.context as object), items, lastAppendedAt: now().toISOString() } })
+        .set({ question, context: mergeContext({ items, lastAppendedAt: now().toISOString() }) })
         .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")));
     },
 
@@ -619,7 +623,7 @@ export function alertLadder(
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
       // The card's own options are buttons the owner sees, so R7 accepts "press <option>" (BOS-421).
-      const ask = checkAsk({ ...input, options: d.options as string[], byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      const ask = checkAsk({ ...input, options: d.options as string[], byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, ...(deps.serverHost ? { serverHost: await deps.serverHost() } : {}), addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Every permission card that reaches the owner carries the CEO's advice (BOS-233 item 2): what it's
       // needed for and what wouldn't get done if the owner denies it. Start from any advice the CEO already

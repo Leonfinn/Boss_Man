@@ -5,16 +5,20 @@ import { collect } from "../devices";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
+import { setHold, useHold } from "../hold";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
 import { StarButton } from "./Agents";
 import { toBase64 } from "./Skills";
+import { CHECK_OK, CHECK_TROUBLE, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../host-facts-display";
+import { clearDraft, readDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
-type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" } | null; error?: string } | null;
+type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
 type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
-type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; report?: CompanyReport | null }) & { launcher?: Launched };
+type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; sandbox?: { guard?: { state: "on" | "absent"; reason: string } } | null; report?: CompanyReport | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
 type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
@@ -84,7 +88,7 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
               {r && !r.ok && r.detail && <p className="error" style={{ fontSize: 13, margin: "2px 0 0" }}>{r.detail}</p>}
               {!r && (
                 <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>
-                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root (on TrueNAS, in the root shell). Skills that need it stay out of runs until then.
+                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root in a root shell on that server. Skills that need it stay out of runs until then.
                 </p>
               )}
             </li>
@@ -103,16 +107,25 @@ function Since({ connected, at }: { connected: boolean; at: string | null }) {
 
 /**
  * The network guard keeps the runner off private addresses (BOS-324). It is only "on" when its rules are loaded
- * (or the host is known to be able to load them); "off" and "unavailable" mean the runner can reach the home
- * network, so say so plainly and how to fix it (BOS-335).
+ * (or the host is known to be able to load them); "off", "unavailable" and "down" mean the runner can reach the
+ * home network, so say so plainly and how to fix it (BOS-335, BOS-709).
  */
-function GuardWarning({ guard }: { guard: "off" | "unavailable" }) {
+function GuardWarning({ guard }: { guard: "off" | "unavailable" | "down" }) {
+  const what =
+    guard === "off"
+      ? "The network guard is turned off, so this runner can reach private addresses (your home network and the database)."
+      : guard === "down"
+        ? "The network guard is down for this runner: it is missing, stopped or out of date, so this runner can reach private addresses (your home network and the database)."
+        : "The network guard is unavailable on this host, which can't load firewall rules, so this runner can reach private addresses (your home network and the database).";
+  const fix =
+    guard === "off"
+      ? "Ask your admin to turn the network guard back on for the launcher, then restart the runner."
+      : guard === "down"
+        ? "The launcher repairs the guard by itself; if this is still shown after a minute, tell your admin."
+        : "Ask your admin to make the launcher refuse runners on hosts that can't run the guard.";
   return (
     <p className="error" role="alert" data-testid="guard-warning">
-      {guard === "off"
-        ? "The network guard is turned off, so this runner can reach private addresses (your home network and the database)."
-        : "The network guard is unavailable on this host, which can't load firewall rules, so this runner can reach private addresses (your home network and the database)."}{" "}
-      {guard === "off" ? "Ask your admin to turn the network guard back on for the launcher, then restart the runner." : "Ask your admin to make the launcher refuse runners on hosts that can't run the guard."}
+      {what} {fix}
     </p>
   );
 }
@@ -180,8 +193,16 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
               <dd className="mono">{s.imageVersion}</dd>
             </>
           )}
+          {s?.registered && (
+            <>
+              <dt>Network guard</dt>
+              <dd data-testid="runner-guard-row">
+                launcher: {c ? c.guard ?? "not reported" : "no container"} · runner: {s.sandbox?.guard ? (s.sandbox.guard.state === "on" ? "on" : `absent (${s.sandbox.guard.reason})`) : "not reported yet"}
+              </dd>
+            </>
+          )}
         </dl>
-        {c && (c.guard === "off" || c.guard === "unavailable") && <GuardWarning guard={c.guard} />}
+        {c && (c.guard === "off" || c.guard === "unavailable" || c.guard === "down") && <GuardWarning guard={c.guard} />}
         {s?.report?.last && (
           <div data-testid="company-update-history">
             <UpdateHistory r={s.report.last} />
@@ -593,7 +614,7 @@ export function ToolServers({ company }: { company: Company }) {
         </div>
         <div className="field">
           <label htmlFor="mcp-url">Server URL</label>
-          <input id="mcp-url" type="url" required placeholder="http://192.168.68.67:30301/mcp" value={form.url} onChange={set("url")} />
+          <input id="mcp-url" type="url" required placeholder="http://192.0.2.10:30301/mcp" value={form.url} onChange={set("url")} />
         </div>
         <div className="field">
           <label htmlFor="mcp-transport">Transport</label>
@@ -627,6 +648,226 @@ export function ToolServers({ company }: { company: Company }) {
           <button className="btn" type="submit" disabled={act.busy}>
             Add tool server
           </button>
+        </div>
+      </form>
+      {act.view}
+    </Section>
+  );
+}
+
+type DeployTargetRow = {
+  id: string;
+  name: string;
+  kind: "ssh" | "docker" | "git";
+  endpoint: string;
+  isProduction: boolean;
+  rules: { requiresApproval?: boolean; liveTag?: { projectId: string; name: string } | null };
+  lastDeploy: { id: string; ref: string; commit: string | null; at: string | null; tagName: string | null; tagResult: string | null } | null;
+};
+
+const ENDPOINT_HINT = { ssh: "deploy@host or ssh://deploy@host:22", docker: "tcp://socket-proxy:2375", git: "https://git.example.com/you/app.git" } as const;
+
+/** What a deploy tag result means, in plain words. */
+function tagResultText(r: string | null) {
+  if (!r) return "";
+  if (r === "moved") return "tag moved";
+  if (r === "unchanged") return "tag already there";
+  if (r === "pending") return "moving the tag…";
+  return r.replace(/^skipped: /, "tag not moved: ").replace(/^failed: /, "tag move failed: ");
+}
+
+/**
+ * Deploy targets (R14, R15, DR-033): where agents ship work, which deploys wait for you, and the tag
+ * Boss Man moves after a successful deploy. Owner-only: agents can list targets but never edit them.
+ */
+export function DeployTargets({ company }: { company: Company }) {
+  const targets = usePoll((signal) => api<DeployTargetRow[]>(`/api/companies/${company.id}/deploy-targets`, { signal }), 30_000, `deploy-targets-${company.id}`);
+  const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 120_000, `projects-${company.id}`);
+  const repoProjects = (projects.data ?? []).filter((p) => p.repoUrl && !p.archivedAt);
+  const blank = { name: "", kind: "ssh" as DeployTargetRow["kind"], endpoint: "", isProduction: false, requiresApproval: false, tagOn: false, tagProject: "", tagName: "" };
+  const [form, setForm] = useState(blank);
+  const [editing, setEditing] = useState<string | null>(null);
+  const act = useAction();
+  const edit = (t: DeployTargetRow) => {
+    setEditing(t.id);
+    const lt = t.rules.liveTag;
+    setForm({ name: t.name, kind: t.kind, endpoint: t.endpoint, isProduction: t.isProduction, requiresApproval: !!t.rules.requiresApproval, tagOn: !!lt, tagProject: lt?.projectId ?? "", tagName: lt?.name ?? "" });
+  };
+  const cancel = () => {
+    setEditing(null);
+    setForm(blank);
+  };
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      const tagProject = form.tagProject || repoProjects[0]?.id || "";
+      const body = {
+        name: form.name,
+        kind: form.kind,
+        endpoint: form.endpoint,
+        isProduction: form.isProduction,
+        requiresApproval: form.requiresApproval,
+        liveTag: form.tagOn ? { projectId: tagProject, name: form.tagName.trim() } : null,
+      };
+      if (editing) await api(`/api/deploy-targets/${editing}`, { method: "PATCH", body });
+      else await api(`/api/companies/${company.id}/deploy-targets`, { method: "POST", body });
+      const what = editing ? "Saved" : "Added";
+      cancel();
+      targets.reload();
+      return `${what}.${form.tagOn ? ` After each successful deploy to ${form.name}, Boss Man moves the tag ${form.tagName.trim()}.` : ""}`;
+    });
+  };
+  const remove = (t: DeployTargetRow) =>
+    window.confirm(`Delete the deploy target ${t.name}? Agents can no longer deploy to it, and its deploy history goes with it.`) &&
+    void act.run(async () => {
+      await api(`/api/deploy-targets/${t.id}`, { method: "DELETE" });
+      if (editing === t.id) cancel();
+      targets.reload();
+      return `Deleted ${t.name}.`;
+    });
+  const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.name ?? "a project";
+  return (
+    <Section id="deploy-targets-h" title="Deploy targets">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Where agents ship work. A deploy to a production target, or to one that requires approval, waits for you in Decisions. Only the run carrying out an approved deploy gets the target's secrets (grant them on the Secrets page, "only for deploys to …").
+      </p>
+      {targets.data?.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Where</th>
+                <th scope="col">Approval</th>
+                <th scope="col">Tag after deploy</th>
+                <th scope="col">Last successful deploy</th>
+                <th scope="col">
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {targets.data.map((t) => (
+                <tr key={t.id}>
+                  <td>
+                    {t.name}
+                    {t.isProduction && <span className="tag amber" style={{ marginLeft: 6 }}>production</span>}
+                  </td>
+                  <td>
+                    <span className="muted">{t.kind}</span> <span className="mono">{t.endpoint}</span>
+                  </td>
+                  <td>{t.isProduction || t.rules.requiresApproval ? "You approve each deploy" : "Starts straight away"}</td>
+                  <td>
+                    {t.rules.liveTag ? <span className="mono">{t.rules.liveTag.name}</span> : <span className="muted">none</span>}
+                    {t.rules.liveTag && <span className="muted"> in {projectName(t.rules.liveTag.projectId)}</span>}
+                  </td>
+                  <td>
+                    {t.lastDeploy ? (
+                      <>
+                        <span className="mono">{t.lastDeploy.commit ? t.lastDeploy.commit.slice(0, 7) : t.lastDeploy.ref}</span>
+                        {t.lastDeploy.at && <span className="muted"> {when(t.lastDeploy.at)}</span>}
+                        {t.lastDeploy.tagResult && (
+                          <div className={t.lastDeploy.tagResult.startsWith("failed") ? "error" : "muted"} style={{ fontSize: 13 }}>
+                            {tagResultText(t.lastDeploy.tagResult)}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <span className="muted">none yet</span>
+                    )}
+                  </td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => edit(t)} aria-label={`Edit deploy target ${t.name}`}>
+                      Edit
+                    </button>{" "}
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(t)} aria-label={`Delete deploy target ${t.name}`}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        targets.data && <p className="muted" style={{ fontSize: 14 }}>No deploy targets yet: agents can't deploy until you add one.</p>
+      )}
+      <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 10 }} aria-labelledby="deploy-target-form-h">
+        <h3 id="deploy-target-form-h" style={{ fontSize: 15, fontWeight: 600 }}>
+          {editing ? `Edit ${form.name || "deploy target"}` : "Add a deploy target"}
+        </h3>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Name
+            <input required maxLength={80} value={form.name} placeholder="Production" onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Kind
+            <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as DeployTargetRow["kind"] })}>
+              <option value="ssh">SSH host</option>
+              <option value="docker">Docker endpoint</option>
+              <option value="git">Git remote</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: "1 1 260px" }}>
+            Address
+            <input required maxLength={500} className="mono" value={form.endpoint} placeholder={ENDPOINT_HINT[form.kind]} onChange={(e) => setForm({ ...form, endpoint: e.target.value })} />
+          </label>
+        </div>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.isProduction} onChange={(e) => setForm({ ...form, isProduction: e.target.checked })} />
+          Production (you approve every deploy, and high-risk work must deploy to staging first)
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.requiresApproval || form.isProduction} disabled={form.isProduction} onChange={(e) => setForm({ ...form, requiresApproval: e.target.checked })} />
+          Requires approval (you approve each deploy here too)
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.tagOn} onChange={(e) => setForm({ ...form, tagOn: e.target.checked, tagProject: form.tagProject || repoProjects[0]?.id || "" })} />
+          After a successful deploy, move tag
+        </label>
+        {form.tagOn && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingLeft: 26 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                Tag name
+                <input required maxLength={100} className="mono" value={form.tagName} placeholder="live-deployed" onChange={(e) => setForm({ ...form, tagName: e.target.value })} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                In the repo of
+                <select required value={form.tagProject} onChange={(e) => setForm({ ...form, tagProject: e.target.value })}>
+                  {!repoProjects.length && <option value="">No project has a git repo yet</option>}
+                  {repoProjects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p className="muted" style={{ fontSize: 13 }}>
+              After each deploy to this target reports success, Boss Man moves this tag on the project's git host to the exact commit that was deployed, using the company's git token. It only moves the tag to work already merged into the main branch, and never deletes it. <strong>Moving this tag can start pipelines on your git host</strong> (for example a GitHub Actions, GitLab CI, Gitea or Woodpecker job that runs when a tag is pushed), so only turn this on for a tag you want to follow the deploy. Deploy scripts must not push this tag themselves. The name can't contain "/" or be the name of a branch.
+            </p>
+            <details>
+              <summary style={{ fontSize: 13 }}>If the git host protects the tag</summary>
+              <ul className="muted" style={{ fontSize: 13, marginTop: 6 }}>
+                <li>GitHub: the token needs Contents read and write (the same as merges). A tag ruleset that blocks updates will refuse the move: allow updates to this tag, or exempt the token's user.</li>
+                <li>GitLab: the token needs write_repository. A protected tag can't be moved, so don't protect this tag, or pick a name that isn't protected.</li>
+                <li>Gitea or Forgejo: the token needs repository write. If the tag is protected, allow the token's user to push it under the repo's Settings → Tags.</li>
+                <li>Others (Bitbucket, plain git over https): set GIT_USERNAME as you would for merges. A repo reached only over ssh isn't supported.</li>
+              </ul>
+            </details>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="submit" className="btn primary" disabled={act.busy || (form.tagOn && (!form.tagName.trim() || !(form.tagProject || repoProjects[0])))}>
+            {editing ? "Save" : "Add target"}
+          </button>
+          {editing && (
+            <button type="button" className="btn" onClick={cancel}>
+              Cancel
+            </button>
+          )}
         </div>
       </form>
       {act.view}
@@ -1421,7 +1662,19 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
   type Rules = { text: string; by: string | null; at: string | null; max: number };
   const [rules, setRules] = useState<Rules | null>(null);
   const [failed, setFailed] = useState(false);
-  const [draft, setDraft] = useState<string | null>(null);
+  // What the editor box shows, kept in this browser as it is typed (DR-045). Opening the editor and
+  // having a kept draft are separate: a kept draft is never sent by itself, only with the Save button.
+  // Cancel keeps the draft (DR-045); the explicit "Discard draft" is the only thing that clears it.
+  const draftKey = `standing-rules/${company.id}`;
+  const [open, setOpen] = useState(false);
+  const [shown, setShown] = useState(() => readDraft(draftKey));
+  // Whether a draft is kept, re-read whenever the store changes so the notice and the Edit button agree.
+  const [kept, setKept] = useState(() => readDraft(draftKey));
+  const cancel = () => {
+    setOpen(false);
+    setKept(readDraft(draftKey));
+    setShown(readDraft(draftKey));
+  };
   const act = useAction();
   useEffect(() => {
     let live = true;
@@ -1442,9 +1695,9 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
         <p className="muted">Couldn't load the standing rules.</p>
       ) : !rules ? (
         <p className="muted">Loading…</p>
-      ) : draft !== null ? (
+      ) : open ? (
         <>
-          <textarea aria-label="Standing rules" value={draft} onChange={(e) => setDraft(e.target.value)} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
+          <DraftTextarea draftKey={draftKey} aria-label="Standing rules" value={shown} onChange={(text) => { setShown(text); setKept(text); }} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
             <button
               type="button"
@@ -1452,9 +1705,12 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
               disabled={act.busy}
               onClick={() =>
                 void act.run(async () => {
-                  const saved = await api<Rules>(url, { method: "PUT", body: { text: draft } });
+                  const saved = await api<Rules>(url, { method: "PUT", body: { text: shown } });
                   setRules(saved);
-                  setDraft(null);
+                  setOpen(false);
+                  clearDraft(draftKey);
+                  setKept("");
+                  setShown(saved.text);
                   onChanged();
                   return "Saved.";
                 })
@@ -1462,7 +1718,7 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
             >
               Save
             </button>
-            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(null)}>
+            <button type="button" className="btn" disabled={act.busy} onClick={cancel}>
               Cancel
             </button>
           </div>
@@ -1480,7 +1736,15 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
             {rules.at ? ` on ${when(rules.at)}` : ""}.
           </p>
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
-            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(rules.text)}>
+            {kept && (
+              <p className="muted" role="status" style={{ fontSize: 13, margin: 0 }}>
+                Draft restored: what you were writing is kept in this browser.{" "}
+                <button type="button" className="link" style={{ padding: 0 }} onClick={() => { clearDraft(draftKey); setKept(""); setShown(rules.text); }}>
+                  Discard draft
+                </button>
+              </p>
+            )}
+            <button type="button" className="btn" disabled={act.busy} onClick={() => { setShown(readDraft(draftKey) || rules.text); setOpen(true); }}>
               Edit
             </button>
             {rules.text ? (
@@ -1493,6 +1757,9 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
                   void act.run(async () => {
                     const saved = await api<Rules>(url, { method: "PUT", body: { text: "" } });
                     setRules(saved);
+                    clearDraft(draftKey);
+                    setKept("");
+                    setShown("");
                     onChanged();
                     return "Cleared.";
                   });
@@ -1509,6 +1776,9 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
                 void act.run(async () => {
                   const saved = await api<Rules>(`${url}/undo`, { method: "POST" });
                   setRules(saved);
+                  clearDraft(draftKey);
+                  setKept("");
+                  setShown(saved.text);
                   onChanged();
                   return "Undone.";
                 })
@@ -1557,7 +1827,7 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
   );
 }
 
-type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null } | null; sandboxCheckedAt?: string | null };
+type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null; guard?: { state: "on" | "absent"; reason: string } } | null; sandboxCheckedAt?: string | null };
 
 /** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
 function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -1572,12 +1842,31 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
       : sb.level === "unavailable"
         ? "This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). Agents run as before."
         : `This host fences agents ${sb.level === "full" ? "fully" : "partly"}${sb.missing.length ? ` (not covered: ${sb.missing.join(", ")})` : ""}.${sb.probe === false ? " Its self-test did not see a write outside the agent's folders refused." : ""} Last checked ${status.data?.sandboxCheckedAt ? when(status.data.sandboxCheckedAt) : "never"}.`;
+  // What the fence means for runs reading each other (BOS-555): said plainly, so Off never looks safe.
+  const isolationLine =
+    mode === "off" || sb?.level === "unavailable"
+      ? "Agent runs are not isolated: one run can read another run's memory and start-up keys."
+      : !sb
+        ? null
+        : sb.level === "partial"
+          ? "Agent runs are isolated from each other, except that one run can send signals to another (this host's kernel is older than 6.12)."
+          : "Agent runs are isolated from each other.";
   return (
     <Section id="fence-h" title="Agent fence">
       <p className="muted" style={{ fontSize: 14 }}>
         The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
       </p>
       <p style={{ fontSize: 14 }}>{hostLine}</p>
+      {sb?.guard ? (
+        <p style={{ fontSize: 14 }} data-testid="network-guard-line">
+          {sb.guard.state === "on"
+            ? "Network guard: on. The runner tried to reach its own gateway and was refused at once."
+            : `Network guard: absent. The runner's own gateway was not refused (${sb.guard.reason}), so private addresses on this network are not blocked.`}
+        </p>
+      ) : sb ? (
+        <p className="muted" style={{ fontSize: 14 }}>Network guard: not reported yet (this runner is older than the check).</p>
+      ) : null}
+      {isolationLine && <p style={{ fontSize: 14 }}>{isolationLine}</p>}
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="fence-mode">Fence</label>
         <select
@@ -1593,7 +1882,9 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
           }
         >
           <option value="off">Off: agents run as before</option>
-          <option value="watch">Watch: agents run inside the fence and every refusal is logged</option>
+          <option value="watch" disabled={sb?.level === "unavailable" && mode !== "watch"}>
+            {sb?.level === "unavailable" ? "Watch: not available, this host can't fence agents" : "Watch: agents run inside the fence and every refusal is logged"}
+          </option>
           <option value="enforce" disabled>
             Enforce: not available yet (waiting for a security fix, BOS-323)
           </option>
@@ -1602,7 +1893,7 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
       <details style={{ marginTop: 10 }}>
         <summary>Setting up a host</summary>
         <ul style={{ fontSize: 14 }}>
-          <li>The fence needs a Linux kernel with Landlock (5.13 or newer, and 6.x for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
+          <li>The fence needs a Linux kernel with Landlock (5.19 or newer, and 6.12 or newer for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
           <li>The runner tests the fence each time it starts. If this page says "can't fence", update the host's kernel, or check that the container's security profile doesn't block Landlock, then restart the runner.</li>
           <li>A fenced agent has its own temporary folder for each run and can't write to the shared /tmp. A skill that hard-codes /tmp needs to use the folder in $TMPDIR instead.</li>
           <li>Start with Watch on one company, look at the permission log after a few days, and fix what it shows before anything stricter.</li>
@@ -1742,6 +2033,41 @@ function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => v
   );
 }
 
+/** The longest one run may go (BOS-846). Empty means no limit. */
+export function RunTimeLimit({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [mins, setMins] = useState(company.maxRunMinutes != null ? String(company.maxRunMinutes) : "");
+  const act = useAction();
+  const n = Number(mins);
+  const empty = mins.trim() === "";
+  const valid = empty || (Number.isInteger(n) && n >= 1 && n <= 10_080);
+  return (
+    <Section id="run-time-limit-h" title="Run time limit">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Stops any single run that goes longer than this many minutes, the same as pressing Stop, and asks you whether to raise the limit. Leave it empty for no limit. Under about 50 minutes it also stops an agent that is waiting on a full check.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="run-time-limit">Most minutes per run</label>
+        <input id="run-time-limit" type="number" min={1} max={10080} step={1} placeholder="No limit" value={mins} onChange={(e) => setMins(e.target.value)} style={{ width: 100 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { maxRunMinutes: empty ? null : n } });
+              onChanged();
+              return empty ? "Saved: no limit." : "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [gb, setGb] = useState(company.diskCapBytes != null ? String(+(company.diskCapBytes / 1024 ** 3).toFixed(1)) : "");
@@ -1867,13 +2193,114 @@ type SelfDeployView = {
   enabled: boolean;
   pending: boolean;
   status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
-  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[] } | null;
+  available: { tip: string; deployed: string; checkedAt: string; commits?: { sha: string; subject?: string }[]; runnerChanged?: boolean; bluegreen?: boolean } | null;
+  /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
+  deployer?: { reportedAt: string | null; late: boolean };
+  lateAfterMinutes?: number;
+  /** The runner trial, with the real time it ends (BOS-953). Null/absent when no trial is running. */
+  trial?: { endsAt: string; seconds: number } | null;
+  /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
+  deployWait?: { until: string } | null;
 };
 
+/** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
+function atTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+/** "in about 6 minutes", or "in less than a minute", from now to an instant (BOS-953). */
+function inAbout(iso: string, now: number): string {
+  const mins = Math.ceil((Date.parse(iso) - now) / 60_000);
+  return mins <= 0 ? "now" : mins === 1 ? "in about 1 minute" : `in about ${mins} minutes`;
+}
+/** A clock that ticks every 15 s, so a countdown on the page moves without waiting for the next poll (BOS-953). */
+function useNow(everyMs = 15_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(timer);
+  }, [everyMs]);
+  return now;
+}
+
+/** The line under "Last deploy" when the host has no offer to show (BOS-753): "not reported" only when it really is overdue. */
+function deployerLine(v: SelfDeployView): string {
+  const d = v.deployer;
+  if (!d) return "The host deployer has not reported yet.";
+  if (!d.reportedAt) return "The host deployer has not reported yet. Check that its cron job is running.";
+  if (d.late) return `The host deployer last reported ${when(d.reportedAt)}, more than ${v.lateAfterMinutes ?? 10} minutes ago; it should report every minute. Check that its cron job is running.`;
+  return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
+}
+
+/** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213). */
+const MERGE_SUBJECT = /^Merge "(.*)" \(([^)]*)\)$/;
+/** A ticket id, as the brackets of a merge subject hold it (BOS-883); anything else in them is not one. */
+const TICKET_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The merges waiting to go live, newest first (BOS-875), each with the ticket id from its subject's brackets, or null
+ * when they hold no ticket id (BOS-883). Non-merge commits and untitled ones are left out.
+ */
+function waitingMerges(commits: { subject?: string }[] | undefined): { title: string; ticketId: string | null }[] {
+  return (commits ?? []).flatMap((c) => {
+    const m = c.subject?.match(MERGE_SUBJECT);
+    if (!m?.[1]) return [];
+    const id = m[2] ?? "";
+    return [{ title: m[1], ticketId: TICKET_ID.test(id) ? id : null }];
+  });
+}
+
+/** What is waiting to go live, by ticket title, each opening its ticket (BOS-875, BOS-883). Nothing when no merges are waiting. */
+function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefined }) {
+  const changes = waitingMerges(commits);
+  if (!changes.length) return null;
+  const shown = changes.slice(0, 10);
+  return (
+    <div style={{ fontSize: 14 }}>
+      <p style={{ margin: 0 }}>{changes.length === 1 ? "1 change waiting:" : `${changes.length} changes waiting:`}</p>
+      <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+        {shown.map((c, i) => (
+          <li key={`${i}:${c.title}`}>
+            {c.ticketId ? <a href={`#/tickets/${c.ticketId}`}>{c.title}</a> : c.title}
+          </li>
+        ))}
+      </ul>
+      {changes.length > shown.length && <p style={{ margin: "4px 0 0" }}>and {changes.length - shown.length} more</p>}
+    </div>
+  );
+}
+
+/**
+ * The runner trial and any rate-limit wait (BOS-953), both counted from their own time so they never show the
+ * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
+ * Pure, so a layout test can render it on its own.
+ */
+export function TrialLines({ trial, wait, now }: { trial?: { endsAt: string } | null; wait?: { until: string } | null; now: number }) {
+  const trialOver = trial ? Date.parse(trial.endsAt) <= now : false;
+  const waitOver = wait ? Date.parse(wait.until) <= now : false;
+  return (
+    <>
+      {trial && !trialOver && (
+        <p className="error" role="status" data-testid="runner-trial" style={{ fontSize: 14 }}>
+          The server update is still in its trial, so the runners can't be updated yet. Runners can be updated from {atTime(trial.endsAt)}, {inAbout(trial.endsAt, now)}.
+          Boss Man offers the runner update by itself then, so you don't need to press again.
+        </p>
+      )}
+      {wait && (
+        <p className={waitOver ? "muted" : "error"} role="status" data-testid="deploy-wait" style={{ fontSize: 14 }}>
+          {waitOver ? "You can deploy now." : `A server deploy was refused to keep one every 10 minutes. You can deploy again from ${atTime(wait.until)}, ${inAbout(wait.until, now)}.`}
+        </p>
+      )}
+    </>
+  );
+}
+
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
-function SelfDeploy({ go }: { go: (to: string) => void }) {
+export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
+  const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const act = useAction();
+  // A clock so the trial and rate-limit lines count down between polls (BOS-953).
+  const now = useNow();
   const v = view.data;
   if (!v?.enabled) return null;
   const s = v.status;
@@ -1881,17 +2308,22 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
   const waiting = v.available && v.available.tip && v.available.tip !== v.available.deployed && !(s?.result === "deployed" && s.to_commit === v.available.tip);
   return (
     <Section id="deploy-h" title="Updates">
+      {/* "Ask agents to wrap up", inside the update box (BOS-988): the main action while an update or rebuild waits on runs. */}
+      <WrapUpAction m={maint.data} reload={maint.reload} />
       <p style={{ fontSize: 14 }}>
         {s ? `Last deploy: ${s.result.replace(/_/g, " ")}, ${s.target} ${s.to_commit.slice(0, 8)}, ${when(s.ended || s.started)}. ${s.message}` : "No deploy yet."}
       </p>
       <p className="muted" style={{ fontSize: 14 }}>
-        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : "The host deployer has not reported yet."}
+        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
+      <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} />
+      {waiting && <WaitingChanges commits={v.available?.commits} />}
       <div>
         <button
           type="button"
           className="btn"
           disabled={act.busy || v.pending || s?.result === "running"}
+          title="Updates the server only. If the update changed the runners, press Build and update runners afterwards."
           onClick={() =>
             act.run(async () => {
               try {
@@ -1920,8 +2352,33 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
           }
         >
           Build and update runners
+        </button>{" "}
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || v.pending || s?.result === "running" || !v.available?.deployed}
+          title="Starts the server again at the version it runs now (BOS-647). Use it when a server-health card says memory is high or freezes are piling up and no update is waiting."
+          onClick={() => {
+            const bg = v.available?.bluegreen === true;
+            const ask = bg
+              ? "Restart the server? It starts a fresh copy of the current version and switches over; pages keep working. The one-step rollback to the release before this one is lost. Continue?"
+              : "Restart the server? It stops for about a minute while it restarts; runs pick up again after. Continue?";
+            if (!window.confirm(ask)) return;
+            act.run(async () => {
+              await api("/api/self-deploy/restart", { method: "POST", body: {} });
+              return "Restart requested. The host picks it up within a minute; the line above shows how it went.";
+            });
+          }}
+        >
+          Restart the server
         </button>
       </div>
+      {v.available?.runnerChanged && (
+        <p style={{ fontSize: 14 }}>This update changes the runners: after Deploy latest, press Build and update runners.</p>
+      )}
+      <p className="muted" style={{ fontSize: 14 }}>
+        Deploy latest updates the server only. If an update changed the runners, press Build and update runners afterwards.
+      </p>
       {act.view}
     </Section>
   );
@@ -1929,16 +2386,19 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
 
 type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 
-/** How many agents may run at once, in total and per company; the per-agent limit is fixed at one. */
-function RunLimits() {
-  const view = usePoll((signal) => api<{ instance: number; company: number; defaults: { instance: number; company: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
+/**
+ * How many agents may run at once, in total and per company, plus the separate background slots for
+ * Infinite-mode agents (BOS-279); the per-agent limit is fixed at one.
+ */
+export function RunLimits() {
+  const view = usePoll((signal) => api<{ instance: number; company: number; background: number; defaults: { instance: number; company: number; background: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
   const act = useAction();
-  const [edit, setEdit] = useState<{ instance: string; company: string } | null>(null);
+  const [edit, setEdit] = useState<{ instance: string; company: string; background: string } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { instance: String(d.instance), company: String(d.company) };
-  const [i, c] = [Number(v.instance), Number(v.company)];
-  const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i;
+  const v = edit ?? { instance: String(d.instance), company: String(d.company), background: String(d.background) };
+  const [i, c, g] = [Number(v.instance), Number(v.company), Number(v.background)];
+  const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i && Number.isInteger(g) && g >= 0 && g <= 16;
   return (
     <Section id="run-limits-h" title="How many agents run at once">
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -1955,6 +2415,13 @@ function RunLimits() {
           Agents running at once in one company (default {d.defaults.company}). Stops one busy company from using every slot. Higher: that company's tickets and reviews start sooner; spend can rise faster. Lower: tickets wait in the queue (you'll see "at a concurrency limit: this company").
         </p>
       </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="limit-background">Background (infinite mode) runs at once (0 to 16)</label>
+        <input id="limit-background" type="number" min={0} max={16} value={v.background} onChange={(e) => setEdit({ ...v, background: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Agents on Synthetic's Infinite mode ("free, slow" models) get their own slots (default {d.defaults.background}), separate from the two numbers above. They don't spend your Synthetic plan's credits, so they never wait for the quota; keeping them on their own small number means a slow free run can't take a normal slot or hold up paid work. 0 stops background runs starting.
+        </p>
+      </div>
       <p className="muted" style={{ fontSize: 14 }}>
         Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits.
       </p>
@@ -1965,7 +2432,7 @@ function RunLimits() {
           disabled={act.busy || !valid}
           onClick={() =>
             void act.run(async () => {
-              await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c } });
+              await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c, background: g } });
               setEdit(null);
               view.reload();
               return "Saved.";
@@ -1980,10 +2447,119 @@ function RunLimits() {
   );
 }
 
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number };
+
+/**
+ * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
+ * stops new runs; ending the ones going is on the Runs page. Resume is on the banner every page shows while it's on.
+ */
+export function StopAllWork() {
+  const hold = useHold();
+  const act = useAction();
+  const paused = hold.data?.paused;
+  return (
+    <Section id="stop-all-h" title="Stop all work">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Stops new work in every company at once: while it is on, Boss Man starts no new agent runs. Wake-ups and messages wait in line and start when you resume. Runs already going are not cut off; they finish by themselves. To end them now, use the Runs page. Press Resume on the banner at the top of any page to start work again.
+      </p>
+      {paused === true ? (
+        <p style={{ fontSize: 14 }} data-testid="stop-all-on">
+          <span className="tag red">On</span> All work is stopped.
+        </p>
+      ) : (
+        <div>
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy || paused !== false}
+            onClick={() =>
+              void act.run(async () => {
+                if (!window.confirm("Stop all work? Nothing new starts in any company until you press Resume. Runs already going finish by themselves.")) return;
+                await setHold(true);
+              })
+            }
+          >
+            Stop all work
+          </button>
+        </div>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
+/** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
+export function CheckQueueSetting() {
+  const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
+  const act = useAction();
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string } | null>(null);
+  const d = view.data;
+  if (!d) return null;
+  const v = edit ?? { mode: d.mode, slots: String(d.slots) };
+  const n = Number(v.slots);
+  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots;
+  const changed = v.mode !== d.mode || n !== d.slots;
+  return (
+    <Section id="check-queue-h" title="Checks">
+      <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+        <legend>Who runs agents' checks</legend>
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input type="radio" name="check-queue-mode" value="legacy" checked={v.mode === "legacy"} onChange={() => setEdit({ ...v, mode: "legacy" })} />
+          <span>
+            <strong>Agents run their own (legacy).</strong> <span className="muted">Each agent runs the quick check inside its own session. A check dies if the session ends or the runner restarts, and agents wait in line for a free slot.</span>
+          </span>
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input type="radio" name="check-queue-mode" value="server" checked={v.mode === "server"} onChange={() => setEdit({ ...v, mode: "server" })} />
+          <span>
+            <strong>Boss Man runs them (server queue).</strong> <span className="muted">Agents ask for a check and Boss Man runs it on the runner. The check keeps going after the agent's session ends or the runner restarts, a pass on the same code is reused, and the agent is woken with the result. The merge check before each merge uses this queue too.</span>
+          </span>
+        </label>
+      </fieldset>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="check-slots">Checks at once (1 to {d.maxSlots})</label>
+        <input id="check-slots" type="number" min={1} max={d.maxSlots} value={v.slots} onChange={(e) => setEdit({ ...v, slots: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors.
+        </p>
+      </div>
+      {d.runnersTooOld.length > 0 && (
+        <p style={{ fontSize: 14 }} data-testid="check-queue-old-runner">
+          <span className="tag red">Update needed</span> The runner for {d.runnersTooOld.join(", ")} is too old to run queued checks; their checks would wait until you update the runners (Updates → Build and update runners).
+        </p>
+      )}
+      <p className="muted" style={{ fontSize: 14 }}>
+        Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid || !changed}
+          onClick={() =>
+            void act.run(async () => {
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n } });
+              setEdit(null);
+              view.reload();
+              return r.cancelled ? `Saved. ${r.cancelled} waiting check${r.cancelled === 1 ? " was" : "s were"} cancelled.` : "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 type UpdateRow = { at: string; title: string; body: string; state: "ok" | "resolved" | "problem"; todo: string | null };
 type LiveRow = { slug: string; name: string; registered: boolean; connected: boolean; at: string | null; imageVersion: string | null; fault: string | null };
 type Report = { live: LiveRow[]; update: UpdateRow | null };
-type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+type WrapUpRun = { runId: string; agent: string | null; ticket: string | null; ticketTitle: string | null; runningForMinutes: number; sinceWrapUpMinutes: number; waitingOn: { question: string; tier: string | null } | null };
+/** The owner's wrap-up ask is on: its own hold, or asked while an update waits (BOS-988), which keeps the update's kind. */
+type WrapUpStatus = MaintenanceView & { on: true; wrapAsked?: boolean; minutes?: number; notRespondingAfter: number; runsList: WrapUpRun[] };
 
 /** The last update as history: grey and "Resolved" once the runner has come back on its image, red only for something wrong now (BOS-465). */
 function UpdateHistory({ r }: { r: UpdateRow }) {
@@ -2048,7 +2624,9 @@ export function RunnerUpdate() {
       )}
       <p className="muted" style={{ fontSize: 14 }}>
         {m.on
-          ? `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done.`
+          ? m.kind === "wrapup"
+            ? "Agents were asked to wrap up. Press Cancel wrap-up once you are done to let new work start again."
+            : `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
       <div>
@@ -2080,37 +2658,204 @@ export function RunnerUpdate() {
   );
 }
 
+/**
+ * "Ask agents to wrap up" (BOS-929, BOS-988), inside the top Runner update box. It tells every running agent to
+ * finish its step, save its work and stop cleanly, so an update or a runner rebuild can go ahead. Unlike "Stop all
+ * work" it also messages the runs going now, so they end by themselves. While an update waits it is the main action
+ * and the still-running list shows here; the update keeps waiting and goes ahead when the runs end. Nothing is ever
+ * stopped for you: the not-responding flag only offers a Stop for that one run.
+ */
+export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | null; reload: () => void; children?: ReactNode }) {
+  const act = useAction();
+  if (!m) return null;
+  const s = m.on && (m.kind === "wrapup" || (m as WrapUpStatus).wrapAsked) ? (m as WrapUpStatus) : null;
+  const waiting = m.on && !s;
+  const start = () =>
+    act.run(async () => {
+      await api("/api/maintenance/wrapup", { method: "POST", body: {} });
+      reload();
+      return "Every running agent was asked to wrap up.";
+    });
+  const cancel = () =>
+    act.run(async () => {
+      await api("/api/maintenance/cancel-wrap", { method: "POST", body: {} });
+      reload();
+      return "Wrap-up cancelled: runs already told still end by themselves; the update keeps waiting for them.";
+    });
+  const stopOne = (run: WrapUpRun) =>
+    act.run(async () => {
+      if (!window.confirm(`Stop ${run.agent ?? "this agent"}'s run? It stops mid-step, so anything it has not committed yet can be lost.`)) return;
+      await api(`/api/runs/${run.runId}/cancel`, { method: "POST", body: {} });
+      reload();
+      return "Stopping that run.";
+    });
+  const n = s ? s.runsList.length : m.on ? m.runs : 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }} data-testid="wrapup-box">
+      {s ? (
+        <>
+          <p style={{ fontSize: 14 }} data-testid="wrapup-on">
+            <span className="tag">Wrap-up on</span>{" "}
+            {n === 0
+              ? "Every agent has finished; the update can go ahead."
+              : `${n} agent${n === 1 ? " is" : "s are"} still running and ${n === 1 ? "has" : "have"} been asked to finish the step they are on. Nothing new starts; the update starts when they have finished.`}
+          </p>
+          {s.runsList.length > 0 && (
+            <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }} data-testid="wrapup-runs">
+              {s.runsList.map((run) => {
+                const onCard = !!run.waitingOn;
+                const late = !onCard && run.sinceWrapUpMinutes >= s.notRespondingAfter;
+                return (
+                  <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
+                    <strong>{run.agent ?? "An agent"}</strong>
+                    <span className="muted">
+                      {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
+                    </span>
+                    {onCard ? (
+                      <span className="tag amber" title={run.waitingOn!.question}>
+                        Waiting for an answer
+                      </span>
+                    ) : late ? (
+                      <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes after being asked to wrap up.`}>
+                        Not responding
+                      </span>
+                    ) : (
+                      <span className="tag grey">Working</span>
+                    )}
+                    {(late || onCard) && (
+                      <button type="button" className="btn small" disabled={act.busy} onClick={() => void stopOne(run)}>
+                        Stop this run
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {s.runsList.length > 0 && (
+            <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
+              Agents have been asked to save their work and finish; most finish within a few minutes. One still going {s.notRespondingAfter} minutes after being asked shows Not responding next to its name. Boss Man won't stop an agent for you: if you want one to end now, press Stop this run next to it, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
+              {s.kind === "wrapup"
+                ? "If you do nothing, nothing new starts until you press Cancel wrap-up."
+                : `If you do nothing, the update keeps waiting; at ${when(s.deadline)} you'll be asked whether to stop the agents still running.`}
+            </p>
+          )}
+          <div>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => void cancel()}>
+              Cancel wrap-up
+            </button>
+          </div>
+        </>
+      ) : waiting ? (
+        <>
+          <p style={{ fontSize: 14 }} data-testid="wrapup-waiting">
+            <span className="tag amber">Update waiting</span>{" "}
+            {n === 0 ? "No agents are running now; the update can go ahead." : `${n} agent${n === 1 ? " is" : "s are"} still running. The update starts when they have finished: press Ask agents to wrap up to have them finish their step and stop by themselves.`}
+          </p>
+          <div>{children ?? (
+            <button type="button" className="btn" disabled={act.busy} onClick={() => void start()}>
+              Ask agents to wrap up
+            </button>
+          )}</div>
+        </>
+      ) : (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button type="button" className="btn small" disabled={act.busy} onClick={() => void start()}>
+            Ask agents to wrap up
+          </button>
+          <span className="muted" style={{ fontSize: 13 }}>Stop the running agents cleanly before an update, if any are going.</span>
+        </div>
+      )}
+      {act.view}
+    </div>
+  );
+}
+
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
 type Colour = { colour: "blue" | "green"; up: boolean; role: string | null; commit: string | null; startedAt: string | null };
 type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; colours: Colour[] };
 const ROLE_NOTE = { leader: "", standby: " (another copy is in charge; changes here are refused)", single: " (no leader lock)" };
 
-/** This copy of the server ("leader" runs the work, "standby" only serves reads; docs/09-self-deploy.md) and, when blue/green is on, both colours. */
-type HostFactsView = {
-  hostName: string | null;
-  reportedAt: string | null;
-  ownerFacts: string[];
-  facts: Record<string, { value: string; source: "host" | "owner"; at: string; conflict?: { confirmed: string; reported: string } }>;
+/** Kept in the browser (BOS-924): the owner folds the reported facts away, and the choice stays as they left it. */
+const HOST_FACTS_OPEN_KEY = "bossman.hostFacts.open";
+const readHostFactsOpen = () => {
+  try {
+    return localStorage.getItem(HOST_FACTS_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
 };
-const OWNER_FACT_LABELS: Record<string, string> = {
-  "network.publicAddress": "Address you reach Boss Man at from outside",
-  "repo.deployKeyAdded": "Deploy key added to the code host (yes or no)",
-};
+
+/** An add-on state saying it is not up (host-deployer.sh's states: running, stopped, needs_login, not installed). */
+const ADDON_RUNNING = "running";
+/** An add-on's name as the owner knows it (BOS-986), for the "isn't running" line. */
+const ADDON_NAME: Record<string, string> = { tailscale: "private-network", ntfy: "phone-notification", penpot: "design-tool" };
+
+/**
+ * What is wrong with the reported facts, for the folded header, so folding never hides a problem (BOS-924):
+ * a fact a card needs that is missing, a check that is failing, or an add-on that isn't running.
+ */
+function reportedProblems(d: HostFactsView): { missing: string[]; failing: string[]; addonsDown: string[] } {
+  const missing: string[] = [];
+  const failing: string[] = [];
+  const addonsDown: string[] = [];
+  for (const [k, f] of Object.entries(d.facts)) {
+    const v = f.value.trim();
+    if (!v) { if (!missing.includes(k)) missing.push(k); }
+    else if (k.startsWith("addon.") && v.toLowerCase() !== ADDON_RUNNING) addonsDown.push(k.slice("addon.".length));
+    else if (k.startsWith("check.")) {
+      const last = k.slice(k.lastIndexOf(".") + 1);
+      const wrong = CHECK_TROUBLE.test(last)
+        ? v !== "0"
+        : CHECK_OK.test(k)
+          ? !/^(ok|pass|passed|healthy)$/i.test(v)
+          : false;
+      if (wrong) failing.push(k);
+    }
+  }
+  for (const k of d.ownerFacts) if (!d.facts[k]?.value.trim() && !missing.includes(k)) missing.push(k);
+  return { missing, failing, addonsDown };
+}
+
+/** The folded header's one line: what the problems are, in plain words, or nothing when all is well. */
+function problemLine(p: { missing: string[]; failing: string[]; addonsDown: string[] }): string | null {
+  const bits: string[] = [];
+  if (p.missing.length) bits.push(`${p.missing.length} missing`);
+  if (p.failing.length) bits.push(`${p.failing.length} check${p.failing.length === 1 ? "" : "s"} failing`);
+  if (p.addonsDown.length) bits.push(`${p.addonsDown.length} add-on${p.addonsDown.length === 1 ? "" : "s"} not running`);
+  return bits.length ? bits.join(" · ") : null;
+}
 
 /** Settings → This host (BOS-419): what the host deployer reported, and the facts only the owner can confirm. */
 export function ThisHost() {
   const facts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 30_000, "host-facts");
   const act = useAction();
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [open, setOpen] = useState(readHostFactsOpen);
   const d = facts.data;
   if (!d) return null;
   const keys = Object.keys(d.facts).sort();
+  const problems = reportedProblems(d);
+  const trouble = problemLine(problems);
+  // BOS-986: name what is wrong, not the raw key. The stopped containers come from the host as a list; its reason the
+  // code-host read failed comes with the probe result. Both are plain text the host wrote, shown as text only.
+  const stopped = stoppedContainerNames(d.facts[STOPPED_CONTAINERS_KEY]?.value ?? "");
+  const probeWhy = d.facts["repo.probeWhy"]?.value?.trim() ?? "";
+  const problemTexts = [...problems.missing, ...problems.failing].map((k) => ({ key: k, text: problemText(k, d, stopped, probeWhy) }));
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    try {
+      localStorage.setItem(HOST_FACTS_OPEN_KEY, next ? "1" : "0");
+    } catch {}
+  };
   const save = (key: string) =>
     act.run(async () => {
       await api("/api/host-facts", { method: "PUT", body: { key, value: draft[key] ?? "" } });
       facts.reload();
       return "Saved.";
     });
+  const summary = `${d.hostName ? `${d.hostName}, ` : ""}${when(d.reportedAt)}`;
   return (
     <Section id="this-host-h" title="This host">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -2119,25 +2864,55 @@ export function ThisHost() {
           : "The host hasn't reported yet. Once its deployer runs, its facts show up here."}
       </p>
       {keys.length > 0 && (
-        <dl data-testid="host-facts" style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 16px", fontSize: 14 }}>
-          {keys.map((k) => {
-            const f = d.facts[k]!;
-            return (
-              <Fragment key={k}>
-                <dt className="mono">{k}</dt>
-                <dd>
-                  <span className="mono">{f.value}</span> <span className="muted">({f.source === "host" ? "reported by the host" : "confirmed by you"})</span>
-                  {f.conflict && (
-                    <span className="error" role="alert">
-                      {" "}
-                      You confirmed "{f.conflict.confirmed}" but the host reports "{f.conflict.reported}". The host's value is used.
-                    </span>
-                  )}
-                </dd>
-              </Fragment>
-            );
-          })}
-        </dl>
+        <div className="host-facts">
+          <button type="button" className="host-facts-toggle" aria-expanded={open} aria-controls="host-facts-body" onClick={toggle}>
+            <span className="pl-arrow" aria-hidden="true">{open ? "▾" : "▸"}</span>
+            <span>
+              Reported facts ({keys.length}) — {summary}
+            </span>
+            {trouble && (
+              <span className="tag amber" data-testid="host-facts-problems">
+                {trouble}
+              </span>
+            )}
+          </button>
+          <div id="host-facts-body" hidden={!open} style={open ? undefined : { display: "none" }}>
+            {trouble && (
+              <div className="muted" data-testid="host-facts-problem-detail" style={{ fontSize: 13 }}>
+                <p style={{ marginTop: 0, marginBottom: 4 }}>Worth a look. Raw keys are in the list below.</p>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {problemTexts.map((p) => (
+                    <li key={p.key}>{p.text}</li>
+                  ))}
+                  {problems.addonsDown.map((a) => (
+                    <li key={`addon.${a}`}>
+                      The {ADDON_NAME[a] ?? a} add-on isn't running, so whatever uses it can't be reached. Turn it back on for this host and it starts again; its own log says why it stopped.
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <dl data-testid="host-facts" className="host-facts-list">
+              {keys.map((k) => {
+                const f = d.facts[k]!;
+                return (
+                  <Fragment key={k}>
+                    <dt className="mono">{k}</dt>
+                    <dd>
+                      <span className="mono host-fact-value">{f.value}</span> <span className="muted">({f.source === "host" ? "reported by the host" : "confirmed by you"})</span>
+                      {f.conflict && (
+                        <span className="error" role="alert">
+                          {" "}
+                          You confirmed "{f.conflict.confirmed}" but the host reports "{f.conflict.reported}". The host's value is used.
+                        </span>
+                      )}
+                    </dd>
+                  </Fragment>
+                );
+              })}
+            </dl>
+          </div>
+        </div>
       )}
       <h3 style={{ fontSize: 15, fontWeight: 600 }}>Facts only you can give</h3>
       {d.ownerFacts.map((k) => (
@@ -2150,6 +2925,118 @@ export function ThisHost() {
         </div>
       ))}
       {act.view}
+    </Section>
+  );
+}
+
+type AutomaticEntryView = {
+  address: string;
+  kind: "tool server" | "git host";
+  name: string;
+  company: string | null;
+  trusted: boolean;
+  notAllowed: string | null;
+};
+
+type NetguardAllowView = {
+  report: {
+    mode: string | null;
+    entries: { entry: string; coveredBy: string[]; note: string | null }[] | null;
+    lineCanGo: boolean;
+    automatic: AutomaticEntryView[] | null;
+    env: { lines: string[][]; reportedAt: string; envFound: boolean } | null;
+    warnings: string[];
+  } | null;
+};
+
+/** What an address the guard opens by itself is, in plain words. */
+function automaticLabel(e: AutomaticEntryView): string {
+  return e.kind === "git host" ? `git host for the project "${e.name}"` : `tool server "${e.name}"`;
+}
+
+/**
+ * Settings → Network guard (BOS-770, BOS-791): what runners may reach. The addresses Boss Man opens by itself (each
+ * company's tool servers and project git hosts), then the owner's own BOSSMAN_NETGUARD_ALLOW lines from .env, with the
+ * ones Boss Man already covers marked. An address the guard now drops shows as not allowed, with the reason.
+ * Read only: it never changes .env.
+ */
+export function NetguardAllow() {
+  const q = usePoll((signal) => api<NetguardAllowView>("/api/netguard-allow", { signal }), 60_000, "netguard-allow");
+  const r = q.data?.report;
+  if (!r) return null;
+  const lines = r.env?.lines ?? [];
+  const automatic = r.automatic ?? [];
+  const notAllowed = automatic.filter((e) => e.notAllowed !== null);
+  return (
+    <Section id="netguard-allow-h" title="Network guard: addresses runners may reach">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Two lists: the addresses Boss Man opens for your runners by itself, and any extra addresses you added in your .env. This page only reports; it never changes .env.
+      </p>
+      {r.mode === "off" && <p>The network guard is turned off (BOSSMAN_NETGUARD=off), so these lists aren't used.</p>}
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Allowed automatically</h3>
+      <p className="muted" style={{ fontSize: 14 }}>
+        Addresses Boss Man opens itself: each company's tool servers and its projects' git hosts. A company's entries are only reachable from that company's own runners.
+      </p>
+      {r.automatic === null ? (
+        <p className="muted" data-testid="netguard-automatic-unknown">Boss Man couldn't work out the addresses it opens by itself just now.</p>
+      ) : automatic.length === 0 ? (
+        <p data-testid="netguard-automatic-empty">Boss Man opens no extra addresses by itself: no tool servers, no project git addresses.</p>
+      ) : (
+        <ul data-testid="netguard-automatic" style={{ fontSize: 14 }}>
+          {automatic.map((e) => (
+            <li key={`${e.company ?? ""}|${e.address}`}>
+              <span className="mono">{e.address}</span> <span className="muted">· {automaticLabel(e)}</span>
+              {e.company && <span className="muted"> · for {e.company}</span>}
+              {e.notAllowed ? (
+                <span className="error" data-testid="netguard-not-allowed"> · {e.notAllowed}</span>
+              ) : (
+                <span className="muted"> · allowed</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {notAllowed.length > 0 && (
+        <p className="error" role="alert" data-testid="netguard-not-allowed-summary">
+          {notAllowed.length === 1 ? "One address above is not allowed" : `${notAllowed.length} addresses above are not allowed`}, so runners can't reach {notAllowed.length === 1 ? "it" : "them"}.
+        </p>
+      )}
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Extra lines from your .env</h3>
+      <p className="muted" style={{ fontSize: 14 }}>
+        Addresses you added in the BOSSMAN_NETGUARD_ALLOW line in your .env, so every runner may reach them. Anything Boss Man already opens by itself doesn't need a line here.
+      </p>
+      {r.entries === null ? (
+        <p className="muted">The launcher didn't say which entries it uses (it isn't running, or it is older than this page).</p>
+      ) : r.entries.length === 0 ? (
+        <p data-testid="netguard-allow-empty">You have no extra lines.</p>
+      ) : (
+        <ul data-testid="netguard-allow-entries" style={{ fontSize: 14 }}>
+          {r.entries.map((e) => (
+            <li key={e.entry}>
+              <span className="mono">{e.entry}</span>
+              {e.note && <span className="muted"> · {e.note}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {r.lineCanGo && r.entries && r.entries.length > 1 && <p data-testid="netguard-allow-line-can-go">Every entry is already allowed by Boss Man; this line can go.</p>}
+      {r.env && lines.length > 1 && (
+        <div style={{ fontSize: 14 }}>
+          <p>Lines in .env (the host reported {when(r.env.reportedAt)}):</p>
+          <ol>
+            {lines.map((l, i) => (
+              <li key={i}>
+                <span className="mono">{l.join(" ") || "(empty)"}</span> <span className="muted">{i === lines.length - 1 ? "(used)" : "(ignored)"}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {r.warnings.map((w) => (
+        <p key={w} className="error" role="alert">
+          {w}
+        </p>
+      ))}
     </Section>
   );
 }
@@ -2223,7 +3110,7 @@ function ColourRow({ c }: { c: Colour }) {
 
 const TABS = [
   { id: "system", label: "Server and runner", help: "This install's server and updates, and the company's runner." },
-  { id: "access", label: "Access and funding", help: "Where agents get their keys, tools and model accounts." },
+  { id: "access", label: "Access and funding", help: "Where agents get their keys, tools and model accounts, and where they deploy." },
   { id: "workflow", label: "Reviews and CEO", help: "Who approves and reviews work at each risk level, and the CEO's chapters." },
   { id: "transfer", label: "Import and export", help: "Move a company in or out of Boss Man as one file: a backup, a copy for another Boss Man, or a template." },
   // These three are pages of their own (#/funding, #/rules, #/secrets), shown inside Settings.
@@ -2239,7 +3126,9 @@ type ImportPreview = {
   agents: Array<{ name: string; role: string; title: string | null; agentKind: string; model: string | null; instructions: string | null }>;
   skills: Array<{ name: string; renamedFrom: string | null; description: string; scripts: string[] }>;
   secrets: Array<{ name: string; envName: string; agents: string[] }>;
+  projects: Array<{ name: string; verifyCommand: string | null; deepVerifyCommand: string | null }>;
   toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
+  gitHosts: Array<{ project: string; url: string; opens: string | null; stackService: boolean }>;
   warnings: string[];
 };
 
@@ -2300,6 +3189,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
   const nameChanged = !!preview && name.trim() !== preview.company.name;
   const scripts = preview?.skills.filter((s) => s.scripts.length) ?? [];
   const stackTools = preview?.toolServers.filter((t) => t.stackService) ?? [];
+  const stackGit = preview?.gitHosts.filter((g) => g.stackService) ?? [];
   return (
     <Section id="import-h" title="Import a company">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -2357,6 +3247,24 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
               </ul>
             </div>
           )}
+          {preview.projects.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Checks each project runs.</strong> These commands run on the runner before work is merged. Read them before you import:
+              <ul>
+                {preview.projects.map((p, i) => (
+                  <li key={i}>
+                    {p.name}: {p.verifyCommand ? <code style={{ whiteSpace: "pre-wrap" }}>{p.verifyCommand}</code> : "none"}
+                    {p.deepVerifyCommand && (
+                      <>
+                        {" "}
+                        (full check: <code style={{ whiteSpace: "pre-wrap" }}>{p.deepVerifyCommand}</code>)
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {preview.toolServers.length > 0 && (
             <div style={{ fontSize: 14 }}>
               <strong>Tool servers.</strong> Each address below is opened past the runner's network guard for this company:
@@ -2368,12 +3276,25 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                   </li>
                 ))}
               </ul>
-              {stackTools.length > 0 && (
-                <label>
-                  <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
-                </label>
-              )}
             </div>
+          )}
+          {preview.gitHosts.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Project git addresses.</strong> Each is opened past the runner's network guard for this company so its agents can clone:
+              <ul>
+                {preview.gitHosts.map((g) => (
+                  <li key={g.project}>
+                    {g.project}: <code>{g.opens ?? "nothing (no address the guard can allow)"}</code> ({g.url})
+                    {g.stackService && <span className="error"> This is one of Boss Man's own services or a private-network address.</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(stackTools.length > 0 || stackGit.length > 0) && (
+            <label>
+              <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
+            </label>
           )}
           {preview.secrets.length > 0 && (
             <div style={{ fontSize: 14 }}>
@@ -2525,10 +3446,13 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         {OWN_PAGE.has(current.id) ? <div className="embedded-page">{children}</div> : null}
         {current.id === "system" && (
           <>
+            <StopAllWork />
             <ServerPanel />
             <SelfDeploy go={go} />
             <ThisHost />
+            <NetguardAllow />
             <RunLimits />
+            <CheckQueueSetting />
           </>
         )}
         {current.id === "transfer" && <ImportCompany go={go} onChanged={onChanged} />}
@@ -2563,6 +3487,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
               </p>
             </section>
             <ToolServers company={company} />
+            <DeployTargets company={company} />
             <Funding company={company} onChanged={onChanged} />
           </div>
         ) : (
@@ -2576,6 +3501,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <NudgeCap company={company} onChanged={onChanged} />
+            <RunTimeLimit company={company} onChanged={onChanged} />
             <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
             <StandingRules company={company} onChanged={onChanged} />

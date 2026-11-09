@@ -5,6 +5,7 @@
 // a person, except an add-on's setup card (raise_decision with setsUp, DR-023 D, BOS-522), which goes
 // once that add-on is seen working.
 import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { mergeContext } from "./decision-context.js";
 import type { Db } from "../db/client.js";
 import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -119,7 +120,6 @@ export type AlertClearingDeps = {
 };
 
 const hhmm = (d: Date) => d.toISOString().slice(11, 16);
-const ago = (ms: number) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 
 export function alertClearing(db: Db, deps: AlertClearingDeps) {
   const now = deps.now ?? (() => new Date());
@@ -250,7 +250,7 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       const note = [...new Set(reasons)].join(", and ");
       const [done] = await db
         .update(decisions)
-        .set({ status: "withdrawn", answeredAt: t, dedupeKey: null, context: { ...(row.context as object), withdrawn: { by: "system", note, at: t.toISOString() } } })
+        .set({ status: "withdrawn", answeredAt: t, dedupeKey: null, context: mergeContext({ withdrawn: { by: "system", note, at: t.toISOString() } }) })
         .where(and(eq(decisions.id, row.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id, question: decisions.question });
       if (!done) continue;

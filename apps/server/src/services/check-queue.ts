@@ -13,6 +13,13 @@ import { checkJobs, projects, settings } from "../db/schema.js";
 export const CHECK_SLOTS_KEY = "check_slots";
 export const CHECK_QUEUE_MODE_KEY = "check_queue_mode";
 export const DEFAULT_CHECK_SLOTS = 1;
+/** Why a queued job was cancelled when a newer request of the same ticket replaced it: not a failure, the newer job is the live one. */
+export const SUPERSEDED_TEXT = "A newer commit of this ticket was queued for checking, so this older request was dropped.";
+/**
+ * Upper bound for check_slots. The runner enforces its own slot count (BOSSMAN_CHECK_SLOTS) on every job too (BOS-805), so a
+ * check_slots above it only means jobs wait in the runner's line: the effective limit is the smaller of the two. The server
+ * doesn't know the runner's count, so the Settings → Checks line must say so rather than clamp.
+ */
 export const MAX_CHECK_SLOTS = 8;
 /** A running job that prints nothing for this long is marked stuck. Waiting in the queue has no limit. */
 export const DEFAULT_NO_OUTPUT_MINUTES = 20;
@@ -51,6 +58,21 @@ export function checkQueue(db: Db) {
     const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, CHECK_SLOTS_KEY));
     const n = Number(row?.value);
     return Number.isInteger(n) && n >= 1 ? Math.min(n, MAX_CHECK_SLOTS) : DEFAULT_CHECK_SLOTS;
+  }
+
+  /** The owner's switch (Settings → Server and runner → Checks, BOS-798). Owner-only routes call these; no agent tool does. */
+  async function setMode(value: CheckQueueMode): Promise<void> {
+    await db.insert(settings).values({ key: CHECK_QUEUE_MODE_KEY, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+  }
+
+  async function setSlots(n: number): Promise<void> {
+    if (!Number.isInteger(n) || n < 1 || n > MAX_CHECK_SLOTS) throw new Error(`Check slots must be a whole number from 1 to ${MAX_CHECK_SLOTS}.`);
+    await db.insert(settings).values({ key: CHECK_SLOTS_KEY, value: n }).onConflictDoUpdate({ target: settings.key, set: { value: n } });
+  }
+
+  /** Jobs still waiting to start, in every company: switching back to legacy cancels them, since nothing would start them. */
+  async function queuedIds(): Promise<string[]> {
+    return (await db.select({ id: checkJobs.id }).from(checkJobs).where(eq(checkJobs.state, "queued"))).map((r) => r.id);
   }
 
   /** Queue a check, or hand back the job that already answers the request. */
@@ -94,7 +116,7 @@ export function checkQueue(db: Db) {
     if (stale.length)
       await db
         .update(checkJobs)
-        .set({ state: "cancelled", reason: "A newer commit of this ticket was queued for checking, so this older request was dropped.", endedAt: new Date() })
+        .set({ state: "cancelled", reason: SUPERSEDED_TEXT, endedAt: new Date() })
         .where(inArray(checkJobs.id, stale.map((j) => j.id)));
     const [job] = await db
       .insert(checkJobs)
@@ -237,5 +259,5 @@ export function checkQueue(db: Db) {
     return { mode: await mode(), slots: await slots(), running, queued, held, recent, main: mains.map((m) => ({ projectId: m.id, project: m.name, state: m.state, since: m.since, commit: m.commit })) };
   }
 
-  return { mode, slots, enqueue, claimNext, progress, complete, cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
+  return { mode, slots, setMode, setSlots, queuedIds, enqueue, claimNext, progress, complete, cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
 }

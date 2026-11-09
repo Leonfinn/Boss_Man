@@ -38,13 +38,32 @@ const HostRecord = z.object({
   ownership: z.array(OwnershipRow).default([]),
   // BOS-419 (DR-008, DR-023, DR-024): more allowlisted facts. Every section is optional (an older deployer writes
   // none), and each is parsed loosely: a section in the wrong shape reads as absent, never as "no record at all".
-  repo: z.object({ origin: z.string(), originHost: z.string().default(""), embeddedCredentials: z.boolean().default(false), probe: z.string(), probedAt: z.string().default("") }).optional().catch(undefined),
+  // BOS-986: `probeWhy` is one short, already-redacted line from the host saying which part of the read failed.
+  repo: z.object({ origin: z.string(), originHost: z.string().default(""), embeddedCredentials: z.boolean().default(false), probe: z.string(), probedAt: z.string().default(""), probeWhy: z.string().default("") }).optional().catch(undefined),
   paths: z.object({ install: z.string(), src: z.string(), deployer: z.string() }).optional().catch(undefined),
   compose: z.object({ files: z.array(z.string()).default([]), bluegreen: z.boolean().default(false), liveColour: z.string().default("") }).optional().catch(undefined),
   network: z.object({ addresses: z.array(z.string()).default([]), ports: z.record(z.string(), z.string()).default({}) }).optional().catch(undefined),
   memory: z.object({ totalKb: z.number().int().nonnegative(), availableKb: z.number().int().nonnegative() }).optional().catch(undefined),
   addons: z.record(z.string(), z.string()).optional().catch(undefined),
-  checks: z.record(z.string(), z.record(z.string(), z.union([z.number(), z.string()]))).optional().catch(undefined),
+  // BOS-986: a record of numbers and short strings, or (container_status.stopped) a short list of {name,status,exit,since}.
+  // A value in another shape reads as absent rather than breaking the whole report.
+  checks: z
+    .record(
+      z.string(),
+      z.record(
+        z.string(),
+        z.union([
+          z.union([z.number(), z.string()]),
+          z
+            .array(z.object({ name: z.string().max(200), status: z.string().max(40), exit: z.union([z.number(), z.string()]).transform(String), since: z.string().max(120) }))
+            .max(200),
+        ]),
+      ),
+    )
+    .optional()
+    .catch(undefined),
+  /** BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries (Compose uses only the last). */
+  netguardEnv: z.object({ envFound: z.boolean().default(true), lines: z.array(z.array(z.string().regex(/^[A-Za-z0-9.-]{1,253}:\d{1,5}$/)).max(100)).max(16) }).optional().catch(undefined),
 });
 export type HostRecord = z.infer<typeof HostRecord>;
 
@@ -67,6 +86,10 @@ export const OWNER_FACTS = ["network.publicAddress", "repo.deployKeyAdded"] as c
 export const HOST_REPORT_FRESH_MS = 30 * 60_000;
 
 const csv = (a: string[]) => a.join(",");
+/** One stopped container as the host reported it (BOS-986): its name, the state it is in, its exit code and since. */
+export type StoppedContainer = { name: string; status: string; exit: string; since: string };
+/** The containers reported as not running, each named: what the panel needs to say which ones and why. */
+export const STOPPED_CONTAINERS_KEY = "check.container_status.stopped.names";
 /** The host's record flattened into dotted keys with string values. Only allowlisted fields exist in the record,
  * so only allowlisted keys come out; a value is never longer than a short string. */
 export function flattenHostRecord(r: HostRecord): Record<string, string> {
@@ -74,6 +97,8 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
   if (r.repo) {
     o["repo.origin"] = r.repo.origin; o["repo.originHost"] = r.repo.originHost; o["repo.probe"] = r.repo.probe;
     o["repo.embeddedCredentials"] = String(r.repo.embeddedCredentials);
+    // BOS-986: why the read of the code host failed, so the panel can say it rather than a bare "failed".
+    o["repo.probeWhy"] = r.repo.probeWhy;
   }
   if (r.paths) { o["paths.install"] = r.paths.install; o["paths.src"] = r.paths.src; o["paths.deployer"] = r.paths.deployer; }
   if (r.compose) { o["compose.files"] = csv(r.compose.files); o["compose.bluegreen"] = String(r.compose.bluegreen); o["compose.liveColour"] = r.compose.liveColour; }
@@ -84,10 +109,24 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
   if (r.memory) { o["memory.totalKb"] = String(r.memory.totalKb); o["memory.availableKb"] = String(r.memory.availableKb); }
   for (const [k, v] of Object.entries(r.addons ?? {})) o[`addon.${k}`] = v;
   for (const [check, fields] of Object.entries(r.checks ?? {}))
-    for (const [k, v] of Object.entries(fields)) o[`check.${check}.${k}`] = String(v);
+    for (const [k, v] of Object.entries(fields)) {
+      // BOS-986: the named stopped containers are a short list, so it is flattened as a plain count and the names
+      // are carried in their own key below, for the panel. Any other list (none today) reads as its count.
+      if (Array.isArray(v)) {
+        o[`check.${check}.${k}`] = String(v.length);
+        if (check === "container_status" && k === "stopped" && v.length)
+          // BOS-986: entries are joined with "; ", which can never appear inside a container name, so the panel can
+          // split them back apart. Joining with ", " broke them, because each entry already contains ", " (exit code,
+          // since when) and the panel split every one into fragments.
+          o[STOPPED_CONTAINERS_KEY] = v.map((c) => `${c.name} (${c.status}${c.exit ? `, exit ${c.exit}` : ""}${c.since ? `, ${c.since}` : ""})`).join("; ");
+        continue;
+      }
+      o[`check.${check}.${k}`] = String(v);
+    }
   for (const k of Object.keys(o)) if (!/^[A-Za-z0-9_.]{1,80}$/.test(k) || o[k]!.length > 500) delete o[k];
   return o;
 }
+
 
 /** The recorded hosts a card may name, for the lint (`lintOwnerSteps`). Falls back to an empty list. */
 export function hostFactsService(deps: { dir?: string; log?: (msg: string) => void; db?: Db; now?: () => Date }) {
@@ -181,5 +220,18 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
     return Number.isFinite(age) && age <= HOST_REPORT_FRESH_MS ? r.addons : {};
   }
 
-  return { read, hosts, load, sync, confirm, value, valuesFor, reportedAddons };
+  /** The name the host deployer reports for the server itself (BOS-774), for the card lint: a card that names a
+   * different host is refused. null when there is no report yet, so the lint can say so rather than guess. */
+  async function serverHost(): Promise<string | null> {
+    const r = await read();
+    return r?.name ?? null;
+  }
+
+  /** The BOSSMAN_NETGUARD_ALLOW lines the host last reported from .env (BOS-770), with when; null when it reports none (an older deployer, or no deployer). */
+  async function netguardEnv(): Promise<{ envFound: boolean; lines: string[][]; reportedAt: string } | null> {
+    const r = await read();
+    return r?.netguardEnv ? { ...r.netguardEnv, reportedAt: r.writtenAt } : null;
+  }
+
+  return { read, hosts, serverHost, load, sync, confirm, value, valuesFor, reportedAddons, netguardEnv };
 }

@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import type { RunnerCommand } from "@boss-man/shared";
+import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { appCache, sharedDatabase } from "./helpers/shared-server.js";
@@ -36,9 +36,12 @@ async function setup(limits: Partial<Limits> = {}) {
   const [runnerRow] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   // A fake connected runner that records commands.
   const commands: Extract<RunnerCommand, { type: "run.start" }>[] = [];
+  // Every command of any kind, for tests that check nothing was cancelled.
+  const sent: RunnerCommand[] = [];
   let online = true;
   const release = built.runners.connect(reg.runnerId, (c) => {
     if (!online) return false;
+    sent.push(c);
     if (c.type === "run.start") commands.push(c);
     return true;
   });
@@ -50,7 +53,7 @@ async function setup(limits: Partial<Limits> = {}) {
     await built.scheduler.slow();
     return built.scheduler.tick();
   };
-  return { ...built, db, release, cookie, req, company, ceo, project, commands, endRun, setOnline, tick };
+  return { ...built, db, release, cookie, req, company, ceo, project, commands, sent, endRun, setOnline, tick };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 50));
@@ -72,6 +75,10 @@ describe("scheduler", () => {
     expect(cmd.prompt).toContain("expected_version");
     expect(cmd.prompt).toContain("Every ticket_reply starts with 1 to 3 plain sentences");
     expect(cmd.prompt).toContain("Details:");
+    // The built-in safety rules, though the company set no standing rules, and outside the untrusted brief (BOS-754).
+    const rules = BUILT_IN_RULES.join("\n");
+    expect(cmd.prompt).toContain(rules);
+    expect(cmd.prompt.indexOf(rules)).toBeLessThan(cmd.prompt.indexOf("<untrusted"));
     const [tok] = await ctx.db.select().from(runTokens).where(eq(runTokens.tokenHash, hashToken(cmd.mcpToken)));
     expect(tok).toMatchObject({ runId: cmd.runId, agentId: ctx.ceo.id });
     // The ticket being worked on leaves the backlog; the one still waiting stays put.
@@ -109,13 +116,44 @@ describe("scheduler", () => {
   it("respects the global and company kill switches", async () => {
     ctx = await setup();
     await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, {});
+    // The owner's Settings switch and banner read the real hold (BOS-836): off before anyone set it, owner-only.
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: false });
+    expect((await ctx.app.inject({ method: "GET", url: "/api/kill-switch" })).statusCode).toBe(401);
     await ctx.req("POST", "/api/kill-switch", { paused: true });
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: true });
     expect(await ctx.tick()).toMatchObject({ paused: true, launched: 0 });
     await ctx.req("POST", "/api/kill-switch", { paused: false });
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: false });
     await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true });
     expect(await ctx.tick()).toMatchObject({ launched: 0, waiting: 1 });
     await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: false });
     expect(await ctx.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("Stop all work (BOS-836): a fresh server starts work as today; the hold keeps a wake waiting without cancelling a run already going; Resume launches it", async () => {
+    ctx = await setup();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json() as { id: string };
+    // A fresh database: no hold row at all, so no banner, and a wake launches.
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: false });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, {});
+    expect(await ctx.tick()).toMatchObject({ paused: false, launched: 1 });
+    const going = ctx.commands[0]!.runId;
+    // The press: the same POST the Settings button sends.
+    await ctx.req("POST", "/api/kill-switch", { paused: true });
+    await ctx.req("POST", `/api/agents/${worker.id}/wake`, {});
+    expect(await ctx.tick()).toMatchObject({ paused: true, launched: 0 });
+    expect(await ctx.tick()).toMatchObject({ paused: true, launched: 0 });
+    expect(ctx.commands).toHaveLength(1);
+    const [waiting] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, worker.id));
+    expect(waiting!.status).toBe("queued");
+    // The run already going is left alone: still open, and no cancel was sent.
+    const [run] = await ctx.db.select().from(runs).where(eq(runs.id, going));
+    expect(run!.endedAt).toBeNull();
+    expect(ctx.sent.filter((c) => c.type === "run.cancel")).toEqual([]);
+    // Resume: the banner's POST. The waiting wake launches on the next tick.
+    await ctx.req("POST", "/api/kill-switch", { paused: false });
+    expect(await ctx.tick()).toMatchObject({ paused: false, launched: 1 });
+    expect(ctx.commands.map((c) => c.agentId)).toEqual([ctx.ceo.id, worker.id]);
   });
 
   it("waits while the runner is offline", async () => {
@@ -598,6 +636,64 @@ describe("scheduler", () => {
       expect(await stateOf(plain.id)).toBe("backlog");
       expect(await stateOf(held.id)).toBe("backlog");
       expect(await unblockedWakes(held.id)).toHaveLength(0);
+    });
+
+    it("a backlog ticket parked with a 'blocked until' time ahead is not started; its assignee is told once (BOS-742)", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const waiting = await mk("Waiting", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: x.id });
+      // Parked on purpose, then left blocked until a date still ahead: a blocked ticket waiting on a blocker is right there.
+      await ctx.db.update(tickets).set({ systemState: "blocked", blockedUntil: new Date(Date.now() + 86_400_000), blockedUntilReason: "after the release" }).where(eq(tickets.id, waiting.id));
+      await ctx.db.delete(wakes);
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(waiting.id)).toBe("blocked");
+      const told = await unblockedWakes(waiting.id);
+      expect(told).toHaveLength(1);
+      expect(told[0]!.note).toContain("parked on purpose");
+      // Sweeps leave it alone and don't tell the assignee a second time for the same blocker.
+      await ctx.req("POST", "/api/sweep");
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(waiting.id)).toBe("blocked");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(1);
+    });
+
+    it("a backlog ticket whose note says parked is not started; its assignee is told the blocker finished (BOS-742)", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${held.id}/dependencies`, { ticketId: x.id });
+      await ctx.db.update(tickets).set({ stateNote: "Parked until the pricing change lands; do not start." }).where(eq(tickets.id, held.id));
+      await ctx.db.delete(wakes);
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+      await ctx.req("POST", "/api/sweep");
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+    });
+
+    it("the catch-up sweep counts a parked ticket it told the assignee about, and does not start it (BOS-742)", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${held.id}/dependencies`, { ticketId: x.id });
+      await ctx.db.update(tickets).set({ blockedUntil: new Date(Date.now() + 86_400_000), stateNote: "Parked: wait for the release." }).where(eq(tickets.id, held.id));
+      // The blocker finished while the sweep was not looking: set it done directly.
+      await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, x.id));
+      await ctx.db.delete(wakes);
+      const pass = (await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number; parked: number } };
+      expect(pass.releasedUnblocked).toMatchObject({ released: 0, parked: 1 });
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+      const again = (await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number; parked: number } };
+      expect(again.releasedUnblocked).toMatchObject({ released: 0, parked: 0 });
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+      expect((await ctx.db.select().from(decisions)).filter((d) => d.dedupeKey === `unblocked-catchup:${ctx.company.id}`)).toHaveLength(0);
     });
   });
 

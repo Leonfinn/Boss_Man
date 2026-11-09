@@ -9,8 +9,10 @@
 #                                 previous release), also after the 15-minute window. With --dry-run it only checks.
 #
 # It reads one small request file the server wrote, treats it as data only, checks it, and runs
-# one of two fixed actions: scripts/deploy.sh (target "server") or scripts/update-runner.sh
-# (target "runner"). Nothing from the request is ever executed or put on a command line unchecked.
+# one of three fixed actions: scripts/deploy.sh (target "server"), scripts/update-runner.sh
+# (target "runner"), or a restart of the server at the commit that already runs (target "restart",
+# BOS-647: a blue/green swap to a fresh copy, or deploy.sh --force on a single server; it never
+# fetches or moves the checkout). Nothing from the request is ever executed or put on a command line unchecked.
 #
 # Settings: environment, then the optional config file $BOSSMAN_DEPLOYER/host.conf (shell
 # KEY=value lines; must be owned by the user running this and not writable by anyone else):
@@ -30,9 +32,9 @@
 # Without that, nothing under the "Blue/green" heading runs.
 set -euo pipefail
 
-DRY=0 ROLLBACK=0 ACK=0
+DRY=0 ROLLBACK=0 ACK=0 FACTS=0
 for arg in "$@"; do
-  case "$arg" in --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; --ack-health) ACK=1 ;; *) echo "Usage: $0 [--dry-run] | --rollback [--dry-run] | --ack-health" >&2; exit 2 ;; esac
+  case "$arg" in --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; --ack-health) ACK=1 ;; --facts) FACTS=1 ;; *) echo "Usage: $0 [--dry-run] | --rollback [--dry-run] | --ack-health | --facts" >&2; exit 2 ;; esac
 done
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron's PATH is minimal
@@ -40,6 +42,8 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron'
 D="${BOSSMAN_DEPLOYER:-$(cd "$(dirname "$0")" && pwd)}"
 REPO="$D/../src"
 WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SECONDS=300
+BG_STOP_SECONDS="${BG_STOP_SECONDS:-60}" # a planned stop's grace before Docker sends SIGKILL (BOS-794); the server's shutdown drains work
+[[ $BG_STOP_SECONDS =~ ^[0-9]{1,4}$ ]] || BG_STOP_SECONDS=60
 BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}" SOAK_CHECK_SECONDS="${SOAK_CHECK_SECONDS:-60}"
 CONF="$D/host.conf"
 if [[ -e $CONF ]]; then
@@ -117,7 +121,10 @@ if ((ROLLBACK)); then flock -w 120 9 || { echo "ERROR: another deployer run hold
 else flock -n 9 || exit 0; fi # a run is already going; the next minute tries again
 
 REQ_ID="" TARGET="" COMMIT="" STARTED="" FROM=""
+RESTART=0 # 1 while a "restart" request runs the blue/green swap: same commit, different messages, no rollback record
 HEALTH_KV=() # the latest whole-stack checklist as key=value pairs (stack, check_*), merged into the status file
+REQ_KV=()    # what the request asked for when it differs from what runs (BOS-753): requested_commit, runner_changed
+PICK_NOTE="" # why the commit that runs is not the one the owner approved (BOS-753), added to every message after the pick
 
 write_status() { # result message [backup]
   ((DRY)) && { log "[dry-run] status: $1: $2"; return 0; }
@@ -125,7 +132,7 @@ write_status() { # result message [backup]
   [[ $1 == running ]] || ended="$(now)"
   local soak=0 # the standby window this host really uses (BOS-401): the server holds the runner update for it
   if bluegreen_enabled; then soak="$SOAK_SECONDS"; fi
-  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/status.json.tmp"
+  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${REQ_KV[@]+"${REQ_KV[@]}"} ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/status.json.tmp"
   chmod 644 "$OUTBOX/status.json.tmp"
   mv "$OUTBOX/status.json.tmp" "$OUTBOX/status.json"
   [[ $1 == running ]] || cat "$OUTBOX/status.json" >>"$OUTBOX/history.jsonl"
@@ -140,14 +147,186 @@ post_webhook() { # result message
 }
 
 finish() { # result message [backup]: record the outcome, tell the owner, stop
-  log "$1: $2"
-  write_status "$@"
-  post_webhook "$1" "$2"
+  local msg="$2${PICK_NOTE:+ $PICK_NOTE}"
+  log "$1: $msg"
+  write_status "$1" "$msg" "${3:-}"
+  post_webhook "$1" "$msg"
   exit 0
 }
 
 # The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an SSH remote with a read-only deploy key for a private one; docs/00 step 2). Empty if unreachable.
 remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }' || true; }
+
+# The merge commits Boss Man's merge gate checked (BOS-753), one full hash per line, written by the server into
+# inbox/checked beside each request. Untrusted like the request: only a plain file under 256 KB is read, and only
+# lines that are exactly a 40-character hash are kept. It can only narrow the choice below: every commit picked
+# from it must still be on main, a fast-forward of what runs, and free of deployment files.
+checked_list() {
+  local f="$INBOX/checked"
+  [[ -f $f && ! -L $f && $(stat -c %s "$f") -le 262144 ]] || return 0
+  LC_ALL=C grep -xE '[0-9a-f]{40}' "$f" 2>/dev/null || true
+}
+
+# BOS-753: the owner approved COMMIT, but main has moved on to tip since the offer was written. An approval means
+# "deploy the newest checked version", so walk main's own history (first parents: the merges themselves, never a
+# branch's commits) from the tip back to the approved commit, and take the newest one that the merge gate checked
+# and that needs no hand-apply. None: the approved commit itself, which is still on main and is what was approved.
+# Sets COMMIT and PICK_NOTE. Every later check (fast-forward, deployment files, rate limit) still runs on the result.
+pick_newest_checked() { # head approved tip
+  local head=$1 approved=$2 tip=$3 c checked unchecked=0 hand=0 why="" infra
+  checked="$(checked_list)"
+  # Newest first; never a commit the running version already contains, so whatever is picked is a fast-forward of it.
+  while IFS= read -r c; do
+    [[ -n $c ]] || continue
+    if ! grep -qxF "$c" <<<"$checked"; then unchecked=$((unchecked + 1)); continue; fi
+    infra="$(g diff --name-only "$head" "$c" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } || true)"
+    if [[ -n $infra ]]; then hand=$((hand + 1)); continue; fi
+    COMMIT=$c
+    break
+  done < <(g rev-list --first-parent "$tip" "^$approved" "^$head" 2>/dev/null || true)
+  if [[ $COMMIT != "$approved" ]]; then
+    if [[ $COMMIT == "$tip" ]]; then
+      why="main had moved on to ${tip:0:8} by the time the deployer ran, so the deployer took that newest checked version instead."
+    elif ((unchecked)); then
+      why="main had moved on to ${tip:0:8} by the time the deployer ran, but the newest $unchecked commit(s) have not passed their merge check yet. ${COMMIT:0:8} is the newest one that has, so the deployer took it instead; the rest come in the next update."
+    else
+      why="main had moved on to ${tip:0:8} by the time the deployer ran, but the newer commits change deployment files and have to be applied by hand. ${COMMIT:0:8} is the newest checked one without them, so the deployer took it instead; the rest come in the next update."
+    fi
+    PICK_NOTE="You approved ${approved:0:8}; $why It includes everything you approved."
+    return 0
+  fi
+  if [[ -z $checked ]]; then why="Boss Man did not say which newer commits passed their merge check"
+  elif ((hand && !unchecked)); then why="the newer commits change deployment files and have to be applied by hand"
+  else why="none of the newer commits has passed its merge check yet"; fi
+  # The approved commit is already in what runs (a newer version went live since the card was raised): nothing to add.
+  if g merge-base --is-ancestor "$approved" "$head" 2>/dev/null; then COMMIT=$head; fi
+  PICK_NOTE="Main has moved on to ${tip:0:8} since you approved ${approved:0:8}, but $why, so the deployer kept to ${COMMIT:0:8}; the newer commits come in the next update."
+}
+
+# ---------------------------------------------------------------------------------------------------
+# Which services an update changes (BOS-487, DR-020 B and C). Read from the rendered compose settings of each service,
+# never from file paths: a comment-only edit changes nothing, a changed memory limit changes the database. The server
+# deploy still rolls only the server colours (do_deploy_bluegreen and deploy.sh never start db or proxy); a changed
+# db/proxy is reported here so Boss Man can raise its own owner step with a backup. SERVICE_COMPARE=0 (host.conf) turns
+# this off; any failure to render is logged and reported as "not checked", and never blocks an update.
+# ---------------------------------------------------------------------------------------------------
+SERVICE_COMPARE="${SERVICE_COMPARE:-1}"
+# The services whose settings only the owner's own step applies (the server deploy never touches them).
+OWNER_SERVICES="db proxy"
+RENDER_DIR="$STATE/render"
+
+# stdin: `docker compose config`; prints "service hash" per service. For a Compose without `config --hash`.
+hash_block() { # name block
+  printf '%s %s\n' "$1" "$(printf '%s' "$2" | sha256sum | cut -d' ' -f1)"
+}
+split_hash() {
+  local line name="" blk="" ins=0
+  while IFS= read -r line; do
+    if [[ $line == services:* ]]; then ins=1; continue; fi
+    if [[ $line =~ ^[^[:space:]] ]]; then
+      [[ -z $name ]] || hash_block "$name" "$blk"
+      name="" blk="" ins=0; continue
+    fi
+    ((ins)) || continue
+    if [[ $line =~ ^\ \ ([A-Za-z0-9_.-]+):[[:space:]]*$ ]]; then
+      [[ -z $name ]] || hash_block "$name" "$blk"
+      name="${BASH_REMATCH[1]}" blk=""
+    fi
+    blk+="$line"$'\n'
+  done
+  [[ -z $name ]] || hash_block "$name" "$blk"
+}
+
+# The compose project this host runs, taken from the live stack's own label; else COMPOSE_PROJECT_NAME; else the
+# checkout folder's name the way Compose normalises it. Empty if nothing can be told (the render then fails).
+compose_project() {
+  local cid p=""
+  cid="$(compose ps -q db 2>/dev/null | head -n 1)" || cid=""
+  if [[ -n $cid ]]; then p="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null)" || p=""; fi
+  [[ -n $p ]] || p="${COMPOSE_PROJECT_NAME:-}"
+  [[ -n $p ]] || p="$(grep -s '^COMPOSE_PROJECT_NAME=' "$REPO/.env" | tail -1 | cut -d= -f2- | tr -d "'\"" || true)"
+  [[ -n $p ]] || p="$(basename "$(cd "$REPO" 2>/dev/null && pwd)" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+  printf '%s' "$p"
+}
+
+# "service hash" lines for a commit, on stdout. The commit is unpacked into one fixed folder (the same path for every
+# commit, so relative bind mounts render the same and don't look like a change), with the checkout's own .env, and
+# rendered under the live project's name and a pinned BOSSMAN_COMMIT, so nothing differs but the settings themselves.
+# Nothing in the checkout is touched. Returns non-zero (and logs why) when it can't render.
+render_hashes() { # commit project
+  local commit=$1 project=$2 out="" rc=0
+  [[ -n $project ]] || { log "Service compare: could not tell the compose project name."; return 1; }
+  rm -rf "$RENDER_DIR"; mkdir -p "$RENDER_DIR"
+  if ! (set -o pipefail; g archive "$commit" | tar -x -C "$RENDER_DIR") 2>>"$LOG"; then
+    log "Service compare: could not unpack ${commit:0:8}."; rm -rf "$RENDER_DIR"; return 1
+  fi
+  # The commit may carry its own .env or secrets (even a link to another file): remove them first, so the copy below
+  # can never write through a link to some other file. This folder holds a copy of the host's .env (secrets): it lives
+  # in $STATE, which is root-only, and is removed straight after the render (a run killed in between leaves it until
+  # the next refresh, which starts by removing it).
+  rm -rf "$RENDER_DIR/.env" "$RENDER_DIR/secrets"
+  [[ ! -f $REPO/.env ]] || cp "$REPO/.env" "$RENDER_DIR/.env"
+  [[ ! -d $REPO/secrets ]] || ln -s "$REPO/secrets" "$RENDER_DIR/secrets"
+  out="$(cd "$RENDER_DIR" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT=compare timeout 120 docker compose --project-name "$project" config --hash '*' 2>>"$LOG")" || rc=$?
+  if ((rc != 0)) || ! grep -qE '^[A-Za-z0-9_.-]+ [0-9a-f]{8,}$' <<<"$out"; then
+    # An older Compose has no --hash: hash each service's block of the rendered file instead.
+    out="$(cd "$RENDER_DIR" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT=compare timeout 120 docker compose --project-name "$project" config 2>>"$LOG" | split_hash)" || out=""
+  fi
+  rm -rf "$RENDER_DIR"
+  out="$(grep -E '^[A-Za-z0-9_.-]+ [0-9a-f]{8,}$' <<<"$out" || true)"
+  [[ -n $out ]] || { log "Service compare: the compose settings of ${commit:0:8} could not be rendered (see above); not comparing."; return 1; }
+  printf '%s\n' "$out"
+}
+
+# Names whose hash differs between two "service hash" lists, including services that were added or removed.
+changed_between() { # old-file new-file
+  LC_ALL=C join -a1 -a2 -e MISSING -o 0,1.2,2.2 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2") | awk '$2 != $3 { print $1 }'
+}
+
+service_container() { compose ps -q "$1" 2>/dev/null | head -n 1 || true; } # service: its container id, empty if none
+
+# A service is "pending" when the live checkout's settings for it differ from what it last ran with and it has not been
+# recreated since: the container id is the proof (a recreate gives a new one, a plain restart or reboot keeps it). The
+# first look records the present state as applied. Reads state; writes only $STATE/applied-services.
+pending_services() { # live-hashes-file: prints the pending service names
+  local f="$STATE/applied-services" svc hash cid sh0 scid new="" line
+  for svc in $OWNER_SERVICES; do
+    hash="$(awk -v s="$svc" '$1 == s { print $2 }' "$1")"
+    [[ -n $hash ]] || continue # the live stack has no such service
+    cid="$(service_container "$svc")"
+    [[ -n $cid ]] || { line="$(grep -E "^$svc " "$f" 2>/dev/null || true)"; [[ -z $line ]] || new+="$line"$'\n'; continue; } # not running: no verdict, keep what we knew
+    line="$(grep -E "^$svc " "$f" 2>/dev/null || true)"
+    if [[ -z $line ]]; then new+="$svc $hash $cid"$'\n'; continue; fi
+    read -r _ sh0 scid <<<"$line"
+    if [[ $sh0 == "$hash" ]]; then new+="$svc $hash $cid"$'\n'
+    elif [[ $scid != "$cid" ]]; then new+="$svc $hash $cid"$'\n' # recreated since: applied
+    else new+="$line"$'\n'; echo "$svc"; fi
+  done
+  printf '%s' "$new" >"$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# Sets SVC_CHANGED (space-separated names), SVC_CHECKED (true/false), SVC_PENDING, DB_STARTED and DB_CID for available.json.
+service_report() { # live-commit tip-commit (tip empty or equal to live: nothing to compare)
+  SVC_CHANGED="" SVC_CHECKED=false SVC_PENDING="" DB_STARTED="" DB_CID=""
+  [[ $SERVICE_COMPARE == 1 ]] || { log "Service compare is off (SERVICE_COMPARE in host.conf)."; return 0; }
+  local project live="$STATE/svc.live" next="$STATE/svc.tip"
+  project="$(compose_project)"
+  render_hashes "$1" "$project" >"$live" || { rm -f "$live"; return 0; }
+  if [[ -n $2 && $2 != "$1" ]]; then
+    render_hashes "$2" "$project" >"$next" || { rm -f "$live" "$next"; return 0; }
+    SVC_CHANGED="$(changed_between "$live" "$next" | tr '\n' ' ')"
+  fi
+  SVC_CHECKED=true
+  SVC_PENDING="$(pending_services "$live" | tr '\n' ' ')"
+  DB_CID="$(service_container db)"
+  if [[ -n $DB_CID ]]; then DB_STARTED="$(docker inspect -f '{{.State.StartedAt}}' "$DB_CID" 2>/dev/null || true)"; fi
+  rm -f "$live" "$next"
+}
+json_names() { # space-separated names: a JSON array of strings
+  local n out="" sep=""
+  for n in $1; do out+="$sep$(jstr "$n")"; sep=", "; done
+  printf '[%s]' "$out"
+}
 
 # Tells the server what is waiting (when main is ahead of what runs), so it can raise the decision.
 refresh_available() {
@@ -193,8 +372,13 @@ refresh_available() {
   if [[ $bg == true ]]; then
     if [[ $SOAK_SECONDS =~ ^[0-9]{1,6}$ ]]; then soak=", \"soakSeconds\": $SOAK_SECONDS"; else log "SOAK_SECONDS is not a whole number of seconds; not reporting the trial length."; fi
   fi
-  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s%s}' \
-    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" "$soak" >"$f.tmp"
+  # Which services the update changes, and which of db/proxy still run with older settings than the live checkout (BOS-487).
+  service_report "$head" "$tip"
+  local svc
+  svc=", \"changedServices\": $(json_names "$SVC_CHANGED"), \"servicesChecked\": $SVC_CHECKED, \"pendingServices\": $(json_names "$SVC_PENDING")"
+  if [[ -n $DB_CID ]]; then svc+=", \"dbContainerId\": $(jstr "$DB_CID"), \"dbStartedAt\": $(jstr "$DB_STARTED")"; fi
+  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s%s%s}' \
+    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" "$soak" "$svc" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
@@ -277,28 +461,66 @@ host_extra_facts() {
     ohost="${ohost%%[/:]*}"
     [[ $ohost =~ ^[A-Za-z0-9_.-]{1,255}$ ]] || ohost=""
   fi
+  local why=""
   if [[ $kind != none ]]; then
     local cache="$STATE/repo-probe" now_s; now_s="$(date +%s)"
     if [[ -f $cache && $(stat -c %Y "$cache" 2>/dev/null || echo 0) -gt $((now_s - REPO_PROBE_SECONDS)) ]]; then
-      read -r probe probed <"$cache" || true
+      # The cache is three fields: what the probe found, when, and (BOS-986) why it failed, base64 so a line with
+      # spaces in it round-trips. An older cache with two fields leaves the reason empty.
+      local b64=""
+      read -r probe probed b64 <"$cache" || true
+      [[ -n $b64 ]] && why="$(printf '%s' "$b64" | base64 -d 2>/dev/null || true)"
     else
       # A read over whatever origin uses: anonymous for https (no credential helper, no prompt), the host's own key for ssh
-      # (BatchMode: never asks). Only ok/failed is kept.
-      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>&1); then probe=ok; else probe=failed; fi
+      # (BatchMode: never asks). Only ok/failed, when, and one redacted error line are kept (BOS-986).
+      # BOS-986: ask for the ref a deploy actually needs (`refs/heads/main`), not `HEAD`. A read-only deploy key on
+      # GitHub can refuse the `HEAD` symref while `refs/heads/main` reads fine, which made the probe say "failed" on a
+      # host whose deploys all work. `HEAD` is kept as a fallback for a repo whose default branch is not main (the
+      # deployer reads main itself, so a failed main read is only a probe failure when HEAD fails too).
+      local errf="$STATE/repo-probe.err" rc=0 ok=0
+      : >"$errf" 2>/dev/null || true
+      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; else rc=$?; fi
+      if ((!ok)) && (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; else ((ok)) || rc=$?; fi
+      if ((ok)); then probe=ok; else probe=failed; fi
       probed="$(now)"
-      printf '%s %s\n' "$probe" "$probed" >"$cache" 2>/dev/null || true
+      # One short line saying which part failed, secret-free: drop anything that looks like a URL or a credential,
+      # cut every token to 80 characters, and keep 200 characters in all.
+      if [[ $probe == failed ]]; then
+        local -a lines=()
+        if [[ -s $errf ]]; then mapfile -t lines <"$errf"; fi
+        ((${#lines[@]})) || lines=("git ls-remote exited with status $rc")
+        # "ssh: Could not resolve hostname <host>: Name or service not known": the host is replaced, so a VPN-only
+        # name can't leak, and the message after it stays (it says what to do).
+        # Only substitute the host when there is one: an empty $ohost (a local-path origin) would make the sed
+        # expression an empty regex, which GNU sed refuses.
+        local sedh=""; [[ -n $ohost ]] && sedh="s#$ohost#<code host>#g; "
+        why="$(printf '%s\n' "${lines[@]}" | grep -v '^[[:space:]]*$' | grep -v '^Warning:' | head -n 1 | cut -c1-200 \
+          | sed -E "${sedh}s#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+#<address>#g; s/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/<user>@<host>/g; s/[A-Za-z0-9_-]{20,}/<key>/g" || true)"
+        [[ -n $why ]] || why="git ls-remote exited with status $rc"
+      fi
+      rm -f "$errf" 2>/dev/null || true
+      printf '%s %s %s\n' "$probe" "$probed" "$(printf '%s' "$why" | base64 -w0 2>/dev/null || printf '%s' "$why" | base64 | tr -d '\n')" >"$cache" 2>/dev/null || true
     fi
     [[ $probe =~ ^(ok|failed)$ ]] || probe=failed
+    [[ $probe == ok ]] && why=""
   fi
-  out+="$sep\"repo\": {\"origin\": $(jstr "$kind"), \"originHost\": $(jstr "$ohost"), \"embeddedCredentials\": $creds, \"probe\": $(jstr "$probe"), \"probedAt\": $(jstr "$probed")}"
+  out+="$sep\"repo\": {\"origin\": $(jstr "$kind"), \"originHost\": $(jstr "$ohost"), \"embeddedCredentials\": $creds, \"probe\": $(jstr "$probe"), \"probedAt\": $(jstr "$probed"), \"probeWhy\": $(jstr "$why")}"
   # --- folders and the compose setup
-  local srcdir deployerdir installdir cf cfl="" cfsep="" f bg=false colour=""
+  local srcdir deployerdir installdir cf cfl="" cfsep="" cflseen="" f bg=false colour=""
   srcdir="$(cd "$REPO" 2>/dev/null && pwd)" || srcdir=""
   deployerdir="$(cd "$D" 2>/dev/null && pwd)" || deployerdir=""
   installdir="$(cd "$D/.." 2>/dev/null && pwd)" || installdir=""
   cf="${COMPOSE_FILE:-}"; [[ -n $cf ]] || cf="$(grep -s '^COMPOSE_FILE=' "$REPO/.env" | tail -1 | cut -d= -f2- || true)"
   cf="${cf%\"}"; cf="${cf#\"}"
-  for f in ${cf//[:,]/ }; do [[ $f =~ ^[A-Za-z0-9_./-]{1,200}$ ]] && { cfl+="$cfsep$(jstr "$f")"; cfsep=", "; }; done
+  for f in ${cf//[:,]/ }; do
+    [[ $f =~ ^[A-Za-z0-9_./-]{1,200}$ ]] || continue
+    # BOS-986: one entry per file, in the order the owner wrote them. A file named twice (or the same file under
+    # two spellings, e.g. deploy/tailscale.yml and ./deploy/tailscale.yml) would mount it twice; Compose errors on
+    # that, so the panel showed duplicates on Docker01.
+    f="${f#./}"; f="${f//\/.\//\/}"
+    [[ " $cflseen " == *" $f "* ]] && continue
+    cflseen+=" $f"; cfl+="$cfsep$(jstr "$f")"; cfsep=", "
+  done
   if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
   out+="$sep\"paths\": {\"install\": $(jstr "$installdir"), \"src\": $(jstr "$srcdir"), \"deployer\": $(jstr "$deployerdir")}"
   out+="$sep\"compose\": {\"files\": [$cfl], \"bluegreen\": $bg, \"liveColour\": $(jstr "$colour")}"
@@ -313,6 +535,21 @@ host_extra_facts() {
     ports+="$psep$(jstr "$k"): $(jstr "$v")"; psep=", "
   done
   out+="$sep\"network\": {\"addresses\": [$addrs], \"ports\": {$ports}}"
+  # --- BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries only. Compose uses
+  # only the last line, so two or more means an earlier list is silently ignored. Nothing else on the line is kept
+  # (any token that isn't host:port is dropped), and no other key is read.
+  local nlines="" nlsep="" nl tok toks tsep nc=0 envfound=false
+  local -a ntoks
+  [[ -r $REPO/.env ]] && envfound=true
+  while IFS= read -r nl; do
+    ((nc < 16)) || break
+    nl="${nl#*=}"; nl="${nl%%[[:space:]]#*}"; nl="${nl//[\"\']/}"
+    IFS=$', \t' read -r -a ntoks <<<"$nl" || true
+    toks="" tsep=""
+    for tok in "${ntoks[@]}"; do [[ $tok =~ ^[A-Za-z0-9.-]{1,253}:[0-9]{1,5}$ ]] && { toks+="$tsep$(jstr "$tok")"; tsep=", "; }; done
+    nlines+="${nlsep}[$toks]"; nlsep=", "; nc=$((nc + 1))
+  done < <(grep -sE '^[[:space:]]*(export[[:space:]]+)?BOSSMAN_NETGUARD_ALLOW[[:space:]]*=' "$REPO/.env" || true)
+  out+="$sep\"netguardEnv\": {\"envFound\": $envfound, \"lines\": [$nlines]}"
   # --- memory, in kB, from /proc/meminfo
   local mt ma
   mt="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null)" || mt=""
@@ -344,15 +581,72 @@ host_extra_facts() {
   done
   out+="$sep\"addons\": {$adds}"
   # --- read-only checks (DR-024), chosen by name from this fixed list
+  # BOS-986: container_status counts only containers that are not running AND are meant to be. A one-shot setup or
+  # init container that finished (exit 0, restart policy "no") is not a fault, and neither is the blue/green standby
+  # (its window is over). Anything else stopped is named with its exit code and since when, so the panel can say
+  # which. A running container that is failing its health check counts as unhealthy too.
+  # Only fields `docker ps` really has are asked for here (`ExitCode` is not one of them, so it comes from inspect).
   local checks="" csep="" total=0 notrun=0 unhealthy=0 maxrestart=0 line r
+  local stopping="" ssep2="" seen_ids=""
   if have_docker; then
-    while IFS= read -r line; do
-      [[ -n $line ]] || continue
+    local cid cname cstate_str cstatus csince csvc
+    local -A exit_code=()
+    # Read the stack once. `docker ps` has no exit-code field (`ExitCode` is not one of the names it accepts, and
+    # asking for it makes real Docker fail), so `docker inspect` is asked afterwards for the containers that aren't
+    # up. The listing is kept in a temp file so the loop can read it and the ids can be inspected before it starts.
+    local listing="$STATE/containers.tsv"
+    dk ps -a --filter label=com.docker.compose.project --format '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Status}}\t{{.RunningFor}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}' >"$listing" 2>/dev/null || : >"$listing"
+    local ids_nonrunning=""
+    while IFS=$'\t' read -r cid _ cstate_str _; do
+      [[ -n $cid && $cstate_str != running ]] && ids_nonrunning+=" $cid"
+    done <"$listing"
+    if [[ -n ${ids_nonrunning// /} ]]; then
+      local -a idsarr=() ecodes=()
+      read -r -a idsarr <<<"${ids_nonrunning# }"
+      mapfile -t ecodes < <(dk inspect -f '{{.State.ExitCode}}' "${idsarr[@]}" 2>/dev/null || true)
+      local i
+      for i in "${!idsarr[@]}"; do exit_code["${idsarr[i]}"]="${ecodes[i]:-}"; done
+    fi
+    while IFS=$'\t' read -r cid cname cstate_str cstatus csince _ csvc; do
+      [[ -n $cstate_str ]] || continue
+      # One entry per container name: a stack run twice on one host (BOS-986's duplicate compose-file entry on
+      # Docker01) holds two containers with the same name. Replicas have their own index (bm-worker-1 and
+      # bm-worker-2), so a stopped replica beside a running one is still counted and named.
+      if [[ -n $cname ]]; then
+        [[ " $seen_ids " == *" $cname "* ]] && continue
+        seen_ids+=" $cname"
+      fi
       total=$((total + 1))
-      [[ $line == *' running '* ]] || notrun=$((notrun + 1))
-      [[ $line == *unhealthy* ]] && unhealthy=$((unhealthy + 1))
-    done < <(dk ps -a --filter label=com.docker.compose.project --format '{{.ID}} {{.State}} {{.Status}}' || true)
-    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy}"; csep=", "
+      if [[ $cstate_str == running ]]; then
+        # A container that is up but failing its health check ("Up 2 minutes (unhealthy)") is a problem too.
+        [[ $cstatus == *unhealthy* ]] && unhealthy=$((unhealthy + 1))
+        continue
+      fi
+      [[ $cstate_str == restarting ]] && unhealthy=$((unhealthy + 1))
+      local cexit="${exit_code[$cid]:-}"
+      # Meant to stop: a one-shot whose job is done. That means a migrate/netguard helper, or any service Compose
+      # starts with `restart: "no"`, and only when it exited 0. A cleanly stopped server or database has a restart
+      # policy of "unless-stopped", so it still counts.
+      local one_shot=false
+      if [[ $cname == *-migrate-* || $cname == *-netguard-* || $csvc == migrate || $csvc == netguard ]]; then one_shot=true; fi
+      local rp
+      rp="$(dk inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid" 2>/dev/null || true)"
+      [[ $rp == no ]] && one_shot=true
+      [[ $one_shot == true && $cexit == 0 ]] && continue
+      # The blue/green standby: a server colour that is stopped (exit 0) is the colour the proxy isn't sending traffic
+      # to. The deployer leaves it running for SOAK_SECONDS after a swap; this report cannot tell a failed swap from a
+      # finished window, so a stopped colour is never counted as "not running" (a colour that crashed exits non-zero
+      # and is counted below).
+      if [[ $cexit == 0 && $csvc =~ ^server-(blue|green)$ ]]; then continue; fi
+      notrun=$((notrun + 1))
+      # `exit` is a string, never bare: if instead of a number inspect returns nothing (the container was removed
+      # between ps and inspect, or inspect was denied), a bare value would leave `"exit": ,` and break the whole
+      # host.json. The server accepts a string and the flatten step skips an empty one.
+      local cexit_s="${cexit//[^0-9-]/}"
+      stopping+="$ssep2{\"name\": $(jstr "$cname"), \"status\": $(jstr "$cstate_str"), \"exit\": $(jstr "$cexit_s"), \"since\": $(jstr "$csince")}"; ssep2=", "
+    done <"$listing"
+    rm -f "$listing" 2>/dev/null || true
+    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"stopped\": [$stopping]}"; csep=", "
     maxrestart=0
     while read -r r; do [[ $r =~ ^[0-9]+$ ]] && ((r > maxrestart)) && maxrestart=$r; done < <(dk ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.RestartCount}}' 2>/dev/null || true)
     checks+="$csep\"restart_counts\": {\"max\": $maxrestart}"; csep=", "
@@ -369,6 +663,9 @@ host_extra_facts() {
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
 do_deploy_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
+# A restart on a single server (BOS-647): --force rebuilds and recreates what is checked out; --commit pins it to the
+# commit the request named, which main() has already checked is HEAD, so nothing new can come in.
+do_restart_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
 # No --now: update-runner.sh builds and checks the image, then asks Boss Man to drain (inbox/drain.json) and returns,
 # so this lock is not held while runs finish. The swap itself is reported by the server.
 do_update_runner() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/update-runner.sh); }
@@ -541,7 +838,7 @@ switch_back() {
   if ((ok)); then flip_proxy "$BG_LIVE" || ok=0; fi
   if ((ok)); then wait_ready proxy leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
   if ((ok)); then
-    if compose stop "server-$BG_IDLE" >>"$LOG" 2>&1; then plan_stopped "$BG_IDLE"; fi
+    stop_colour "$BG_IDLE" || true
     g reset --quiet --hard "$BG_PREV" || true
   else
     # The old colour did not take over: put the new one back in charge and keep it running (the checkout stays on what runs).
@@ -619,7 +916,18 @@ take_baseline() {
 }
 # Colours the deployer stopped on purpose (soak over, rollback, undone deploy): a stop that is not on this list is a crash.
 plan_stopped() { grep -qxs "$1" "$STATE/stopped-by-plan" || printf '%s\n' "$1" >>"$STATE/stopped-by-plan"; } # colour
-unplan_stopped() { { grep -vx "$1" "$STATE/stopped-by-plan" 2>/dev/null || true; } >"$STATE/stopped-by-plan.tmp"; mv "$STATE/stopped-by-plan.tmp" "$STATE/stopped-by-plan"; } # colour
+unplan_stopped() { { grep -vx "$1" "$STATE/stopped-by-plan" 2>/dev/null || true; } >"$STATE/stopped-by-plan.tmp"; mv "$STATE/stopped-by-plan.tmp" "$STATE/stopped-by-plan"; rm -f "$STATE/stop-took.$1"; } # colour
+# A planned stop of a colour (BOS-794): an explicit grace longer than the server's SIGTERM shutdown, and the time it took is
+# logged and kept (state/stop-took.<colour>), so a slow shutdown that still ended in SIGKILL (exit 137) stays visible.
+stop_colour() { # colour
+  local t0=$SECONDS
+  if compose stop -t "$BG_STOP_SECONDS" "server-$1" >>"$LOG" 2>&1; then
+    plan_stopped "$1"; printf '%s\n' "$((SECONDS - t0))" >"$STATE/stop-took.$1"
+    log "Stopped server-$1 in $((SECONDS - t0))s (grace ${BG_STOP_SECONDS}s)."
+    return 0
+  fi
+  log "Could not stop server-$1."; return 1
+}
 
 # Writes outbox/health.json and keeps the same fields for the status file (HEALTH_KV, read by write_status).
 hc_record() { # phase commit
@@ -639,7 +947,7 @@ hc_record() { # phase commit
 # Runs the checklist. plan = what the other colour should be doing: standby (during the trial) or stopped (after it).
 # Returns 1 if any item fails; VERIFY_WHY then says which and what was seen (the live colour's own message first).
 stack_check() { # commit seconds phase plan
-  local commit=$1 secs=$2 phase=$3 plan=$4 live other st line s why="" bad="" n leaders=0 rolelist="" id started restarts oom running code bid bst bn p bp note=""
+  local commit=$1 secs=$2 phase=$3 plan=$4 live other st line s why="" bad="" n leaders=0 rolelist="" id started restarts oom running code bid bst bn p bp took note=""
   if [[ ! -s $STATE/baseline ]] && ! ((DRY)); then take_baseline; note=" (no baseline from before the deploy; taken now)"; fi
   # 1. The live colour, through the proxy.
   if verify_live "$commit" "$secs"; then
@@ -653,7 +961,8 @@ stack_check() { # commit seconds phase plan
   if [[ -z $live ]]; then hc_set other fail "no live colour is set in the proxy include"
   else
     other="$(other_colour "$live")"; st="$(cstate "server-$other")"; running=absent code=""
-    if [[ $st != none ]]; then read -r _ _ _ _ running code <<<"$st"; fi
+    oom=false
+    if [[ $st != none ]]; then read -r _ _ _ oom running code <<<"$st"; fi
     if [[ $plan == standby ]]; then
       if [[ $running != true ]]; then hc_set other fail "server-$other should be running as a standby but is $([[ $running == absent ]] && echo missing || echo "stopped (exit code $code)")"
       elif [[ $(colour_role "$other") != standby ]]; then hc_set other fail "server-$other is running but not as a standby (role '$(colour_role "$other")')"
@@ -661,9 +970,21 @@ stack_check() { # commit seconds phase plan
     else
       if [[ $running == true ]]; then hc_set other fail "server-$other is running but the plan says it should be stopped"
       elif [[ $running == absent ]]; then hc_set other pass "server-$other has no container (nothing to run)"
-      elif [[ $code != 0 ]]; then hc_set other fail "server-$other stopped with exit code $code, so it crashed or was killed"
-      elif ! grep -qxs "$other" "$STATE/stopped-by-plan"; then hc_set other fail "server-$other is stopped but the deployer did not stop it"
-      else hc_set other pass "server-$other was stopped by plan (exit code 0)"; fi
+      # The plan first (BOS-794): a planned stop that outlived its grace ends in SIGKILL (137) and is still a planned stop.
+      # Both colours are restart: unless-stopped, so a crash or OOM kill alone would have been restarted, not left stopped.
+      elif ! grep -qxs "$other" "$STATE/stopped-by-plan"; then
+        if [[ $code != 0 ]]; then hc_set other fail "server-$other stopped with exit code $code, so it crashed or was killed"
+        else hc_set other fail "server-$other is stopped but the deployer did not stop it"; fi
+      elif [[ $oom == true ]]; then hc_set other fail "server-$other was killed for running out of memory (exit code $code)"
+      else
+        took="$(cat "$STATE/stop-took.$other" 2>/dev/null || true)"; [[ $took =~ ^[0-9]+$ ]] || took=""
+        case $code in
+          0) hc_set other pass "server-$other was stopped by plan (exit code 0)" ;;
+          143) hc_set other pass "server-$other was stopped by plan (exit code 143, SIGTERM)" ;;
+          137) hc_set other pass "server-$other was stopped by plan; it did not shut down in time and needed SIGKILL${took:+ after ${took}s} (exit code 137)" ;;
+          *) hc_set other fail "server-$other was stopped by plan but exited with code $code" ;;
+        esac
+      fi
     fi
   fi
   # 3. Exactly one leader across both colours.
@@ -712,7 +1033,7 @@ health_degraded() { # commit prev
 }
 
 pre_fail() { # message: undo what happened before the hand-over; the live colour was never touched
-  if compose stop "server-$BG_IDLE" >>"$LOG" 2>&1; then plan_stopped "$BG_IDLE"; fi
+  stop_colour "$BG_IDLE" || true
   g reset --quiet --hard "$BG_PREV" || true
   bg_fail failed "$1 The live colour ($BG_LIVE) was not touched. Backup: $BG_BACKUP"
 }
@@ -732,7 +1053,8 @@ do_deploy_bluegreen() {
   unplan_stopped "$BG_IDLE" # it is about to be rebuilt and started on purpose
   take_baseline # the containers as they are before this deploy touches anything (DR-020 D)
 
-  log "Blue/green: $BG_LIVE is live; building $BG_IDLE at ${COMMIT:0:8}."
+  if ((RESTART)); then log "Blue/green restart: $BG_LIVE is live; building a fresh $BG_IDLE at the same commit (${COMMIT:0:8})."
+  else log "Blue/green: $BG_LIVE is live; building $BG_IDLE at ${COMMIT:0:8}."; fi
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
   BOSSMAN_COMMIT="$COMMIT" compose build "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Building $BG_IDLE failed."; return 1; }
@@ -760,16 +1082,24 @@ do_deploy_bluegreen() {
   fi
 
   printf 'old=%s new=%s deadline=%s commit=%s prev=%s\n' "$BG_LIVE" "$BG_IDLE" "$(($(date +%s) + SOAK_SECONDS))" "$COMMIT" "$BG_PREV" >"$STATE/soak"
+  BG_RESULT=deployed
+  if ((RESTART)); then
+    # The colour just rebuilt held the release before this one, so no stopped colour holds it any more: without the
+    # record, --rollback refuses with its own clear message instead of "going back" to the code that runs now.
+    # The hold (a release rejected by a rollback) stays: main has not moved, so it must still not be offered.
+    rm -f "$STATE/previous"
+    BG_MSG="Restarted at ${COMMIT:0:8}: a fresh $BG_IDLE is live; $BG_LIVE stays up as a standby for $((SOAK_SECONDS / 60)) minutes, and the deployer switches back by itself if the checks fail. The one-step rollback to the release before this one is no longer available."
+    return 0
+  fi
   # Kept after the soak ends: the only release a manual --rollback may go back to (colour, commit).
   printf '%s %s\n' "$BG_LIVE" "$BG_PREV" >"$STATE/previous"
   rm -f "$STATE/hold"
-  BG_RESULT=deployed
   BG_MSG="Deployed ${BG_PREV:0:8} to ${COMMIT:0:8}: $BG_IDLE is live; $BG_LIVE stays up as a standby for $((SOAK_SECONDS / 60)) minutes, and the deployer switches back by itself if the checks fail."
 }
 
 soak_end() { # old commit prev soakfile: time is up and the live colour is fine
   log "Soak over: stopping the old colour ($1)."
-  if compose stop "server-$1" >>"$LOG" 2>&1; then plan_stopped "$1"; else log "Could not stop server-$1."; fi
+  stop_colour "$1" || true
   rm -f "$4"
   # The end of the window: the same checklist with the old colour now planned to be stopped.
   if ! stack_check "$2" "$SOAK_CHECK_SECONDS" end stopped; then log "End-of-window check: $VERIFY_WHY"; health_degraded "$2" "$3"; fi
@@ -803,6 +1133,12 @@ soak_tick() {
   # The record names the commit that failed (to_commit), as a swap-time rollback does, and the one we are back on (from_commit).
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
   rm -f "$f"
+  # A restart's window (BOS-647) has the same commit on both sides: the old copy runs the same version.
+  if [[ $commit == "$prev" ]]; then
+    TARGET=restart
+    if switch_back; then finish rolled_back "The fresh copy started by the restart was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the copy it ran before (same version, ${commit:0:8}) automatically and is running normally on it."
+    else finish failed "The checks on the restarted $new failed and the automatic switch-back to $old ALSO failed: $(recovery_hint)"; fi
+  fi
   if switch_back; then finish rolled_back "The update to ${commit:0:8} was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the previous version (${prev:0:8}) automatically and is running normally on it."
   else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: $(recovery_hint)"; fi
 }
@@ -852,7 +1188,7 @@ do_rollback_bluegreen() {
     return 1
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.
-  if compose stop "server-$BG_LIVE" >>"$LOG" 2>&1; then plan_stopped "$BG_LIVE"; else log "Could not stop server-$BG_LIVE."; fi
+  stop_colour "$BG_LIVE" || true
   printf '%s\n' "$BG_PREV" >"$STATE/hold" # the release just rejected: refresh_available must not offer it again
   rm -f "$STATE/previous"
   if [[ -n $ocommit ]] && g cat-file -e "$ocommit^{commit}" 2>/dev/null; then g reset --quiet --hard "$ocommit" || log "Could not move the checkout to ${ocommit:0:8}."; fi
@@ -878,7 +1214,7 @@ recover_interrupted() {
   ((DRY)) && { log "[dry-run] the last run was cut off (status still 'running'); a real tick would mark it failed"; return 0; }
   REQ_ID="$(jfield id <<<"$st")" TARGET="$(jfield target <<<"$st")" STARTED="$(jfield started <<<"$st")" FROM="$(jfield from_commit <<<"$st")" COMMIT="$(jfield to_commit <<<"$st")"
   head="$(g rev-parse HEAD 2>/dev/null || true)"
-  if [[ $TARGET == server ]] && bluegreen_enabled; then
+  if [[ $TARGET == server || $TARGET == restart ]] && bluegreen_enabled; then
     live="$(jfield commit <<<"$(probe proxy 3100 /api/ready 2>/dev/null || true)")"
     if [[ $live =~ ^[0-9a-f]{40}$ && $live != "$head" ]] && g cat-file -e "$live^{commit}" 2>/dev/null; then
       g reset --quiet --hard "$live" && reset=" The checkout was put back on ${live:0:8}, which is what answers."
@@ -915,7 +1251,19 @@ main() {
     local ap=stopped
     [[ -f $STATE/soak && ! -L $STATE/soak ]] && ap=standby
     take_baseline; rm -f "$STATE/last-health-alert" "$STATE/planned-db"
-    if stack_check "$(g rev-parse HEAD)" "$SOAK_CHECK_SECONDS" ack "$ap"; then log "Health accepted: baseline renewed; the checklist passes."; exit 0; fi
+    local head sf="$OUTBOX/status.json" st=""
+    head="$(g rev-parse HEAD)"
+    if stack_check "$head" "$SOAK_CHECK_SECONDS" ack "$ap"; then
+      # The ack must clear what it was asked to clear (BOS-794): the "partial" page health_degraded left in the status
+      # file keeps the server saying "degraded" until another result replaces it. Only that page is replaced, and with
+      # nothing_new, not deployed: deployed would start a new standby window and runner hold on the server for a swap that never ran.
+      [[ -f $sf && ! -L $sf ]] && st="$(cat "$sf")"
+      if [[ $(jfield result <<<"$st") == partial && $(jfield target <<<"$st") == server ]]; then
+        REQ_ID="ack-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$head" COMMIT="$head"
+        finish nothing_new "Health accepted on the host: the whole-stack check passes at ${head:0:8}, so the earlier warning is cleared. Nothing was deployed or changed."
+      fi
+      log "Health accepted: baseline renewed; the checklist passes."; exit 0
+    fi
     log "Baseline renewed, but the checklist still fails: $VERIFY_WHY"; exit 1
   fi
   recover_interrupted
@@ -942,7 +1290,7 @@ main() {
   done
   id="$(jfield id <<<"$flat")" target="$(jfield target <<<"$flat")" commit="$(jfield commit <<<"$flat")"
   at="$(jfield requestedAt <<<"$flat")" by="$(jfield approvedBy <<<"$flat")"
-  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target =~ ^(server|runner)$ && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] ||
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target =~ ^(server|runner|restart)$ && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] ||
     finish rejected "Rejected: the request file does not match the expected format."
   REQ_ID=$id TARGET=$target COMMIT=$commit
 
@@ -957,16 +1305,52 @@ main() {
   if [[ $TARGET == server ]]; then
     tip="$(remote_tip)"
     [[ -n $tip ]] || finish rejected "Rejected: could not read main from GitHub. Try again in a few minutes."
-    # The offer the owner approved was stale: drop it, so the next minute writes one for the real tip.
-    [[ $COMMIT == "$tip" ]] || { rm -f "$OUTBOX/available.json"; finish rejected "Rejected: ${COMMIT:0:8} is not the tip of main (${tip:0:8}). Approve the latest deploy instead."; }
+    # BOS-753: main moved on after the offer was written (a merge between the card and the press, or before this
+    # tick). The approval still stands: it deploys the newest checked commit on main, never one off main.
+    if [[ $COMMIT != "$tip" ]]; then
+      local approved=$COMMIT
+      g fetch --quiet origin main || finish rejected "Rejected: git fetch from GitHub failed."
+      if ! g cat-file -e "$COMMIT^{commit}" 2>/dev/null || ! g merge-base --is-ancestor "$COMMIT" "$tip"; then
+        # Main was rewritten under the offer: drop it, so the next minute writes one for the real tip.
+        rm -f "$OUTBOX/available.json"
+        finish rejected "Rejected: ${COMMIT:0:8} is not on main any more (main is at ${tip:0:8}), so it can't be deployed. A new update question for main follows within a few minutes."
+      fi
+      pick_newest_checked "$head" "$COMMIT" "$tip"
+      REQ_KV=(requested_commit="$approved")
+      # The offer no longer says what goes out: the next minute writes a fresh one.
+      rm -f "$OUTBOX/available.json"
+    fi
+  elif [[ $TARGET == restart ]]; then
+    # A restart only ever runs what is checked out: never a fetch, a merge or a move of the checkout (BOS-647).
+    [[ $COMMIT == "$head" ]] || finish rejected "Rejected: nothing was restarted. The version running changed since you asked (it is ${head:0:8} now, the request named ${COMMIT:0:8}), so an update probably ran in between. If the server still needs it, press Restart the server again."
+    # The old colour soaking as a standby is the automatic switch-back for the last update; a restart would rebuild it.
+    if bluegreen_enabled && [[ -e $STATE/soak || -L $STATE/soak ]]; then
+      finish rejected "Rejected: nothing was restarted. The last update is still in its $((SOAK_SECONDS / 60))-minute trial, and a restart now would replace the copy it switches back to. Try again when the trial is over."
+    fi
   else
     # Runners are built from what is checked out, which is what the server deploy put there.
-    [[ $COMMIT == "$head" ]] || finish rejected "The runners were not updated. They can only be rebuilt from the version the server runs, which is ${head:0:8}, and you asked for ${COMMIT:0:8} (the server update to it may still be running, or was switched back). Nothing is broken and nothing needs doing now: once the server runs the version you want, use Build and update runners in Settings."
+    # BOS-947: the server may have moved past the card's commit (a newer checked commit was deployed). When the card's
+    # commit is part of what the server runs now, build from the running version: it has everything the card asked for.
+    if [[ $COMMIT != "$head" ]]; then
+      if g cat-file -e "$COMMIT^{commit}" 2>/dev/null && g merge-base --is-ancestor "$COMMIT" "$head"; then
+        REQ_KV=(requested_commit="$COMMIT")
+        ASKED_SHORT=${COMMIT:0:8}
+        COMMIT=$head
+      else
+        finish rejected "The runners were not updated. They can only be rebuilt from the version the server runs, which is ${head:0:8}, and the card named ${COMMIT:0:8}, which is not part of it (the server was probably switched back, or its update is still running). Nothing is broken. Open Settings → Server and runner → Updates and press Build and update runners there: it builds from the version the server runs now."
+      fi
+    fi
   fi
 
-  last="$(cat "$STATE/last-$TARGET" 2>/dev/null || echo 0)"
+  # A restart shares the server's limit, so it can't come right on top of an update (or another restart).
+  local slot=$TARGET
+  [[ $TARGET != restart ]] || slot=server
+  last="$(cat "$STATE/last-$slot" 2>/dev/null || echo 0)"
   wait=$((last + RATE_LIMIT_SECONDS - $(date +%s)))
-  ((wait <= 0)) || finish rejected "Rejected: only one $TARGET deploy every $((RATE_LIMIT_SECONDS / 60)) minutes. Try again in $(((wait + 59) / 60)) minute(s)."
+  if ((wait > 0)); then
+    [[ $TARGET != restart ]] || finish rejected "Rejected: nothing was restarted. The server was updated or restarted less than $((RATE_LIMIT_SECONDS / 60)) minutes ago. Try again in $(((wait + 59) / 60)) minute(s)."
+    finish rejected "Rejected: only one $TARGET deploy every $((RATE_LIMIT_SECONDS / 60)) minutes. Try again in $(((wait + 59) / 60)) minute(s)."
+  fi
 
   if [[ $TARGET == server ]]; then
     [[ $head != "$COMMIT" ]] || finish nothing_new "Nothing new: ${head:0:8} is already deployed."
@@ -976,26 +1360,37 @@ main() {
     local infra
     infra="$(g diff --name-only "$head" "$COMMIT" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } | head -5 | paste -sd, - || true)"
     [[ -z $infra ]] || finish rejected "Rejected: this change touches deployment files ($infra). Deploy it by hand on the host: scripts/deploy.sh"
+    # Whether the runners need rebuilding for what really goes out (BOS-753): the card only knew its own range.
+    if ((${#REQ_KV[@]})); then
+      local rp
+      rp="$(g diff --name-only "$head" "$COMMIT" | grep -E "$RUNNER_PATHS" || true)"
+      if [[ -n $rp ]]; then REQ_KV+=(runner_changed=true); else REQ_KV+=(runner_changed=false); fi
+    fi
   fi
 
   if ((DRY)); then
-    if [[ $TARGET == server ]]; then problem="$(readable_problem "$REPO")"; [[ -z $problem ]] || log "[dry-run] the real run would stop: $problem"; fi
-    log "[dry-run] checks passed: would run: $(if [[ $TARGET != server ]]; then echo "scripts/update-runner.sh"; elif bluegreen_enabled; then echo "a blue/green swap to ${COMMIT:0:8}"; else echo "scripts/deploy.sh --yes --no-runner --commit ${COMMIT:0:8}"; fi)"
+    if [[ $TARGET != runner ]]; then problem="$(readable_problem "$REPO")"; [[ -z $problem ]] || log "[dry-run] the real run would stop: $problem"; fi
+    log "[dry-run] checks passed: would run: $(if [[ $TARGET == runner ]]; then echo "scripts/update-runner.sh"; elif [[ $TARGET == restart ]] && bluegreen_enabled; then echo "a blue/green restart (fresh copy) at ${COMMIT:0:8}"; elif [[ $TARGET == restart ]]; then echo "scripts/deploy.sh --yes --no-runner --force --commit ${COMMIT:0:8}"; elif bluegreen_enabled; then echo "a blue/green swap to ${COMMIT:0:8}"; else echo "scripts/deploy.sh --yes --no-runner --commit ${COMMIT:0:8}"; fi)"
     exit 0
   fi
 
-  printf '%s\n' "$(date +%s)" >"$STATE/last-$TARGET"
+  printf '%s\n' "$(date +%s)" >"$STATE/last-$slot"
   if [[ -f $LOG && $(stat -c %s "$LOG") -gt 1000000 ]]; then tail -n 2000 "$LOG" >"$LOG.tmp" && mv "$LOG.tmp" "$LOG"; fi
   write_status running "Running: $TARGET ${COMMIT:0:8}"
   log "Running the $TARGET action for ${COMMIT:0:8} (request $REQ_ID)."
   local rc=0 result msg
-  if [[ $TARGET == server ]] && bluegreen_enabled; then
+  [[ $TARGET != restart ]] || RESTART=1
+  if [[ $TARGET != runner ]] && bluegreen_enabled; then
     do_deploy_bluegreen >>"$LOG" 2>&1 || rc=$?
-    [[ $BG_RESULT == deployed ]] || BG_MSG="${BG_MSG:-The blue/green swap stopped with an error (exit $rc).} See $LOG on the host."
+    [[ $BG_RESULT == deployed ]] || BG_MSG="${BG_MSG:-The blue/green ${TARGET/server/swap} stopped with an error (exit $rc).} See $LOG on the host."
     finish "${BG_RESULT:-failed}" "$BG_MSG" "$BG_BACKUP"
   fi
-  if [[ $TARGET == server ]]; then do_deploy_server >>"$LOG" 2>&1 || rc=$?; else do_update_runner >>"$LOG" 2>&1 || rc=$?; fi
-  if [[ $TARGET == server ]]; then
+  case $TARGET in
+    server) do_deploy_server >>"$LOG" 2>&1 || rc=$? ;;
+    restart) do_restart_server >>"$LOG" 2>&1 || rc=$? ;;
+    *) do_update_runner >>"$LOG" 2>&1 || rc=$? ;;
+  esac
+  if [[ $TARGET != runner ]]; then
     result="$(deploy_status_field result)"; msg="$(deploy_status_field message)"
     [[ $(deploy_status_field to_commit) == "$COMMIT" ]] || { result=""; msg=""; }
   else
@@ -1003,12 +1398,22 @@ main() {
   fi
   if ((rc == 0)); then
     [[ $result == nothing_new ]] || result=deployed
-    if [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="New runner image ready (commit ${COMMIT:0:8}); Boss Man is waiting for runs to finish, then swaps the runners and reports the result."; fi
+    if [[ $TARGET == restart ]]; then msg="Restarted at ${COMMIT:0:8}: the server was rebuilt from what is checked out and is healthy again."
+    elif [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="New runner image ready (commit ${COMMIT:0:8}${REQ_KV[0]:+, built from the version the server runs now; the card named ${ASKED_SHORT}, which that includes}); Boss Man is waiting for runs to finish, then swaps the runners and reports the result."; fi
   else
     case $result in partial | rolled_back) ;; *) result=failed ;; esac
     msg="${msg:-The $TARGET action stopped with an error (exit $rc).} See $LOG on the host."
   fi
   finish "$result" "$msg" "$(deploy_status_field backup)"
 }
+
+# BOS-986: a by-hand look at what this host says about itself, on the same terms as a tick, but with no request read,
+# no deploy run and no lock held. It writes outbox/host.json exactly as a tick would, so a fix's effect can be checked
+# straight away without waiting a minute for the next cron run.
+if [[ ${FACTS:-0} == 1 ]]; then
+  write_host_facts || { echo "ERROR: could not write $OUTBOX/host.json." >&2; exit 1; }
+  echo "Wrote $OUTBOX/host.json"
+  exit 0
+fi
 
 main

@@ -3,6 +3,7 @@
 // asked, the wiki and tickets. Never in it: secret values or hints, owner login, runs, costs.
 import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { strToU8, zipSync } from "fflate";
+import { readWatchdogSettings } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentSkills, agents, companies, features, keyResults, mcpServers, milestones, objectives, projects, secretGrantAgents, secretGrants, secrets, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
 import { slugify } from "./wiki.js";
@@ -30,7 +31,9 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
   if (!c) return null;
   const files: Record<string, Uint8Array> = {};
 
-  files["company.json"] = json({ name: c.name, mission: c.mission, reviewPolicy: c.reviewPolicy, goalCheckDays: c.goalCheckDays, ownerApprovesEngagements: c.ownerApprovesEngagements, ticketPrefix: c.ticketPrefix });
+  // The watchdog's switch travels with the company (BOS-762), so a package can ask for it and the
+  // import can say in plain words when it kept it on anyway. Its limits are left out and take the defaults.
+  files["company.json"] = json({ name: c.name, mission: c.mission, reviewPolicy: c.reviewPolicy, goalCheckDays: c.goalCheckDays, ownerApprovesEngagements: c.ownerApprovesEngagements, ticketPrefix: c.ticketPrefix, ...(c.standingRules?.trim() ? { standingRules: c.standingRules } : {}), watchdog: { enabled: readWatchdogSettings(c.watchdog).enabled } });
 
   // Agents, by a folder name other files refer to them by.
   const team = await db.select().from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt))).orderBy(asc(agents.createdAt));

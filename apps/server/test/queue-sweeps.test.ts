@@ -128,6 +128,24 @@ describe("ranked decision queue (R20)", () => {
     expect(q[0]!.score).toBeLessThan(q[1]!.score);
   });
 
+  // BOS-804: the card read "Raised just now" for a card 8 minutes old, and every card carried "Score 0: 0 for waiting".
+  // Both were the app's, not the design note's seed scripts: the age words came from the rank reasons, which use
+  // whole hours, and the age part is under 1 for anything raised within a day, so it rounded to 0 on every new card.
+  it("a normal card 8 minutes old scores 0 but still ranks its age as 'Raised just now'", async () => {
+    ctx = await setup();
+    const fresh = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+    // A new card blocks nothing and is due nothing, so only the age scores. One point a day rounded to a whole
+    // point leaves the age part at 0 for anything under ~2.4 hours (8 min => 0.006 => 0.0), which is why every
+    // new card showed "Score 0: 0 for waiting". The reason itself is still "Raised just now" under an hour, so
+    // the card needed its own age label (BOS-804).
+    ctx.advance(8 * 60 * 1000);
+    const [after] = (await ctx.queue()) as unknown as Array<Row & { parts: { age: number } }>;
+    expect(after!.id).toBe(fresh.id);
+    expect(after!.parts.age).toBe(0);
+    expect(Math.round(after!.score)).toBe(0);
+    expect(after!.reasons).toContain("Raised just now");
+  });
+
   describe("do-this-next ordering and the waiting group (BOS-551)", () => {
     type Ordered = Row & { step?: number | null; waiting?: string | null; doAfter?: string[]; doBefore?: string[] };
     const ordered = async () => (await ctx.queue()) as unknown as Ordered[];
@@ -287,6 +305,85 @@ describe("ranked decision queue (R20)", () => {
       const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, mine.id));
       expect((row!.context as { doAfter?: unknown[] }).doAfter ?? []).toEqual([]);
     });
+
+    it("the menu badge's count is the queue's actionable cards only: not waiting, superseded, CEO-tier or lesson ones (BOS-969)", async () => {
+      ctx = await setup();
+      // Two cards the owner can act on now.
+      const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      const plain = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
+      // One the owner already acted on: the agent is checking it (superseded → waiting group).
+      const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the other budget?", options: ["Approve", "No"], recommended: "Approve" });
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+      // One whose ticket went back to an agent (a merge card in the waiting group).
+      const sentBackTicket = await ctx.ticket({ title: "Ship the invoicing page", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: sentBackTicket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
+      // One on the CEO tier, still on the ladder: not the owner's to answer yet.
+      const [ceoTier] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "question", tier: "ceo", question: "Merge retry for the CEO", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: sentBackTicket.id, command: "scripts/check-all.sh", output: "failed", ladder: { rung: "ceo" } } as never }).returning();
+      // One of Boss Man's lesson cards, which are never the owner's in the queue.
+      const [lesson] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "question", tier: "owner", question: "Lesson for the brief?", options: ["Apply", "Skip"], recommendedOption: "Skip", context: { type: "lesson", lesson: "Say it plainly." } as never }).returning();
+
+      const rows = (await ordered()).map((r) => r.id);
+      expect(new Set(rows)).toEqual(new Set([hands.id, plain.id, stale.id, sentBack!.id]));
+      expect(rows).not.toContain(ceoTier!.id);
+      expect(rows).not.toContain(lesson!.id);
+      // The one shared count: the menu badge and the page heading come from it.
+      const tally = async (query = "") => (await ctx.req("GET", `/api/decisions/tally${query}`)).json() as { open: number; waiting: number };
+      expect(await tally()).toEqual({ open: 2, waiting: 2 });
+      expect(await tally(`?companyId=${ctx.company.id}`)).toEqual({ open: 2, waiting: 2 });
+      // A company with no cards of its own reads zero, whatever this one holds.
+      const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
+      expect(await tally(`?companyId=${other.company.id}`)).toEqual({ open: 0, waiting: 0 });
+      // (BOS-996) The page no longer sends its own figures, and if a stale tab still does, the server
+      // ignores them: the tally is the server's alone.
+      expect(await tally(`?open=1&waiting=1`)).toEqual({ open: 2, waiting: 2 });
+      expect(await tally(`?open=99&waiting=99`)).toEqual({ open: 2, waiting: 2 });
+      expect(await tally(`?open=0&waiting=0`)).toEqual({ open: 2, waiting: 2 });
+
+      // A card moving between groups changes the count on the next read, the way the live badge follows it.
+      // These writes go straight to the table (as another process might), so step past the few-seconds
+      // kept tally first (BOS-996).
+      ctx.advance(6_000);
+      await ctx.db.update(decisions).set({ staleAt: null, staleReason: null }).where(eq(decisions.id, stale.id));
+      expect(await tally()).toEqual({ open: 3, waiting: 1 });
+      ctx.advance(6_000);
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, plain.id));
+      expect(await tally()).toEqual({ open: 2, waiting: 2 });
+      // Answering the hands-on card drops it out of both figures at once: an answer clears the kept tally.
+      await ctx.req("POST", `/api/decisions/${hands.id}/answer`, { answer: "Done" });
+      expect(await tally()).toEqual({ open: 1, waiting: 2 });
+    });
+
+    it("the badge, the heading and the dashboard share one read of the queue for a few seconds (BOS-996)", async () => {
+      ctx = await setup();
+      await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
+      // Count the reads of the decisions table, the queue walk's own first select: the tally keeps the
+      // figures, not the rows. An answer or a new card clears the kept tally first.
+      const measure = async (url: string) => {
+        ctx.reads.queries = 0;
+        ctx.reads.rows = 0;
+        ctx.reads.byTable = {};
+        ctx.reads.on = true;
+        const r = await ctx.req("GET", url);
+        ctx.reads.on = false;
+        return { body: r.json() as { open: number; waiting: number; stats?: { decisionsWaiting: number } }, queueRows: ctx.reads.byTable.decisions ?? 0 };
+      };
+      const first = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
+      expect(first.body).toEqual({ open: 1, waiting: 0 });
+      expect(first.queueRows).toBeGreaterThan(0);
+      // The page heading, the menu badge and the dashboard all read one company's view, polling
+      // together a moment later: they share the kept tally, so the queue is not walked again.
+      expect((await measure(`/api/decisions/tally?companyId=${ctx.company.id}`)).queueRows).toBe(0);
+      expect((await measure(`/api/decisions/tally?companyId=${ctx.company.id}`)).queueRows).toBe(0);
+      const dash = await measure(`/api/companies/${ctx.company.id}/dashboard`);
+      expect((dash.body as unknown as { stats: { decisionsWaiting: number } }).stats.decisionsWaiting).toBe(1);
+      expect(dash.queueRows).toBe(0);
+      // Past the few seconds the queue is walked again, so a card moving between groups shows at once.
+      ctx.advance(6_000);
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(sql`${decisions.companyId} = ${ctx.company.id}`);
+      const later = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
+      expect(later.body).toEqual({ open: 0, waiting: 1 });
+      expect(later.queueRows).toBeGreaterThan(0);
+    });
   });
 
   it("links the tickets a card is about and the references in its text, in its own company only", async () => {
@@ -403,7 +500,7 @@ describe("stale blockers (R21)", () => {
     // The sweep also asked the CEO to hand out work, as the worker had nothing to do (BOS-615). That wake
     // then waits 25 hours with no run finishing, so the no-progress alert (BOS-593) rightly wakes the CEO
     // with a "decision" card too; neither is what this test is about.
-    expect(await ctx.db.select().from(wakes).where(and(ne(wakes.reason, "idle agents"), ne(wakes.reason, "decision")))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+    expect(await ctx.db.select().from(wakes).where(and(ne(wakes.reason, "idle agents"), ne(wakes.reason, "decision"), ne(wakes.reason, "ceo reply")))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
   });
 
   it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {

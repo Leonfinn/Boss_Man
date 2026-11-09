@@ -6,6 +6,8 @@ import { away } from "../server-watch";
 import { when } from "./Runs";
 import { STATUS_TONE } from "./Features";
 import { SaveButton, useSaveState } from "../components/SaveButton";
+import { clearDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 type State = "unprocessed" | "processed" | "archived";
 const TABS: Array<{ id: State; label: string }> = [
@@ -18,6 +20,8 @@ const SOURCE: Record<string, string> = { owner: "You", chat: "Chat", agent: "An 
 function AddNote({ companyId, onAdded }: { companyId: string; onAdded: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ text: "", title: "", name: "", email: "", segment: "", source: "owner" });
+  // The feedback text is kept in this browser as it is typed (DR-045); it goes once the feedback is saved.
+  const textKey = `feedback-new/${companyId}`;
   const [error, setError] = useState<string | null>(null);
   const customers = usePoll((signal) => (open ? api<Array<{ id: string; name: string }>>(`/api/companies/${companyId}/feedback-customers`, { signal }) : Promise.resolve([])), 60_000, `cust-${companyId}-${open}`);
   if (!open)
@@ -37,7 +41,7 @@ function AddNote({ companyId, onAdded }: { companyId: string; onAdded: (id: stri
         ...(form.name.trim() ? { customer: { name: form.name.trim(), ...(form.email.trim() ? { email: form.email.trim() } : {}), ...(form.segment.trim() ? { segment: form.segment.trim() } : {}) } } : {}),
       },
     }).then(
-      (n) => (setForm({ text: "", title: "", name: "", email: "", segment: "", source: "owner" }), setOpen(false), setError(null), onAdded(n.id)),
+      (n) => (setForm({ text: "", title: "", name: "", email: "", segment: "", source: "owner" }), clearDraft(textKey), setOpen(false), setError(null), onAdded(n.id)),
       (err: Error) => setError(err.message),
     );
   };
@@ -45,7 +49,7 @@ function AddNote({ companyId, onAdded }: { companyId: string; onAdded: (id: stri
     <form className="card" onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }} aria-label="Add feedback">
       <div className="field">
         <label htmlFor="fb-text">Feedback, as they said it</label>
-        <textarea id="fb-text" rows={5} required maxLength={20_000} autoFocus value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} placeholder="Paste an email, a message or your notes from a call." />
+        <DraftTextarea draftKey={textKey} id="fb-text" rows={5} required maxLength={20_000} autoFocus value={form.text} onChange={(text) => setForm({ ...form, text })} placeholder="Paste an email, a message or your notes from a call." />
       </div>
       <div className="form-grid">
         <div className="field">
@@ -303,16 +307,26 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
 function PortalSettings({ companyId, shown }: { companyId: string; shown: number }) {
   const s = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `portal-${companyId}`);
   const [form, setForm] = useState<{ title: string; intro: string } | null>(null);
+  // BOS-967: the optional way back to the owner's website, saved on its own so a bad address
+  // blocks only that save. Blank means the portal shows no back link.
+  const [back, setBack] = useState<{ url: string; text: string } | null>(null);
+  const backProblem = back && back.url.trim() && !/^https:\/\/[^\s]+$/i.test(back.url.trim()) ? "Enter a full web address that starts with https://" : null;
+  // The introduction is kept in this browser as it is typed (DR-045); it goes once the portal is saved.
+  const introKey = `portal-intro/${companyId}`;
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const d = s.data;
   const sv = useSaveState(form);
   const [busy, setBusy] = useState(false);
+  const [backBusy, setBackBusy] = useState(false);
   const [logoV, setLogoV] = useState(0);
   useEffect(() => {
     if (d && !form) setForm({ title: d.portalTitle ?? "", intro: d.portalIntro ?? "" });
   }, [d, form]);
-  if (!d || !form) return null;
-  const run = (p: Promise<unknown>, ok?: string) => void p.then(() => (setNote(ok ? { ok: true, text: ok } : null), s.reload()), (err: Error) => setNote({ ok: false, text: err.message }));
+  useEffect(() => {
+    if (d && !back) setBack({ url: d.portalBackUrl ?? "", text: d.portalBackText ?? "" });
+  }, [d, back]);
+  if (!d || !form || !back) return null;
+  const run = (p: Promise<unknown>, ok?: string) => p.then(() => (setNote(ok ? { ok: true, text: ok } : null), s.reload()), (err: Error) => setNote({ ok: false, text: err.message }));
   const logoUrl = `/api/companies/${companyId}/feedback/portal-logo`;
   const pickLogo = (file: File | undefined) => {
     if (!file) return;
@@ -328,7 +342,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
         Feedback portal
       </h2>
       <p className="muted" style={{ fontSize: 14 }}>
-        A page for people outside: they see the features you choose (tick "Show on the feedback portal" on a feature), vote on how much each matters to them, comment, and suggest ideas. What they send arrives here marked "from outside". Anyone with the link can use it, so share it only where you mean to.
+        A page for people outside: they see the features on the portal (new features go on by default unless they look like security work), vote on how much each matters to them, comment, and suggest ideas. What they send arrives here marked "from outside". Anyone with the link can use it, so share it only where you mean to.
       </p>
       <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
         <input type="checkbox" checked={d.portalEnabled} onChange={(e) => run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { enabled: e.target.checked } }))} />
@@ -358,7 +372,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
           e.preventDefault();
           setBusy(true);
           run(
-            api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { title: form.title.trim() || null, intro: form.intro.trim() || null } }).then(() => sv.markSaved()).finally(() => setBusy(false)),
+            api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { title: form.title.trim() || null, intro: form.intro.trim() || null } }).then(() => { sv.markSaved(); clearDraft(introKey); }).finally(() => setBusy(false)),
             "Saved.",
           );
         }}
@@ -385,9 +399,52 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
         </div>
         <div className="field">
           <label htmlFor="portal-intro">Introduction</label>
-          <textarea id="portal-intro" rows={2} maxLength={2000} value={form.intro} onChange={(e) => setForm({ ...form, intro: e.target.value })} />
+          <DraftTextarea draftKey={introKey} id="portal-intro" rows={2} maxLength={2000} value={form.intro} onChange={(text) => setForm({ ...form, intro: text })} />
         </div>
         <SaveButton {...sv} busy={busy} style={{ alignSelf: "flex-start" }} />
+      </form>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (backProblem) return;
+          setBackBusy(true);
+          run(
+            api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { backUrl: back.url.trim() || null, backText: back.text.trim() || null } }),
+            back.url.trim() ? "Back link saved." : "Back link removed.",
+          ).finally(() => setBackBusy(false));
+        }}
+        style={{ display: "flex", flexDirection: "column", gap: 10 }}
+      >
+        <div className="field">
+          <label htmlFor="portal-back-url">Link back to your website (optional)</label>
+          <input
+            id="portal-back-url"
+            type="url"
+            inputMode="url"
+            maxLength={2000}
+            placeholder="https://example.com"
+            value={back.url}
+            aria-invalid={!!backProblem}
+            aria-describedby={backProblem ? "portal-back-url-error" : undefined}
+            onChange={(e) => setBack({ url: e.target.value, text: back.text })}
+          />
+          {backProblem && (
+            <p id="portal-back-url-error" className="error" role="alert">
+              {backProblem}
+            </p>
+          )}
+          <span className="muted" style={{ fontSize: 13 }}>
+            When set, the portal shows a "back to" bar at the top and a link at the bottom, so a visitor can return to your site. Leave it empty for no bar.
+          </span>
+        </div>
+        <div className="field">
+          <label htmlFor="portal-back-text">Link text (optional)</label>
+          <input id="portal-back-text" maxLength={40} placeholder="e.g. Boss Man" value={back.text} onChange={(e) => setBack({ url: back.url, text: e.target.value })} />
+          <span className="muted" style={{ fontSize: 13 }}>
+            Shown after "Back to". Leave it empty to use the portal heading.
+          </span>
+        </div>
+        <SaveButton dirty saved={false} busy={backBusy} disabled={!!backProblem || !back || (!back.url.trim() && !back.text.trim())} style={{ alignSelf: "flex-start" }} />
       </form>
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
