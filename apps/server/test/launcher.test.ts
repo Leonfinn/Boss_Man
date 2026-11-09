@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, notifications, projects, settings } from "../src/db/schema.js";
-import { allowsPrivate, gitHostAddress, isLanHost, resolvesStack, slugify, toolServerAddress } from "../src/services/launcher.js";
+import { allowsPrivate, gitHostAddress, isLanHost, isStackAddress, resolvesStack, slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -360,8 +360,33 @@ describe("runners through the launcher (R55)", () => {
   });
 });
 
-describe("isLanHost (BOS-777): whether a git host is trusted for private addresses, with no DNS", () => {
-  it("trusts private IP literals and LAN-style names only", () => {
+describe("the launcher's private addresses (BOS-886): the shared table, pinned to today's answers", () => {
+  // The same list the permission check and the skill fetcher agree on (skill-security-bos88.test.ts), with the launcher's
+  // own answer: private means part of the stack, so multicast, 192.0.0.0/24 and 198.18.0.0/15 stay out (and a mapped
+  // address in hex form is only stack if the IPv4 it carries is).
+  const LIST: Array<[string, boolean]> = [
+    ["10.1.2.3", true], ["127.0.0.1", true], ["169.254.1.1", true], ["100.64.0.1", true], ["192.0.0.1", false], ["198.18.0.1", false], ["224.0.0.251", false],
+    ["::1", true], ["fd00::1", true], ["ff02::1", false], ["::ffff:192.168.0.1", true], ["::ffff:10.0.0.1", true],
+    ["8.8.8.8", false], ["2606:4700::1", false],
+  ];
+  it("answers each address the same way as before for the stack's ranges, and does not widen to the fetch-only ones", async () => {
+    const lookup = async (h: string) => ({ "mcast.example.org": ["224.0.0.251"], "public.example.org": ["93.184.216.34"] })[h] ?? (() => { throw new Error("ENOTFOUND"); })();
+    for (const [ip, stack] of LIST) {
+      expect(isStackAddress(ip), ip).toBe(stack);
+      // Through a URL: an IPv6 literal is flagged by guardHost (unhandled, fail closed for the preview) and never trusted.
+      const u = `http://${ip.includes(":") ? `[${ip}]` : ip}:1/`;
+      if (!ip.includes(":")) {
+        expect(await resolvesStack(u, lookup), u).toBe(stack ? "stack" : "ok");
+        expect(await allowsPrivate(u, lookup), u).toBe(stack);
+      }
+    }
+    // A name that resolves to a fetch-only range is not the stack; one that resolves to a stack range is.
+    expect(await resolvesStack("http://mcast.example.org:1/", lookup)).toBe("ok");
+    expect(await allowsPrivate("http://mcast.example.org:1/", lookup)).toBe(false);
+  });
+});
+
+describe("isLanHost (BOS-777): whether a git host is trusted for private addresses, with no DNS", () => {  it("trusts private IP literals and LAN-style names only", () => {
     for (const u of ["http://192.168.68.67:3003/o/r.git", "https://10.0.0.5/o/r", "git@git.lan:o/r.git", "ssh://git@h.local:2222/o/r", "http://gitea/o/r", "https://git.corp.internal/o/r", "http://nas.home/o/r"]) expect(isLanHost(u), u).toBe(true);
     for (const u of ["https://git.example.org/o/r.git", "https://github.com/o/r.git", "git@github.com:o/r.git", "http://8.8.8.8/o/r", "https://lan.example.org/o/r", "/srv/repos/r", "not a url"]) expect(isLanHost(u), u).toBe(false);
   });

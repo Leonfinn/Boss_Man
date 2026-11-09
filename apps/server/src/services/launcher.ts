@@ -4,6 +4,7 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
+import { inV4Ranges, inV6Ranges, NON_PUBLIC_V4, NON_PUBLIC_V6 } from "@boss-man/shared";
 import { and, eq, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, mcpServers, projects, runners, settings } from "../db/schema.js";
@@ -65,18 +66,25 @@ export function isStackService(url: string): boolean {
   }
 }
 
+/**
+ * The stack's own ranges, from the shared table (BOS-886) but deliberately narrower: the stack's containers live on
+ * loopback, private, link-local and CGNAT addresses. Multicast, 192.0.0.0/24 and 198.18.0.0/15 are refused by the
+ * permission check and the skill fetcher, but "private" here widens trust, so adding a row would widen it too (BOS-886
+ * pins today's answers in launcher.test.ts). 240.0.0.0/4 was never counted here either.
+ */
+const STACK_V4 = NON_PUBLIC_V4.filter(([network]) => !["192.0.0.0", "198.18.0.0", "224.0.0.0", "240.0.0.0"].includes(network));
+/** Unique-local and link-local: what a stack or home LAN address looks like. Not multicast (ff00::/8), which trust never covered. */
+const STACK_V6 = NON_PUBLIC_V6.filter(([network]) => network !== "ff00");
+
 /** True for loopback, private, link-local, CGNAT and unspecified addresses (IPv4, IPv6, and IPv4-mapped IPv6): where the stack's containers live. */
-export function isPrivateAddress(ip: string): boolean {
+export function isStackAddress(ip: string): boolean {
   const v = isIP(ip);
-  if (v === 4) {
-    const [a, b] = ip.split(".").map(Number) as [number, number];
-    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
-  }
+  if (v === 4) return inV4Ranges(ip, STACK_V4);
   if (v === 6) {
     const l = ip.toLowerCase();
     const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(l);
-    if (mapped) return isPrivateAddress(mapped[1]!);
-    return l === "::" || l === "::1" || /^f[cd]/.test(l) || /^fe[89ab]/.test(l) || /^::ffff:/.test(l);
+    if (mapped) return isStackAddress(mapped[1]!);
+    return l === "::" || l === "::1" || inV6Ranges(l, STACK_V6) || /^::ffff:/.test(l);
   }
   return false;
 }
@@ -111,11 +119,11 @@ export async function reachesStack(url: string, lookup: HostLookup = systemLooku
   if (isStackService(url)) return true;
   const host = guardHost(url);
   if (host === null) return true;
-  if (isIP(host)) return isPrivateAddress(host);
+  if (isIP(host)) return isStackAddress(host);
   if (STACK_LIKE_NAME(host)) return true;
   try {
     const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
-    return addrs.length === 0 || addrs.some(isPrivateAddress);
+    return addrs.length === 0 || addrs.some(isStackAddress);
   } catch {
     return true;
   }
@@ -131,11 +139,11 @@ export async function reachesStack(url: string, lookup: HostLookup = systemLooku
 export async function allowsPrivate(url: string, lookup: HostLookup = systemLookup): Promise<boolean> {
   const host = guardHost(url);
   if (host === null) return false;
-  if (isIP(host)) return isPrivateAddress(host);
+  if (isIP(host)) return isStackAddress(host);
   if (STACK_LIKE_NAME(host)) return true;
   try {
     const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
-    return addrs.length > 0 && addrs.every(isPrivateAddress);
+    return addrs.length > 0 && addrs.every(isStackAddress);
   } catch {
     return false;
   }
@@ -151,11 +159,11 @@ export async function resolvesStack(url: string, lookup: HostLookup = systemLook
   if (isStackService(url)) return "stack";
   const host = guardHost(url);
   if (host === null) return "lookup-failed";
-  if (isIP(host)) return isPrivateAddress(host) ? "stack" : "ok";
+  if (isIP(host)) return isStackAddress(host) ? "stack" : "ok";
   if (STACK_LIKE_NAME(host)) return "stack";
   try {
     const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
-    return addrs.some(isPrivateAddress) ? "stack" : "ok";
+    return addrs.some(isStackAddress) ? "stack" : "ok";
   } catch {
     return "lookup-failed";
   }
@@ -169,7 +177,7 @@ export async function resolvesStack(url: string, lookup: HostLookup = systemLook
 export function isLanHost(url: string): boolean {
   const host = guardHost(url);
   if (host === null) return false;
-  return isIP(host) ? isPrivateAddress(host) : STACK_LIKE_NAME(host);
+  return isIP(host) ? isStackAddress(host) : STACK_LIKE_NAME(host);
 }
 
 /** The launcher's own check for an allow entry (apps/launcher/src/spec.ts): one bad entry makes it refuse the whole list, so never send one it would refuse. */
@@ -337,7 +345,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
         if (trust === undefined) return null; // not in the list the guard is sent
         // The guard also keeps a private IP literal whatever its flag (netguard.sh allow_rules): it can't be re-pointed.
         const host = guardHost(url);
-        const trusted = trust || (!!host && isIP(host) !== 0 && isPrivateAddress(host));
+        const trusted = trust || (!!host && isIP(host) !== 0 && isStackAddress(host));
         const notAllowed = !trusted && (await resolvesStack(url, lookup)) === "stack" ? (isStackService(url) ? DROPPED_TIED_TO_SERVER : DROPPED_PRIVATE) : null;
         return { address: address!, kind, name, company, trusted, notAllowed };
       };
