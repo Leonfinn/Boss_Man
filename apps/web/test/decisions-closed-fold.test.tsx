@@ -131,6 +131,21 @@ body { margin: 0; } main { padding: 16px; }
   />,
 )}</main></div></body></html>`;
 
+// (BOS-809) The empty-queue case: nothing open, only closed notices. The "Nothing needs you" state
+// shows, and the closed notices (kept steps, the link to the newer card) must still be there.
+const emptyHtml = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}
+body { margin: 0; } main { padding: 16px; }
+</style></head><body><div class="app"><main>${renderToStaticMarkup(
+  <Decisions
+    decisions={[]}
+    companies={[company]}
+    loaded
+    agentsWorking={0}
+    onAnswered={() => {}}
+    closedNotices={[closedNotice(0), closedNotice(1)]}
+  />,
+)}</main></div></body></html>`;
+
 type Measure = {
   openTop: number;
   closedTop: number;
@@ -153,7 +168,10 @@ const measure = () => {
   const summary = group.querySelector(":scope > summary") as HTMLElement;
   const openList = document.querySelector(".decision .deploy-update ul") as HTMLElement;
   const more = document.querySelector(".decision .deploy-update button") as HTMLButtonElement | null;
-  const note = document.querySelector(".decision .body") as HTMLElement;
+  // (BOS-809) Requirement 3 is about the squeezed side note that wrapped one word per line. That was
+  // the closed card's own note column; folding to one line removed it. The remaining place a kept note
+  // is read is .closed-body, which must keep a readable minimum width.
+  const note = document.querySelector(".closed-covers .closed-body") as HTMLElement | null;
   return {
     openTop: open.getBoundingClientRect().top,
     closedTop: group.getBoundingClientRect().top,
@@ -161,7 +179,7 @@ const measure = () => {
     closedOpen: group.open,
     lineHeights: rows.map((r) => Math.round(r.getBoundingClientRect().height)),
     singleLine: rows.every((r) => r.scrollWidth <= r.clientWidth + 1 || getComputedStyle(r).textOverflow === "ellipsis"),
-    noteLines: [Math.round(note.getBoundingClientRect().width)],
+    noteLines: note ? [Math.round(note.getBoundingClientRect().width)] : [],
     updateListItems: openList.querySelectorAll("li").length,
     moreButton: more?.textContent?.trim() ?? null,
     waiting: document.querySelector(".page-head .sub")?.textContent ?? "",
@@ -218,6 +236,29 @@ describe.skipIf(!browser)("closed Decisions cards fold away (BOS-809)", () => {
     }
   });
 
+  it("empty queue: the closed notices still show under 'Closed (2)' beside the nothing-to-do state", async () => {
+    const page = await browser!.newPage({ viewport: { width: 1280, height: 900 } });
+    try {
+      await page.setContent(emptyHtml, { waitUntil: "load" });
+      const r = await page.evaluate(() => {
+        const group = document.querySelector(".closed-covers") as HTMLDetailsElement | null;
+        return {
+          nothingState: document.body.textContent?.includes("Nothing needs you") ?? false,
+          summary: group?.querySelector(":scope > summary")?.textContent ?? null,
+          groupOpen: group?.open ?? null,
+          cards: document.querySelectorAll(".closed-covers [data-closed-card]").length,
+        };
+      });
+      // The "Nothing needs you" state still shows, and the notices below it are not lost.
+      expect(r.nothingState).toBe(true);
+      expect(r.summary).toBe("Closed (2)");
+      expect(r.groupOpen).toBe(false);
+      expect(r.cards).toBe(2);
+    } finally {
+      await page.close();
+    }
+  });
+
   it.skipIf(!shot)("saves a before/after screenshot to the scratch folder when asked", async () => {
     const page = await browser!.newPage({ viewport: { width: 1280, height: 900 } });
     try {
@@ -240,10 +281,20 @@ describe.skipIf(!browser)("closed Decisions cards fold away (BOS-809)", () => {
         // One line, not a paragraph: on a touch device the phone tap-target rule (BOS-245) gives
         // every summary a 44px minimum height, so allow that rather than a desktop 40px.
         for (const h of m.lineHeights) expect(h).toBeLessThan(45);
-        expect(m.noteLines[0]).toBeGreaterThan(240);
         expect(m.closedCount).toBe(6);
         expect(m.updateListItems).toBe(4);
         expect(m.scrollWidth).toBeLessThanOrEqual(m.innerWidth + 1);
+        // Requirement 3: open the group and its first closed card; the kept note (.closed-body) must
+        // keep a readable minimum width, never a one-word-per-line column.
+        const noteWidth = await page.evaluate(() => {
+          const group = document.querySelector(".closed-covers") as HTMLDetailsElement;
+          group.open = true;
+          const card = document.querySelector(".closed-covers [data-closed-card] details") as HTMLDetailsElement;
+          card.open = true;
+          const body = document.querySelector(".closed-covers .closed-body") as HTMLElement;
+          return Math.round(body.getBoundingClientRect().width);
+        });
+        expect(noteWidth).toBeGreaterThan(240);
       } finally {
         await page.close();
       }

@@ -179,9 +179,9 @@ p { margin: 0; }
 .decision .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 520px) { .decision .actions { flex-direction: column; } .decision .actions .btn { width: 100%; } .decision { grid-template-columns: 1fr; } .decision .score { flex-direction: row; align-items: center; padding: 14px 16px 0; } .decision .body { padding: 10px 16px 16px; } }
 
-/* (BOS-809) Closed cards fold to one clipped line each inside the "Closed (N)" group. A card's side
-   note column keeps a readable minimum and moves under the text on narrow cards, so it never wraps to
-   one word per line. */
+/* (BOS-809) Closed cards fold to one clipped line each inside the "Closed (N)" group, so the full-size
+   card (and its narrow "A newer update card covers this one" column that wrapped one word per line) is
+   gone. A line opens to reveal its kept steps in .closed-body, which keeps a readable minimum width. */
 .closed-covers .covered-line { list-style: none; cursor: pointer; display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
 .closed-covers .covered-line::-webkit-details-marker { display: none; }
 .closed-covers .covered-line::before { content: "▸ "; color: var(--muted); }

@@ -1223,9 +1223,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               </ul>
             </details>
           )}
-          <ClosedGroup notices={shownNotices} advised={advised} />
         </>
       )}
+      {/* (BOS-809) Outside the empty-queue ternary on purpose: a closed notice (kept steps, the link to
+          the newer card) and the settled/withdrawn history must still show when nothing else is open. */}
+      <ClosedGroup notices={shownNotices} advised={advised} />
     </>
   );
 }
