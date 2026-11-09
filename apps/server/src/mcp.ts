@@ -41,10 +41,10 @@ import { AgentError, type agentsService } from "./services/agents.js";
 import { resolveReviewer } from "./services/review-policy.js";
 import { activeRows, latestRows } from "./services/review-kinds.js";
 import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
-import { markSearched, remember, type paService } from "./services/pa.js";
+import type { paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
 import type { alertLadder } from "./services/alert-ladder.js";
-import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
+import { RetroError, type retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
@@ -52,6 +52,8 @@ import type { serverStatusService } from "./services/server-status.js";
 import { ADDONS, type AddonFacts } from "./services/addons.js";
 import { CAP, cut, fail, managerIn, refsOf, text, withNote, type Scope } from "./mcp-common.js";
 import { registerAgentAdminTools } from "./mcp-agent-admin.js";
+import { buildPaServer } from "./mcp-pa.js";
+import { registerRetro, registerWatchdog } from "./mcp-watchdog.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
@@ -2256,200 +2258,6 @@ function traceCalls(server: McpServer, db: Db, runId: string, companyId: string)
   return server;
 }
 
-/** The tools a PA may have (R87): all reads. Anything else is never registered for it. */
-const PA_READS = new Set(["tickets", "decisions", "list_my_work", "wiki", "whats_new", "board"]);
-
-/**
- * A view of the server that registers only the PA's read tools. What they return is remembered
- * for the run, since pa_reply may cite only that; a wiki write is refused.
- */
-function readOnly(server: McpServer, runId: string): Pick<McpServer, "registerTool"> {
-  return {
-    registerTool: ((name: string, config: never, cb: (input: { action?: string }, extra: never) => Promise<unknown>) => {
-      if (!PA_READS.has(name)) return undefined;
-      return server.registerTool(name, config, (async (input: { action?: string }, extra: never) => {
-        if (name === "wiki" && input.action !== "list" && input.action !== "read") return fail("You can only read the wiki.");
-        const r = await cb(input, extra);
-        // Only a search can show "nothing found"; reading one ticket can't.
-        if ((name === "tickets" && input.action === "find") || (name === "decisions" && input.action === "list")) markSearched(runId);
-        if (name !== "wiki" && input.action !== "file") remember(runId, JSON.stringify(r));
-        return r;
-      }) as never);
-    }) as never,
-  };
-}
-
-/** The PA's server: the read tools plus pa_reply and pa_escalate, and nothing that writes (R87). */
-function buildPaServer(db: Db, { notes, wiki, skills, skillProposals, review, agents: team, pa, images }: Services, scope: Scope) {
-  const server = new McpServer({ name: "bossman", version: "0.1.0" });
-  const reads = readOnly(server, scope.runId);
-  registerSharedTools(reads as McpServer, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
-  registerViewImage(server, images, scope);
-  registerBoard(reads, db, scope);
-  registerListMyWork(reads, db, scope);
-  reads.registerTool(
-    "decisions",
-    { description: "Decisions that are waiting on the owner or the CEO: id, question, options and who raised it.", inputSchema: { action: z.literal("list") } },
-    async () => {
-      const open = await db.select().from(decisionsTable).where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"))).orderBy(decisionsTable.createdAt).limit(40);
-      return text(open.length ? JSON.stringify(open.map((d) => ({ id: d.id, question: d.question, options: d.options, recommended: d.recommendedOption, waitingOn: d.tier, raisedAt: d.createdAt }))) : "No decisions are waiting.");
-    },
-  );
-
-  server.registerTool(
-    "pa_reply",
-    {
-      description:
-        "Answer the owner's last message. The only way you answer them. text is the answer, in plain words, from what your tools returned. cites lists every ticket or decision it rests on, each with its id (ids your tools returned in this run only). An empty list is allowed for a \"nothing found\" answer, but only after you searched with the tickets or decisions tool. confidence is high only when the tools show the answer plainly. Boss Man checks the reply and may hand the question to the CEO instead; the result says so.",
-      inputSchema: {
-        text: z.string().min(1).max(4000),
-        cites: z.array(z.object({ kind: z.enum(["ticket", "decision", "run"]), id: z.string().uuid() })).max(20),
-        confidence: z.enum(["high", "low"]),
-      },
-    },
-    async (input) => {
-      const r = await pa.reply(scope.runId, input);
-      return r.posted ? text(r.note) : fail(r.note);
-    },
-  );
-
-  server.registerTool(
-    "pa_escalate",
-    { description: "Pass the owner's last message to the CEO when you can't answer it from your tools or it needs judgement. summary is what you found, for the CEO. The owner is told it's with the CEO.", inputSchema: { summary: z.string().min(1).max(2000) } },
-    async ({ summary }) => ((await pa.escalate(scope.runId, summary)).ok ? text("Passed to the CEO; the owner was told. Don't answer it yourself.") : fail("There's no unanswered owner message to pass on.")),
-  );
-
-  return server;
-}
-
-/** The workflow retro agent's tools (docs/19 parts 2 and 3): the company's configured retro agent only, and checked again on every call. */
-function registerRetro(server: McpServer, retro: Services["retro"], scope: Scope) {
-  const guarded = (run: () => Promise<string>) => async () => {
-    if (!scope.agentId || !(await retro.isRetroAgent(scope.companyId, scope.agentId))) return fail("Only the agent that runs this company's workflow retro can use this.");
-    try {
-      return text(await run());
-    } catch (err) {
-      if (err instanceof RetroError) return fail(err.message);
-      if (err instanceof z.ZodError) return fail(err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
-      throw err;
-    }
-  };
-  const agentId = () => scope.agentId!;
-  server.registerTool(
-    "workflow_scorecard",
-    { description: "Workflow retro only. The numbers for the retro's period against the one before (per role, handoffs, features waiting on their last tasks), digests of up to 10 of the worst tickets, and the workflow changes already proposed or applied. Start here.", inputSchema: {} },
-    guarded(() => retro.scorecardText(scope.companyId)),
-  );
-  server.registerTool(
-    "save_retro",
-    {
-      description: "Workflow retro only. Save what the retro found, once: findings ranked by how often they recur. Each has a failure label, the handoff where it went wrong (from and to roles, if it fits), the tickets it was seen on (references like HOL-12 or ids), how many tickets in all, and a note of up to 240 characters. Blame handoffs and patterns, never one agent on one ticket.",
-      inputSchema: FindingsShape,
-    },
-    async (input) => guarded(async () => `Saved ${(await retro.save(scope.companyId, agentId(), input)).saved} findings.`)(),
-  );
-  server.registerTool(
-    "propose_workflow_change",
-    {
-      description:
-        "Workflow retro only. Propose one small change; at most 3 per retro, and only one live change per kind and target. It becomes a decision with Apply and Skip; nothing changes until it is answered. Needs evidence (at least 2 tickets), a metric it should move, and what you expect. lever and what target and change hold: playbook (CEO approves the nomination) target = a role, change = {name, description, body}, a skill for that role's agents; Apply sends it to the add-a-skill flow, where the Security Reviewer checks it and the owner decides before any agent gets it. lesson (CEO approves) target = a project name, change = {lesson}, one line for the project's brief. instructions (owner approves) target = an agent name, change = {instructions}, the whole new text. review_policy (owner) target = a risk tier, change = any of {planApprover, reviewer, ownerSignoff}. watchdog (owner) target = watchdog, change = any of the numeric watchdog limits; it is replayed over 14 days first. model (owner) target = an agent name, change = {model}. thinking (owner) target = an agent name, change = {thinking}. metric is one of firstPassRate, meanRework, medianCycleMs, costPerDoneMicros, watchdogFlags (scope: a role or an agent name; defaults to the target), medianWaitMs or bounceRate (scope: from and to roles, optional kind), tailLagMs (whole company).",
-      inputSchema: ProposeShape,
-    },
-    async (input) =>
-      guarded(async () => {
-        const r = await retro.propose(scope.companyId, agentId(), input);
-        return `Proposed as change ${r.changeId}. It is waiting for ${r.approver === "ceo" ? "the CEO" : "the owner"} (decision ${r.decisionId}); nothing changes until it is answered.`;
-      })(),
-  );
-}
-
-/** The Scrum Master's watchdog actions (BOS-58). Each needs a one-line reason, is logged and can be undone. */
-function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], alerts: Services["alerts"], scope: Scope) {
-  server.registerTool(
-    "watchdog",
-    {
-      description:
-        "Your only way to act on the problems the watchdog hands you. Every action needs reason: one line saying why. list: the open flags. nudge (ticketId): ask the assignee to pick it up or say why it's stuck. assign (ticketId, to): an unassigned ticket only, to the obvious colleague by name, or \"ceo\" if none is obvious. rewake (ticketId): wake the assignee again after their run crashed or ended without moving the ticket. chase_review (ticketId): wake the pending reviewers. snooze (flagId, hours up to 48): the flag is fine for now; a third snooze in a row is refused and the ticket goes to the CEO. escalate (ticketId): hand it to the CEO. raise_decision (ticketId, question, options, recommended, triedFirst, ownerMustDo, steps, and proof when the steps have host commands, checked like raise_decision's): when only the owner can unblock it. Boss Man's own alerts come to you first: alerts lists yours. For a plain alert resolve_alert (alertId, optional rewake: true to wake the dropped agent again with a fresh chain) once you've dealt with it. Stalled-run alerts are also yours, even while the watchdog is switched off: resolve_alert with answer \"Keep waiting\" or \"Cancel run\" (add nudge: true to ask the agent why it is quiet), or pass_alert (alertId) when it needs the CEO. A review that keeps being woken without a verdict goes straight to the CEO, not you. Act only on the problems the watchdog handed you, each action at most once per problem until it is handed to you again. The owner can undo any of your actions. You can't do the work, change risk or priority, or close or cancel tickets. Actions are capped per hour; past the cap the watchdog switches off and the owner is told.",
-      inputSchema: {
-        action: z.enum(["list", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "alerts", "resolve_alert", "pass_alert"]),
-        alertId: z.string().uuid().optional(),
-        rewake: z.boolean().optional(),
-        answer: z.string().min(1).max(200).optional(),
-        nudge: z.boolean().optional(),
-        reason: z.string().max(400).optional(),
-        ticketId: z.string().uuid().optional(),
-        flagId: z.string().uuid().optional(),
-        to: z.string().min(1).max(100).optional(),
-        hours: z.number().positive().max(48).optional(),
-        question: z.string().min(1).max(1000).optional(),
-        options: z.array(z.string().min(1).max(200)).min(2).max(6).optional(),
-        recommended: z.string().optional(),
-        triedFirst: z.string().max(1000).optional(),
-        ownerMustDo: z.boolean().optional(),
-        steps: z.array(z.string().min(1).max(500)).max(12).optional(),
-        stillNeeded: z.string().max(500).optional(),
-        proof: z.string().max(300).optional(),
-      },
-    },
-    async (input) => {
-      if (!scope.agentId) return fail("Only the Scrum Master's run can use the watchdog.");
-      const { companyId, agentId, runId } = { companyId: scope.companyId, agentId: scope.agentId, runId: scope.runId };
-      const need = <K extends keyof typeof input>(...keys: K[]) => {
-        const missing = keys.filter((k) => input[k] === undefined);
-        if (missing.length) throw new WatchdogError(422, `${input.action} needs ${missing.join(", ")}.`);
-      };
-      const reason = input.reason ?? "";
-      const done = (a: { id: string }) => text(`Done and logged as action ${a.id}.`);
-      try {
-        switch (input.action) {
-          case "list": {
-            // Only flags the actions below accept: the owner's waits, escalated and already-actioned ones are left out.
-            const open = await watchdog.actionableFlags(companyId, 50);
-            return text(open.length ? JSON.stringify(open.map((f) => ({ flagId: f.id, ticketId: f.ticketId, title: f.ticketTitle, rule: f.rule, openedAt: f.openedAt, snoozedUntil: f.snoozedUntil, snoozeCount: f.snoozeCount, escalatedAt: f.escalatedAt, detail: f.detail }))) : "No open flags.");
-          }
-          case "nudge":
-            need("ticketId");
-            return done(await watchdog.nudge(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
-          case "assign":
-            need("ticketId", "to");
-            return done(await watchdog.assign(companyId, agentId, runId, { ticketId: input.ticketId!, to: input.to!, reason }));
-          case "rewake":
-            need("ticketId");
-            return done(await watchdog.rewake(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
-          case "chase_review":
-            need("ticketId");
-            return done(await watchdog.chaseReview(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
-          case "snooze":
-            need("flagId", "hours");
-            return done(await watchdog.snooze(companyId, agentId, runId, { flagId: input.flagId!, hours: input.hours!, reason }));
-          case "escalate":
-            need("ticketId");
-            return done(await watchdog.escalate(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
-          case "raise_decision":
-            need("ticketId", "question", "options", "recommended", "triedFirst");
-            return done(await watchdog.raiseDecision(companyId, agentId, runId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, reason, stillNeeded: input.stillNeeded, proof: input.proof }));
-          case "alerts": {
-            const mine = await alerts.mine(companyId, agentId);
-            return text(mine.length ? JSON.stringify(mine) : "No alerts are waiting for you.");
-          }
-          case "resolve_alert":
-            need("alertId");
-            await alerts.resolve(companyId, agentId, { alertId: input.alertId!, reason, rewake: input.rewake, answer: input.answer, nudge: input.nudge, runId });
-            return text(`Settled and logged${input.rewake ? ", and the agent was woken again" : ""}.`);
-          case "pass_alert": {
-            need("alertId");
-            const r = await alerts.pass(companyId, agentId, { alertId: input.alertId!, reason });
-            return text(`Passed on: it's with ${r.to === "ceo" ? "the CEO" : "the owner"} now.`);
-          }
-        }
-      } catch (err) {
-        if (err instanceof WatchdogError) return fail(err.message);
-        throw err;
-      }
-    },
-  );
-}
-
 const NUDGE_DESCRIPTION =
   "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, none back and forth about the same ticket, and a company-wide limit each hour.";
 const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
@@ -2630,7 +2438,7 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
     const ceo = me?.role === "ceo";
     const server =
       me?.duty === "assistant"
-        ? buildPaServer(db, services, scope)
+        ? buildPaServer(db, services, scope, { registerSharedTools, registerViewImage, registerBoard, registerListMyWork })
         : run?.purpose === "chat"
           ? buildChatServer(db, services, scope, hooks, ceo)
           : me?.duty === SCRUM_MASTER_DUTY
