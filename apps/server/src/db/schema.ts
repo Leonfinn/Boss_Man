@@ -236,6 +236,8 @@ export const projects = pgTable("projects", {
   /** The git host ("github" or "gitea") and its API base, detected from the repo address (R59). */
   gitHost: text("git_host"),
   gitApiBase: text("git_api_base"),
+  /** The owner (or an import they ticked) let this project's git host reach a private address, so the network guard keeps it (BOS-708). */
+  allowPrivate: boolean("allow_private").notNull().default(false),
   /** A check that must pass in a ticket's worktree before it can be merged and done (R47). */
   verifyCommand: text("verify_command"),
   /** An extra, slower check run before merging high and critical risk tickets (R48). */
@@ -1724,6 +1726,8 @@ export const mcpServers = pgTable(
     /** {secret} is replaced by the runner with the value of secret_env. */
     headerValue: text("header_value").notNull().default("Bearer {secret}"),
     secretEnv: text("secret_env"),
+    /** The owner let this entry resolve to a private address on purpose (an import tick, or a host they added that lives on the LAN), so the network guard keeps it (BOS-708). */
+    allowPrivate: boolean("allow_private").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("mcp_servers_company_name").on(t.companyId, t.name)],

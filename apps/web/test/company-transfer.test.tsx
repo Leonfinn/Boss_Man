@@ -15,6 +15,7 @@ const preview = (name: string, nameTaken: boolean) => ({
   company: { name, nameTaken },
   counts: { agents: 3, skills: 1, projects: 1, objectives: 1, features: 0, toolServers: 0, wikiPages: 2, tickets: 4 },
   toolServers: [],
+  gitHosts: [],
   agents: [{ name: "Celebrimbor", role: "worker", title: "Engineer", agentKind: "claude", model: null, instructions: "Build things." }],
   skills: [{ name: "deploy", renamedFrom: null, description: "Deploys.", scripts: ["run.sh"] }],
   secrets: [{ name: "Gitea token", envName: "GITEA_TOKEN", agents: ["celebrimbor"] }],
@@ -78,5 +79,31 @@ describe("company import and export (docs/11, step 3)", () => {
     expect(post.body).toMatchObject({ name: "Holiday Hours Copy", fundingSourceId: "f1" });
     expect(post.body!.zip).toBe("UEsFBg==");
     expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("shows a packaged project git address and offers the tick when one reaches the stack (BOS-708)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/funding-sources") return json([]);
+        if (url === "/api/companies/import/preview")
+          return json({
+            ...preview("Git Co", false),
+            toolServers: [],
+            gitHosts: [
+              { project: "Site", url: "https://rebind.example.org/o/r.git", opens: "rebind.example.org:443", stackService: true },
+              { project: "Docs", url: "https://tools.example.org/o/r.git", opens: "tools.example.org:443", stackService: false },
+            ],
+          });
+        return json({});
+      }),
+    );
+    render(<ImportCompany go={() => {}} onChanged={() => {}} />);
+    fireEvent.change(screen.getByLabelText("Package"), { target: { files: [new File([new Uint8Array([80, 75, 5, 6])], "git.bossman.zip")] } });
+    expect(await screen.findByText(/Project git addresses/)).toBeTruthy();
+    expect(screen.getByText(/rebind.example.org:443/)).toBeTruthy();
+    expect(screen.getByText(/tools.example.org:443/)).toBeTruthy();
+    // The tick is offered because one of the git hosts reaches the stack.
+    expect(screen.getByLabelText(/I understand this gives the runner/)).toBeTruthy();
   });
 });
