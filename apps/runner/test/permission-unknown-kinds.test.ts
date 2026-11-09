@@ -50,6 +50,10 @@ describe("permission options the runner doesn't know (BOS-895)", () => {
     expect(warnings[0]!.message).toContain("touch /tmp/x");
     expect(warnings[0]!.message).toContain("permit_once, refuse_once");
     expect(warnings[0]!.message).toContain("allow");
+    const denied = await ask(renamed, "deny");
+    expect(denied.answer).toEqual({ outcome: { outcome: "cancelled" } });
+    expect(denied.warnings).toHaveLength(1);
+    expect(denied.warnings[0]!.message).toContain("permit_once, refuse_once");
   }, 30_000);
 
   it("with known and unknown kinds mixed, a known one is still picked; a refusal with no known reject kind is logged", async () => {
