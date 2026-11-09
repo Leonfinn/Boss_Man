@@ -51,6 +51,12 @@ function ownAdminDir(repo: string, dir: string, pointer: string | undefined): st
 const VERIFY_KILL_GRACE_MS = 2000;
 /** A review copy's install (BOS-693): seconds from a warm store; a cold one on a slow link can take a few minutes. */
 export const REVIEW_INSTALL_TIMEOUT_MS = 5 * 60_000;
+/**
+ * The run-start refresh's upstream fetch (BOS-853) holds the project's repo lock, so every other run start and merge
+ * for the project waits behind it. A hung connection (a stalled TCP link, dropped packets, a slow host) is cut off
+ * here, git's helpers and all, and the run starts with the copy it has.
+ */
+export const RUN_START_FETCH_TIMEOUT_MS = 60_000;
 
 /** Runs a command in its own process group, killed whole at the timeout; output kept to the last 4 KB. Never rejects on exit. */
 function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; timedOut: boolean; output: string }> {
@@ -111,7 +117,6 @@ export const branchFor = (ticketId: string) => `bossman/${ticketId}`;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** A ticket's copy that is its own clone (a .git folder), not a worktree of the shared repo (a .git file). */
 /**
  * Where a session's push to the upstream address is sent instead (BOS-853): a path that is no repo, so the push fails
  * at once, with no network call and no login asked for. Boss Man merges a ticket's branch; copies never push.
@@ -130,7 +135,8 @@ export function hasCredential(url: string): boolean {
 
 const firstLine = (err: unknown) => String((err as { stderr?: string })?.stderr || (err as Error)?.message || err).trim().split("\n")[0]!.slice(0, 300);
 
-export const isClone = (dir: string) =>statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
+/** A ticket's copy that is its own clone (a .git folder), not a worktree of the shared repo (a .git file). */
+export const isClone = (dir: string) => statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
 
 /** The project a copy belongs to, if its link to the shared repo still holds: a worktree's admin folder, or a clone's borrowed objects. */
 function copyProject(dir: string): string | null {
@@ -272,6 +278,9 @@ export class Workspaces {
    */
   fenceCloneGit = Workspaces.fenceCloneGitByDefault;
 
+  /** How long the run-start refresh's upstream fetch may take (BOS-853); see RUN_START_FETCH_TIMEOUT_MS. */
+  runStartFetchTimeoutMs = RUN_START_FETCH_TIMEOUT_MS;
+
   /**
    * Where a fenced merge check lives (BOS-323), set at start-up when the runner can fence: its own
    * home, shared by every fenced check (caches, harness state), and the pnpm store it installs from.
@@ -293,7 +302,7 @@ export class Workspaces {
    *   to that folder, so a planted .git/commondir can't send git elsewhere, and its own config is checked.
    * - neither: only `init`/`clone`, which make a repo; run from the repos folder, which is no repo at all.
    */
-  private async git(args: string[], opts: { cwd?: string; env?: Record<string, string>; repo?: string; reads?: string[] } = {}) {
+  private async git(args: string[], opts: { cwd?: string; env?: Record<string, string>; repo?: string; reads?: string[]; timeoutMs?: number } = {}) {
     const repo = opts.repo ?? opts.cwd;
     if (repo && !this.isRepoDir(repo)) throw new Error(`The runner's git only runs in one of its own repos, not ${repo} (BOS-332).`);
     let place: Record<string, string>;
@@ -323,6 +332,13 @@ export class Workspaces {
     // A clone is always fenced. So is any ticket folder of a runner that makes clones, whatever its .git now is: an agent that swaps the clone's .git for a pointer at a git dir it controls would otherwise move the runner's git out of the fence.
     if (this.fenceCloneGit && opts.cwd && opts.repo && (clone || this.newCopiesAreClones())) return this.fencedGit(args, opts.cwd, opts.repo, extra, opts.reads);
     const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(extra) };
+    if (opts.timeoutMs !== undefined) {
+      // Its own process group, so a timeout also ends git's transport helper (git-remote-https, ssh), not just git.
+      const r = await runGroup("git", args, opts.cwd ?? this.reposRoot(), env as NodeJS.ProcessEnv, opts.timeoutMs);
+      if (r.timedOut) throw new Error(`git ${args[0]} timed out after ${Math.round(opts.timeoutMs / 1000)} s and was stopped`);
+      if (r.code !== 0) throw new Error(`git ${args[0]} failed (exit ${r.code}): ${r.output.split("\n").filter(Boolean).pop() ?? ""}`);
+      return r.output;
+    }
     const { stdout } = await run("git", args, { cwd: opts.cwd ?? this.reposRoot(), env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
     return stdout.trim();
   }
@@ -397,8 +413,8 @@ export class Workspaces {
   }
 
   /** Fetches origin's branches from the recorded address into refs/remotes/origin, as `git fetch origin` did. */
-  private async fetchOrigin(repo: string, auth: Record<string, string>, tags = false) {
-    await this.git(["fetch", "--quiet", await this.remoteUrl(repo), "+refs/heads/*:refs/remotes/origin/*", ...(tags ? ["+refs/tags/*:refs/tags/*"] : [])], { cwd: repo, env: auth });
+  private async fetchOrigin(repo: string, auth: Record<string, string>, tags = false, timeoutMs?: number) {
+    await this.git(["fetch", "--quiet", await this.remoteUrl(repo), "+refs/heads/*:refs/remotes/origin/*", ...(tags ? ["+refs/tags/*:refs/tags/*"] : [])], { cwd: repo, env: auth, timeoutMs });
     // Every fetch keeps the agents' view current; a failure there never fails the caller (a merge, a check).
     await this.writeOriginView(repo).catch((err: unknown) => console.warn(`[runner] couldn't update ${repo}'s origin view (BOS-853): ${firstLine(err)}`));
   }
@@ -474,11 +490,12 @@ export class Workspaces {
    * At the start of a run in an existing copy (BOS-853): the shared repo is fetched from upstream (best effort: a
    * failure is logged once and the copy keeps what it has), then a clone gets origin's branches and the tags from it.
    * A worktree shares the shared repo's refs, so it is current already. The copy's own branch, HEAD, files and
-   * shared/* refs are never touched. Callers hold the repo lock.
+   * shared/* refs are never touched. Callers hold the repo lock, so the upstream fetch is cut off at
+   * runStartFetchTimeoutMs: a hung one would otherwise hold up every run start and merge in the project.
    */
   private async refreshCopy(projectId: string, repo: string, dir: string, auth: Record<string, string>) {
     try {
-      await this.fetchOrigin(repo, auth, true);
+      await this.fetchOrigin(repo, auth, true, this.runStartFetchTimeoutMs);
     } catch (err) {
       console.warn(`[runner] couldn't refresh project ${projectId} from upstream at run start; the copy keeps the origin/main it has (BOS-853): ${firstLine(err)}`);
       // The view may not exist yet (a copy made before BOS-853): it's made from what the shared repo has.

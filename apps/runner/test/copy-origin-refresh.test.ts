@@ -3,6 +3,7 @@
 // copies made before the change.
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { type AddressInfo, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -102,6 +103,42 @@ for (const copies of ["worktree", "clone"] as const) {
       expect(lines[0]).toMatch(/couldn't refresh project .* from upstream at run start/);
       // The agent's own fetch still works, from what the shared repo has.
       expect(sessionGit(ws, dir, "fetch").code).toBe(0);
+    });
+
+    it("cuts off an upstream that hangs, so the run starts within the time limit with the copy's origin/main", async () => {
+      const { ws, spec, dir } = await setup();
+      const before = git(dir, "rev-parse", "refs/remotes/origin/main");
+      // An upstream that takes the connection and never answers: a stalled link, dropped packets, a stuck host.
+      const sockets = new Set<Socket>();
+      const server = createServer((s) => {
+        sockets.add(s);
+        // Read (and ignore) the request, so the stream sees the client's end when git's helper goes.
+        s.resume();
+        s.on("error", () => undefined);
+        s.on("close", () => sockets.delete(s));
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const { port } = server.address() as AddressInfo;
+        ws.runStartFetchTimeoutMs = 1500;
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+        const started = Date.now();
+        const again = await ws.ensure({ ...spec, repoUrl: `http://127.0.0.1:${port}/project.git` });
+        const took = Date.now() - started;
+        expect(again.path).toBe(dir);
+        expect(took).toBeGreaterThanOrEqual(1500);
+        expect(took).toBeLessThan(1500 + 4000);
+        expect(git(dir, "rev-parse", "refs/remotes/origin/main")).toBe(before);
+        const lines = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("BOS-853"));
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toMatch(/couldn't refresh project .* from upstream at run start.*timed out after 2 s/);
+        // git's transport helper went with it: it held the connection, and nothing holds it now.
+        for (let i = 0; i < 50 && sockets.size > 0; i++) await new Promise((r) => setTimeout(r, 100));
+        expect(sockets.size).toBe(0);
+      } finally {
+        for (const s of sockets) s.destroy();
+        await new Promise((resolve) => server.close(resolve));
+      }
     });
 
     it("leaves the copy's branch, HEAD, uncommitted and untracked files and shared/* refs as they were", async () => {
