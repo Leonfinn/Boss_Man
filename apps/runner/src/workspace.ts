@@ -32,6 +32,9 @@ import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
 const run = promisify(execFile);
 
+/** What a queued check job runs before a command that doesn't install for itself: the lockfile's packages from the shared store (BOS-798). */
+const JOB_INSTALL_COMMAND = "pnpm install --frozen-lockfile --prefer-offline --config.confirmModulesPurge=false";
+
 /**
  * The worktree admin folder a .git pointer names, but only if it sits directly in <repo>/worktrees
  * and its own gitdir file points back at <dir>/.git. A pointer the agent wrote at another ticket's
@@ -1218,6 +1221,9 @@ export class Workspaces {
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
+        // BOS-798: a fresh worktree has no node_modules. check-all.sh installs for itself; any other command (check-quick.sh) gets
+        // the same install first, inside the same fence and check slot, so its typecheck and tests find their tools.
+        if (existsSync(path.join(dir, "pnpm-lock.yaml")) && !/check-all\.sh/.test(command)) command = `${JOB_INSTALL_COMMAND} && ${command}`;
         return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) });
       } finally {
         await this.withRepoLock(spec.projectId, async () => {
