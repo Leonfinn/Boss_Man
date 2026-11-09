@@ -112,7 +112,25 @@ export const branchFor = (ticketId: string) => `bossman/${ticketId}`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** A ticket's copy that is its own clone (a .git folder), not a worktree of the shared repo (a .git file). */
-export const isClone = (dir: string) => statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
+/**
+ * Where a session's push to the upstream address is sent instead (BOS-853): a path that is no repo, so the push fails
+ * at once, with no network call and no login asked for. Boss Man merges a ticket's branch; copies never push.
+ */
+export const NO_PUSH_URL = "/bossman/copies-never-push--Boss-Man-merges-the-branch";
+
+/** Whether an address carries a user or password (https://user:token@host/...), which must never reach a session. */
+export function hasCredential(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return !!(u.username || u.password) && u.protocol !== "ssh:";
+  } catch {
+    return false;
+  }
+}
+
+const firstLine = (err: unknown) => String((err as { stderr?: string })?.stderr || (err as Error)?.message || err).trim().split("\n")[0]!.slice(0, 300);
+
+export const isClone = (dir: string) =>statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
 
 /** The project a copy belongs to, if its link to the shared repo still holds: a worktree's admin folder, or a clone's borrowed objects. */
 function copyProject(dir: string): string | null {
@@ -379,8 +397,99 @@ export class Workspaces {
   }
 
   /** Fetches origin's branches from the recorded address into refs/remotes/origin, as `git fetch origin` did. */
-  private async fetchOrigin(repo: string, auth: Record<string, string>) {
-    await this.git(["fetch", "--quiet", await this.remoteUrl(repo), "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo, env: auth });
+  private async fetchOrigin(repo: string, auth: Record<string, string>, tags = false) {
+    await this.git(["fetch", "--quiet", await this.remoteUrl(repo), "+refs/heads/*:refs/remotes/origin/*", ...(tags ? ["+refs/tags/*:refs/tags/*"] : [])], { cwd: repo, env: auth });
+    // Every fetch keeps the agents' view current; a failure there never fails the caller (a merge, a check).
+    await this.writeOriginView(repo).catch((err: unknown) => console.warn(`[runner] couldn't update ${repo}'s origin view (BOS-853): ${firstLine(err)}`));
+  }
+
+  /**
+   * The origin view (BOS-853): a small bare repo inside the shared repo whose branches are origin's branches as the
+   * shared repo last fetched them (its refs/remotes/origin/*) and whose tags are its tags. It borrows the shared repo's
+   * objects. An agent's `git fetch` in a copy is sent here (copyGitConfig), so it works with no git login and gets
+   * exactly what `git fetch origin` would, with the copy's usual refspec. It sits under the shared repo's root, which
+   * fenced sessions can read but not write, so a push into it fails there too. The daemon writes its few files itself
+   * and never runs git in it, so nothing an agent could plant in it is ever run by the runner.
+   */
+  originViewDir = (repo: string) => path.join(repo, "bossman-origin");
+
+  private async writeOriginView(repo: string) {
+    const view = this.originViewDir(repo);
+    const listing = await this.git(["for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes/origin/", "refs/tags/"], { cwd: repo });
+    const lines: string[] = [];
+    const heads = new Set<string>();
+    for (const line of listing.split("\n").filter(Boolean)) {
+      const [sha, ref] = line.split(" ") as [string, string];
+      if (ref === "refs/remotes/origin/HEAD") continue;
+      if (ref.startsWith("refs/remotes/origin/")) {
+        const name = ref.slice("refs/remotes/origin/".length);
+        heads.add(name);
+        lines.push(`${sha} refs/heads/${name}`);
+      } else lines.push(`${sha} ${ref}`);
+    }
+    const format = await this.git(["rev-parse", "--show-object-format"], { cwd: repo }).catch(() => "sha1");
+    const head = heads.has("main") ? "main" : heads.has("master") ? "master" : ([...heads].sort()[0] ?? "main");
+    // Built aside and swapped in, so a fetch reading it never sees a half-made one. Whatever was in the old folder
+    // (an unfenced agent's push, a planted hook) is dropped, not merged with.
+    const tmp = `${view}.new`;
+    const old = `${view}.old`;
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(old, { recursive: true, force: true });
+    mkdirSync(path.join(tmp, "objects", "info"), { recursive: true });
+    mkdirSync(path.join(tmp, "refs", "heads"), { recursive: true });
+    mkdirSync(path.join(tmp, "refs", "tags"), { recursive: true });
+    writeFileSync(path.join(tmp, "objects", "info", "alternates"), `${path.join(repo, "objects")}\n`);
+    writeFileSync(
+      path.join(tmp, "config"),
+      format === "sha1" ? "[core]\n\trepositoryformatversion = 0\n\tbare = true\n" : `[core]\n\trepositoryformatversion = 1\n\tbare = true\n[extensions]\n\tobjectformat = ${format}\n`,
+    );
+    writeFileSync(path.join(tmp, "HEAD"), `ref: refs/heads/${head}\n`);
+    // No traits in the header: git sorts and peels the refs itself as it reads them.
+    writeFileSync(path.join(tmp, "packed-refs"), `# pack-refs with: \n${lines.map((l) => `${l}\n`).join("")}`);
+    if (lstatSync(view, { throwIfNoEntry: false })) renameSync(view, old);
+    renameSync(tmp, view);
+    rmSync(old, { recursive: true, force: true });
+  }
+
+  /**
+   * Git config for a session working in one of the project's copies (BOS-853), as GIT_CONFIG_* pairs: the upstream
+   * address is read from the origin view instead, so `git fetch` needs no login, and a push to it goes nowhere. Only
+   * the session's own git reads these, never the runner's, and the copy's and shared repo's config files are untouched,
+   * so this covers clones, worktrees, review copies and copies made before the change alike. Nothing when the
+   * project has no recorded address yet, or the address carries a credential (which must never reach a session).
+   */
+  copyGitConfig(projectId: string): Array<[string, string]> {
+    const repo = this.repoDir(projectId);
+    const file = this.urlFile(repo);
+    if (!existsSync(file) || !existsSync(path.join(this.originViewDir(repo), "HEAD"))) return [];
+    const url = readFileSync(file, "utf8").trim();
+    if (!url || hasCredential(url)) return [];
+    return [
+      [`url.${this.originViewDir(repo)}.insteadOf`, url],
+      [`url.${NO_PUSH_URL}.pushInsteadOf`, url],
+    ];
+  }
+
+  /**
+   * At the start of a run in an existing copy (BOS-853): the shared repo is fetched from upstream (best effort: a
+   * failure is logged once and the copy keeps what it has), then a clone gets origin's branches and the tags from it.
+   * A worktree shares the shared repo's refs, so it is current already. The copy's own branch, HEAD, files and
+   * shared/* refs are never touched. Callers hold the repo lock.
+   */
+  private async refreshCopy(projectId: string, repo: string, dir: string, auth: Record<string, string>) {
+    try {
+      await this.fetchOrigin(repo, auth, true);
+    } catch (err) {
+      console.warn(`[runner] couldn't refresh project ${projectId} from upstream at run start; the copy keeps the origin/main it has (BOS-853): ${firstLine(err)}`);
+      // The view may not exist yet (a copy made before BOS-853): it's made from what the shared repo has.
+      await this.writeOriginView(repo).catch(() => undefined);
+    }
+    if (!isClone(dir)) return;
+    const r = await this.git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", repo, "+refs/remotes/origin/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], { cwd: dir, repo }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    if (r) console.warn(`[runner] couldn't bring origin's branches into ticket copy ${dir} at run start (BOS-853): ${firstLine(r)}`);
   }
 
   /**
@@ -613,6 +722,7 @@ export class Workspaces {
           await this.gitCode(["worktree", "unlock", dir], { cwd: repo });
         }
         if (this.newCopiesAreClones() || isClone(dir)) await this.convertToClone(repo, dir);
+        await this.refreshCopy(spec.projectId, repo, dir, auth);
         const baseCommit = await this.git(["config", "--get", baseKey], { cwd: repo }).catch(() => "");
         return { path: dir, branch, baseCommit, created: false, restoredPatch: false };
       }
@@ -722,6 +832,8 @@ export class Workspaces {
         mkdirSync(path.dirname(dir), { recursive: true });
         await this.addCopy(repo, dir, commit, null);
       }
+      // A reviewer compares against origin/main too (BOS-853).
+      await this.refreshCopy(spec.projectId, repo, dir, auth);
       return { path: dir, commit };
     });
   }
