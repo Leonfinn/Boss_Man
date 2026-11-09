@@ -1,0 +1,89 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { addedLines, scan, format, parseDenylist, parseAllow } from './scan-added-lines.mjs'
+
+// Fake values are built at run time so this file holds no secret-looking literal of its own.
+const fakeAnthropic = ['sk', 'ant', 'api03'].join('-') + '-' + 'Zq8vK2mXp4Lr7TnB9wYc3HdF6sJg1UaE5oIi'
+const fakeGithub = 'gh' + 'p_' + 'aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5'
+const listedIp = ['192', '0', '2', '77'].join('.') // documentation range, stands in for the owner's real address
+
+const diffOf = (file, ...lines) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -0,0 +1,${lines.length} @@\n${lines.map((l) => '+' + l).join('\n')}\n`
+const run = (lines, opts = {}) => scan({ items: addedLines(diffOf('src/a.ts', ...lines)), ...opts })
+
+test('a planted fake key is blocked, named by kind, file and line, and never echoed', () => {
+  const r = run(['const a = 1', `const k = "${fakeAnthropic}"`])
+  assert.equal(r.blocked.length, 1)
+  assert.equal(r.blocked[0].kind, 'anthropic-key')
+  const out = format(r)
+  assert.match(out, /BLOCKED anthropic-key at src\/a\.ts:2/)
+  assert.ok(!out.includes(fakeAnthropic.slice(10, 30)))
+})
+
+test('github token, private key block, credentialed URL and assignment are blocked', () => {
+  const pk = '-----BEGIN ' + 'RSA PRIVATE KEY-----'
+  const url = 'postgres://app:' + 'Tr0ub4dor9xQ' + '@db.internal:5432/x'
+  const asg = 'API_TOKEN = "' + 'aB3dE5gH7jK9mN1pQ3sT5vW7yZ9b' + '"'
+  const kinds = run([fakeGithub, pk, url, asg]).blocked.map((b) => b.kind)
+  assert.deepEqual(kinds, ['github-token', 'private-key', 'url-with-credentials', 'secret-assignment'])
+})
+
+test('made-up examples pass', () => {
+  const r = run([
+    'host: 192.168.1.50',
+    'url: https://example.com/path?token=${TOKEN}',
+    'ssh admin@myserver',
+    'DATABASE_URL=postgres://boss:password@localhost:5432/boss',
+    'Authorization: Bearer ${token}',
+    'Copyright (c) 2026 Some Owner, https://github.com/some-owner/repo',
+    'const secret = process.env.SECRET_KEY',
+  ])
+  assert.deepEqual(r.blocked, [])
+})
+
+test('a listed IP is blocked, an unlisted one and a longer neighbour are not', () => {
+  const denylist = parseDenylist(`ip\t${listedIp}\n`)
+  assert.equal(run([`ssh root@${listedIp}`], { denylist }).blocked[0].kind, 'listed-private-ip')
+  assert.deepEqual(run([`ssh root@${listedIp}0`], { denylist }).blocked, [])
+  assert.deepEqual(run(['ssh root@192.0.2.5'], { denylist }).blocked, [])
+  const out = format(run([`ssh root@${listedIp}`], { denylist }))
+  assert.ok(!out.includes(listedIp))
+})
+
+test('listed host, path, email (case-insensitive), CIDR and prefix entries', () => {
+  const denylist = parseDenylist('host\tnas-box\npath\t/mnt/tank1\nemail\tme@personal.test\nip\t198.51.100.0/24\nip\t203.0.113.\n# comment\n')
+  for (const l of ['ping NAS-BOX', 'cd /mnt/tank1/apps', 'mail Me@Personal.test', 'ip 198.51.100.200', 'ip 203.0.113.9']) {
+    assert.equal(run([l], { denylist }).blocked.length, 1, l)
+  }
+  assert.deepEqual(run(['ip 198.51.101.1'], { denylist }).blocked, [])
+})
+
+test('an empty list still runs the secret rules', () => {
+  assert.equal(run([fakeGithub], { denylist: parseDenylist('') }).blocked.length, 1)
+})
+
+test('the allow-list needs a reason and the exact fingerprint', () => {
+  const fp = createHash('sha256').update(fakeGithub).digest('hex').slice(0, 12)
+  const allow = parseAllow(`src/a.ts\tgithub-token\t${fp}\ttest fixture\n`)
+  assert.deepEqual(run([fakeGithub], { allow }).blocked, [])
+  assert.equal(run([fakeGithub.replace('aB3', 'xY3')], { allow }).blocked.length, 1)
+  assert.equal(run([fakeGithub], { allow: parseAllow(`src/a.ts\tgithub-token\t${fp}\t\n`) }).blocked.length, 1)
+})
+
+test('only added lines are scanned and line numbers follow the hunk', () => {
+  const diff = `diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -3 +10,2 @@\n-old ${fakeGithub}\n+fine\n+${fakeGithub}\n`
+  const r = scan({ items: addedLines(diff) })
+  assert.equal(r.blocked.length, 1)
+  assert.match(format(r), /x\.ts:11/)
+})
+
+test('key files block, .env.example passes, archives warn', () => {
+  const r = scan({ items: [], newFiles: ['.env', 'a/id_rsa', 'cert.pem', '.env.example', 'data.tgz'] })
+  assert.equal(r.blocked.length, 3)
+  assert.equal(r.warnings.length, 1)
+})
+
+test('commit message text is scanned too', () => {
+  const r = scan({ items: [], extra: [{ where: 'commit abc1234 message', text: `oops ${fakeGithub}` }] })
+  assert.match(format(r), /commit abc1234 message/)
+})

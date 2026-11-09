@@ -122,6 +122,10 @@ done
 
   if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
   step "merge with $base is clean" git merge-tree --write-tree "$base" HEAD
+  # BOS-979: no secret and none of the owner's listed private details in what this branch adds. The merge gate gets the
+  # owner's list in BOSSMAN_SCAN_DENYLIST_FILE; a hand run has none and runs the secret rules only. Skipped if the script
+  # is absent (a branch based on an older main).
+  if [ -f scripts/scan-added-lines.mjs ]; then step "secrets and private-details scan" node scripts/scan-added-lines.mjs "$base"; fi
   if has '^apps/server/drizzle/|^scripts/lint-migrations'; then step "migration lint" node scripts/lint-migrations.mjs; fi
   # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
   if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
