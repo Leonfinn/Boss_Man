@@ -35,7 +35,7 @@ export class CheckJobs {
     this.unsent.delete(jobId);
   }
 
-  run(cmd: { jobId: string; projectId: string; commit: string; command: string; timeoutMs?: number }) {
+  run(cmd: { jobId: string; projectId: string; commit: string; command: string; timeoutMs?: number; scanList?: string }) {
     if (this.cancels.has(cmd.jobId)) return; // the server asked twice
     let lastSent = 0;
     let cancelled = false;
@@ -44,6 +44,7 @@ export class CheckJobs {
     });
     void this.workspaces
       .runCommitCheck({ projectId: cmd.projectId, jobId: cmd.jobId, commit: cmd.commit }, cmd.command, cmd.timeoutMs ?? VERIFY_TIMEOUT_MS, {
+        scanList: cmd.scanList,
         onStart: (kill) => {
           this.cancels.set(cmd.jobId, () => {
             cancelled = true;

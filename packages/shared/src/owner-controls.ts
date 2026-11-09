@@ -229,6 +229,8 @@ export const OWNER_FIELDS = {
   "Server and runner": [
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background (infinite mode) runs at once (0 to 16)",
+    // Settings → Server and runner → Private details to block (BOS-979).
+    "New list (replaces the saved one; leave empty and save to clear it)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
   ],

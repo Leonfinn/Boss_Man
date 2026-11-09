@@ -1191,8 +1191,8 @@ export class Workspaces {
    * Runs the ticket's check (e.g. "pnpm test") in its worktree (R47). Output is kept to the
    * last 8 KB. It runs without the company's secrets: a check shouldn't need them.
    */
-  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS, queueMaxMs = VERIFY_QUEUE_MAX_MS, fence = false): Promise<VerifyResult> {
-    return this.runCheck(await this.reopen(spec), command, timeoutMs, queueMaxMs, undefined, fence ? spec.projectId : null);
+  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS, queueMaxMs = VERIFY_QUEUE_MAX_MS, fence = false, scanList?: string): Promise<VerifyResult> {
+    return this.runCheck(await this.reopen(spec), command, timeoutMs, queueMaxMs, undefined, fence ? spec.projectId : null, scanList);
   }
 
   /**
@@ -1203,7 +1203,7 @@ export class Workspaces {
     spec: { projectId: string; jobId: string; commit: string },
     command: string,
     timeoutMs: number,
-    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void } = {},
+    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string } = {},
   ): Promise<VerifyResult> {
     if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
@@ -1218,7 +1218,7 @@ export class Workspaces {
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
-        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) });
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) }, null, hooks.scanList);
       } finally {
         await this.withRepoLock(spec.projectId, async () => {
           await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
@@ -1276,6 +1276,7 @@ export class Workspaces {
     queueMaxMs = VERIFY_QUEUE_MAX_MS,
     job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void; fence?: { env: Record<string, string>; wrap?: (bin: string, args: string[]) => { bin: string; args: string[] } } },
     fenceProject: string | null = null,
+    scanList?: string,
   ): Promise<VerifyResult> {
     const fence = fenceProject !== null;
     const started = Date.now();
@@ -1295,6 +1296,9 @@ export class Workspaces {
       const jobTakesSlot = !!job && !!queueEnv?.BOSSMAN_CHECK_SLOT && existsSync(path.join(dir, "scripts", "check-all.sh"));
       const jobQueueEnv = jobTakesSlot && queueEnv ? { CHECK_ALL_LOCK: queueEnv.CHECK_ALL_LOCK, CHECK_ALL_PAIR_PROOF: queueEnv.CHECK_ALL_PAIR_PROOF, BOSSMAN_CHECK_SLOT: queueEnv.BOSSMAN_CHECK_SLOT } : { BOSSMAN_CHECK_NO_LOCK: "1" };
       let env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? jobQueueEnv : queueEnv ?? {}), ...storeEnv } as NodeJS.ProcessEnv;
+      // BOS-979: the owner's private-details list for the merge-line scan. check-quick.sh moves it into a private temp file
+      // and unsets it before any other step runs; it is never in the log, the repo or the process list.
+      if (scanList) env.BOSSMAN_SCAN_DENYLIST = scanList;
       // BOS-614: a tree that takes part in the check line (it has scripts/check-all.sh) waits for its slot through the runner's
       // own check-slot.sh, not through the branch's copy of the queue rules: a branch based on older main brought older rules,
       // and old and new waiters jammed with both slots free. Inside, the branch's script gets a private lock and goes straight on.

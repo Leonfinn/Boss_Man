@@ -49,6 +49,17 @@ describe("check job folders", () => {
     expect(existsSync(path.join(root, "check-jobs", jobId))).toBe(false);
   });
 
+  // BOS-979: the owner's private-details list reaches the check as an environment variable, only when the job brought one.
+  it("gives the check the owner's private-details list only when the job carries one", async () => {
+    const { root, commit } = setup();
+    const ws = new Workspaces(root, process.env);
+    const probe = 'printf "list=[%s]" "$BOSSMAN_SCAN_DENYLIST"';
+    const withList = await ws.runCommitCheck({ projectId, jobId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", commit }, probe, 60_000, { scanList: "ip\t192.0.2.77" });
+    expect(withList.output).toContain("list=[ip\t192.0.2.77]");
+    const without = await ws.runCommitCheck({ projectId, jobId: "ffffffff-ffff-4fff-8fff-ffffffffffff", commit }, probe, 60_000);
+    expect(without.output).toContain("list=[]");
+  });
+
   it("removes check-jobs and check-jobs-home folders no running job owns, and prunes the stale worktree entry", async () => {
     const { root, commit } = setup();
     const ws = new Workspaces(root, process.env);
