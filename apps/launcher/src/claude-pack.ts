@@ -56,12 +56,31 @@ export function packInstallerSpec(cfg: LauncherConfig, slug: string) {
 }
 
 /**
+ * The install in flight per stack, so all companies on one host share ONE install of the shared pack
+ * volume (BOS-972, Dougal/Freddy): two installer containers writing the same content-addressed folder
+ * would wipe each other's half-done `npm ci` and can delete a finished pack a runner has mounted. The
+ * second caller waits for the first and shares its result instead of starting another install.
+ */
+const installs = new Map<string, Promise<boolean>>();
+
+/**
  * Runs the installer to make the pack ready, if it isn't already (the installer exits 0 at once for a ready
  * folder, so calling it on every create is cheap). Returns whether a ready pack is there afterwards: true on
  * exit 0, false on any failure, which the caller treats as "Claude absent", never as a reason to refuse the
  * runner. A failure is logged so the owner can see why Claude isn't available.
+ *
+ * Serialised per stack: one install at a time for the shared volume, however many companies start together.
  */
-export async function ensurePack(docker: Docker, cfg: LauncherConfig, slug: string, log: (msg: string) => void = () => {}): Promise<boolean> {
+export function ensurePack(docker: Docker, cfg: LauncherConfig, slug: string, log: (msg: string) => void = () => {}): Promise<boolean> {
+  const key = cfg.stack ?? "";
+  const busy = installs.get(key);
+  if (busy) return busy;
+  const run = installPack(docker, cfg, slug, log).finally(() => installs.delete(key));
+  installs.set(key, run);
+  return run;
+}
+
+async function installPack(docker: Docker, cfg: LauncherConfig, slug: string, log: (msg: string) => void): Promise<boolean> {
   const name = packContainerName(slug, cfg.stack);
   // A leftover installer from a crash would clash on the name: remove it first (it holds nothing worth keeping).
   const old = await docker.inspect(name).catch(() => null);

@@ -115,6 +115,40 @@ describe("ensurePack", () => {
     expect(await ensurePack(fake.docker, config(), "app-co", () => {})).toBe(true);
     expect(fake.calls).toEqual(["inspect boss-man-claude-pack-app-co", "remove old", "create boss-man-claude-pack-app-co", "start id1", "wait id1", "remove id1"]);
   });
+
+  it("shares ONE install between two companies on the same stack starting together (BOS-972)", async () => {
+    // Two installers writing the shared pack volume would wipe each other's half-done npm ci; all companies on
+    // a stack must share one install. Hold the first install open, start a second, then let it finish.
+    const fake = fakeDocker(0);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    fake.docker.wait = async (id: string, ms: number) => {
+      fake.calls.push(`wait ${id}`);
+      await gate;
+      const c = [...fake.containers.values()].find((x) => x.id === id)!;
+      c.state = "exited";
+      return { stopped: true, exitCode: c.exitCode };
+    };
+    const cfg = config();
+    const first = ensurePack(fake.docker, cfg, "app-co", () => {});
+    const second = ensurePack(fake.docker, cfg, "other-co", () => {});
+    // Let the first install reach its wait before releasing.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-claude-pack-app-co"]);
+    release();
+    expect(await first).toBe(true);
+    expect(await second).toBe(true);
+    // The second company never started its own installer: it shared the first's result.
+    expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-claude-pack-app-co"]);
+  });
+
+  it("starts a fresh install once the previous one has finished (a stack isn't locked forever)", async () => {
+    const fake = fakeDocker(0);
+    const cfg = config();
+    expect(await ensurePack(fake.docker, cfg, "app-co", () => {})).toBe(true);
+    expect(await ensurePack(fake.docker, cfg, "other-co", () => {})).toBe(true);
+    expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-claude-pack-app-co", "create boss-man-claude-pack-other-co"]);
+  });
 });
 
 describe("the launcher runs the installer before a runner, and a failed pack never blocks it", () => {

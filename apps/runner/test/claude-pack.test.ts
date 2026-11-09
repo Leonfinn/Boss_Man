@@ -1,11 +1,11 @@
 // The Claude pack (DR-050, BOS-972): content-addressed folders, the READY marker written only after
 // every check passed, a runner that never starts on a not-ready pack and never crashes without one,
 // and the installer's fixed order (copy, npm ci, version, canary, then READY).
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { adapterBin, claudeBin, discardDir, installPack, lockHash, markReady, packDirFor, packEnv, packPaths, parseClaudeVersion, readPack, sourceLockHash } from "../src/claude-pack.js";
+import { adapterBin, claudeBin, cleanStalePacks, discardDir, installPack, lockHash, markReady, packDirFor, packEnv, packPaths, parseClaudeVersion, readPack, sourceLockHash } from "../src/claude-pack.js";
 import { defaultBin } from "../src/session-manager.js";
 
 const roots: string[] = [];
@@ -193,5 +193,37 @@ describe("the pack in the repo", () => {
     // npm ci refuses a package whose bytes don't match its integrity hash: every resolved package must have one.
     const missing = Object.entries(lock.packages).filter(([k, v]) => k && v.resolved && !v.integrity).map(([k]) => k);
     expect(missing).toEqual([]);
+  });
+});
+
+describe("cleaning stale pack folders (BOS-972, Dougal/Freddy)", () => {
+  it("removes only OLD folders without a READY marker, never the kept or a fresh one or a ready one", () => {
+    const r = root();
+    const keep = packDirFor(r, HASH);
+    mkdirSync(keep, { recursive: true });
+    const staleHash = lockHash("stale");
+    const freshHash = lockHash("fresh");
+    const readyOtherHash = lockHash("ready-other");
+    const stale = path.join(r, staleHash);
+    const fresh = path.join(r, freshHash);
+    mkdirSync(stale, { recursive: true });
+    mkdirSync(fresh, { recursive: true });
+    readyPack(r, readyOtherHash);
+    // A stray file that isn't a pack hash name is left alone too.
+    writeFileSync(path.join(r, "keep.txt"), "x");
+    const old = 2 * 60 * 60_000;
+    // Only the stale one is aged: the fresh one keeps its "just created" mtime, as another installer's work would.
+    utimesSync(stale, new Date(Date.now() - old), new Date(Date.now() - old));
+    const removed = cleanStalePacks(r, keep);
+    expect(removed).toEqual([stale]);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(keep)).toBe(true);
+    expect(existsSync(packDirFor(r, readyOtherHash))).toBe(true);
+    expect(existsSync(path.join(r, "keep.txt"))).toBe(true);
+  });
+
+  it("never throws on a root it can't list (a gone volume): returns nothing", () => {
+    expect(cleanStalePacks(path.join(root(), "does-not-exist"), "/x")).toEqual([]);
   });
 });

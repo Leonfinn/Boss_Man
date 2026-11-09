@@ -41,6 +41,15 @@ describe("the runner image holds no Anthropic code (DR-050)", () => {
     expect(instructions.some((l) => /^COPY .*apps\/runner\/claude-pack/.test(l))).toBe(true);
   });
 
+  it("creates the pack volume mount point owned by node, before USER node, so a fresh volume is writable (BOS-972)", () => {
+    // Docker copies a path's ownership into a new named volume only when the path exists in the image.
+    // Without this, a fresh volume mounts root-owned and the installer (uid 1000) fails with EACCES.
+    const made = instructions.findIndex((l) => /^RUN .*mkdir -p \/opt\/bossman-claude\b/.test(l) && /chown node:node \/opt\/bossman-claude\b/.test(l));
+    expect(made, "the Dockerfile must mkdir -p /opt/bossman-claude and chown node:node it").toBeGreaterThanOrEqual(0);
+    const userNode = instructions.findIndex((l) => /^USER node\b/.test(l));
+    expect(userNode).toBeGreaterThan(made);
+  });
+
   it("has no Claude adapter or Anthropic package in the runner's dependencies", () => {
     const all = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
     expect(Object.keys(all).filter((k) => k.startsWith("@anthropic-ai/") || k === "@agentclientprotocol/claude-agent-acp")).toEqual([]);

@@ -45,11 +45,12 @@ x-runner: &runner
   depends_on:
     server:
       condition: service_started
-    # Start after the installer has *begun*, not after it finished: a host with no internet must still get
-    # OpenCode and Codex working (the runner reports Claude absent until the pack is ready). The runner reads
-    # the ready pack lazily on each start, so an install finishing later is picked up on the next restart.
+    # Start after the installer has FINISHED its one attempt, not merely begun (BOS-972, Rod/Freddy): the runner
+    # reads the ready pack once at start, so starting before the install ends would leave Claude absent until a
+    # hand restart. The installer's own command always exits 0 (below), so a host with no internet still gets a
+    # runner with OpenCode and Codex working, just with Claude reported absent.
     claude-pack:
-      condition: service_started
+      condition: service_completed_successfully
   environment: &runner-env
     BOSSMAN_URL: ws://server:3100/api/runner/connect
     BOSSMAN_RUNNER_TOKEN_FILE: /run/secrets/runner_token
@@ -86,8 +87,10 @@ x-runner: &runner
     profiles: ["runners"]
     # One-shot: installs the pack (npm ci + version check + canary + READY marker) and exits. Re-running
     # it on an update is cheap: a ready folder is left alone and a new lockfile installs beside the old.
+    # The command exits 0 even when it can't install (no internet, npm down): readiness is proven by the READY
+    # marker, not the exit code, and the runner waiting on it must still start with Claude absent (BOS-972).
     restart: "no"
-    command: ["node_modules/.bin/tsx", "src/claude-pack-main.ts"]
+    command: ["sh", "-c", "node_modules/.bin/tsx src/claude-pack-main.ts || echo '[claude-pack] install did not finish; Claude will be absent until it can'"]
     environment:
       BOSSMAN_CLAUDE_PACK: /opt/bossman-claude
       BOSSMAN_CLAUDE_PACK_SOURCE: /opt/bossman-claude-pack

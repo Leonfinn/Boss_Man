@@ -50,6 +50,10 @@ RUN --mount=type=secret,id=extra_ca,required=false \
       playwright --version; \
       echo "webkit@${PLAYWRIGHT_VERSION}" >> /etc/bossman-addons;; \
     esac
+# The Claude pack volume's mount point (DR-050, BOS-972): created here, owned by node, BEFORE `USER node`.
+# Docker copies a path's ownership into a fresh named volume only when the path exists in the image, so
+# without this a new volume mounts root-owned and the installer (uid 1000) can't create its folder in it.
+RUN mkdir -p /opt/bossman-claude && chown node:node /opt/bossman-claude
 # The container is the sandbox (agents already run shell commands in it); Chromium's own sandbox
 # needs privileges the runner doesn't have. Both are ignored when the add-on isn't installed.
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \

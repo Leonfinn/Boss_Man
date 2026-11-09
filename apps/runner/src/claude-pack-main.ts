@@ -5,11 +5,11 @@
 // a local stand-in model, no network), and only then the READY marker. Exits 0 when a ready pack is
 // there afterwards, non-zero otherwise, so the launcher knows whether to mount the volume read-only.
 // Idempotent: a ready folder is left alone, and an update installs beside the old one.
-import { copyFileSync, readdirSync } from "node:fs";
+import { copyFileSync } from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { PACK_ROOT, PACK_SOURCE, PINNED_CLAUDE_CODE, claudeBin, discardDir, installPack, packPaths, sourceLockHash, type Exec } from "./claude-pack.js";
+import { PACK_ROOT, PACK_SOURCE, PINNED_CLAUDE_CODE, claudeBin, cleanStalePacks, installPack, sourceLockHash, type Exec } from "./claude-pack.js";
 import { runCanary } from "./canary.js";
 
 const run = promisify(execFile);
@@ -51,12 +51,10 @@ async function main() {
   try {
     const result = await installPack({ root: PACK_ROOT, hash, version, steps: { copySource, npmCi, claudeVersion, canary }, log });
     log(`ready: ${result.dir} (Claude Code ${result.version})`);
-    // A folder another install may have left half-done beside ours (a crash): remove it so the volume
-    // doesn't grow without bound. Only folders without a READY marker go, and never the one we used.
-    for (const name of readdirSync(PACK_ROOT)) {
-      const old = path.join(PACK_ROOT, name);
-      if (old !== result.dir && /^[0-9a-f]{24}$/.test(name) && !readdirSync(old).includes("READY")) discardDir(old);
-    }
+    // A crash may have left half-made folders beside ours: remove only STALE ones (older than an hour), so
+    // one won't delete another installer's work in progress, and never the folder we just used.
+    const swept = cleanStalePacks(PACK_ROOT, result.dir, { log });
+    if (swept.length) log(`removed ${swept.length} stale pack folder(s)`);
     process.exit(0);
   } catch (err) {
     log(`the Claude pack couldn't be installed: ${String((err as Error)?.message ?? err)}`);

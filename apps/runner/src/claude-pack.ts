@@ -4,7 +4,7 @@
 // the one copy of the rules both the runner and the installer follow. Pure and injectable, so a
 // test drives every path (a missing pack, a tampered lock, a failed canary) without a real npm.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /** Where the named volume is mounted in the runner and the installer container. */
@@ -99,6 +99,46 @@ export function markReady(dir: string, info: { version: string; hash: string; at
 /** Removes a folder that failed to install, so the next try starts clean. Never touches a READY one. */
 export function discardDir(dir: string) {
   rmSync(dir, { recursive: true, force: true });
+}
+
+/** How old a folder without a READY marker must be before the installer removes it (a crashed install). */
+export const STALE_PACK_MS = 60 * 60_000;
+
+/**
+ * Cleans up half-made pack folders beside a fresh install (a crash or an older installer left them), so the
+ * volume doesn't grow without bound. Only folders whose names are a pack hash, that are NOT the folder just
+ * installed, have no READY marker, and are older than `staleMs` are removed: a younger one may be another
+ * installer's work in progress (BOS-972), so it is left alone. Never throws: a folder that can't be listed
+ * (removed meanwhile, a stray file, permissions) is skipped, so a good install is never turned into a failure.
+ * Returns the folders it removed.
+ */
+export function cleanStalePacks(root: string, keepDir: string, opts: { now?: number; staleMs?: number; log?: (msg: string) => void } = {}): string[] {
+  const now = opts.now ?? Date.now();
+  const staleMs = opts.staleMs ?? STALE_PACK_MS;
+  const log = opts.log ?? (() => {});
+  const removed: string[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    if (!/^[0-9a-f]{24}$/.test(name)) continue;
+    const old = path.join(root, name);
+    if (path.resolve(old) === path.resolve(keepDir)) continue;
+    try {
+      const st = statSync(old);
+      if (!st.isDirectory()) continue;
+      if (existsSync(path.join(old, "READY"))) continue;
+      if (now - st.mtimeMs < staleMs) continue; // possibly another installer still building it
+      discardDir(old);
+      removed.push(old);
+    } catch (err) {
+      log(`couldn't check the pack folder ${old} for cleanup: ${String((err as Error)?.message ?? err)}`);
+    }
+  }
+  return removed;
 }
 
 /**
