@@ -1,5 +1,5 @@
 {
-  "id": "96a493cc-ac82-4804-ba1c-c7b32d6d64cf",
+  "id": "ad890ac5-9d8b-400a-8d9b-9c93c116b8e7",
   "prevId": "aea8609f-b2ca-4e56-8295-1ac16193ab9f",
   "version": "7",
   "dialect": "postgresql",
@@ -3228,6 +3228,13 @@
         },
         "portal_visible": {
           "name": "portal_visible",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "keep_off_portal": {
+          "name": "keep_off_portal",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
@@ -8456,13 +8463,6 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
-        },
-        "until": {
-          "name": "until",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'done'"
         }
       },
       "indexes": {

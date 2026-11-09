@@ -31,13 +31,13 @@ Words used here: `$BOSSMAN_HOME` is the folder that holds Boss Man on a host. In
 
 | Value | Where | What to do |
 |---|---|---|
-| `/mnt/NVME_Apps/Container_files/boss-man/{src,deployer}` in the "hand-apply" cards | `apps/server/src/services/self-deploy.ts` | **BOS-269** fixes the cards. Until it merges, a card that shows this path must be read as `$BOSSMAN_HOME/...` |
+| The TrueNAS install folder in the "hand-apply" cards | `apps/server/src/services/self-deploy.ts` | Fixed by **BOS-269**: the cards now use the `src` and `deployer` folders that the host deployer reports, so they follow the new host |
 | The same path in the install guides | `docs/06-install-truenas.md`, `docs/09-self-deploy.md` | Left as the TrueNAS worked example; both now point here for any other host. They are marked as TrueNAS paths |
 | `BOSSMAN_DATA` (default `/srv/boss-man/data`) | `docker-compose.yml`, launcher | Host-neutral. Set it in `.env` to a folder on the new host |
-| `BOSSMAN_DEPLOYER` (absolute host path, e.g. `/mnt/NVME_Apps/...` on TrueNAS), `NTFY_DATA` if set | `.env`; required by `deploy/truenas-deployer.yml` and `deploy/truenas-bluegreen.yml` | **Must be changed** to the new host's paths. A copied `.env` keeps the old path and the stack will not start (or mounts nothing useful) |
+| `BOSSMAN_DEPLOYER` (absolute host path, e.g. `/mnt/tank/apps/boss-man/deployer` on TrueNAS), `NTFY_DATA` if set | `.env`; required by `deploy/truenas-deployer.yml` and `deploy/truenas-bluegreen.yml` | **Must be changed** to the new host's paths. A copied `.env` keeps the old path and the stack will not start (or mounts nothing useful) |
 | `deploy/truenas.yml`, `deploy/truenas-deployer.yml`, `deploy/truenas-bluegreen.yml` | `deploy/`, and `scripts/deploy.sh` and `scripts/host-deployer.sh` match on the file names | **Generic despite the names:** they bind-mount the data folder, add the deployer mounts, and add blue/green. Use them unchanged on any host. Renaming would break a live `COMPOSE_FILE`, so it is a follow-up ticket (rename with the old names kept working) |
 | "TrueNAS cron job" for the deployer | `docs/09-self-deploy.md`, `scripts/host-deployer.sh` header | The script needs only bash, git, docker, flock and curl. The one-minute scheduler is whatever the new host has. **Unconfirmed** for each host: find out with `systemctl --version` (systemd timer) or `command -v crontab` (cron) |
-| `192.168.68.67` | A comment in `docker-compose.yml` (now `<host-ip>`), the wiki restore runbook and `.env` values `BOSSMAN_BIND` and `BOSSMAN_PORTAL_URL` | `.env` values **must be changed** to the new host's address. Other hits are test data and examples (`packages/shared/test`, `git-host.ts` comment) and need no change |
+| The old host's LAN address | `.env` values `BOSSMAN_BIND` and `BOSSMAN_PORTAL_URL`, and the restore runbook in the private wiki | `.env` values **must be changed** to the new host's address |
 | `BOSSMAN_DOCKER_GID` | `.env` | Differs per host. Find it on the new host with `stat -c %g /var/run/docker.sock` |
 | `PENPOT_BIND`, `PENPOT_PUBLIC_URI` | `.env`, `deploy/penpot.yml` | Host addresses; must be changed if Penpot moves |
 | `BOSSMAN_NETGUARD_ALLOW` (host:port entries, space separated, in double quotes) | `.env`, passed to the launcher | Carry it over as one line: if `.env` has it twice, compose uses only the last one, so merge the entries you still need into that line (`BOSSMAN_NETGUARD_ALLOW="host:port host:port"`). Drop entries that were only stopgaps for addresses Boss Man now opens by itself: each company's runner already reaches its tool servers and its projects' git hosts, so those never need an entry here. If a LAN add-on such as Penpot changed address, change its entry and the matching Boss Man secret (`PENPOT_URL`) to the same host:port. The launcher reads it only when it is recreated, and each runner's guard only when the runner is recreated |
@@ -49,7 +49,7 @@ Words used here: `$BOSSMAN_HOME` is the folder that holds Boss Man on a host. In
 
 If you change a subnet, change every address that lives in it. `grep -rn "subnet:\|ipv4_address" deploy/` lists them all.
 
-The grep behind this list searched the repo for `NVME_Apps`, `192.168.`, `truenas`, `subnet` and `ipam` (31 Oct 2026). The app's own code has no host-specific path other than the BOS-269 cards.
+The grep behind this list searched the repo for the old host's pool name, `192.168.`, `truenas`, `subnet` and `ipam` (31 Oct 2026). The app's own code has no host-specific path.
 
 ## 3. The order of the move
 
@@ -209,7 +209,7 @@ Check the file is not tiny and decompresses cleanly (`gzip -t`) before going on:
 ls -l ../<the file name printed above> && gzip -t ../<the file name printed above> && echo gzip-ok
 ```
 
-4. Copy the backup, `secrets/`, the old `.env` **under another name** (for example `.env.old-host`), `$BOSSMAN_DATA` (without `postgres/`, which is rebuilt from the dump, but **including** `tailscale/` and `ntfy/`) and the whole deployer folder `$D` (`inbox`, `outbox`, `state`, `proxy/active.caddy` naming the live colour, `host-deployer.sh`, `host.conf`) to the new host. **Never copy the old `.env` over the new host's `.env`** from stage 1: it would bring back the old host's data and deployer paths, bind addresses, portal URL and Docker group id, and the stack would fail during downtime. On the new host, compare the two files and carry over only the secrets that differ (for example `POSTGRES_PASSWORD`, which must match the old host's); or skip the copy if stage 1 already set every secret. Use the tool you trust (`rsync -a` keeps owners and times; **Unconfirmed**: check it is installed with `command -v rsync`). Note which colour is live (`grep reverse_proxy $D/proxy/active.caddy`). Compare checksums of `master.key` and the backup on both sides:
+4. Copy the backup, `secrets/`, the old `.env` **under another name** (for example `.env.old-host`), `$BOSSMAN_DATA` (without `postgres/`, which is rebuilt from the dump, but **including** `tailscale/` and `ntfy/`) and the whole deployer folder `$D` (`inbox`, `outbox`, `state`, `proxy/active.caddy` naming the live colour, `host-deployer.sh`, and `host.conf` only if you have one: it is optional) to the new host. **Never copy the old `.env` over the new host's `.env`** from stage 1: it would bring back the old host's data and deployer paths, bind addresses, portal URL and Docker group id, and the stack would fail during downtime. On the new host, compare the two files and carry over only the secrets that differ (for example `POSTGRES_PASSWORD`, which must match the old host's); or skip the copy if stage 1 already set every secret. Use the tool you trust (`rsync -a` keeps owners and times; **Unconfirmed**: check it is installed with `command -v rsync`). Note which colour is live (`grep reverse_proxy $D/proxy/active.caddy`). Compare checksums of `master.key` and the backup on both sides:
 
 ```sh
 sha256sum secrets/master.key ../<the file name printed above>
@@ -229,7 +229,7 @@ Move the checkout to the final commit (`git -C "$BOSSMAN_HOME/src" reset --hard 
 BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue server-green launcher netguard
 ```
 
-Put the deployer folder `$D` in place from the copy made in stage 3 (same layout as `docs/06` steps 9a and 9d: `inbox` owned by uid 1000, `proxy/active.caddy` naming the live colour, `host.conf` root-only 600) and set `BOSSMAN_DEPLOYER` in `.env` to its path on this host. Without `active.caddy` the proxy has nothing to route to.
+Put the deployer folder `$D` in place from the copy made in stage 3 (same layout as `docs/06` steps 9a and 9d: `inbox` owned by uid 1000, `proxy/active.caddy` naming the live colour, `host.conf` optional: only if you use a failure webhook, root-only 600; do not copy one over just to keep an old address) and set `BOSSMAN_DEPLOYER` in `.env` to its path on this host. Without `active.caddy` the proxy has nothing to route to.
 
 First start the database, because the load needs it running:
 
@@ -277,7 +277,7 @@ After your sign-off: remove the old deploy key from GitHub, delete the old host'
 
 ### TrueNAS (the old host)
 
-- Paths in `docs/06-install-truenas.md` and `docs/09-self-deploy.md` are the owner's TrueNAS layout, `/mnt/NVME_Apps/Container_files/boss-man`.
+- Paths in `docs/06-install-truenas.md` and `docs/09-self-deploy.md` are a worked TrueNAS example, `/mnt/tank/apps/boss-man`. Your old host's real folder is in its `.env` (`BOSSMAN_DATA`, `BOSSMAN_DEPLOYER`).
 - Keep the old host's datasets until sign-off; a dataset snapshot taken at stage 3 is a cheap extra safety net (**Unconfirmed**: how snapshots are taken is TrueNAS's own UI; see the TrueNAS documentation).
 - The deployer's scheduler on TrueNAS is a cron job in the TrueNAS UI; stop it there at stage 3.
 

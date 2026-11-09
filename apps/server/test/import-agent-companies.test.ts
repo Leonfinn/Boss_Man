@@ -1,8 +1,18 @@
 import { randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+
+// No real DNS: the package's git address (github.com) must resolve public so the network guard doesn't flag it (BOS-953).
+// The import's guard lookup races a 3 s timeout and fails closed, so a real lookup that stalls under load would refuse the
+// import at random; mocked, the answer is the same on every run and on every host.
+vi.mock("node:dns/promises", () => ({
+  lookup: async (host: string) => {
+    if (host === "github.com") return [{ address: "140.82.121.4", family: 4 }];
+    throw new Error("ENOTFOUND");
+  },
+}));
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
