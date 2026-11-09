@@ -159,7 +159,7 @@ function TokenHelp({ projects }: { projects: Project[] }) {
       )}
       {(both || hosts.has("gitea")) && (
         <section aria-label="Gitea token steps">
-          <h4 style={{ margin: "8px 0 4px" }}>Gitea (self-hosted, e.g. http://192.168.68.67:3003)</h4>
+          <h4 style={{ margin: "8px 0 4px" }}>Gitea (self-hosted, e.g. http://192.0.2.10:3003)</h4>
           <ol style={{ margin: 0, paddingLeft: 20 }}>
             <li>Gitea → Settings → Applications → Generate New Token.</li>
             <li>Name it and set the repository scope to Read and Write (<span className="mono">write:repository</span>).</li>

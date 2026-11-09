@@ -605,7 +605,7 @@ export function ToolServers({ company }: { company: Company }) {
         </div>
         <div className="field">
           <label htmlFor="mcp-url">Server URL</label>
-          <input id="mcp-url" type="url" required placeholder="http://192.168.68.67:30301/mcp" value={form.url} onChange={set("url")} />
+          <input id="mcp-url" type="url" required placeholder="http://192.0.2.10:30301/mcp" value={form.url} onChange={set("url")} />
         </div>
         <div className="field">
           <label htmlFor="mcp-transport">Transport</label>
