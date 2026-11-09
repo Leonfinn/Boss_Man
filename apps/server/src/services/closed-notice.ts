@@ -15,8 +15,8 @@ export const NOTICE_MS = 2 * 3_600_000;
 export const ENGAGED_MS = 30 * 60_000;
 
 export type ClosedNotice = {
-  /** Why Boss Man closed it: the update is live already, a newer card covers it, or it was switched back. */
-  why: "live" | "newer" | "switched-back";
+  /** Why Boss Man closed it: the update is live already, a newer card covers it, it was switched back, or a server update started (BOS-1010). */
+  why: "live" | "newer" | "switched-back" | "replaced";
   /** The owner's words, shown on the card and in the feed note. */
   text: string;
   at: string;
@@ -70,6 +70,11 @@ export function newerNotice(a: { newerId: string; label: string; steps?: string[
   };
 }
 
+/** The notice for a runner-update card a newer one replaced (BOS-1010, the owner's rule of 9 Nov). */
+export function replacedNotice(a: { commit: string; text: string; now: Date }): ClosedNotice {
+  return { why: "replaced", commit: a.commit, text: a.text, at: a.now.toISOString(), until: new Date(a.now.getTime() + NOTICE_MS).toISOString() };
+}
+
 /** The notice for a card whose change was switched back off (BOS-740): its setup steps no longer apply. */
 export function switchedBackNotice(a: { steps?: string[]; now: Date }): ClosedNotice {
   return {
@@ -107,7 +112,7 @@ export async function leaveClosedNotice(db: Db, id: string, notice: ClosedNotice
   // One key merged in place, so nothing else written to the context meanwhile is lost.
   await db.update(decisions).set({ context: sql`${decisions.context} || jsonb_build_object('closedNotice', ${JSON.stringify(notice)}::jsonb)` }).where(eq(decisions.id, id));
   if (!engagedRecently(row, now)) return false;
-  await deps.notify({ companyId: row.companyId, level: "flag", title: notice.why === "live" ? "You can stop: that update is already live" : notice.why === "switched-back" ? "You can stop: that change was switched back off" : "You can stop: a newer update card covers that one", body: notice.text, link: "#/decisions" });
+  await deps.notify({ companyId: row.companyId, level: "flag", title: notice.why === "live" ? "You can stop: that update is already live" : notice.why === "switched-back" ? "You can stop: that change was switched back off" : notice.why === "replaced" ? "You can stop: that update was replaced by a newer one" : "You can stop: a newer update card covers that one", body: notice.text, link: "#/decisions" });
   return true;
 }
 
