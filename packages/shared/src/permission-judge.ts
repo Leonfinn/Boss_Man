@@ -82,11 +82,11 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (!command) return judgeWithoutCommand(question, ownFolder, ownProject);
   // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
-  // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
+  // Every heredoc body is judged like any other command text: a cat/tee body is no longer skipped as data, because each
+  // rule for telling "data" from "code" was bypassed in review (BOS-725, 726, 727, 728). Fail closed.
   // A quoted word reads as the word it is: quote removal (`"..."`, `'...'`, `$'...'`, `$"..."`, `\-`, backslash-newline)
   // is applied to every plain word before every check below, not only to flags (BOS-715).
-  const own0 = withoutOwnMemory(command, ownProject);
-  const base = dropCatHeredocBodies(dequoteWords(own0), own0);
+  const base = dequoteWords(withoutOwnMemory(command, ownProject));
   // The command string of each shell `-c` runs too, so `bash -c 'r''m -rf /'`, `bash -c $'\x72m -rf /'` and
   // `sh -c 'echo '$'\x24(cat /tmp/x)'` are all read (BOS-715). It is judged as its own command rather than glued onto the
   // outer line, so its redirects do not change how the outer line is read. A shell nested inside a shell is bounded by
@@ -2049,111 +2049,6 @@ function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
     if (touchesFiles && /\+|\bjoin\b|%[sdr(]|\bformat\b|\bchr\b|fromCharCode|base64|b64|decode|\\x[0-9a-fA-F]|\\u|environ|\benv\b|HOME|argv|getenv|\$\{/.test(code)) return false;
   }
   return true;
-}
-
-/** Commands a cat/tee heredoc may be piped into without its body becoming code (BOS-727); any other stage keeps the body. */
-const HEREDOC_SINK_SAFE = new Set("cat tee head tail wc sort uniq tr cut grep".split(" "));
-
-/**
- * True when a `<<` in the original command may not be a real heredoc operator (or may be hidden from the operator
- * count): inside quotes, after a comment `#`, backslash-escaped, in `((...))` arithmetic, or on a command line that
- * leaves a quote open. Only command lines are scanned: heredoc bodies are skipped using the real operators found, so an
- * apostrophe in a file's text does not matter. One pass over the lines, so it is linear. (BOS-727)
- */
-function hasUnreliableHeredocOps(original: string): boolean {
-  const lines = original.split("\n");
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i++]!;
-    let quote = "";
-    const ends: { dash: boolean; end: string }[] = [];
-    let ops = 0;
-    for (let k = 0; k < line.length; k++) {
-      const ch = line[k]!;
-      if (quote === "'") { if (ch === "'") quote = ""; else if (ch === "<" && line[k + 1] === "<") return true; continue; }
-      if (ch === "\\") {
-        if (line[k + 1] === "<" && line[k + 2] === "<") return true;
-        k++;
-        continue;
-      }
-      if (quote === '"') { if (ch === '"') quote = ""; else if (ch === "<" && line[k + 1] === "<") return true; continue; }
-      if (ch === "'" || ch === '"') { quote = ch; continue; }
-      if (ch === "#" && (k === 0 || /[\s;&|(]/.test(line[k - 1]!))) return /<</.test(line.slice(k));
-      if (ch === "<" && line[k + 1] === "<") {
-        if (line[k + 2] === "<") { k += 2; continue; } // a here-string, no body
-        ops++;
-        const m = /^(-?)[ \t]*(['"]?)(\w+)\2/.exec(line.slice(k + 2, k + 202));
-        if (m) ends.push({ dash: m[1] === "-", end: m[3]! });
-        k++;
-      }
-    }
-    if (quote) return true;
-    if (ops > 0 && /\(\(/.test(line)) return true;
-    for (const e of ends) {
-      while (i < lines.length && (e.dash ? lines[i]!.replace(/^\t+/, "") : lines[i]!) !== e.end) i++;
-      if (i >= lines.length) return false;
-      i++;
-    }
-  }
-  return false;
-}
-
-/**
- * Drops the bodies of heredocs that belong to cat/tee (text written to a file is data), and nothing else (BOS-727).
- * Every `<<` on a line is read in order, and the bodies that follow the line are taken in that order, so an earlier
- * interpreter heredoc keeps its body even when a cat heredoc comes later on the same line. A body is also kept when
- * the cat/tee output is run: sent to a process substitution (`> >(bash)`) or piped to anything but a plain text tool
- * (`| xargs rm`, `| python3`). A body whose end is not found, or one with `$(…)`/backticks under an unquoted delimiter
- * (bash expands those, BOS-725), is kept. One pass over the lines, so linear in the command.
- */
-function dropCatHeredocBodies(text: string, original: string): string {
-  if (!text.includes("<<")) return text;
-  // `text` has had its quotes removed, so a `<<` that sat inside quotes or a comment looks like a real heredoc there.
-  // Such a fake would pair with the wrong body and swallow a real interpreter's body, so the original is checked first.
-  if (hasUnreliableHeredocOps(original)) return text;
-  const lines = text.split("\n");
-  const out: string[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i]!;
-    out.push(line);
-    i++;
-    const ops = [...line.matchAll(/(?<!<)<<(?!<)(-?)[ \t]*(['"]?)(\w+)\2/g)];
-    if (ops.length === 0) continue;
-    // Read the bodies in order; if any end is missing, keep everything from here on as it is.
-    const bodies: { body: string[]; term: string; drop: boolean }[] = [];
-    let j = i;
-    let ok = true;
-    for (const op of ops) {
-      const [, dash, q, end] = op as unknown as [string, string, string, string];
-      const body: string[] = [];
-      while (j < lines.length && (dash ? lines[j]!.replace(/^\t+/, "") : lines[j]!) !== end) body.push(lines[j++]!);
-      if (j >= lines.length) { ok = false; break; }
-      const k = op.index!;
-      const segStart = Math.max(line.lastIndexOf(";", k), line.lastIndexOf("&", k), line.lastIndexOf("|", k), line.lastIndexOf("(", k)) + 1;
-      let drop = /^[ \t]*(?:cat|tee)\b/.test(line.slice(segStart, k)) && !/[;&|()]/.test(line.slice(segStart, k));
-      if (drop && q === "" && /\$\(|\x60/.test(body.join("\n"))) drop = false;
-      if (drop) {
-        const rest = line.slice(segStart);
-        // A process substitution is found from the `<<` on, not only as `>(`/`<(` after a space: `tee <<'EOF' >(bash)` and
-        // `> >(bash)` put a separate `>` before the `(`, and `>>(bash)` glues it on, so neither matched (BOS-744).
-        if (/[<>]\(/.test(rest.slice(k - segStart))) drop = false;
-        else {
-          const stages = rest.split(/(?<!\|)\|(?!\|)&?/).slice(1);
-          if (stages.some((s) => !HEREDOC_SINK_SAFE.has(/^[ \t]*([\w.-]+)/.exec(s)?.[1] ?? ""))) drop = false;
-        }
-      }
-      bodies.push({ body, term: lines[j]!, drop });
-      j++;
-    }
-    if (!ok) { while (i < lines.length) out.push(lines[i++]!); break; }
-    for (const b of bodies) {
-      if (!b.drop) out.push(...b.body);
-      out.push(b.term);
-    }
-    i = j;
-  }
-  return out.join("\n");
 }
 
 /**

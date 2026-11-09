@@ -12,13 +12,15 @@ FROM (
 WHERE "mcp_servers"."id" = u."id"
   AND (
     (
-      -- A private, loopback, link-local or CGNAT IPv4 literal.
+      -- A private, loopback, link-local or CGNAT IPv4 literal. Read each octet as text with a regex so no cast can
+      -- throw on a name that only looks dotted (BOS-708): a host such as evil.example.org or x.y.z.w must fall through
+      -- this test, not fail the whole migration (which would stop the server starting after the deploy).
       split_part(u."raw", ':', 1) ~ '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' AND (
-        split_part(split_part(u."raw", ':', 1), '.', 1)::int IN (0, 10, 127) OR
-        (split_part(split_part(u."raw", ':', 1), '.', 1) = '169' AND split_part(split_part(u."raw", ':', 1), '.', 2) = '254') OR
-        (split_part(split_part(u."raw", ':', 1), '.', 1) = '172' AND split_part(split_part(u."raw", ':', 1), '.', 2)::int BETWEEN 16 AND 31) OR
-        (split_part(split_part(u."raw", ':', 1), '.', 1) = '192' AND split_part(split_part(u."raw", ':', 1), '.', 2) = '168') OR
-        (split_part(split_part(u."raw", ':', 1), '.', 1) = '100' AND split_part(split_part(u."raw", ':', 1), '.', 2)::int BETWEEN 64 AND 127)
+        split_part(u."raw", ':', 1) ~ '^(0|10|127)\.' OR
+        split_part(u."raw", ':', 1) ~ '^169\.254\.' OR
+        split_part(u."raw", ':', 1) ~ '^172\.(1[6-9]|2[0-9]|3[01])\.' OR
+        split_part(u."raw", ':', 1) ~ '^192\.168\.' OR
+        split_part(u."raw", ':', 1) ~ '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'
       )
     ) OR (
       -- A stack or LAN-style name: no dot at all (a container name such as db), or a .local/.internal/.lan/.home/.docker name.

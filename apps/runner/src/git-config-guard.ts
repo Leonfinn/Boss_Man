@@ -77,6 +77,22 @@ async function listKeys(file: string, env: Record<string, string | undefined>): 
     .map((entry) => entry.split("\n", 1)[0]!);
 }
 
+/** git's message when another process holds `<file>.lock` (the guard's git runs with no locale, so in English). */
+const LOCKED = /could not lock config file/i;
+
+/**
+ * Sections the guard never removes whole (BOS-797): without core.bare, core.repositoryformatversion and
+ * extensions.objectformat a shared bare repo (sha256 most of all) can't be read; without the remotes nothing fetches.
+ * `section` is the key minus its name: the section name matches in any case, a subsection exactly, as git does.
+ */
+export function keptSection(section: string): boolean {
+  const dot = section.indexOf(".");
+  const name = (dot < 0 ? section : section.slice(0, dot)).toLowerCase();
+  if (dot < 0) return name === "core" || name === "extensions";
+  const sub = section.slice(dot + 1);
+  return name === "remote" && (sub === "origin" || sub === "shared");
+}
+
 export type GuardLog = (message: string) => void;
 
 /**
@@ -121,13 +137,25 @@ export class GitConfigGuard {
     const env = { PATH: this.env.PATH };
     const bad = [...new Set((await listKeys(file, env)).filter((k) => !allowedKey(k)))];
     for (const key of bad) {
-      const unset = await run("git", ["config", "--file", file, "--unset-all", key], { env: { ...env, ...GUARD_ENV } as NodeJS.ProcessEnv }).then(
-        () => true,
-        () => false,
+      const failed = await run("git", ["config", "--file", file, "--unset-all", key], { env: { ...env, ...GUARD_ENV } as NodeJS.ProcessEnv }).then(
+        () => null,
+        (err: { stderr?: string }) => String(err.stderr ?? ""),
       );
-      // A key git won't name on the command line (an odd subsection): drop its whole section instead.
-      if (!unset) {
+      if (failed !== null) {
         const section = key.slice(0, key.lastIndexOf("."));
+        // BOS-797: a held config.lock (an agent's git writing at that moment) is the usual failure. Don't fall back
+        // then: the lock may be free a moment later, and the fallback would take every allowed key in the section
+        // with it. The check below throws, the caller's git doesn't run, and the next call tries again.
+        if (LOCKED.test(failed)) {
+          this.log(`git config guard: couldn't remove ${key} from ${file}, its config.lock is held; will try again (BOS-797)`);
+          continue;
+        }
+        // A key git won't name on the command line (an odd subsection): drop its whole section instead, unless the
+        // repo can't work without that section; then the check below refuses the git call.
+        if (keptSection(section)) {
+          this.log(`git config guard: couldn't remove ${key} from ${file}, and won't remove its whole [${section}] section (BOS-797)`);
+          continue;
+        }
         await run("git", ["config", "--file", file, "--remove-section", section], { env: { ...env, ...GUARD_ENV } as NodeJS.ProcessEnv }).catch(() => undefined);
       }
       this.log(`git config guard: removed ${key} from ${file} (not on the runner's allowlist, BOS-332)`);

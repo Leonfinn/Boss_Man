@@ -74,6 +74,33 @@ describe("runner protocol (R31)", () => {
     conn.stop();
   });
 
+  it("stores the image commit from hello, and a later hello without one clears it (BOS-764)", async () => {
+    const commit = "ABCDEF0123456789abcdef0123456789ABCDEF01";
+    const journal = new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-runner-")), "j.jsonl"));
+    const stored = async () => (await ctx.db.select({ c: runners.imageCommit }).from(runners).where(eq(runners.id, ctx.reg.runnerId)))[0]!.c;
+    const first = new RunnerConnection({ url: ctx.url, token: ctx.reg.token, journal, runnerVersion: "test", heartbeatMs: HEARTBEAT, imageCommit: commit, onCommand: () => {} });
+    first.start();
+    await waitFor(async () => first.isLive, Boolean);
+    expect(await waitFor(stored, (c) => c !== null)).toBe(commit.toLowerCase());
+    first.stop();
+    // The image is replaced by one built outside a checkout: the old commit must not vouch for it.
+    const second = new RunnerConnection({ url: ctx.url, token: ctx.reg.token, journal, runnerVersion: "test", heartbeatMs: HEARTBEAT, onCommand: () => {} });
+    second.start();
+    await waitFor(async () => second.isLive, Boolean);
+    expect(await waitFor(stored, (c) => c === null)).toBeNull();
+    second.stop();
+  });
+
+  it("refuses a hello whose image commit is not a 40-character hex sha (BOS-764)", async () => {
+    const ws = new WebSocket(ctx.url, { headers: { authorization: `Bearer ${ctx.reg.token}` } });
+    await new Promise((r) => ws.on("open", r));
+    ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "test", imageVersion: null, imageCommit: "not-a-sha" }));
+    await new Promise((r) => setTimeout(r, 300));
+    const [row] = await ctx.db.select({ c: runners.imageCommit }).from(runners).where(eq(runners.id, ctx.reg.runnerId));
+    expect(row!.c).toBeNull();
+    ws.close();
+  });
+
   it("delivers every event exactly once across a dropped connection", async () => {
     const { conn, journal } = runner();
     conn.start();
