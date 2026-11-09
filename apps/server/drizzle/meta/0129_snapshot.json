@@ -1,6 +1,6 @@
 {
-  "id": "342d8448-99ae-4634-81bd-950a4f5a99be",
-  "prevId": "d34f2886-846a-49b0-8e33-9dcfb131f27a",
+  "id": "c47cf77d-e75a-4cf8-b7d6-0a78e9918852",
+  "prevId": "873e7a18-5f01-4a42-84e9-019044040b89",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3970,6 +3970,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "allow_private": {
+          "name": "allow_private",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5484,6 +5491,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "allow_private": {
+          "name": "allow_private",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "verify_command": {
           "name": "verify_command",

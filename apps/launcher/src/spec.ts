@@ -74,6 +74,15 @@ export function parseAllow(v: string | string[] | undefined): string[] {
   return [...new Set(list)];
 }
 
+/**
+ * The host:ports the owner trusted for private addresses (BOS-708): each is checked as an allow entry.
+ * The guard keeps their private addresses, and drops any other entry's.
+ */
+export function parseTrusted(v: string[] | undefined): Set<string> {
+  const list = parseAllow(v ?? []);
+  return new Set(list);
+}
+
 /** BOSSMAN_STACK (BOS-69): a short name for a second Boss Man on the same Docker host, e.g. "staging". Empty = the one and only stack. */
 export const STACK_LABEL = "boss-man.stack";
 const STACK = /^[a-z0-9][a-z0-9]{0,15}$/;

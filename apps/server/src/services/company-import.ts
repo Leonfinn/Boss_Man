@@ -12,7 +12,7 @@ import { EXPORT_FORMAT } from "./company-export.js";
 import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.js";
 import { MAX_BODY, slugify } from "./wiki.js";
 import { cleanPath, LIMITS, normalise, parseSkillMd, skillName, SkillError, type SkillFile } from "./skills.js";
-import { reachesStack, sendableAddress } from "./launcher.js";
+import { allowsPrivate, gitHostAddress, reachesStack, sendableAddress } from "./launcher.js";
 import { normalizeStandingRules, standingRulesError } from "./standing-rules.js";
 import { addTicketDependency } from "./ticket-links.js";
 
@@ -290,6 +290,12 @@ export async function previewPackage(db: Db, pkg: Package, name = pkg.company.na
     // Each project's verify commands word for word: they run on the runner during checks (BOS-818). Shown, not judged.
     projects: pkg.projects.map((p) => ({ name: p.name, verifyCommand: p.verifyCommand ?? null, deepVerifyCommand: p.deepVerifyCommand ?? null })),
     toolServers: await Promise.all(pkg.toolServers.map(async (t) => ({ name: t.name, url: t.url, opens: sendableAddress(t.url), stackService: await reachesStack(t.url) }))),
+    // Each project's git address and whether it would reach a private or stack address, so the owner sees it and ticks for it (BOS-708).
+    gitHosts: await Promise.all(
+      pkg.projects
+        .filter((p) => p.repoUrl)
+        .map(async (p) => ({ project: p.name, url: p.repoUrl!, opens: gitHostAddress(p.repoUrl!), stackService: await reachesStack(p.repoUrl!) })),
+    ),
     warnings,
   };
 }
@@ -317,10 +323,26 @@ function remapPolicy(policy: unknown, ids: Map<string, string>, marks: Partial<R
 /** Creates the package as a new company in one transaction. Every agent starts paused. */
 export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; fundingSourceId?: string | null; allowStackServices?: boolean } = {}) {
   const name = opts.name?.trim() || pkg.company.name;
-  const flags = opts.allowStackServices === true ? [] : await Promise.all(pkg.toolServers.map((t) => reachesStack(t.url)));
+  const ticked = opts.allowStackServices === true;
+  const flags = await Promise.all(pkg.toolServers.map((t) => reachesStack(t.url)));
+  // The tick says the owner allows private addresses for the servers the preview flagged, and only those: a public name
+  // the package also lists stays untrusted, so re-pointing it later can't open the stack network (BOS-708). A server the
+  // preview didn't flag stays untrusted even when ticked, and so does one whose host isn't really meant for a private
+  // address (allowsPrivate fails closed on a lookup error).
+  const trustPrivate = await Promise.all(
+    pkg.toolServers.map(async (t, i) => ticked && flags[i] === true && (await allowsPrivate(t.url))),
+  );
   const onStack = pkg.toolServers.filter((_, i) => flags[i]);
-  if (onStack.length)
+  if (!ticked && onStack.length)
     throw new ImportError(400, `Tool server${onStack.length > 1 ? "s" : ""} ${onStack.map((t) => `"${t.name}" (${sendableAddress(t.url) ?? t.url})`).join(", ")} point${onStack.length > 1 ? "" : "s"} at Boss Man's own services or a private-network address, which could give the company's runner a direct path to them. Tick the box to allow it, or remove ${onStack.length > 1 ? "them" : "it"} from the package.`);
+  // A project's git address in a package is treated the same way (BOS-708, Jane's finding): the preview flags the ones that
+  // reach the stack, and only the tick lets them keep a private address. The owner's own git address stays trusted.
+  const gitFlags = await Promise.all(pkg.projects.map((p) => (p.repoUrl ? reachesStack(p.repoUrl) : false)));
+  const onStackGit = pkg.projects.filter((_, i) => gitFlags[i]);
+  if (!ticked && onStackGit.length)
+    throw new ImportError(400, `Project git address${onStackGit.length > 1 ? "es" : ""} ${onStackGit.map((p) => `"${p.name}" (${gitHostAddress(p.repoUrl!) ?? p.repoUrl})`).join(", ")} point${onStackGit.length > 1 ? "" : "s"} at Boss Man's own services or a private-network address, which could give the company's runner a direct path to them. Tick the box to allow ${onStackGit.length > 1 ? "them" : "it"}, or remove ${onStackGit.length > 1 ? "them" : "it"} from the package.`);
+  // Trust a package's git host for private only when the preview flagged it, the owner ticked, and it really resolves private.
+  const gitTrust = await Promise.all(pkg.projects.map(async (p, i) => ticked && gitFlags[i] === true && !!p.repoUrl && (await allowsPrivate(p.repoUrl))));
   if (opts.fundingSourceId && !(await db.select({ id: fundingSources.id }).from(fundingSources).where(eq(fundingSources.id, opts.fundingSourceId))).length) throw new ImportError(400, "No such funding source.");
   if ((await db.select({ id: companies.id }).from(companies).where(eq(companies.name, name))).length) throw new ImportError(409, `There's already a company called ${name}. Pick another name.`);
 
@@ -387,11 +409,11 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       if (holders.length) await tx.insert(agentSkills).values(holders.map((id) => ({ agentId: id, skillId: row!.id })));
     }
 
-    for (const p of pkg.projects) {
+    for (const [pi, p] of pkg.projects.entries()) {
       const { slug, columns, reviewPolicy, ...fields } = p;
       const [row] = await tx
         .insert(projects)
-        .values({ companyId, ...fields, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : floored(remapPolicy(reviewPolicy, agentRef, marks), { name: fields.name, floor: companyPolicy }) })
+        .values({ companyId, ...fields, allowPrivate: gitTrust[pi] === true, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : floored(remapPolicy(reviewPolicy, agentRef, marks), { name: fields.name, floor: companyPolicy }) })
         .returning();
       projectId.set(slug, row!.id);
       columnsOf.set(row!.id, await tx.insert(workflowColumns).values(columns.map((col, i) => ({ projectId: row!.id, name: col.name, systemState: col.systemState, wipLimit: col.wipLimit ?? null, position: i }))).returning({ id: workflowColumns.id, systemState: workflowColumns.systemState }));
@@ -416,7 +438,9 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       featureId.set(f.ref, row!.id);
     }
 
-    if (pkg.toolServers.length) await tx.insert(mcpServers).values(pkg.toolServers.map((t) => ({ companyId, ...t, secretEnv: t.secretEnv ?? null })));
+    // The import tick lets a packaged tool server point at a private address, so trust it for private from then on
+    // (BOS-708): the guard keeps its private addresses instead of dropping them when its name is re-pointed.
+    if (pkg.toolServers.length) await tx.insert(mcpServers).values(pkg.toolServers.map((t, i) => ({ companyId, ...t, secretEnv: t.secretEnv ?? null, allowPrivate: trustPrivate[i] === true })));
 
     for (const t of pkg.tickets) {
       const project = projectId.get(t.project);
