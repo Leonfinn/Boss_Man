@@ -155,16 +155,21 @@ describe("git workspaces (R38)", () => {
   it("keeps the hook and fsmonitor settings when a git token adds its own config entry", () => {
     const env = safeGitEnv(gitAuthEnv({ GIT_TOKEN: "ghp_x" }));
     expect(env).toMatchObject({
-      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_COUNT: "5",
       GIT_CONFIG_KEY_0: "core.hooksPath",
       GIT_CONFIG_VALUE_0: "/dev/null",
       GIT_CONFIG_KEY_1: "core.fsmonitor",
       GIT_CONFIG_VALUE_1: "false",
-      GIT_CONFIG_KEY_2: "http.extraHeader",
+      GIT_CONFIG_KEY_2: "credential.helper",
+      GIT_CONFIG_VALUE_2: "",
+      GIT_CONFIG_KEY_3: "commit.gpgSign",
+      GIT_CONFIG_VALUE_3: "false",
+      GIT_CONFIG_KEY_4: "http.extraHeader",
+      GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_TERMINAL_PROMPT: "0",
     });
-    expect(env.GIT_CONFIG_VALUE_2).toMatch(/^Authorization: Basic /);
-    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "2" });
+    expect(env.GIT_CONFIG_VALUE_4).toMatch(/^Authorization: Basic /);
+    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "4" });
   });
 
   it("reports a clone that fails", async () => {
@@ -527,6 +532,41 @@ describe("turn checkpoints (R39)", () => {
     // Released: the checkpoints go with the worktree.
     await ws.release(spec);
     expect(git(ws.repoDir(ids.project), "for-each-ref", `refs/bossman/checkpoints/${ids.a}/`)).toBe("");
+  });
+});
+
+// BOS-832: the review-time clash check (BOS-426) must read the same current branch and main the merge gate will.
+describe("the clash check reads a current branch and a current main (BOS-832)", () => {
+  it("reports no clash when the branch already contains origin's main tip", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    // The branch and main both touch the same line. The branch commit reaches the shared repo (a turn
+    // checkpoint), then main moves and the agent merges main in on the branch (the HOL-585 shape): the
+    // branch head holds main's tip and merges clean, but the shared ref is still the pre-merge commit.
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    await ws.checkpoint(spec, "after a turn");
+    r.commit("main side");
+    git(w.path, "fetch", "-q", "origin");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", "-X", "ours", "origin/main");
+    // HOL-585's shape: the branch head already holds main's tip, so no clash is possible.
+    expect(git(w.path, "merge-base", "--is-ancestor", git(r.dir, "rev-parse", "main"), "HEAD")).toBe("");
+    expect(await ws.clash(spec, "main")).toEqual({ clashes: false, files: [] });
+  });
+
+  it("still reports a real clash", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    r.commit("main side");
+    const res = await ws.clash(spec, "main");
+    expect(res.clashes).toBe(true);
+    expect(res.files).toEqual(["README.md"]);
   });
 });
 

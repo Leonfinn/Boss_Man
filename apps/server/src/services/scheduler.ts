@@ -1843,6 +1843,9 @@ export function schedulerService(
       return result;
     },
 
+    /** The server-wide hold the tick honours, for the owner's "Stop all work" switch and banner (BOS-836). */
+    globallyPaused,
+
     async setGlobalPause(paused: boolean) {
       await db.insert(settings).values({ key: "paused", value: paused }).onConflictDoUpdate({ target: settings.key, set: { value: paused } });
     },

@@ -4,7 +4,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, decisions, notifications, reviewRequests, settings, ticketDependencies, tickets } from "../src/db/schema.js";
-import { carriedTitles, waitedText } from "../src/services/merge-queue.js";
+import { carriedNoteText, carriedTitles, waitedText } from "../src/services/merge-queue.js";
 import { jammedRows, JAM_REMINDER_MS, mergeJamService } from "../src/services/merge-jam.js";
 
 const HOUR = 3_600_000;
@@ -18,7 +18,8 @@ function fakeService(db: never, view: { current: unknown }, clock: () => Date) {
     notify: async (input) => {
       const row = { ...input, id: `n${++n}` };
       sent.push(row);
-      return { id: row.id };
+      // The fake keeps the asked-for level: no quiet hours or cap here, so delivered is as asked.
+      return { id: row.id, level: row.level };
     },
     now: clock,
   });
@@ -55,7 +56,9 @@ async function setup() {
   const advance = (ms: number) => (offset += ms);
   // Every notification for the company, newest first.
   const allNotes = () => db.select().from(notifications).where(eq(notifications.companyId, company.id)).orderBy(desc(notifications.createdAt));
-  return { ...built, db, close, req, company, project, ticket, approve, waitingSince, sweep, advance, clock, allNotes };
+  // Put the owner in quiet hours around the test's noon clock, so a flag is held back to a feed note.
+  const quietNow = async (on = true) => built.notes.setSettings({ ...(await built.notes.getSettings()), quietHours: on ? { start: "11:00", end: "13:00", timeZone: "UTC" } : null });
+  return { ...built, db, close, req, company, project, ticket, approve, waitingSince, sweep, advance, clock, allNotes, quietNow };
 }
 
 describe("merge line jam alert (BOS-766)", () => {
@@ -66,6 +69,18 @@ describe("merge line jam alert (BOS-766)", () => {
     expect(waitedText(5)).toBe("5 min");
     expect(waitedText(70)).toBe("1 h 10 min");
     expect(waitedText(120)).toBe("2 h");
+  });
+
+  it("reads a carried title with quotes and an apostrophe in full, from the titles kept apart from the sentence (BOS-819)", async () => {
+    // The note the gate writes now: the owner's sentence first, then the titles exactly as they are.
+    const withQuotes = [`Fix the "login" bug`, `Don't touch the owner's settings`];
+    const note = `Waiting: its branch also carries unapproved work from "Fix the "login" bug", "Don't touch the owner's settings" (medium risk), which must merge first.\n${JSON.stringify(withQuotes)}`;
+    expect(carriedTitles(note)).toEqual(withQuotes);
+    expect(carriedNoteText(note)).toBe('Waiting: its branch also carries unapproved work from "Fix the "login" bug", "Don\'t touch the owner\'s settings" (medium risk), which must merge first.');
+    // A note from before the titles were kept apart is still read, best effort, and its prose is kept whole.
+    const old = 'Waiting: its branch also carries unapproved work from "Ship the API" (medium risk), which must merge first.';
+    expect(carriedTitles(old)).toEqual(["Ship the API"]);
+    expect(carriedNoteText(old)).toBe(old);
   });
 
   it("counts only long merge checks and stuck work Boss Man is meant to move", () => {
@@ -99,6 +114,20 @@ describe("merge line jam alert (BOS-766)", () => {
     expect(row.label).toBe(`waiting for ${carriedRef} to merge first`);
     expect(row.next).toBe(`${carriedRef} has to be reviewed and merged first.`);
     expect(row.stuck).toBe(true);
+  });
+
+  it("shows the full title of a carried ticket whose title has a double quote and an apostrophe (BOS-819)", async () => {
+    const c = (ctx = await setup());
+    const title = `Fix the "login" bug and don't break the owner's links`;
+    const carried = await c.ticket(title);
+    const held = await c.waitingSince("Build the page", 65);
+    // The note the gate writes now keeps the titles on their own last line, exactly as they are.
+    await c.db.update(tickets).set({ pullRequestNote: `Waiting: its branch also carries unapproved work from "${title}" (medium risk), which must merge first.\n${JSON.stringify([title])}` }).where(eq(tickets.id, held.id));
+    const data = (await c.req("GET", `/api/companies/${c.company.id}/merge-queue`)).json() as { waiting: Array<{ ticketId: string; title: string; carried?: Array<{ ticketId: string | null; ref: string | null; title: string }> }> };
+    const row = data.waiting.find((r) => r.ticketId === held.id)!;
+    const [hold] = row.carried ?? [];
+    expect(hold).toMatchObject({ ticketId: carried.id, title });
+    expect(hold!.ref).toMatch(/-[\d]+$/);
   });
 
   it("sends one flag on the first sight of a jam, then one page an hour later, and never a third", async () => {
@@ -161,6 +190,41 @@ describe("merge line jam alert (BOS-766)", () => {
     c.advance(JAM_REMINDER_MS);
     expect((await c.sweep()).mergeJam).toEqual({ alerted: 1, reminded: 0, cleared: 0 });
     expect((await c.allNotes())[0]).toMatchObject({ level: "flag" });
+  });
+
+  it("sends no all-clear for a jam whose first flag was held back by quiet hours (BOS-819)", async () => {
+    const c = (ctx = await setup());
+    // Quiet hours make the first alert a plain feed note: the owner was never told above the feed.
+    await c.quietNow();
+    const t = await c.waitingSince("Stuck behind a slot", 65);
+    expect((await c.sweep()).mergeJam).toEqual({ alerted: 1, reminded: 0, cleared: 0 });
+    let sent = await c.allNotes();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ requested: "flag", level: "note", demotedBy: "quiet hours" });
+    // The jam clears before anything louder reached the owner: no "Merges are moving again" for a jam they never heard of.
+    await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, t.id));
+    expect((await c.sweep()).mergeJam).toEqual({ alerted: 0, reminded: 0, cleared: 1 });
+    sent = await c.allNotes();
+    expect(sent.map((n) => n.title)).not.toContain("Merges are moving again");
+    // The episode is gone, so a new jam starts afresh.
+    expect(await c.db.select().from(settings).where(eq(settings.key, `merge_jam:${c.company.id}`))).toHaveLength(0);
+  });
+
+  it("still sends the one all-clear when the jam cleared after the reminder reached the owner (BOS-819)", async () => {
+    const c = (ctx = await setup());
+    // Quiet hours hold the first flag back, but an hour later the reminder is a page: quiet hours only lower it a step, to a flag.
+    await c.quietNow();
+    const t = await c.waitingSince("Stuck behind a slot", 65);
+    await c.sweep();
+    c.advance(JAM_REMINDER_MS);
+    expect((await c.sweep()).mergeJam).toEqual({ alerted: 0, reminded: 1, cleared: 0 });
+    const reminded = (await c.allNotes())[0]!;
+    expect(reminded).toMatchObject({ requested: "page", title: "Merges are still stuck" });
+    expect(["flag", "page", "ask"]).toContain(reminded.level);
+    // Now the owner has been told, so the all-clear goes.
+    await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, t.id));
+    expect((await c.sweep()).mergeJam).toEqual({ alerted: 0, reminded: 0, cleared: 1 });
+    expect((await c.allNotes())[0]).toMatchObject({ level: "note", title: "Merges are moving again" });
   });
 
   it("leaves a jam a card already covers to the card", async () => {

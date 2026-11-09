@@ -1,6 +1,6 @@
 {
-  "id": "e5402217-5596-4909-847a-88ab840dbc51",
-  "prevId": "b17f6553-0973-4633-92a8-1d804bb2dbae",
+  "id": "873e7a18-5f01-4a42-84e9-019044040b89",
+  "prevId": "d34f2886-846a-49b0-8e33-9dcfb131f27a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1537,7 +1537,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"trivial\":{\"planApprover\":\"none\",\"reviewer\":\"ceo\",\"ownerSignoff\":false},\"low\":{\"planApprover\":\"ceo\",\"reviewer\":\"ceo\",\"ownerSignoff\":false},\"medium\":{\"planApprover\":\"ceo\",\"reviewer\":\"senior-dev\",\"ownerSignoff\":false},\"high\":{\"planApprover\":\"owner\",\"reviewer\":\"senior-dev\",\"ownerSignoff\":true},\"critical\":{\"planApprover\":\"owner\",\"reviewer\":\"senior-dev\",\"ownerSignoff\":true}}'::jsonb"
+          "default": "'{\"trivial\":{\"planApprover\":\"none\",\"reviewer\":\"ceo\",\"ownerSignoff\":false},\"low\":{\"planApprover\":\"ceo\",\"reviewer\":\"ceo\",\"ownerSignoff\":false},\"medium\":{\"planApprover\":\"ceo\",\"reviewer\":\"senior-dev\",\"ownerSignoff\":false},\"high\":{\"planApprover\":\"owner\",\"reviewer\":\"senior-dev\",\"ownerSignoff\":true,\"kinds\":{\"security\":\"ceo\"}},\"critical\":{\"planApprover\":\"owner\",\"reviewer\":\"senior-dev\",\"ownerSignoff\":true,\"kinds\":{\"security\":\"ceo\"}}}'::jsonb"
         },
         "goal_check_days": {
           "name": "goal_check_days",
@@ -1597,7 +1597,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":true,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2,\"idleAgentMinutes\":15,\"spareCapacityMinutes\":20}'::jsonb"
+          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2,\"idleAgentMinutes\":15,\"spareCapacityMinutes\":20}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -2264,6 +2264,42 @@
         },
         "outcome": {
           "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "commit": {
+          "name": "commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_name": {
+          "name": "tag_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_from": {
+          "name": "tag_from",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_to": {
+          "name": "tag_to",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_at": {
+          "name": "tag_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tag_result": {
+          "name": "tag_result",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -3934,6 +3970,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "allow_private": {
+          "name": "allow_private",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5448,6 +5491,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "allow_private": {
+          "name": "allow_private",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "verify_command": {
           "name": "verify_command",

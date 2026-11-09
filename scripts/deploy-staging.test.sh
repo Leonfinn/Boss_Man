@@ -39,6 +39,23 @@ good; echo k1 >"$t/staging/secrets/master.key"; expect_refuse "master.key is ide
 good; sed -i '/BOSSMAN_DATA/d' "$t/staging/.env"; expect_refuse "BOSSMAN_DATA"
 good; sed -i '/^COMPOSE_FILE/d' "$t/staging/.env"; expect_refuse "COMPOSE_FILE"
 
+# Stricter .env reading: "export", quotes and trailing comments still count.
+good; sed -i 's|^COMPOSE_PROJECT_NAME=.*|export COMPOSE_PROJECT_NAME="boss-man"  # oops|' "$t/staging/.env"; expect_refuse "production project"
+good; sed -i 's|^BOSSMAN_HOST_PORT=3200|BOSSMAN_HOST_PORT=3100 # prod|' "$t/staging/.env"; expect_refuse "BOSSMAN_HOST_PORT"
+good; sed -i 's|^BOSSMAN_DATA=.*|BOSSMAN_DATA="/srv/stg" # ok|' "$t/staging/.env"; "$s" --check >/dev/null || fail "quoted value with a comment was refused"
+# No other install to compare against: refuses unless told so.
+good
+mkdir "$t/alone" && git clone -q "$t/origin" "$t/alone/staging" 2>/dev/null && mkdir -p "$t/alone/staging/secrets" && echo k2 >"$t/alone/staging/secrets/master.key" && cp "$t/staging/.env" "$t/alone/staging/.env"
+if out="$("$t/alone/staging/scripts/deploy-staging.sh" --check 2>&1)"; then fail "no-peer check passed"; fi
+[[ $out == *BOSSMAN_PRODUCTION_DIRS* ]] || fail "no-peer refusal: $out"
+BOSSMAN_ISOLATION_NO_PEERS=1 "$t/alone/staging/scripts/deploy-staging.sh" --check >/dev/null || fail "no-peer override refused"
+BOSSMAN_PRODUCTION_DIRS="$t/prod" "$t/alone/staging/scripts/deploy-staging.sh" --check >/dev/null || fail "explicit production dir refused"
+# Two deploys at once: the second refuses while the first holds the lock.
+good; (exec 8>"$t/staging/.git/staging-deploy.lock"; flock -n 8 && sleep 3) & sleep 1
+if out="$("$s" "$two" 2>&1)"; then fail "ran while another deploy held the lock"; fi
+[[ $out == *"already running"* ]] || fail "lock refusal: $out"
+wait
+
 # deploy.sh and update-runner.sh are production's: in a staging folder they refuse before touching docker.
 good; : >"$FAKE_LOG"
 for sc in deploy.sh update-runner.sh; do
@@ -46,6 +63,13 @@ for sc in deploy.sh update-runner.sh; do
   [[ $out == *"not the production install"* ]] || fail "$sc refusal: $out"
 done
 [[ ! -s $FAKE_LOG ]] || fail "docker was called by a refused script: $(cat "$FAKE_LOG")"
+# A staging folder whose .env names no project and no stack is still caught by its overlay.
+printf 'COMPOSE_FILE=docker-compose.yml:deploy/staging.yml # overlay\n' >"$t/staging/.env"
+for sc in deploy.sh update-runner.sh; do
+  if out="$(cd "$t/staging" && "scripts/$sc" 2>&1)"; then fail "$sc ran with only the staging overlay set"; fi
+  [[ $out == *"not the production install"* ]] || fail "$sc overlay refusal: $out"
+done
+good
 
 good; : >"$FAKE_LOG"
 "$s" --dry-run "$two" >"$t/dry.out"
