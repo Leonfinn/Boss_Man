@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Menu as MenuIcon } from "lucide-react";
 import { api, type Company } from "../api";
 import { useFormDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { Markdown, headingId } from "../components/Markdown";
 import { useMediaQuery, usePoll } from "../hooks";
 import { away } from "../server-watch";
@@ -73,7 +74,9 @@ function Editor({ draftKey, initial, folders, onSave, onCancel, saveLabel }: { d
           <label htmlFor="wiki-body" className="sr-only">
             Page text, in Markdown
           </label>
-          <textarea id="wiki-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Write in Markdown: # headings, - lists, | tables |, **bold**, [links](#/tickets/…)." />
+          {/* The whole page (title, folder and body) is kept by the form draft above, so this box must not
+              write a second, clashing entry under the same key: it only displays the form's body. */}
+          <DraftTextarea draftKey={null} noDraft="the editor keeps the whole page, body included, with useFormDraft under the same key" id="wiki-body" value={body} onChange={setBody} placeholder="Write in Markdown: # headings, - lists, | tables |, **bold**, [links](#/tickets/…)." />
         </>
       )}
       <div style={{ display: "flex", gap: 8 }}>

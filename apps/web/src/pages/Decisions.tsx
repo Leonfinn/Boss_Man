@@ -12,6 +12,7 @@ import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
 import { SkillProposal } from "../components/SkillProposal";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 
 // A card's note and own-word answer are kept in this browser as they are typed (BOS-637): a
@@ -1079,16 +1080,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
                           <div className="field">
                             <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : "Note for the agent (if you send it back)"}</label>
-                            <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => editNote(d.id, e.target.value)} />
+                            <DraftTextarea draftKey={draftNote(d.id)} id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(text) => editNote(d.id, text)} />
                           </div>
                         )}
                         {d.context?.type === "workflow_change" && (
                           <>
                             <div className="field">
                               <label htmlFor={`reason-${d.id}`}>Why (shown on the Changes table, required)</label>
-                              <textarea ref={(el) => {
+                              <DraftTextarea draftKey={draftNote(d.id)} ref={(el) => {
                                 reasonBoxes.current.set(d.id, el);
-                              }} id={`reason-${d.id}`} rows={2} maxLength={500} required value={notes[d.id] ?? ""} onChange={(e) => editNote(d.id, e.target.value)} placeholder="e.g. adds a skill; waits for BOS-172" />
+                              }} id={`reason-${d.id}`} rows={2} maxLength={500} required value={notes[d.id] ?? ""} onChange={(text) => editNote(d.id, text)} placeholder="e.g. adds a skill; waits for BOS-172" />
                             </div>
                             <div className="field">
                               <label htmlFor={`reason-link-${d.id}`}>Wiki page that explains it (optional)</label>

@@ -131,7 +131,7 @@ export function NewBuildBanner({ newer }: { newer: boolean }) {
     <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
       <span>
         Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.
-        {kept ? " What you have written is kept: it comes back when the page reloads." : ""}
+        {kept ? " What you've typed is kept: it comes back when the page reloads." : " Nothing you've typed is lost by reloading: every text box keeps a draft."}
       </span>
       <button className="btn" type="button" onClick={() => window.location.reload()}>
         Reload

@@ -1,6 +1,8 @@
 // The public feedback portal (portal.html#<token>). It shares nothing with the owner's app
 // but the styles; the token after "#" never reaches the server in a URL.
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { clearDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 type Importance = "nice_to_have" | "important" | "critical";
 const LEVELS: Array<{ id: Importance; label: string }> = [
@@ -49,15 +51,17 @@ function Who({ name, email, onChange, idPrefix }: { name: string; email: string;
 
 function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void }) {
   const [comment, setComment] = useState(f.myVote?.comment ?? "");
+  // A visitor's comment is kept in their browser as they type (DR-045); it goes once it is sent.
+  const commentKey = `portal-comment/${f.id}`;
   const [who, setWho] = useState({ name: "", email: "" });
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const vote = (importance: Importance, withComment = false) =>
     void call(`/api/portal/votes`, { method: "POST", body: { featureId: f.id, importance, ...(withComment ? { comment: comment.trim() || null, name: who.name.trim() || null, email: who.email.trim() || null } : {}) } }).then(
-      () => (setNote({ ok: true, text: withComment ? "Thanks, we've got your comment." : "Thanks for your vote." }), setOpen(withComment ? false : open), onChanged()),
+      () => (setNote({ ok: true, text: withComment ? "Thanks, we've got your comment." : "Thanks for your vote." }), setOpen(withComment ? false : open), withComment && clearDraft(commentKey), onChanged()),
       (err: Error) => setNote({ ok: false, text: err.message }),
     );
-  const remove = () => void call(`/api/portal/votes/${f.id}`, { method: "DELETE" }).then(() => (setNote(null), setComment(""), onChanged()), (err: Error) => setNote({ ok: false, text: err.message }));
+  const remove = () => void call(`/api/portal/votes/${f.id}`, { method: "DELETE" }).then(() => (setNote(null), setComment(""), clearDraft(commentKey), onChanged()), (err: Error) => setNote({ ok: false, text: err.message }));
   const canVote = f.stage !== "released";
   return (
     <li className="card portal-card">
@@ -95,7 +99,7 @@ function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void
             >
               <div className="field">
                 <label htmlFor={`c-${f.id}`}>What would it let you do?</label>
-                <textarea id={`c-${f.id}`} rows={3} maxLength={2000} value={comment} onChange={(e) => setComment(e.target.value)} />
+                <DraftTextarea draftKey={commentKey} id={`c-${f.id}`} rows={3} maxLength={2000} value={comment} onChange={setComment} />
               </div>
               <Who name={who.name} email={who.email} onChange={setWho} idPrefix={`w-${f.id}`} />
               <div style={{ display: "flex", gap: 8 }}>
@@ -121,11 +125,13 @@ function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void
 
 function Idea() {
   const [form, setForm] = useState({ title: "", text: "", name: "", email: "", website: "" });
+  // A visitor's idea is kept in their browser as they type (DR-045); it goes once it is sent.
+  const textKey = "portal-idea";
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
     void call(`/api/portal/ideas`, { method: "POST", body: { title: form.title.trim(), text: form.text.trim(), name: form.name.trim() || null, email: form.email.trim() || null, website: form.website } }).then(
-      () => (setForm({ title: "", text: "", name: "", email: "", website: "" }), setNote({ ok: true, text: "Thank you! We read every idea." })),
+      () => (setForm({ title: "", text: "", name: "", email: "", website: "" }), clearDraft(textKey), setNote({ ok: true, text: "Thank you! We read every idea." })),
       (err: Error) => setNote({ ok: false, text: err.message }),
     );
   };
@@ -140,7 +146,7 @@ function Idea() {
       </div>
       <div className="field">
         <label htmlFor="idea-text">What problem would it solve for you?</label>
-        <textarea id="idea-text" required rows={4} maxLength={5000} value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} />
+        <DraftTextarea draftKey={textKey} id="idea-text" required rows={4} maxLength={5000} value={form.text} onChange={(text) => setForm({ ...form, text })} />
       </div>
       <Who name={form.name} email={form.email} onChange={(w) => setForm({ ...form, ...w })} idPrefix="idea" />
       {/* People never see this; bots tend to fill it in. */}

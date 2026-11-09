@@ -54,10 +54,12 @@ describe("noticing newer screens on the server (BOS-550)", () => {
   it("says the owner's text is kept when this browser holds a draft, so the prompt doesn't warn them off (BOS-773)", () => {
     saveDraft("new-task/c1/p1", "half a task");
     render(<NewBuildBanner newer />);
-    expect(screen.getByRole("status").textContent).toMatch(/What you have written is kept/);
+    expect(screen.getByRole("status").textContent).toMatch(/What you've typed is kept/);
     cleanup();
     clearAllDrafts();
+    // Every owner text box keeps a draft by construction (BOS-784, DR-045), so it says so even with none
+    // typed yet: reloading can't lose anything.
     render(<NewBuildBanner newer />);
-    expect(screen.getByRole("status").textContent).not.toMatch(/kept/);
+    expect(screen.getByRole("status").textContent).toMatch(/every text box keeps a draft/);
   });
 });
