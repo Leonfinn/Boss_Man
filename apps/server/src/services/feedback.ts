@@ -106,12 +106,13 @@ export function feedbackService(
     return { area, criteria };
   }
 
-  /** The features that actually reach visitors: ticked on, and with a public summary (the portal shows internal title and description). */
+  /** The features that actually reach visitors: ticked on, not marked keep-off, and with a public summary (that summary
+   * replaces the internal description, so internal text never reaches visitors). */
   async function livePortalFeatures(companyId: string) {
     const rows = await db
-      .select({ id: features.id, title: features.title, description: features.description, status: features.status, releasedAt: features.releasedAt, publicSummary: features.publicSummary })
+      .select({ id: features.id, title: features.title, publicSummary: features.publicSummary, status: features.status, releasedAt: features.releasedAt })
       .from(features)
-      .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
+      .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), eq(features.keepOffPortal, false), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
       .orderBy(asc(features.title));
     return rows.filter((f) => !!f.publicSummary?.trim());
   }
@@ -634,7 +635,8 @@ export function feedbackService(
           return {
             id: f.id,
             title: f.title,
-            description: f.description?.slice(0, 1000) ?? null,
+            // The public summary stands in for the internal description: anonymous visitors never see internal text.
+            description: f.publicSummary!.trim().slice(0, 1000),
             stage: f.status === "released" ? "released" : f.status === "planned" || f.status === "in_progress" ? "planned" : "considering",
             myVote: v ? { importance: v.importance, comment: v.hasComment ? v.comment : null } : null,
           };

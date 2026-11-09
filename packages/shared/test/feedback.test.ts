@@ -60,6 +60,13 @@ describe("portalVerdict", () => {
     expect(looksLikeSecurity("Keyboard shortcut keys and sorting keys")).toBe(false);
     expect(portalVerdict({ title: "Keyboard shortcuts", hasPublicSummary: true })).toMatchObject({ onPortal: true });
   });
+  it("splits hyphenated and possessive words, matching the migration's SQL rule", () => {
+    expect(looksLikeSecurity("Token-based login")).toBe(true);
+    expect(looksLikeSecurity("password-reset flow")).toBe(true);
+    expect(looksLikeSecurity("Fix the token's expiry")).toBe(true);
+    expect(portalVerdict({ title: "Token-based login", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(portalVerdict({ title: "Password-reset page", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+  });
   it("lets the manual keep-off mark win, even over an ordinary feature", () => {
     expect(portalVerdict({ title: "Dark mode", keepOffPortal: true, hasPublicSummary: true })).toEqual({ onPortal: false, reason: "sensitive" });
     expect(portalVerdict({ title: "Dark mode", keepOffPortal: false, hasPublicSummary: true })).toEqual({ onPortal: true, reason: null });

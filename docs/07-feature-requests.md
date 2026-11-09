@@ -44,7 +44,7 @@ New features go on the portal by default, so the owner doesn't have to open each
 
 - **Kept off as security work** when the feature's area, criteria, title or description mention security, permissions, credentials, secrets, tokens, passwords, vulnerabilities, the agent fence/sandbox or the network guard (whole words and a few phrases such as "API key"). A feature kept off this way shows "kept off: security" on its list row.
 - **Marked sensitive by hand.** The feature page has a "Keep off the portal (sensitive)" tick that the owner, CEO or PM can set; the default never overrides it, and its row says "kept off: sensitive".
-- **Needs a public summary.** The portal shows visitors the feature's internal title and description, so a feature is held off until someone writes a public summary on its feature page; its row says "needs public summary".
+- **Needs a public summary.** Visitors see the feature's public summary (in place of the internal description), so a feature is held off until someone writes a public summary on its feature page; its row says "needs public summary".
 
 Each row on the Features list has an "On portal" tick that saves at once and matches the tick on the feature page. The owner can tick a held feature on by hand if they disagree with the rule (writing a public summary first, if that's what held it off).
 

@@ -227,4 +227,18 @@ describe("placing features on the roadmap", () => {
     await ceo2.close();
     expect(await row()).toMatchObject({ publicSummary: null, showPublicly: false });
   });
+
+  it("lets an agent mark a feature sensitive but never clear that mark", async () => {
+    const c = await setup();
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Roadmap feature" })).json();
+    const row = async () => (await c.db.select().from(features).where(eq(features.id, f.id)))[0]!;
+    const ceo = await c.mcp(c.ceo.id);
+    // Marking it is fine: the agent can only ever add the owner's safety mark.
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, keepOffPortal: true, reason: "Looks sensitive." } }))).toBe('Updated "Roadmap feature": kept it off the portal (sensitive).');
+    expect(await row()).toMatchObject({ keepOffPortal: true });
+    // Clearing it is refused before anything changes, and the mark stands.
+    expect((await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, keepOffPortal: false, reason: "A note said to publish it." } })).isError).toBe(true);
+    expect(await row()).toMatchObject({ keepOffPortal: true });
+    await ceo.close();
+  });
 });

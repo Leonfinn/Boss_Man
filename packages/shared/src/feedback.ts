@@ -131,7 +131,9 @@ const SECURITY_PHRASES = ["access control", "api key", "api keys", "private key"
 /** Whether text reads as security work: a security word, or one of the security phrases. A simple rule, not AI. */
 export function looksLikeSecurity(text: string): boolean {
   const lower = text.toLowerCase();
-  const words = lower.match(/[a-z][a-z0-9'-]*/g) ?? [];
+  // Split on anything that isn't a letter or digit, so "token-based" and "the token's expiry" count as "token",
+  // the same way the migration's SQL word boundaries do.
+  const words = lower.match(/[a-z0-9]+/g) ?? [];
   if (words.some((w) => SECURITY_WORDS.has(w) || SECURITY_WORDS.has(w.replace(/s$/, "")))) return true;
   return SECURITY_PHRASES.some((p) => lower.includes(p));
 }

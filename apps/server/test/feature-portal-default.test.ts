@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp | undefined;
@@ -67,5 +68,27 @@ describe("features go on the portal by default (BOS-957)", () => {
     const driver = (await c.req("POST", `/api/companies/${c.company.id}/feature-drivers`, { name: "Keeps the network guard sound" })).json();
     const fromCriteria = await c.feature({ title: "Routing change", driverScores: { [driver.id]: 5 } });
     expect(fromCriteria).toMatchObject({ portalVisible: false });
+  });
+
+  it("shows the public summary, never the internal description, to visitors", async () => {
+    const c = await setup();
+    const f = await c.feature({ title: "Dark mode", description: "Internal: owner's private note about the dark theme.", publicSummary: "A dark theme you can switch on." });
+    const { portalToken } = await c.portal(c.company.id);
+    const body = (await t!.app.inject({ method: "GET", url: "/api/portal", headers: { "x-portal-token": portalToken } })).json();
+    expect(body.features).toHaveLength(1);
+    expect(body.features[0]).toMatchObject({ title: f.title, description: "A dark theme you can switch on." });
+    expect(JSON.stringify(body)).not.toContain("Internal: owner's private note");
+  });
+
+  it("still keeps a marked feature off even when its portalVisible flag says on", async () => {
+    const c = await setup();
+    const f = await c.feature({ title: "Dark mode", description: "A dark theme.", publicSummary: "A dark theme." });
+    const { portalToken } = await c.portal(c.company.id);
+    const visitor = () => t!.app.inject({ method: "GET", url: "/api/portal", headers: { "x-portal-token": portalToken } });
+    expect((await visitor()).json().features).toHaveLength(1);
+    // The keep-off mark wins whatever the tick says: a stray tick must not publish a sensitive feature.
+    expect((await c.req("PATCH", `/api/features/${f.id}`, { keepOffPortal: true })).statusCode).toBe(200);
+    await t!.db.execute(sql`update "features" set "portal_visible" = true where "id" = ${f.id}`);
+    expect((await visitor()).json().features).toEqual([]);
   });
 });
