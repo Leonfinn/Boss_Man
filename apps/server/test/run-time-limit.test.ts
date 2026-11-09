@@ -93,6 +93,18 @@ describe("run time limit", () => {
     expect((await ctx.row(id)).outcome).toBe("stopped: run time limit (60 min)");
   });
 
+  it("leaves a run that already ended with its recorded outcome", async () => {
+    ctx = await setup();
+    await ctx.limit(60);
+    const id = await ctx.startRun(61);
+    // It ended on its own before the sweep ran; the sweep must not re-end it or change its outcome.
+    await ctx.emit({ type: "run.ended", runId: id, stopReason: "end_turn", error: null });
+    expect((await ctx.row(id)).outcome).toBe("end_turn");
+    // The server's own end refuses an already-ended run, so the recorded outcome stands.
+    expect(await ctx.runners.endRun(id, "cancelled", new Date())).toBe(false);
+    expect((await ctx.row(id)).outcome).toBe("end_turn");
+  });
+
   it("raises one owner card per stopped run, and Raise the limit lifts the limit by half", async () => {
     ctx = await setup();
     await ctx.limit(60);
