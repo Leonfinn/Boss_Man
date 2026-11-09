@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions } from "../src/db/schema.js";
+import { decisions, runs } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { checkAsk } from "../src/services/decisions.js";
 import { lintOwnerSteps, sh, step, type CardLint, type SelfDeployFacts } from "../src/services/steps.js";
@@ -98,10 +98,19 @@ describe("R6: where a command runs and as whom (BOS-427)", () => {
     expect(refuse([step("Go:", sh("cd /mnt/bm/src", { host: "nas01", as: "root" }))])).toEqual([]);
   });
 
-  it("warns, not refuses, on a host Boss Man hasn't recorded, and asks the card to start with a read-only check", () => {
-    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm", { host: "orange", as: "root" }))], HOSTS);
+  it("refuses a block that names a host with no record while Boss Man knows the server's name (BOS-774)", () => {
+    // The server is nas01; a block that names a host Boss Man has no record for is refused, never guessed at (the
+    // old name from memory case). A real second host needs its own record from its own deployer.
+    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm", { host: "orange", as: "root" }))], { hosts: HOSTS, serverHost: "nas01" });
+    expect(f.refuse.filter((x) => x.rule === "R6").map((x) => x.problem)).toEqual([expect.stringMatching(/runs on "orange", but Boss Man runs on "nas01"/)]);
+  });
+
+  it("warns, not refuses, on a host Boss Man hasn't recorded when it has no report of the server's name", () => {
+    // No report of the server's own name yet (serverHost: null): the name can't be confirmed, so the first step
+    // should be a read-only check rather than the card being refused (BOS-774).
+    const f = lintOwnerSteps([step("Go:", sh("cd /mnt/bm", { host: "orange", as: "root" }))], { hosts: HOSTS, serverHost: null });
     expect(f.refuse.filter((x) => x.rule === "R6")).toEqual([]);
-    expect(f.warn.some((x) => /hasn't recorded/.test(x.problem))).toBe(true);
+    expect(f.warn.some((x) => /no host report yet/.test(x.problem))).toBe(true);
   });
 
   it("refuses a login-run block that reads a folder the login can't read, and passes it once an earlier block staged a copy", () => {
@@ -203,6 +212,108 @@ describe("R6: where a command runs and as whom (BOS-427)", () => {
   it("warns when a copy step touches a path with no recorded ownership", () => {
     const w = warn([step("Copy it:", sh("cp /mnt/bm/x /srv/somewhere/x", { host: "nas01", as: "root" }))]);
     expect(w.some((f) => f.rule === "warn" && /no recorded ownership/.test(f.problem))).toBe(true);
+  });
+});
+
+describe("R6: the server's name comes from the host report, never a remembered one (BOS-774)", () => {
+  const HOSTS = [{ name: "Docker01", ownership: [] }];
+  const R6 = (steps: string[], serverHost?: string | null) => lintOwnerSteps(steps, { hosts: HOSTS, ...(serverHost !== undefined ? { serverHost } : {}) });
+  const one = (steps: string[], serverHost?: string | null) => R6(steps, serverHost);
+
+  it("refuses a card that names \"truenas\" while the host report says \"Docker01\", and names the one on record", () => {
+    const r = one([step("List the containers:", sh("DOCKER_HOST=unix:///run/docker.sock docker ps", { host: "truenas", as: "root" }))], "Docker01");
+    const f = r.refuse.filter((x) => x.rule === "R6");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.problem).toMatch(/runs on "truenas", but Boss Man runs on "Docker01"/);
+  });
+
+  it("accepts the reported name, case aside, and finds the record by it even when it differs in case", () => {
+    expect(one([step("List the containers:", sh("docker ps", { host: "Docker01", as: "root" }))], "Docker01").refuse.filter((x) => x.rule === "R6")).toEqual([]);
+    expect(one([step("List the containers:", sh("docker ps", { host: "docker01", as: "root" }))], "Docker01").refuse.filter((x) => x.rule === "R6")).toEqual([]);
+  });
+
+  it("uses the one recorded host's name when the caller gives no server name, so an old name is still refused", () => {
+    const f = R6([step("List the containers:", sh("docker ps", { host: "truenas", as: "root" }))]).refuse.filter((x) => x.rule === "R6");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.problem).toMatch(/but Boss Man runs on "Docker01"/);
+  });
+
+  it("flags a card as unconfirmed when Boss Man has no host report yet, rather than passing it", () => {
+    const r = one([step("List the containers:", sh("docker ps", { host: "truenas", as: "root" }))], null);
+    expect(r.refuse.filter((x) => x.rule === "R6")).toEqual([]);
+    expect(r.warn.some((x) => /no host report yet/.test(x.problem))).toBe(true);
+    // The same with no facts at all: the name can't be confirmed either.
+    const none = lintOwnerSteps([step("List the containers:", sh("docker ps", { host: "truenas", as: "root" }))], { hosts: [], serverHost: null });
+    expect(none.warn.some((x) => /no host report yet/.test(x.problem))).toBe(true);
+  });
+
+  it("still lets another recorded host through: a name Boss Man has a record for is that host, not a stand-in for the server", () => {
+    const two = [{ name: "Docker01", ownership: [] }, { name: "nas01", ownership: [{ path: "/mnt/backups", owner: "root", group: "root", mode: "700" }] }];
+    expect(lintOwnerSteps([step("List it:", sh("ls /mnt/backups", { host: "nas01", as: "root" }))], { hosts: two, serverHost: "Docker01" }).refuse.filter((x) => x.rule === "R6")).toEqual([]);
+  });
+
+  it("refuses a wrong server name on any step, not only the first (DR-046)", () => {
+    // Brian's card: the old name was step 5 and said nothing. Now a later step is refused like the first.
+    const steps = [
+      step("Look first:", sh("df -h", { host: "Docker01", as: "root" })),
+      step("Then list:", sh("docker ps", { host: "truenas", as: "root" })),
+    ];
+    const f = one(steps, "Docker01").refuse.filter((x) => x.rule === "R6");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.step).toBe(2);
+    expect(f[0]!.problem).toMatch(/runs on "truenas", but Boss Man runs on "Docker01"/);
+  });
+
+  it("checks as=\"login\" the same way as as=\"root\" (DR-046)", () => {
+    const f = one([step("List:", sh("docker ps", { host: "truenas", as: "login" }))], "Docker01").refuse.filter((x) => x.rule === "R6");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.problem).toMatch(/runs on "truenas", but Boss Man runs on "Docker01"/);
+  });
+
+  // `step` refuses a `{{host}}` fence line (it only accepts a plain name), so the token cases are written out.
+  const tokenStep = "Look at the install folder:\n\n```sh host=\"{{host}}\" as=\"root\"\nls -ld /srv/bm\n```";
+
+  it("fills host=\"{{host}}\" with the reported name (DR-046)", () => {
+    // checkAsk fills the token from the report before the lint, so host="{{host}}" is the server's own name.
+    const ok = checkAsk({ triedFirst: TRIED, steps: [tokenStep], hosts: HOSTS, serverHost: "Docker01" });
+    expect(ok.error).toBeNull();
+    expect(ok.steps?.[0]).toContain('host="Docker01"');
+  });
+
+  it("refuses host=\"{{host}}\" with a plain message when Boss Man has no host report (DR-046)", () => {
+    const r = checkAsk({ triedFirst: TRIED, steps: [tokenStep], hosts: HOSTS, serverHost: null });
+    expect(r.error).toMatch(/host deployer hasn't reported a name yet/);
+  });
+
+  it("fills the reported name into a block that names the account but leaves the host out (BOS-774 item 2)", () => {
+    const noLabel = "Look at the install folder:\n\n```sh as=\"root\"\nls -ld /srv/bm\n```";
+    const ok = checkAsk({ triedFirst: TRIED, steps: [noLabel], hosts: HOSTS, serverHost: "Docker01" });
+    expect(ok.error).toBeNull();
+    expect(ok.steps?.[0]).toContain('host="Docker01" as="root"');
+  });
+
+  it("lets a CEO-raised card name the one host it is setting up (newHost), saying that host isn't known yet (DR-046)", () => {
+    const steps = [step("Look at the new machine: this prints nothing.", sh("df -h", { host: "Proxmox01", as: "root" }))];
+    const r = checkAsk({ triedFirst: TRIED, steps, hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01", byCeo: true });
+    expect(r.error).toBeNull();
+    expect(r.lint?.warn.some((w) => /isn't known to Boss Man yet/.test(w.problem))).toBe(true);
+  });
+
+  it("refuses newHost from anyone but the CEO (DR-046)", () => {
+    const steps = [step("Look at the new machine: this prints nothing.", sh("df -h", { host: "Proxmox01", as: "root" }))];
+    const r = checkAsk({ triedFirst: TRIED, steps, hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01", byCeo: false });
+    expect(r.error).toMatch(/Only the CEO can pass newHost/);
+  });
+
+  it("refuses a name other than newHost on a new-host card (DR-046)", () => {
+    // newHost may excuse exactly one unrecorded name; a different wrong name on the same card is still refused.
+    const steps = [
+      step("Look at the new machine: this prints nothing.", sh("df -h", { host: "Proxmox01", as: "root" })),
+      step("Then on the old one:", sh("docker ps", { host: "truenas", as: "root" })),
+    ];
+    const f = lintOwnerSteps(steps, { hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01" }).refuse.filter((x) => x.rule === "R6");
+    expect(f.map((x) => x.step)).toEqual([2]);
+    expect(f[0]!.problem).toMatch(/runs on "truenas", but Boss Man runs on "Docker01"/);
   });
 });
 
@@ -370,7 +481,10 @@ async function setup() {
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const clients: Client[] = [];
   const mcp = async (agentId: string) => {
-    const token = await issueRunToken(db, { companyId: company.id, agentId, runId: randomUUID() });
+    const runId = randomUUID();
+    // A token works only while its own run is live (BOS-513): give it a live run row.
+    await db.insert(runs).values({ id: runId, companyId: company.id, agentId });
+    const token = await issueRunToken(db, { companyId: company.id, agentId, runId });
     const c = new Client({ name: "t", version: "0" });
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     clients.push(c);

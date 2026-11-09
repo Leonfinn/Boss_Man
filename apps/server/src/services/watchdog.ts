@@ -80,6 +80,9 @@ export type WatchdogDeps = {
   now?: () => Date;
   /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
   hosts?: () => Promise<HostFacts[]>;
+  /** The name the host deployer reports for the server itself (BOS-774), for the card lint's R6: a card that names
+   * another host is refused. Absent: only the name the facts carry stands in. */
+  serverHost?: () => Promise<string | null>;
   /** The owner's local hour (0-23) at a moment; the daily summary goes out from 8. Defaults to UTC. */
   localHour?: (t: Date) => number;
   log?: (msg: string) => void;
@@ -1303,7 +1306,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
-      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, ...(deps.serverHost ? { serverHost: await deps.serverHost() } : {}), addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {

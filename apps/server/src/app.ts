@@ -750,6 +750,7 @@ export async function buildApp(opts: AppOptions) {
     },
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
+    serverHost: () => hostFacts.serverHost(),
     localHour: (t) => Number(formatDate("en-GB", t, { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ })),
     now: opts.now,
     log: (m) => app.log.error(m),
@@ -765,6 +766,7 @@ export async function buildApp(opts: AppOptions) {
     nudge: (input) => scheduler.nudge(input),
     ceoCanRun: (companyId) => scheduler.ceoCanRun(companyId),
     hosts: () => hostFacts.hosts(),
+    serverHost: () => hostFacts.serverHost(),
     clearExpired: async () => {
       const n = await clearing.check();
       if (n) await notes.syncDecisions();
