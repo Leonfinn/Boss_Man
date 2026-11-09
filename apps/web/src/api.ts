@@ -207,6 +207,10 @@ export type Decision = {
   evidence?: StallEvidence | null;
 };
 
+/** (BOS-969) The Decisions menu badge and page heading: how many cards need the owner now, and how
+ * many are folded into "Waiting, nothing to do yet". One server figure, so the two never drift. */
+export type DecisionTally = { open: number; waiting: number };
+
 export type StallEvidence = {
   runId: string;
   agent: string | null;
@@ -274,7 +278,7 @@ export type Ticket = {
 };
 /** A reviewer's "Passed, hold merge" (BOS-808): why, what it waits on, and the line the badge shows. */
 export type ReviewHold = { id: string; reason: string; reviewer: string | null; releaseAt: string | null; ready: boolean; label: string; waits: Array<{ kind: "ticket" | "decision"; id: string; label: string; closed: boolean }> };
-export type TicketDetail = Ticket & { hold?: ReviewHold | null; ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: Criterion[]; ownerSetup: string | null; /** "Fixes live" (BOS-639): the live symptom this ticket fixes, set by the CEO, its author or a reviewer. */ fixesLive?: string | null; noCode: boolean; urgent: boolean; quotaHeldUntil?: string | null; quotaHeldReason?: string | null; /** The account the ticket's agent is paid from, by name (BOS-471). */ quotaHeldSource?: string | null; /** When another ticket really holds the agent, which one (BOS-471). */ quotaHeldOther?: { ref: string; title: string } | null; /** The owner's sign-off card for this ticket is open (BOS-471). */ signoffWaiting?: boolean; /** Where it stands on the owner's sign-off (BOS-503): waiting (card open), missing (owed, card being raised again), signed_off, or null when not needed. */ signoff?: "waiting" | "missing" | "signed_off" | null; stateNote: string | null; /** When an agent last posted on it, a reply or a state note (BOS-314). */ lastPostAt?: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
+export type TicketDetail = Ticket & { /** What the merged ticket's after-merge checks still wait for (BOS-1021). */ goLiveWait?: "server" | "runner" | "both" | null; hold?: ReviewHold | null; ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: Criterion[]; ownerSetup: string | null; /** "Fixes live" (BOS-639): the live symptom this ticket fixes, set by the CEO, its author or a reviewer. */ fixesLive?: string | null; noCode: boolean; urgent: boolean; quotaHeldUntil?: string | null; quotaHeldReason?: string | null; /** The account the ticket's agent is paid from, by name (BOS-471). */ quotaHeldSource?: string | null; /** When another ticket really holds the agent, which one (BOS-471). */ quotaHeldOther?: { ref: string; title: string } | null; /** The owner's sign-off card for this ticket is open (BOS-471). */ signoffWaiting?: boolean; /** Where it stands on the owner's sign-off (BOS-503): waiting (card open), missing (owed, card being raised again), signed_off, or null when not needed. */ signoff?: "waiting" | "missing" | "signed_off" | null; stateNote: string | null; /** When an agent last posted on it, a reply or a state note (BOS-314). */ lastPostAt?: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
 export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean; turn?: { number: number; at: string } };
 /** A run going now that no card on the board shows (BOS-155). */
 export type UnticketedRun = { id: string; agent: string | null; ticketId: string | null; ticket: string | null; purpose: string | null; origin: string | null; originFrom: string | null; originNote: string | null; wakeNote: string | null; runTicketId: string | null; startedAt: string };
@@ -290,8 +294,8 @@ export type FundingStatus = {
   windowsSeen: string[];
   /** Whether new runs are going to this account right now (the owner's ranked Claude accounts, BOS-383). */
   claudeActive?: boolean;
-  /** Per window: when it runs out at the recent rate (R78); null with no readings. */
-  forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
+  /** Per window: when it runs out at its pace so far (R78, BOS-1012); null with no readings. */
+  forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutPerHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
   /** Synthetic's own used/limit reading, cached on the server; null for other providers, null counts mean unknown. */
   providerQuota?: {
     used: number | null;
@@ -486,8 +490,14 @@ export type Feature = {
   milestoneId: string | null;
   objectiveId: string | null;
   portalVisible: boolean;
+  /** Marked "keep off the portal (sensitive)"; the default never overrides it. */
+  keepOffPortal: boolean;
   publicSummary: string | null;
+  /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
+  publicTitle: string | null;
   showPublicly: boolean;
+  /** Why the feature is on or off the portal: onPortal, or the reason it is held off (BOS-957). */
+  portal?: { onPortal: boolean; reason: "sensitive" | "security" | "needs public summary" | null };
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;
@@ -504,7 +514,7 @@ export type Feature = {
   tickets: { total: number; done: number; items: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null }> };
 };
 export type ScoredFeatures = { settings: { demandWeight: number; ceoTriage: boolean }; drivers: Driver[]; maxDemand: number; features: Feature[] };
-export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; hasLogo: boolean; portalUrl: string | null; drivers: Driver[]; areas: FeatureArea[] };
+export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; portalUrl: string | null; drivers: Driver[]; areas: FeatureArea[] };
 export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number };
 export type Insight = { id: string; noteId: string; featureId: string; importance: Importance; highlight: string | null; createdBy: string; createdAt: string };
 export type NoteDetail = {

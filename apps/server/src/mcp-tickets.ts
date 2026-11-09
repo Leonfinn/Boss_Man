@@ -4,7 +4,7 @@
 import { and, asc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { acceptanceCriteriaSchema, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
+import { goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
@@ -13,6 +13,7 @@ import { EngagementError } from "./services/engagements.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
 import { NOTHING_CHANGED } from "./services/review.js";
 import { reviewTicketWriteRefusal } from "./services/skill-proposals.js";
+import { moveTicket } from "./services/ticket-moves.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
 import { criteriaWarning, delegateTarget, findProject, fail, FIXES_LIVE_HELP, managerIn, STATES, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
@@ -406,6 +407,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // A review only needs the before-merge criteria reported: an after-merge one can only be settled
       // once the work is live, so it must not bounce rounds of review (DR-024 #5). Once the work has
       // merged, the ticket can't be done until those after-merge criteria are reported pass or fail.
+      if (state === "done") {
+        // BOS-1021: the live checks can't be made before the merge is running; closing now would hide that.
+        const [w] = await db.select({ wait: tickets.goLiveWait }).from(tickets).where(eq(tickets.id, ticketId));
+        if (w?.wait) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(w.wait as GoLiveWait)}), so its after-merge checks can't be made. Boss Man wakes you when it is live; then report them and close the ticket.`);
+      }
       const missing = state === "review" ? missingVerdicts(withCriteria.criteria, note, "before") : state === "done" ? unreportedAfterMerge(withCriteria.criteria, reported) : [];
       if (missing.length)
         return fail(
@@ -420,26 +426,33 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (state === "blocked" && !(await hasOpenBlocker(db, ticketId))) {
         return fail("A blocked ticket must be waiting on something the board can see. If you need the owner (to run something, answer or sign off), call raise_decision with blocksTicketId set to this ticket: it blocks the ticket and puts the ask in their Your review lane. A note in the summary or ticket_reply does not reach them. If you need a colleague's work first, create_ticket with parent set to this ticket: that blocks it until the sub-task is done. For CI or an outside service, use schedule_check instead.");
       }
-      // The card moves to the project's first column for a new state, so the board matches; a note alone leaves it where it is.
-      const [col] = await db
-        .select({ id: workflowColumns.id })
-        .from(workflowColumns)
-        .innerJoin(tickets, eq(tickets.projectId, workflowColumns.projectId))
-        .where(and(eq(tickets.id, ticketId), eq(workflowColumns.systemState, state)))
-        .orderBy(asc(workflowColumns.position))
-        .limit(1);
+      // The move itself is moveTicket's (DR-047): the column, the WIP limit, the field rules, the history line,
+      // the merge line's "left" event, and the done, review and feature steps after a real change. This tool
+      // only says whom to wake: the chain depth of this run goes with each wake.
       const at = new Date();
-      const rows = await db
-        .update(tickets)
-        // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, ...(sameState && state === "done" ? {} : { outcome: state === "done" ? (outcome ?? "completed") : null }), ...(state === "done" && !sameState ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) })
-        // The version is checked in the same statement, so a change between read and write can't slip through (R81).
-        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
-        .returning({ id: tickets.id });
+      try {
+        await moveTicket(db, ticketId, state, {
+          by: scope.agentId,
+          companyId: scope.companyId,
+          expectedVersion: expected_version,
+          outcome,
+          note: summary,
+          blockedUntil: state === "blocked" ? until : undefined,
+          blockedUntilReason: blocked_reason?.trim() || null,
+          fields: { ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
+          hooks: {
+            onDone: () => hooks.onTicketDone?.(ticketId, scope.runId),
+            onReview: () => hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId),
+            onFeature: (fid) => feedback.syncFeature(fid),
+          },
+          now: at,
+        });
+      } catch (e) {
+        if (e instanceof WorkError) return fail(e.message);
+        throw e;
+      }
       // A state note is a post: the run's silence is measured from it (BOS-314).
-      if (rows.length && summary?.trim() && scope.agentId) await db.update(runsTable).set({ lastPostAt: at }).where(eq(runsTable.id, scope.runId));
-      if (!rows.length) return fail(expected_version === undefined ? "No ticket with that ID in your company." : await staleVersionMessage(db, scope.companyId, ticketId, expected_version));
-      await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}${until ? ` (until ${until.toISOString().slice(0, 16).replace("T", " ")} UTC${blocked_reason?.trim() ? `: ${blocked_reason.trim()}` : ""})` : ""}`, at });
+      if (summary?.trim() && scope.agentId) await db.update(runsTable).set({ lastPostAt: at }).where(eq(runsTable.id, scope.runId));
       await noteRunTicket(ticketId);
       // A live check that failed doesn't hold the merged ticket open: Boss Man opens a filled-in, owned
       // follow-up for it (DR-009 #5, BOS-575), so nobody files a bare title by hand. A cancel makes none.
@@ -451,11 +464,6 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           ? `\n\nAn after-merge check failed, so Boss Man opened the follow-up ${f.ref} (#/tickets/${f.id}) "${f.title}", assigned to ${f.assignee ?? "the CEO"}, and told the CEO. Don't create another one.`
           : `\n\nAn after-merge check failed, but Boss Man couldn't open its follow-up ticket. Create it with create_ticket: a description of what failed, a risk and an assignee, and this ticket's link.`;
       }
-      const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
-      await feedback.syncFeature(moved?.featureId);
-      // Work that waited on this ticket can start; the wake carries this run's chain depth.
-      if (state === "done" && !sameState) await hooks.onTicketDone?.(ticketId, scope.runId);
-      if (state === "review" && !sameState) await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
       // The check that counts is at the merge, but telling the agent now saves it waiting hours to
       // find out its migration number is taken (BOS-219). It never holds the move up.
       const warn = state === "review" && !sameState ? await migrationWarning(review, ticketId, scope.companyId) : "";

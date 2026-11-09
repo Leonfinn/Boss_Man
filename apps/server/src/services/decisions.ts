@@ -1063,6 +1063,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let selfDeploy: SelfDeployHook | null = null;
   let maintenance: MaintenanceHook | null = null;
 
+  // (BOS-996) The tally, kept for a few seconds per view so the badge, the page heading and the
+  // dashboard share one walk of the ranked queue instead of one each. Cleared on every answer.
+  // shortcut: a 5-second copy, cleared on every answer; lost on restart, harmless because the next
+  // read simply walks the queue again.
+  const TALLY_CACHE_MS = 5_000;
+  const tallyCache = new Map<string, { tally: { open: number; waiting: number }; until: number }>();
+  const clearTallyCache = () => tallyCache.clear();
+
   /** What the owner needs to judge a stalled run, worked out when asked (not stored). The last steps come from the run's own transcript. */
   async function stallEvidence(runId: string) {
     const [row] = await db
@@ -1826,6 +1834,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return row!;
       });
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
+      // (BOS-996) A new card is in the queue: the kept tally is stale from this moment.
+      clearTallyCache();
       // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
       return { ...raised, droppedLinks };
     },
@@ -2075,6 +2085,31 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * in the company, any tier, including lesson cards and cards still with the CEO or the
      * Scrum Master. `companyId` narrows that view to one company.
      */
+    /**
+     * What the owner has to do now (BOS-969). The number on the Decisions menu and the page's heading
+     * must never drift, so both take it from here, over the same rows and the same rule as the list:
+     * a card is actionable when it is not in the "Waiting, nothing to do yet" group. It walks the
+     * owner's own queue (CEO-tier and lesson cards are left out there, so they wait for the ladder).
+     * `companyId` narrows it to one company. (BOS-996) The page no longer sends its own figures: the
+     * tally is the server's alone, and the heading reads the same number the menu does. The tally is
+     * kept for a few seconds per view, so the menu badge, the page heading and the dashboard's
+     * "need your answer" figure, polling together, share one walk of the ranked queue rather than
+     * three. `now()` is the service's clock, so a test can step past the window.
+     */
+    async queueTally(opts: { includeAll?: boolean; companyId?: string } = {}): Promise<{ open: number; waiting: number }> {
+      const key = opts.includeAll ? "*" : (opts.companyId ?? "");
+      const hit = tallyCache.get(key);
+      if (hit && hit.until > now().getTime()) return hit.tally;
+      const query: { includeAll?: boolean; companyId?: string } = {};
+      if (opts.includeAll) query.includeAll = true;
+      if (opts.companyId) query.companyId = opts.companyId;
+      const rows = (await this.queue(query)) as unknown as Array<{ waiting?: string | null }>;
+      const waiting = rows.filter((r) => !!r.waiting).length;
+      const tally = { open: rows.length - waiting, waiting };
+      tallyCache.set(key, { tally, until: now().getTime() + TALLY_CACHE_MS });
+      return tally;
+    },
+
     async queue(opts: { includeAll?: boolean; companyId?: string } = {}) {
       const t = now();
       const open = await db
@@ -2742,6 +2777,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** Records the answer and resumes what was waiting. Returns null if not open. */
     async answer(id: string, answer: string, extra: AnswerExtra = {}) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      // (BOS-996) The queue changed: the badge, the heading and the dashboard read it afresh next poll.
+      clearTallyCache();
       if (!d) {
         // A sign-off the owner pressed twice (or the CEO settled) is already answered, and the ticket page's
         // Approve and merge still merges it rather than refusing on a card that is no longer open (BOS-471).
@@ -3173,6 +3210,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** The agent that raised a card takes it back (BOS-123); what it blocked can move again. */
     async withdraw(id: string, actor: { agentId: string | null }, reason?: string) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      // (BOS-996) A withdrawal changes the queue; clear the kept tally before anything reads it again.
+      clearTallyCache();
       if (!d) return null;
       if (!actor.agentId || d.raisedByAgentId !== actor.agentId) throw new AnswerError("You can only withdraw a decision you raised.");
       // Only a question asked through raise_decision may be taken back. System cards that also

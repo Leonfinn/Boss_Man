@@ -342,6 +342,12 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
+    mergedAt: timestamp("merged_at", { withTimezone: true }),
+    touchesRunner: boolean("touches_runner"),
+    /** What its after-merge checks still wait for ("server" | "runner" | "both") and since when (BOS-1021): null = not waiting. */
+    goLiveWait: text("go_live_wait"),
+    goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
@@ -1401,6 +1407,10 @@ export const feedbackSettings = pgTable("feedback_settings", {
   portalToken: text("portal_token").unique(),
   portalTitle: text("portal_title"),
   portalIntro: text("portal_intro"),
+  /** Where the portal's "← Back to …" links go: an https address on the owner's own site (BOS-967). */
+  portalBackUrl: text("portal_back_url"),
+  /** The words after "← Back to "; empty means the portal's heading. */
+  portalBackText: text("portal_back_text"),
   /** The logo beside the portal heading: png, jpeg or webp bytes, checked on upload. */
   portalLogo: bytea("portal_logo"),
   portalLogoType: text("portal_logo_type"),
@@ -1445,8 +1455,12 @@ export const features = pgTable(
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
     portalVisible: boolean("portal_visible").notNull().default(false),
+    /** Marked "keep off the portal (sensitive)" by the owner, CEO or PM; the default never overrides it. */
+    keepOffPortal: boolean("keep_off_portal").notNull().default(false),
     /** A plain-language summary for readers outside the team; null until written. */
     publicSummary: text("public_summary"),
+    /** The title visitors see on the feedback portal; null falls back to the summary's first line (BOS-991). */
+    publicTitle: text("public_title"),
     /** Off by default; nothing is published anywhere until a later public roadmap uses it. */
     showPublicly: boolean("show_publicly").notNull().default(false),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),

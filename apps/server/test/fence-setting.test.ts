@@ -212,9 +212,9 @@ describe("the fence stops being off by unspoken default (DR-049 point 3, BOS-940
     expect(await fenceDefaultSweep(c.db, new Date())).toMatchObject({ raised: 0 });
   });
 
-  it("migration 0133 marks only the companies already at watch or enforce as chosen, and changes no mode", async () => {
+  it("migration 0138 marks only the companies already at watch or enforce as chosen, and changes no mode", async () => {
     const c = (ctx = await setup(["fence"]));
-    const file = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle/0133_fence_watch_by_default.sql"), "utf8");
+    const file = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle/0138_fence_watch_by_default.sql"), "utf8");
     const update = file.slice(file.indexOf('UPDATE "companies"')).trim();
     expect(update).toMatch(/^UPDATE "companies" SET "fence_mode_chosen_at" = now\(\) WHERE "fence_mode" <> 'off';$/);
     const [other] = await c.db.insert(companies).values({ name: "Fenced Co", fenceMode: "watch" }).returning();

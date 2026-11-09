@@ -227,4 +227,116 @@ describe("placing features on the roadmap", () => {
     await ceo2.close();
     expect(await row()).toMatchObject({ publicSummary: null, showPublicly: false });
   });
+
+  it("refuses to put a feature the rule calls security work on the portal, though the owner still can (BOS-991)", async () => {
+    const c = await setup();
+    // A security-worded feature is held off by the default; the guard uses the same rule as the default.
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Rotate the host-deployer token", description: "Rotate it every week." })).json();
+    const row = async () => (await c.db.select().from(features).where(eq(features.id, f.id)))[0]!;
+    expect(f).toMatchObject({ portalVisible: false, keepOffPortal: false });
+
+    const ceo = await c.mcp(c.ceo.id);
+    const refused = textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: true, publicSummary: "A tidier weekly routine for the team.", reason: "A portal note asked for this." } }));
+    expect(refused).toMatch(/security work/);
+    expect(await row()).toMatchObject({ portalVisible: false, publicSummary: null });
+    // The refusal is the tick only: the same agent can still write the summary or take it off.
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: "A tidier weekly routine for the team.", reason: "Write its public summary." } }))).toBe('Updated "Rotate the host-deployer token": wrote its public summary.');
+    expect((await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: false, reason: "Take it off." } })).isError).not.toBe(true);
+    // A decoy title and description must not slip the security-worded feature past the rule: update_feature never
+    // saves them, so the guard judges the stored feature, and the call is refused outright (Jane's BOS-991 finding).
+    const decoy = textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: true, title: "Dark mode", description: "A dark theme", publicSummary: "A tidier weekly routine for the team.", reason: "A portal note asked for this." } }));
+    expect(decoy).toMatch(/does not change a feature's title or description/);
+    expect(await row()).toMatchObject({ title: "Rotate the host-deployer token", portalVisible: false });
+    await ceo.close();
+
+    // An ordinary feature may still be put on the portal by an agent, and the public title is written too.
+    const ordinary = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Dark mode", description: "A dark theme." })).json();
+    const ceo2 = await c.mcp(c.ceo.id);
+    expect(textOf(await ceo2.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: ordinary.id, portalVisible: false, reason: "Hold it back." } }))).toContain("took it off the feedback portal");
+    expect(textOf(await ceo2.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: ordinary.id, portalVisible: true, publicTitle: "Dark mode", publicSummary: "A dark theme you can switch on.", reason: "Show it again." } }))).toBe('Updated "Dark mode": wrote its public summary, wrote its public title, put it on the feedback portal.');
+    await ceo2.close();
+    expect((await c.db.select().from(features).where(eq(features.id, ordinary.id)))[0]).toMatchObject({ portalVisible: true, publicTitle: "Dark mode" });
+
+    // The owner can still tick it on in the app, as BOS-957 intends.
+    expect((await c.req("PATCH", `/api/features/${f.id}`, { portalVisible: true })).json()).toMatchObject({ portalVisible: true });
+  });
+
+  it("lets an agent mark a feature sensitive but never clear that mark", async () => {
+    const c = await setup();
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Roadmap feature" })).json();
+    const row = async () => (await c.db.select().from(features).where(eq(features.id, f.id)))[0]!;
+    const ceo = await c.mcp(c.ceo.id);
+    // Marking it is fine: the agent can only ever add the owner's safety mark.
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, keepOffPortal: true, reason: "Looks sensitive." } }))).toBe('Updated "Roadmap feature": kept it off the portal (sensitive).');
+    expect(await row()).toMatchObject({ keepOffPortal: true });
+    // Clearing it is refused before anything changes, and the mark stands.
+    expect((await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, keepOffPortal: false, reason: "A note said to publish it." } })).isError).toBe(true);
+    expect(await row()).toMatchObject({ keepOffPortal: true });
+    await ceo.close();
+  });
+});
+
+describe("QA: the portal security guard on update_feature (BOS-991)", () => {
+  const call = (cl: Awaited<ReturnType<Awaited<ReturnType<typeof setup>>["mcp"]>>, args: Record<string, unknown>) => cl.callTool({ name: "feedback", arguments: { action: "update_feature", reason: "A portal note asked for this.", ...args } });
+
+  it("judges the stored title AND the stored description: security wording in either one refuses the tick", async () => {
+    const c = await setup();
+    const row = async (id: string) => (await c.db.select().from(features).where(eq(features.id, id)))[0]!;
+    const inTitle = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Rotate API keys", description: "Make it nicer." })).json();
+    const inDescription = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Weekly routine", description: "Rotate the signing secrets every week." })).json();
+    expect(inTitle.portalVisible).toBe(false);
+    expect(inDescription.portalVisible).toBe(false);
+    const ceo = await c.mcp(c.ceo.id);
+    for (const f of [inTitle, inDescription]) {
+      const r = await call(ceo, { featureId: f.id, portalVisible: true, publicSummary: "A tidier weekly routine." });
+      expect(r.isError).toBe(true);
+      expect(textOf(r)).toMatch(/security work/);
+      expect(await row(f.id)).toMatchObject({ portalVisible: false });
+    }
+    await ceo.close();
+  });
+
+  it("title or description alone is refused too, even without portalVisible: they would be silently ignored", async () => {
+    const c = await setup();
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Dark mode", description: "A dark theme." })).json();
+    const ceo = await c.mcp(c.ceo.id);
+    for (const extra of [{ title: "Renamed" }, { description: "New text" }]) {
+      const r = await call(ceo, { featureId: f.id, rank: 2, ...extra });
+      expect(r.isError).toBe(true);
+      expect(textOf(r)).toMatch(/does not change a feature's title or description/);
+    }
+    const [after] = await c.db.select().from(features).where(eq(features.id, f.id));
+    expect(after).toMatchObject({ title: "Dark mode", description: "A dark theme." });
+    expect(after!.rank).not.toBe(2);
+    await ceo.close();
+  });
+
+  it("a decoy title only (innocent-looking) on a security feature is refused and nothing is saved", async () => {
+    const c = await setup();
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Rotate the host-deployer token", description: "Weekly." })).json();
+    const ceo = await c.mcp(c.ceo.id);
+    const r = await call(ceo, { featureId: f.id, portalVisible: true, title: "Dark mode", publicSummary: "Tidier." });
+    expect(r.isError).toBe(true);
+    expect((await c.db.select().from(features).where(eq(features.id, f.id)))[0]).toMatchObject({ portalVisible: false, publicSummary: null, title: "Rotate the host-deployer token" });
+    await ceo.close();
+  });
+
+  it("an engineer cannot place features at all, so the guard is never the only wall", async () => {
+    const c = await setup();
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Rotate API keys" })).json();
+    const eng = await c.mcp(c.worker.id);
+    expect((await call(eng, { featureId: f.id, portalVisible: true })).isError).toBe(true);
+    await eng.close();
+  });
+
+  it("publicTitle: set and cleared by the agent, trimmed, and a whitespace-only one reads as none", async () => {
+    const c = await setup();
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Dark mode", description: "A dark theme." })).json();
+    const ceo = await c.mcp(c.ceo.id);
+    await call(ceo, { featureId: f.id, publicTitle: "  Dark theme  " });
+    expect((await c.db.select().from(features).where(eq(features.id, f.id)))[0]!.publicTitle).toBe("Dark theme");
+    expect(textOf(await call(ceo, { featureId: f.id, publicTitle: "   " }))).toContain("cleared its public title");
+    expect((await c.db.select().from(features).where(eq(features.id, f.id)))[0]!.publicTitle).toBeNull();
+    await ceo.close();
+  });
 });
