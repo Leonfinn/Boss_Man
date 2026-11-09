@@ -64,6 +64,8 @@ export const OWNER_CONTROLS = {
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
     "Mark urgent", "Marked urgent", "Edit steps", "Save steps", "Discard draft",
+    // A text field someone else changed was refused: the owner's draft stays and this brings in the latest (BOS-905).
+    "Reload the latest",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // The Scrum Master's log of this ticket.
