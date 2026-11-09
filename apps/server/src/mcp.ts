@@ -1489,7 +1489,7 @@ function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?
  * the company's tickets, so an agent can look things up instead of saying it can't see them.
  */
 /** Opening a picture or file the owner attached, or a screenshot an agent attached, in every kind of run. */
-export function registerViewImage(server: McpServer, images: Services["images"], scope: Scope) {
+function registerViewImage(server: McpServer, images: Services["images"], scope: Scope) {
   server.registerTool(
     "open_attachment",
     {
@@ -1523,7 +1523,7 @@ export function registerViewImage(server: McpServer, images: Services["images"],
   );
 }
 
-export function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, skillProposals, review, agents: team }: Pick<Services, "notes" | "wiki" | "skills" | "skillProposals" | "review" | "agents">, scope: Scope) {
+function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, skillProposals, review, agents: team }: Pick<Services, "notes" | "wiki" | "skills" | "skillProposals" | "review" | "agents">, scope: Scope) {
   server.registerTool(
     "tickets",
     {
@@ -2255,7 +2255,7 @@ function registerRequestNote(server: Pick<McpServer, "registerTool">, db: Db, sc
   );
 }
 
-export function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
+function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
   server.registerTool(
     "board",
     { description: "See the company's board: projects, objectives with their milestones, agents (with the reviews each does under the company's Settings > Reviews, e.g. \"Code (all levels), Security (High+)\"; a project can override them), and open tickets with their ids.", inputSchema: {} },
@@ -2281,7 +2281,7 @@ export function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, s
   );
 }
 
-export function registerListMyWork(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
+function registerListMyWork(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
   server.registerTool(
     "list_my_work",
     { description: "List the open tickets assigned to you.", inputSchema: {} },
@@ -2665,7 +2665,7 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
     const ceo = me?.role === "ceo";
     const server =
       me?.duty === "assistant"
-        ? buildPaServer(db, services, scope)
+        ? buildPaServer(db, services, scope, { registerSharedTools, registerViewImage, registerBoard, registerListMyWork })
         : run?.purpose === "chat"
           ? buildChatServer(db, services, scope, hooks, ceo)
           : me?.duty === SCRUM_MASTER_DUTY

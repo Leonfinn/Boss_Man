@@ -7,7 +7,15 @@ import type { Db } from "./db/client.js";
 import { decisions as decisionsTable } from "./db/schema.js";
 import { markSearched, remember } from "./services/pa.js";
 import { fail, text, type Scope } from "./mcp-common.js";
-import { registerBoard, registerListMyWork, registerSharedTools, registerViewImage, type Services } from "./mcp.js";
+import type { Services } from "./mcp.js";
+
+/** The shared registrars still living in mcp.ts, handed in so this file never imports mcp.ts at run time. */
+export type PaTools = {
+  registerSharedTools: (server: McpServer, db: Db, services: Pick<Services, "notes" | "wiki" | "skills" | "skillProposals" | "review" | "agents">, scope: Scope) => void;
+  registerViewImage: (server: McpServer, images: Services["images"], scope: Scope) => void;
+  registerBoard: (server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) => void;
+  registerListMyWork: (server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) => void;
+};
 
 /** The tools a PA may have (R87): all reads. Anything else is never registered for it. */
 const PA_READS = new Set(["tickets", "decisions", "list_my_work", "wiki", "whats_new", "board"]);
@@ -33,7 +41,7 @@ function readOnly(server: McpServer, runId: string): Pick<McpServer, "registerTo
 }
 
 /** The PA's server: the read tools plus pa_reply and pa_escalate, and nothing that writes (R87). */
-export function buildPaServer(db: Db, { notes, wiki, skills, skillProposals, review, agents: team, pa, images }: Services, scope: Scope) {
+export function buildPaServer(db: Db, { notes, wiki, skills, skillProposals, review, agents: team, pa, images }: Services, scope: Scope, { registerSharedTools, registerViewImage, registerBoard, registerListMyWork }: PaTools) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   const reads = readOnly(server, scope.runId);
   registerSharedTools(reads as McpServer, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
