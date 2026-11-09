@@ -43,6 +43,6 @@ describe("imageContains (BOS-764)", () => {
 
   it("compares commits without regard to case", () => {
     expect(imageContains(C, A.toUpperCase(), order)).toBe(true);
-    expect(imageContains(C.toUpperCase().toLowerCase(), C.toUpperCase(), order)).toBe(true);
+    expect(imageContains(C, C.toUpperCase(), order)).toBe(true);
   });
 });
