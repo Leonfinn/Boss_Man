@@ -1,5 +1,5 @@
 import path from "node:path";
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
@@ -103,7 +103,8 @@ import { diskService, type DiskLimits } from "./services/disk.js";
 import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { NotifySettings, notificationsService } from "./services/notifications.js";
+import { NotifySettings, NtfyUrl, notificationsService } from "./services/notifications.js";
+import { approveGate, phoneApproveService } from "./services/phone-approve.js";
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
 const OWNER_TZ = timeZoneOr(process.env.TZ);
@@ -124,7 +125,8 @@ export type AppOptions = {
   secureCookies?: boolean | "auto";
   /** Exact addresses of the proxies whose X-Forwarded-* headers are believed (BOS-242). Never "true". */
   trustedProxies?: string[];
-  logger?: boolean;
+  /** Fastify's logger: on, off, or options (tests pass a stream to read what is logged). */
+  logger?: FastifyServerOptions["logger"];
   /** Quiet time before a wiki page is embedded after a write. Default 30s. */
   semanticDebounceMs?: number;
   /** Runner heartbeat interval; tests shorten it. */
@@ -321,6 +323,15 @@ export async function buildApp(opts: AppOptions) {
     } });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
+  // Phone Approve (BOS-243): the decision push asks it for an Approve button; a tap answers through decisionsSvc.
+  const phoneApprove = phoneApproveService(db, {
+    getSettings: () => notes.getSettings(),
+    reveal: (id) => secretsSvc.reveal(id),
+    pushPlain: (n) => notes.pushPlain(n),
+    answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
+    now: opts.now,
+  });
+  notes.setApproveHook(phoneApprove);
   // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
   const secondOpinion = secondOpinionService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
   decisionsSvc.setSecondOpinion(secondOpinion);
@@ -1011,6 +1022,35 @@ export async function buildApp(opts: AppOptions) {
     return { username: owner.username };
   });
 
+  // Phone Approve (BOS-243 rules 3, 4, 8): an ntfy http action posts {"token": "..."} here, with no
+  // session. JSON in and out, never a page; request logging is off and the body is never logged or
+  // echoed, so the token can't reach a log, the error buffer or a response. Its own parsers, in their
+  // own scope, so a bad body gets a plain JSON answer rather than the error handler's message.
+  await app.register(async (phone) => {
+    phone.removeAllContentTypeParsers();
+    phone.addContentTypeParser("application/json", { parseAs: "string", bodyLimit: 1024 }, (_req, body, done) => done(null, { json: body }));
+    phone.addContentTypeParser("*", { parseAs: "string", bodyLimit: 1024 }, (_req, _body, done) => done(null, { json: null }));
+    phone.setErrorHandler((err, _req, reply) => {
+      const status = (err as { statusCode?: number }).statusCode;
+      if (status && status >= 400 && status < 500) return reply.code(status).send({ ok: false, error: "bad_request" });
+      // A fixed line only: the error itself could quote the request.
+      app.log.warn("phone approve: a tap failed inside the server");
+      return reply.code(500).send({ ok: false, error: "internal_error" });
+    });
+    phone.post("/api/phone/approve", { logLevel: "silent" }, async (req, reply) => {
+      const raw = (req.body as { json?: string | null } | undefined)?.json;
+      if (typeof raw !== "string") return reply.code(415).send({ ok: false, error: "json_only" });
+      let token: unknown;
+      try {
+        token = (JSON.parse(raw) as { token?: unknown } | null)?.token;
+      } catch {
+        return reply.code(400).send({ ok: false, error: "bad_request" });
+      }
+      const r = await phoneApprove.redeem(token, req.ip);
+      return reply.code(r.status).send(r.body);
+    });
+  });
+
   app.post("/api/logout", async (req, reply) => {
     const token = req.cookies[SESSION_COOKIE];
     if (token) await db.delete(sessions).where(eq(sessions.tokenHash, hashToken(token)));
@@ -1308,6 +1348,11 @@ export async function buildApp(opts: AppOptions) {
       await db.insert(settings).values({ key: "run_limits", value: merged }).onConflictDoUpdate({ target: settings.key, set: { value: merged } });
       return runLimits();
     });
+    /** Whether phone Approve buttons are on, and if not why, for Settings → Notifications (BOS-243). */
+    const approveStatus = async (s: NotifySettings) => {
+      const g = approveGate(s, s.ntfy?.tokenSecretId ? await secretsSvc.reveal(s.ntfy.tokenSecretId) : null);
+      return g.on ? { on: true } : { on: false, why: g.why };
+    };
     // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
     // Owner only: no agent tool or route writes these settings.
     const checkQueueView = async () => {
@@ -1354,12 +1399,12 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
-      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null };
+      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s) };
     });
     owner.put("/api/notification-settings", async (req) => {
       const b = NotifySettings.omit({ ntfy: true })
         .extend({
-          ntfy: z.object({ url: z.string().url(), topic: z.string(), token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
+          ntfy: z.object({ url: NtfyUrl, topic: z.string(), token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
         })
         .parse(req.body);
       const current = await notes.getSettings();
@@ -1372,7 +1417,7 @@ export async function buildApp(opts: AppOptions) {
           : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: b.ntfy.token })).secret.id;
       }
       const saved = await notes.setSettings({ ...b, ntfy: b.ntfy ? { url: b.ntfy.url, topic: b.ntfy.topic, tokenSecretId } : null });
-      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null };
+      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved) };
     });
     owner.post("/api/notification-settings/test", async (_req, reply) => {
       try {

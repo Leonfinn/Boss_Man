@@ -1156,6 +1156,42 @@ export const notifications = pgTable(
 );
 
 /**
+ * Single-use links behind a phone push's Approve button (BOS-243). Only the SHA-256 of the token is
+ * kept; the token itself lives only in the push. `decisionRev` pins the card as it was when the push
+ * went out, so a rewritten card refuses the tap. At most one live token per decision.
+ */
+export const approveTokens = pgTable(
+  "approve_tokens",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    decisionId: uuid("decision_id").notNull().references(() => decisions.id, { onDelete: "cascade" }),
+    /** The option a tap submits: the card's recommended option when the push went out, never anything else. */
+    answer: text("answer").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    decisionRev: text("decision_rev").notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("approve_tokens_live").on(t.decisionId).where(sql`${t.usedAt} is null and ${t.revokedAt} is null`), index("approve_tokens_company_expires").on(t.companyId, t.expiresAt)],
+);
+
+/** Taps on the phone Approve endpoint, for its rate limit (BOS-243). Kept a day. */
+export const phoneActionHits = pgTable(
+  "phone_action_hits",
+  {
+    id: id(),
+    ip: text("ip").notNull(),
+    companyId: uuid("company_id").references(() => companies.id, { onDelete: "cascade" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("phone_action_hits_ip_at").on(t.ip, t.at), index("phone_action_hits_company_at").on(t.companyId, t.at)],
+);
+
+/**
  * CEO continuity (v1.1). A CEO works in chapters: one long agent session with a directive
  * frozen at the start, so prompt caching holds. A chapter closes at 70% context, after 7
  * days, or when the owner asks; the CEO writes a handoff that opens the next one.
