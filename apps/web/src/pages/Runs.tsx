@@ -168,8 +168,15 @@ function EndAllRuns({ count, onDone }: { count: number; onDone: () => void }) {
     setBusy(true);
     setSaid(null);
     try {
-      const r = await api<{ cancelled: number }>("/api/runs/cancel-all", { method: "POST" });
-      setSaid({ ok: true, text: r.cancelled ? `Ended ${r.cancelled} run${r.cancelled === 1 ? "" : "s"}.` : "No runs were running, so nothing was ended." });
+      const r = await api<{ cancelled: number; failed?: string[] }>("/api/runs/cancel-all", { method: "POST" });
+      // An emergency stop must say plainly what it could not do (BOS-862): the runs it failed on stay listed as
+      // running, so the owner can open them and stop them one by one.
+      const ended = r.cancelled ? `Ended ${r.cancelled} run${r.cancelled === 1 ? "" : "s"}.` : "No runs were running, so nothing was ended.";
+      const missed = r.failed?.length ?? 0;
+      setSaid({
+        ok: !missed,
+        text: missed ? `${ended} ${missed} run${missed === 1 ? "" : "s"} could not be ended. Open ${missed === 1 ? "it" : "them"} to stop ${missed === 1 ? "it" : "them"} one by one.` : ended,
+      });
       onDone();
     } catch (err) {
       setSaid({ ok: false, text: (err as Error).message });

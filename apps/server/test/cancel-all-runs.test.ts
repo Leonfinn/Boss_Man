@@ -10,6 +10,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { runners, runs } from "../src/db/schema.js";
+import { RunError } from "../src/services/runs.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -147,5 +148,91 @@ describe("ending all running runs (BOS-837)", () => {
     expect(live.map((r) => r.id)).toEqual([a.runId]);
     expect(live[0]!.cancelRequestedAt).not.toBeNull();
     expect((await c.req("POST", "/api/runs/cancel-all")).json()).toEqual({ cancelled: 1 });
+  });
+
+  it("keeps going when one cancel throws, ending the rest, and returns and logs the one it could not end", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co");
+    const b = await c.company("Web Co");
+    // A failed cancel is a dancer's send throwing, or a database error; here the runner's socket throws for one run.
+    // The others, before and after it, must still be cancelled: this is the emergency stop (BOS-862).
+    // A second live run in the first company, so one throwing run is not the whole list.
+    const from = c.sent.length;
+    await c.scheduler.wake({ agentId: a.ceo.id, reason: "start" });
+    await c.scheduler.tick();
+    const second = c.sent.slice(from).find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start")!;
+
+    // The runner's call throws for one run's cancel, as a closed socket or a database error can. Put that run in
+    // the middle of the list so the one after it proves the loop went on.
+    const broken = second.runId;
+    c.releases[0]!();
+    c.releases.push(
+      c.runners.connect(a.runnerId, (command) => {
+        if (command.type === "run.cancel" && command.runId === broken) throw new Error("socket is closed");
+        c.sent.push(command);
+        return true;
+      }),
+    );
+    // The list comes off the table unordered, so sort it so the broken run is not first.
+    await c.db.update(runs).set({ startedAt: new Date(Date.now() - 60_000) }).where(eq(runs.id, broken));
+
+    const logs: string[] = [];
+    const off = c.app.log.error;
+    c.app.log.error = ((...args: Parameters<typeof off>) => (logs.push(String(args[0])), off(...args))) as typeof c.app.log.error;
+    try {
+      const res = await c.req("POST", "/api/runs/cancel-all");
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { cancelled: number; failed: string[] };
+      expect(body.cancelled).toBe(2);
+      expect(body.failed).toEqual([broken]);
+      // The other two got their cancel; the broken one did not stop the loop.
+      expect(c.sent).toContainEqual({ type: "run.cancel", runId: a.runId });
+      expect(c.sent).toContainEqual({ type: "run.cancel", runId: b.runId });
+      expect((await runRow(c.db, a.runId)).cancelRequestedAt).not.toBeNull();
+      expect((await runRow(c.db, b.runId)).cancelRequestedAt).not.toBeNull();
+      // The run it could not end is still live, so the owner can open it and stop it themselves.
+      expect((await runRow(c.db, broken)).endedAt).toBeNull();
+      expect((await runRow(c.db, broken)).cancelRequestedAt).toBeNull();
+      // The failure is logged with the run id and the error's message.
+      expect(logs.some((l) => l.includes(broken) && l.includes("socket is closed"))).toBe(true);
+    } finally {
+      c.app.log.error = off;
+    }
+  });
+
+  it("skips a run that ended on its own during the loop, counting it in neither number", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co");
+    const b = await c.company("Web Co");
+    // A second live run in the first company, on its CEO.
+    const from = c.sent.length;
+    await c.scheduler.wake({ agentId: a.ceo.id, reason: "start" });
+    await c.scheduler.tick();
+    const selfEnds = c.sent.slice(from).find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start")!;
+
+    // The run ends on its own between the list and its cancel (its agent finished). The per-run cancel it then
+    // sees throws a 409, which is not a failure: it must be skipped and counted in neither number, and not logged
+    // as one that could not be ended (BOS-862). A 409 from the real cancel is the same shape as this.
+    const offCancel = c.runs.cancel;
+    const realCancel = offCancel.bind(c.runs);
+    c.runs.cancel = ((runId: string, companyId?: string, reason?: string) =>
+      runId === selfEnds.runId ? Promise.reject(new RunError(409, "That run has already ended.")) : realCancel(runId, companyId, reason)) as typeof offCancel;
+
+    const logs: string[] = [];
+    const off = c.app.log.error;
+    c.app.log.error = ((...args: Parameters<typeof off>) => (logs.push(String(args[0])), off(...args))) as typeof c.app.log.error;
+    try {
+      const res = await c.req("POST", "/api/runs/cancel-all");
+      expect(res.statusCode).toBe(200);
+      // The two other live runs were ended; the one that had ended itself is counted in neither number.
+      expect(res.json()).toEqual({ cancelled: 2 });
+      expect((await runRow(c.db, a.runId)).cancelRequestedAt).not.toBeNull();
+      expect((await runRow(c.db, b.runId)).cancelRequestedAt).not.toBeNull();
+      // A 409 is expected housekeeping, not a failure: nothing is logged as could-not-end.
+      expect(logs.some((l) => l.includes(selfEnds.runId))).toBe(false);
+    } finally {
+      c.runs.cancel = offCancel;
+      c.app.log.error = off;
+    }
   });
 });

@@ -100,8 +100,11 @@ p { margin: 0; }
 .page-head h1 { font-family: var(--display); font-weight: 800; font-size: 34px; line-height: 1.1; letter-spacing: -0.01em; }
 .page-head .sub { color: var(--muted); }
 .embedded-page .page-head h1 { font-size: 22px; }
+:root { --board-gutter: 40px; }
 @media (max-width: 640px) {
   .app > main { padding: 20px 16px 40px; }
+  /* The board's gutter follows the phone's narrower side padding, so it still lines up with the heading (BOS-807). */
+  :root { --board-gutter: 16px; }
   .page-head h1 { font-size: 28px; }
 }
 
@@ -199,7 +202,12 @@ p { margin: 0; }
 /* A sideways scroller must not become a vertical one too: `overflow-x: auto` alone computes
    `overflow-y: auto`, so a strip one pixel taller than its box swallows the wheel and the page
    never moves (BOS-554). `hidden` keeps the horizontal scroll and lets the wheel scroll the page. */
-.board-scroll { overflow-x: auto; overflow-y: hidden; padding-bottom: 8px; }
+/* The page's side padding inset the scroller too, so the columns were clipped by that padding and
+   left a ~33px empty strip at each edge on a narrow screen (BOS-807). The scroller cancels the `main`
+   side padding with negative margins so it runs from the menu to the window edge and the screen clips
+   the columns. The same amount returns as its own side padding: a gutter before the first column (so
+   at rest it still lines up with the page heading) and after the last one. */
+.board-scroll { overflow-x: auto; overflow-y: hidden; padding-bottom: 8px; margin-inline: calc(var(--board-gutter) * -1); padding-inline: var(--board-gutter); }
 .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 1fr); gap: 12px; align-items: start; }
 .board-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .board-bar > div, .board-bar label { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
