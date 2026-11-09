@@ -1172,7 +1172,7 @@ export function schedulerService(
      * reply-lane wake through while any work run is live. Returns that wake's outcome when it
      * replaced the plain one, so the caller queues nothing more.
      */
-    async replyLane(agent: typeof agents.$inferSelect, input: Pick<WakeInput, "reason" | "ticketId" | "note" | "causedByRunId" | "replyLane">) {
+    async replyLane(agent: typeof agents.$inferSelect, input: Pick<WakeInput, "reason" | "ticketId" | "note" | "causedByRunId" | "replyLane">): Promise<WakeResult | undefined> {
       if (agent.role !== "ceo" || agent.retiredAt) return undefined;
       const wanted = input.replyLane || (input.reason === "message" && !input.causedByRunId);
       if (!wanted) return undefined;
@@ -1190,7 +1190,7 @@ export function schedulerService(
     },
 
     /** Queues a wake, or drops it (and tells the owner) if it looks like a loop. */
-    async wake(input: WakeInput) {
+    async wake(input: WakeInput): Promise<WakeResult> {
       const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
       if (!agent) throw new Error("No such agent.");
       const swapped = await this.replyLane(agent, input);
@@ -1329,7 +1329,7 @@ export function schedulerService(
      * waiting for the same agent, ticket and reason, held for that reason's batch window; and
      * otherwise a new wake is queued, through every guard in wake().
      */
-    async notify(agentId: string, input: Omit<WakeInput, "agentId" | "defer" | "steerRunId">) {
+    async notify(agentId: string, input: Omit<WakeInput, "agentId" | "defer" | "steerRunId">): Promise<WakeResult> {
       const ticketId = input.ticketId ?? null;
       const note = input.note ?? null;
       const urgent = await isUrgentTicket(ticketId);
