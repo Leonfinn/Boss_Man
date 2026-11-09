@@ -190,11 +190,14 @@ describe("after-merge checks wait for go-live", () => {
     await serverRuns(OLD);
     const { id } = await mergeOne(NEW, "scripts/host-deployer.sh");
     expect((await ctx.row(id)).goLiveWait).toBe("server");
-    // The owner hand-applied it: the restarted process was built from NEW and says so on its own build.
+    // The owner hand-applied it: the restarted process was built from NEW and says so on its own build. The host's
+    // own reports still describe the last deployer run (the old commit): a hand-apply goes straight to the host's
+    // git and deploy scripts and never touches the deployer's status.json, and its available.json can be gone.
+    const a = { version: 1, checkedAt: new Date().toISOString(), deployed: OLD, tip: OLD, commits: [], paths: [], infraPaths: [], runnerChanged: false };
+    const s = { id: "prev", target: "server" as const, result: "deployed" as const, message: "Deployed.", from_commit: "0".repeat(40), to_commit: OLD, started: "2026-11-09T18:00:00Z", ended: "2026-11-09T18:02:00Z", backup: "" };
     vi.stubEnv("BOSSMAN_COMMIT", NEW);
     try {
-      const a = { version: 1, checkedAt: new Date().toISOString(), deployed: OLD, tip: NEW, commits: [], paths: [], infraPaths: [], runnerChanged: false };
-      await ctx.selfDeploy.noteLive(a, null);
+      await ctx.selfDeploy.noteLive(a, s);
     } finally {
       vi.unstubAllEnvs();
     }
