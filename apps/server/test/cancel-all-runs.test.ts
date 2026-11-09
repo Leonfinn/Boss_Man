@@ -10,6 +10,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { runners, runs } from "../src/db/schema.js";
+import { RunError } from "../src/services/runs.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -195,6 +196,42 @@ describe("ending all running runs (BOS-837)", () => {
       // The failure is logged with the run id and the error's message.
       expect(logs.some((l) => l.includes(broken) && l.includes("socket is closed"))).toBe(true);
     } finally {
+      c.app.log.error = off;
+    }
+  });
+
+  it("skips a run that ended on its own during the loop, counting it in neither number", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co");
+    const b = await c.company("Web Co");
+    // A second live run in the first company, on its CEO.
+    const from = c.sent.length;
+    await c.scheduler.wake({ agentId: a.ceo.id, reason: "start" });
+    await c.scheduler.tick();
+    const selfEnds = c.sent.slice(from).find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start")!;
+
+    // The run ends on its own between the list and its cancel (its agent finished). The per-run cancel it then
+    // sees throws a 409, which is not a failure: it must be skipped and counted in neither number, and not logged
+    // as one that could not be ended (BOS-862). A 409 from the real cancel is the same shape as this.
+    const offCancel = c.runs.cancel;
+    const realCancel = offCancel.bind(c.runs);
+    c.runs.cancel = ((runId: string, companyId?: string, reason?: string) =>
+      runId === selfEnds.runId ? Promise.reject(new RunError(409, "That run has already ended.")) : realCancel(runId, companyId, reason)) as typeof offCancel;
+
+    const logs: string[] = [];
+    const off = c.app.log.error;
+    c.app.log.error = ((...args: Parameters<typeof off>) => (logs.push(String(args[0])), off(...args))) as typeof c.app.log.error;
+    try {
+      const res = await c.req("POST", "/api/runs/cancel-all");
+      expect(res.statusCode).toBe(200);
+      // The two other live runs were ended; the one that had ended itself is counted in neither number.
+      expect(res.json()).toEqual({ cancelled: 2 });
+      expect((await runRow(c.db, a.runId)).cancelRequestedAt).not.toBeNull();
+      expect((await runRow(c.db, b.runId)).cancelRequestedAt).not.toBeNull();
+      // A 409 is expected housekeeping, not a failure: nothing is logged as could-not-end.
+      expect(logs.some((l) => l.includes(selfEnds.runId))).toBe(false);
+    } finally {
+      c.runs.cancel = offCancel;
       c.app.log.error = off;
     }
   });
