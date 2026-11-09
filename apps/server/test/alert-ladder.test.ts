@@ -72,7 +72,7 @@ const handRaise = (input: Parameters<typeof ctx.alerts.raise>[0]) => ctx.alerts.
 const ownerRaise = (why = "only the owner can act on it") =>
   handRaise({ companyId: ctx.companyId, kind: "owner", question: `Owner card: ${why}`, ticketId: ctx.ticket.id, from: "scrum_master", options: ["Got it"] });
 const ladderOf = async (id: string) => ((await ctx.db.select().from(decisions).where(eq(decisions.id, id)))[0]!.context as { ladder: Ladder; triedFirst?: string; steps?: string[] });
-const alertWakes = () => ctx.db.select().from(wakes).where(inArray(wakes.reason, ["alert", "decision"]));
+const alertWakes = () => ctx.db.select().from(wakes).where(inArray(wakes.reason, ["alert", "decision", "ceo reply"]));
 const ownerNotified = async (id: string) => {
   await ctx.notes.syncDecisions();
   return ctx.db.select().from(notifications).where(eq(notifications.decisionId, id));

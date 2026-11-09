@@ -91,7 +91,7 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
     expect((await ctx.decisions.withTeam()).map((q) => q.id)).toContain(d!.id);
     expect(await ownerNotified(d!.id)).toEqual([]);
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
-    expect(w).toMatchObject({ reason: "decision", priority: 3 });
+    expect(w).toMatchObject({ reason: "ceo reply", priority: 4 });
     expect(w!.note).toContain(CLEANUP);
     expect(w!.note).toMatch(/git worktree add writes into the project.s repository/);
     // A worktree writes the repository's .git, so the card never promises the repository is untouched.
@@ -194,7 +194,7 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
     expect((await ctx.decisions.queue()).map((q) => q.id)).not.toContain(d!.id);
     expect(await ownerNotified(d!.id)).toEqual([]);
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
-    expect(w).toMatchObject({ reason: "decision", priority: 3, ticketId: ctx.ticket.id });
+    expect(w).toMatchObject({ reason: "ceo reply", priority: 4, ticketId: ctx.ticket.id });
     expect(w!.note).toContain("symlink");
     // BOS-159: the shell keeps its folder between commands, so the note can't vouch for where it sits.
     expect(w!.note).toContain("can't vouch for where it sits now");
