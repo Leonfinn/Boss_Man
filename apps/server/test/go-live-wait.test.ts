@@ -201,6 +201,8 @@ describe("after-merge checks wait for go-live", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+    const [rec] = await ctx.db.select().from(settings).where(eq(settings.key, `live_release:${ctx.co.company.id}`));
+    expect((rec!.value as { new: string }).new).toBe(NEW);
     expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(1);
     expect((await ctx.row(id)).goLiveWait).toBeNull();
     expect(await afterMergeWakes(id)).toHaveLength(1);
