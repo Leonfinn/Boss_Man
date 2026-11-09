@@ -177,7 +177,7 @@ describe("ending all running runs (BOS-837)", () => {
 
     const logs: string[] = [];
     const off = c.app.log.error;
-    c.app.log.error = ((...args: unknown[]) => (logs.push(String(args[0])), off(...args))) as typeof c.app.log.error;
+    c.app.log.error = ((...args: Parameters<typeof off>) => (logs.push(String(args[0])), off(...args))) as typeof c.app.log.error;
     try {
       const res = await c.req("POST", "/api/runs/cancel-all");
       expect(res.statusCode).toBe(200);
