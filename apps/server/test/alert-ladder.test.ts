@@ -709,28 +709,25 @@ describe("a re-asked permission card and the CEO's handover clock (DR-048 #3)", 
     const second = randomUUID();
     await ctx.emit({ type: "run.permission_request", runId, requestId: second, title: CMD, kind: "execute", rawInput: { command: CMD }, optionKinds: ["allow_once", "reject_once"], toolCallId: "call-retry" });
     const [card2] = await ctx.db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${second}`));
-    // Measure when each card reaches the owner, in minutes from card 1's raise, sweeping once a minute and
-    // recording the first sweep a card is seen at the owner's tier. On the old code card 2 is a fresh card
-    // raised at +10 minutes, so it is only reached at its own +30. If the clock runs from the first card for
-    // this run and command, card 2 is settled with card 1 and the owner is reached at +20.
-    // The re-ask is a repeat of card 1's ask while card 1 is still open: it rides on it, so one answer covers
-    // both and no second clock starts. (This is what rules the symptom out on today's code.)
+    // Ruled out on today's code: the re-ask is a repeat of card 1's ask while card 1 is still open, so it rides
+    // on it (one ask, one card, BOS-376). There is no second raise, so there is no second clock to start, and the
+    // CEO card keeps card 1's own 20-minute clock from when it was first raised.
     expect(card2).toBeUndefined();
     const [rode] = await ctx.db.select().from(decisions).where(eq(decisions.id, card1!.id));
     expect((rode!.context as { repeats?: Array<{ requestId: string }> }).repeats?.map((r) => r.requestId)).toEqual([second]);
-    const ids = [card1!.id, ...(card2 ? [card2.id] : [])];
-    const reached: Record<string, number> = {};
+    // Sweep once a minute and record the first minute card 1 is seen at the owner's tier, from its raise.
+    let reachedAt: number | null = null;
     for (let minute = 11; minute <= 40; minute++) {
       await ctx.alerts.sweep();
-      const rows = await ctx.db.select().from(decisions).where(inArray(decisions.id, ids));
-      for (const r of rows) if (r.tier === "owner" && reached[r.id] === undefined) reached[r.id] = minute;
-      if (rows.every((r) => r.status !== "open")) break;
+      const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, card1!.id));
+      if (row!.tier === "owner") {
+        reachedAt = minute;
+        break;
+      }
       ctx.advance(1);
     }
-    // The re-ask must not raise a second card: one ask, one card (BOS-376). On the old code it does, because
-    // card 1 is no longer counted as an open repeat once the runner's deny has happened.
-    expect(card2).toBeUndefined();
-    // Card 1's own clock hands it to the owner at 20 minutes (the first sweep after, at +21).
-    expect(reached[card1!.id]).toBe(21);
+    // Reached at its own 20-minute cap (the first sweep after), not pushed back by the re-ask: if the re-ask had
+    // started a fresh clock at +10, the card would still be with the CEO at +20 and only reach the owner at +30.
+    expect(reachedAt).toBe(21);
   });
 });
