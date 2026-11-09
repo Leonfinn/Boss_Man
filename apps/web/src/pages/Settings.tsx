@@ -2670,7 +2670,7 @@ export function NetguardAllow() {
       ) : (
         <ul data-testid="netguard-automatic" style={{ fontSize: 14 }}>
           {automatic.map((e) => (
-            <li key={e.address}>
+            <li key={`${e.company ?? ""}|${e.address}`}>
               <span className="mono">{e.address}</span> <span className="muted">· {automaticLabel(e)}</span>
               {e.company && <span className="muted"> · for {e.company}</span>}
               {e.notAllowed ? (
