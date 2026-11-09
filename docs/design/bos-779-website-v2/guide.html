@@ -11,13 +11,15 @@
 <header class="top">
   <div class="wrap">
     <a class="brand" href="#"><img src="img/boss-mark-256.png" alt="">Boss Man</a>
-    <nav aria-label="Main">
+    <nav aria-label="Main" id="main-menu">
       <a href="#" aria-current="page">Guides</a>
+      <a href="#" class="ext">Roadmap<span class="sr"> and feedback, on our feedback portal</span><span class="arrow" aria-hidden="true">↗</span><span class="menu-sub" aria-hidden="true">See what's planned, vote and suggest</span></a>
+      <a href="about.html">About</a>
       <a href="#">FAQ</a>
       <a href="#">GitHub</a>
       <a class="btn small" href="#">Install</a>
     </nav>
-    <button class="menu" type="button" aria-expanded="false">Menu</button>
+    <button class="menu" type="button" aria-expanded="false" aria-controls="main-menu">Menu</button>
   </div>
 </header>
 
@@ -133,10 +135,11 @@
       <p>Boss Man is in alpha: it works, and it still changes often. Free and open source under the Apache 2.0 licence.</p>
     </div>
     <nav aria-label="Footer">
-      <a href="#">Guides</a><a href="#">FAQ</a><a href="#">GitHub</a><a href="#">Report a problem</a><a href="#">Licence</a>
+      <a href="#">Guides</a><a href="#">Roadmap and feedback</a><a href="about.html">About</a><a href="#">FAQ</a><a href="#">GitHub</a><a href="#">Report a problem</a><a href="#">Licence</a>
     </nav>
   </div>
 </footer>
+<script src="menu.js"></script>
 <script>if (innerWidth <= 760) document.querySelector(".g-toggle").removeAttribute("open");</script>
 </body>
 </html>

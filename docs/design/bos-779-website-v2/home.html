@@ -13,13 +13,17 @@
 <header class="top">
   <div class="wrap">
     <a class="brand" href="#"><img src="img/boss-mark-256.png" alt="">Boss Man</a>
-    <nav aria-label="Main">
+    <!-- Menu (owner, 9 Nov): Roadmap goes straight to Boss Man's own feedback portal, so the arrow says it leaves the site.
+         The build takes the portal's public (Cloudflare) address from config; until that exists the link is hidden. -->
+    <nav aria-label="Main" id="main-menu">
       <a href="#">Guides</a>
+      <a href="#" class="ext">Roadmap<span class="sr"> and feedback, on our feedback portal</span><span class="arrow" aria-hidden="true">↗</span><span class="menu-sub" aria-hidden="true">See what's planned, vote and suggest</span></a>
+      <a href="about.html">About</a>
       <a href="#">FAQ</a>
       <a href="#">GitHub</a>
       <a class="btn small" href="#">Install</a>
     </nav>
-    <button class="menu" type="button" aria-expanded="false">Menu</button>
+    <button class="menu" type="button" aria-expanded="false" aria-controls="main-menu">Menu</button>
   </div>
 </header>
 
@@ -116,6 +120,11 @@
       <li><p class="kicker">Roadmap</p><h3>A roadmap tied to the tickets</h3><p>Put features in Now, Next or Later, under an objective or a dated milestone. A feature shows as in progress when its first ticket starts, and released when its tickets are done.</p></li>
       <li><p class="kicker">Public roadmap</p><h3>A page for your users</h3><p>The feedback portal shows the features you choose as Under consideration, Planned or Released. Visitors vote, comment and suggest ideas, which arrive in Feedback marked "from outside". Anyone with its secret link can open it.</p></li>
     </ol>
+    <!-- Owner, 9 Nov: Boss Man's own roadmap is on this same portal. Hidden in the build until it has a public address. -->
+    <div class="own-portal">
+      <p><strong>Boss Man's own roadmap is on one of these portals.</strong> See what's planned next, vote for what matters to you, or suggest something new.</p>
+      <a class="btn" href="#">Open the Boss Man roadmap<span class="arrow" aria-hidden="true">↗</span></a>
+    </div>
   </div>
 </section>
 
@@ -238,9 +247,10 @@
       <p>Boss Man is in alpha: it works, and it still changes often. Free and open source under the Apache 2.0 licence.</p>
     </div>
     <nav aria-label="Footer">
-      <a href="#">Guides</a><a href="#">FAQ</a><a href="#">GitHub</a><a href="#">Report a problem</a><a href="#">Licence</a>
+      <a href="#">Guides</a><a href="#">Roadmap and feedback</a><a href="about.html">About</a><a href="#">FAQ</a><a href="#">GitHub</a><a href="#">Report a problem</a><a href="#">Licence</a>
     </nav>
   </div>
 </footer>
+<script src="menu.js"></script>
 </body>
 </html>
