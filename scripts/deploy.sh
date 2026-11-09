@@ -168,7 +168,7 @@ print_rollback_help() {
   say "       docker compose up -d --no-deps server"
   say "  7. Check the restore worked. The answer must say role is leader; then sign in, open Tickets and compare the counts with step 1's output:"
   say "       docker compose exec -T server node -e \"fetch('http://localhost:3100/api/ready').then(async r=>console.log(await r.text()))\""
-  say "  8. To undo the restore, put back step 3's copy of the old data: repeat steps 2, 4 and 5 with ../before-restore-\$(date +%F-%H%M).sql.gz in place of the backup file, then start again with step 6."
+  say "  8. To undo the restore, put back step 3's copy of the old data: repeat steps 2, 4 and 5 with the ../before-restore-*.sql.gz file step 3 made in place of the backup file (ls -t ../before-restore-*.sql.gz | head -1 shows the newest), then start again with step 6."
 }
 
 do_rollback() {
