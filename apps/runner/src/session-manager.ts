@@ -180,6 +180,8 @@ export function opencodeEnv(granted: string | undefined, verdict: "ask" | "deny"
       share: "disabled",
       permission,
       disabled_providers: disabled,
+      // A refused tool call must not end the run (BOS-864/870): the model sees the refusal and goes on.
+      experimental: { ...(existing.experimental as object | undefined), continue_loop_on_deny: true },
     }),
     OPENCODE_DISABLE_AUTOUPDATE: "1",
     OPENCODE_DISABLE_CLAUDE_CODE: "1", // don't read ~/.claude as OpenCode config

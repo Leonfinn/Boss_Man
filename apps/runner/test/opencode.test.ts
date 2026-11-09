@@ -61,6 +61,16 @@ describe("opencode agent kind", () => {
     expect(events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "end_turn", error: null });
   });
 
+  it("keeps the loop going after a refused tool call, and keeps the owner's other experimental keys (BOS-870)", async () => {
+    const plain = await run({ model: "b/two" });
+    expect(plain.dump.config.experimental).toEqual({ continue_loop_on_deny: true });
+    const kept = await run({ model: "b/two", secrets: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ experimental: { foo: 1 } }) } });
+    expect(kept.dump.config.experimental).toEqual({ foo: 1, continue_loop_on_deny: true });
+    const chat = await run({ model: "b/two", boardToolsOnly: true });
+    expect(chat.dump.config.experimental.continue_loop_on_deny).toBe(true);
+    expect(chat.dump.config.permission).toMatchObject({ edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" });
+  });
+
   it("ends the run without quoting a malformed config secret", async () => {
     const events: RunnerEvent[] = [];
     let done!: () => void;
