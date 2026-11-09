@@ -1,4 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -16,7 +19,7 @@ afterEach(async () => {
 
 type Pushed = { url: string; headers: Record<string, string>; body: Record<string, unknown> };
 
-async function setup(opts: { listen?: boolean; pushStatus?: number } = {}) {
+async function setup(opts: { listen?: boolean; pushStatus?: number; deployerDir?: string } = {}) {
   const { db, close } = await openPglite();
   // 23:30 UTC is 00:30 in London (BST) on 16-17 Oct 2026.
   let clock = new Date("2026-10-16T23:30:00Z");
@@ -25,7 +28,7 @@ async function setup(opts: { listen?: boolean; pushStatus?: number } = {}) {
     pushed.push({ url: String(input), headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)), body: JSON.parse(String(init?.body)) });
     return new Response("{}", { status: opts.pushStatus ?? 200 });
   }) as typeof fetch;
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, now: () => clock, fetch: fakeFetch });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, now: () => clock, fetch: fakeFetch, ...(opts.deployerDir ? { deployerDir: opts.deployerDir } : {}) });
   let base = "";
   if (opts.listen) {
     await built.app.listen({ host: "127.0.0.1", port: 0 });
@@ -55,6 +58,26 @@ describe("notification ladder (R44)", () => {
     const cut = fitBytes("🚨".repeat(20), 20);
     expect(new TextEncoder().encode(cut).length).toBeLessThanOrEqual(20);
     expect(cut).toBe("🚨🚨🚨🚨...");
+  });
+
+  it("returns the ntfy address and container the host reports, and null when it reports none (BOS-995)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "bm-phoneaddr-"));
+    try {
+      await mkdir(path.join(dir, "outbox"), { recursive: true });
+      await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "box", writtenAt: "2026-11-09T00:00:00Z", ownership: [], ntfy: { baseUrl: "https://ntfy.example.ts.net:8443", container: "bossman-ntfy-1" } }));
+      const c = await setup({ deployerDir: dir });
+      await c.req("PUT", "/api/notification-settings", SETTINGS);
+      const got = (await c.req("GET", "/api/notification-settings")).json();
+      expect(got.phoneAddress).toBe("https://ntfy.example.ts.net:8443");
+      expect(got.phoneContainer).toBe("bossman-ntfy-1");
+      // The host stops reporting the add-on: both go back to null, so the page shows its "can't work out" note.
+      await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "box", writtenAt: "2026-11-09T00:05:00Z", ownership: [] }));
+      const none = (await c.req("GET", "/api/notification-settings")).json();
+      expect(none.phoneAddress).toBeNull();
+      expect(none.phoneContainer).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("keeps the ntfy token in the secrets store and never returns it", async () => {

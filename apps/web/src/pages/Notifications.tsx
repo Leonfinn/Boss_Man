@@ -147,7 +147,11 @@ function SettingsForm() {
       return `Your ntfy server accepted it. If it doesn't appear on the phone within a few seconds, check the phone app is subscribed at ${phoneAddress ?? "the ntfy address (the NTFY_BASE_URL line in your .env file)"}.`;
     });
   const copyAddress = () => {
-    if (phoneAddress) void navigator.clipboard?.writeText(phoneAddress).then(() => setNote({ ok: true, text: "Address copied." }), () => setNote({ ok: false, text: "Couldn't copy. Select the address and copy it by hand." }));
+    if (!phoneAddress) return;
+    const failed = () => setNote({ ok: false, text: "Couldn't copy. Select the address and copy it by hand." });
+    // navigator.clipboard is missing on plain http and in some browsers.
+    if (!navigator.clipboard) return failed();
+    void navigator.clipboard.writeText(phoneAddress).then(() => setNote({ ok: true, text: "Address copied." }), failed);
   };
   const row = { display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end" } as const;
   const check = { display: "flex", gap: 6, alignItems: "center", minHeight: 32, fontSize: 14 } as const;
