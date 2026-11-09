@@ -209,7 +209,7 @@ Check the file is not tiny and decompresses cleanly (`gzip -t`) before going on:
 ls -l ../<the file name printed above> && gzip -t ../<the file name printed above> && echo gzip-ok
 ```
 
-4. Copy the backup, `secrets/`, the old `.env` **under another name** (for example `.env.old-host`), `$BOSSMAN_DATA` (without `postgres/`, which is rebuilt from the dump, but **including** `tailscale/` and `ntfy/`) and the whole deployer folder `$D` (`inbox`, `outbox`, `state`, `proxy/active.caddy` naming the live colour, `host-deployer.sh`, `host.conf`) to the new host. **Never copy the old `.env` over the new host's `.env`** from stage 1: it would bring back the old host's data and deployer paths, bind addresses, portal URL and Docker group id, and the stack would fail during downtime. On the new host, compare the two files and carry over only the secrets that differ (for example `POSTGRES_PASSWORD`, which must match the old host's); or skip the copy if stage 1 already set every secret. Use the tool you trust (`rsync -a` keeps owners and times; **Unconfirmed**: check it is installed with `command -v rsync`). Note which colour is live (`grep reverse_proxy $D/proxy/active.caddy`). Compare checksums of `master.key` and the backup on both sides:
+4. Copy the backup, `secrets/`, the old `.env` **under another name** (for example `.env.old-host`), `$BOSSMAN_DATA` (without `postgres/`, which is rebuilt from the dump, but **including** `tailscale/` and `ntfy/`) and the whole deployer folder `$D` (`inbox`, `outbox`, `state`, `proxy/active.caddy` naming the live colour, `host-deployer.sh`, and `host.conf` only if you have one: it is optional) to the new host. **Never copy the old `.env` over the new host's `.env`** from stage 1: it would bring back the old host's data and deployer paths, bind addresses, portal URL and Docker group id, and the stack would fail during downtime. On the new host, compare the two files and carry over only the secrets that differ (for example `POSTGRES_PASSWORD`, which must match the old host's); or skip the copy if stage 1 already set every secret. Use the tool you trust (`rsync -a` keeps owners and times; **Unconfirmed**: check it is installed with `command -v rsync`). Note which colour is live (`grep reverse_proxy $D/proxy/active.caddy`). Compare checksums of `master.key` and the backup on both sides:
 
 ```sh
 sha256sum secrets/master.key ../<the file name printed above>
@@ -229,7 +229,7 @@ Move the checkout to the final commit (`git -C "$BOSSMAN_HOME/src" reset --hard 
 BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue server-green launcher netguard
 ```
 
-Put the deployer folder `$D` in place from the copy made in stage 3 (same layout as `docs/06` steps 9a and 9d: `inbox` owned by uid 1000, `proxy/active.caddy` naming the live colour, `host.conf` root-only 600) and set `BOSSMAN_DEPLOYER` in `.env` to its path on this host. Without `active.caddy` the proxy has nothing to route to.
+Put the deployer folder `$D` in place from the copy made in stage 3 (same layout as `docs/06` steps 9a and 9d: `inbox` owned by uid 1000, `proxy/active.caddy` naming the live colour, `host.conf` optional: only if you use a failure webhook, root-only 600; do not copy one over just to keep an old address) and set `BOSSMAN_DEPLOYER` in `.env` to its path on this host. Without `active.caddy` the proxy has nothing to route to.
 
 First start the database, because the load needs it running:
 
