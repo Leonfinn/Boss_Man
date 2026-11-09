@@ -86,6 +86,11 @@ export const ALERT_KINDS = {
   run_time_limit: {
     topRung: "owner",
   },
+  // sweeps.ts missedWork (BOS-1015): a ticket woken again and again with nothing running on it. The Scrum Master
+  // settles it first, then the CEO; it reaches the owner only if the CEO escalates it.
+  looks_stuck: {
+    topRung: "ceo",
+  },
   // sweeps.ts longTicketlessRuns: a run with no ticket going for a long time.
   ticketless_run: {
     topRung: "ceo",

@@ -20,6 +20,7 @@ function files(dir: string): string[] {
 const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/sweeps.ts", kind: "stalled_run", why: "a stalled run" },
   { file: "services/sweeps.ts", kind: "ticketless_run", why: "a run with no ticket" },
+  { file: "services/sweeps.ts", kind: "looks_stuck", why: "a ticket woken again and again with nothing running (BOS-1015)" },
   { file: "services/sweeps.ts", kind: "review_stall", why: "a review nobody is doing" },
   { file: "services/sweeps.ts", kind: "runner_boot", why: "runs that never started after a runner restart" },
   { file: "services/progress.ts", kind: "silent_run", why: "a silent run" },
@@ -80,7 +81,7 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
       expect(["scrum_master", "ceo", "owner"]).toContain(row.topRung);
     }
     // The alert kinds that must stop at the CEO (DR-017 A).
-    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "runner_boot", "quota_held", "opencode_vacuum_cut"] as const) {
+    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "looks_stuck", "runner_boot", "quota_held", "opencode_vacuum_cut"] as const) {
       expect(kindCeiling(kind, undefined), kind).toBe("ceo");
       expect(kindRow(kind, undefined).topRung, kind).toBe("ceo");
     }
