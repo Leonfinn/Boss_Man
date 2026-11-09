@@ -142,7 +142,7 @@ a { color: inherit; text-underline-offset: 3px; }
 
 /* Everything else: a reference list, not a card grid */
 .more { margin-top: 64px; display: grid; grid-template-columns: 5fr 6fr; gap: 72px; align-items: start; }
-.more .shot { border-radius: 12px; overflow: hidden; box-shadow: 0 0 0 1px var(--line-light), 0 20px 50px rgba(23, 32, 44, 0.16); aspect-ratio: 1000 / 860; background: #252c36; }
+.more .shot { border-radius: 12px; overflow: hidden; box-shadow: 0 0 0 1px var(--line-light), 0 20px 50px rgba(23, 32, 44, 0.16); aspect-ratio: 1000 / 1040; background: #252c36; }
 .more .shot img { width: 230%; max-width: none; }
 .more .shot-cap { margin-top: 14px; font-size: 15px; }
 .facts-list { display: grid; grid-template-columns: 1fr 1fr; gap: 36px 48px; }
