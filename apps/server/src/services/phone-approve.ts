@@ -138,6 +138,7 @@ export function phoneApproveService(
   const now = deps.now ?? (() => new Date());
   const doFetch = deps.fetch ?? fetch;
   /** Anonymous-read verdicts per ntfy URL + topic, kept for TOPIC_CHECK_MS. */
+  // shortcut: lost on restart, harmless because a restart costs at most one extra poll; cleared past 20 entries, so it stays small.
   const topicChecks = new Map<string, { at: number; why: string | null }>();
   /** Unknown-token taps, counted rather than logged (rule 8). */
   let unknownTaps = 0;
