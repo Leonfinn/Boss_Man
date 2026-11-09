@@ -13,8 +13,8 @@ import { Causes } from "../src/pages/Plan";
 // BOS-745: a rendering check of the "What's holding work up" box at real widths, not a reading of
 // the CSS text. The box's own markup is rendered by the real component (the same tree the pages
 // show), then that markup is loaded into a real Chromium at a desktop width, the owner's phone
-// width (380px) and the recorded unfolded-foldable profile, and the box is measured there.
-//
+// width (380px), the recorded unfolded-foldable profile, and the owner's recorded Brave touch
+// profile, and the box is measured there.
 // Skipped, not failed, where no browser is installed; the jsdom test in plan-causes-fold.test.tsx
 // still checks the behaviour everywhere.
 
@@ -116,6 +116,8 @@ const VIEWPORTS = [
   { name: "desktop", viewport: { width: 1280, height: 800 }, isMobile: false, hasTouch: false, deviceScaleFactor: 1 },
   { name: "phone 380px", viewport: { width: 380, height: 820 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 },
   { name: "foldable unfolded", viewport: { width: 840, height: 900 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.6 },
+  // The owner's recorded Brave touch profile (1667x1668 CSS px, ratio 3), from the devices tool.
+  { name: "owner Brave touch 1667px", viewport: { width: 1667, height: 1668 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 },
 ];
 
 describe.skipIf(!browser)("What's holding work up at real widths (BOS-745)", () => {
