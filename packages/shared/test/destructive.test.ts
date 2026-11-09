@@ -701,6 +701,8 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "git worktree remove --force ../wt",
     "git update-ref -d refs/heads/x",
     "git update-ref --delete refs/heads/x",
+    "git update-ref --stdin",
+    "git update-ref refs/heads/x 0000000000000000000000000000000000000000",
     "git reflog expire --expire=now --all",
     "git reflog expire --all",
     "git gc --prune=now",
@@ -722,6 +724,11 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "tar --to-command=rm -xf a.tar",
     "tar --use-compress-program=rm -xf a.tar",
     "tar -I rm -xf a.tar",
+    "tar -cf a.tar -I 'sh -c \"rm -rf /srv/x\"' d",
+    "tar -xf a.tar -I rm",
+    "tar cf a.tar -Irm x",
+    "tar -cf a.tar -F 'rm -rf /srv/x' d",
+    "tar -cf a.tar --rsh-command=rm d",
     "tar --info-script=rm -cf a.tar x",
     // 4. Other cloud CLIs.
     "gcloud compute instances delete i-1",
@@ -740,6 +747,18 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "helm del rel",
     "helm delete rel",
     "helm un rel",
+    // ruby -C changes directory before relative paths resolve (BOS-571 review).
+    "ruby -C / -i -pe s/a/b/ etc/hosts",
+    "ruby -C/ -i -pe s/a/b/ etc/hosts",
+    "ruby -C /srv -i -pe s/a/b/ x.rb",
+    "ruby -C /srv -i.bak -pe s/a/b/ f",
+    "ruby --chdir=/srv -pi -e s/a/b/ x.rb",
+    // ruby long options whose value is the next word must not hide the -i (security review round 3).
+    "ruby --encoding utf-8 -i -pe s/a/b/ /etc/hosts",
+    "ruby --external-encoding utf-8 -i -pe s/a/b/ /etc/hosts",
+    "ruby --internal-encoding utf-8 -i -pe s/a/b/ /etc/hosts",
+    "ruby --unknown-long-opt -i -pe s/a/b/ x.rb",
+    "ruby --inplace -pe s/a/b/ /etc/hosts",
     // 5. Wrappers.
     "sg docker -c 'rm -rf /x'",
     "sg docker rm -rf /x",
@@ -769,6 +788,12 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -e 'print 1'",
     "ruby -r date script.rb",
     "ruby -rdate script.rb",
+    // -C without -i only reads a script from another folder.
+    "ruby -C /srv script.rb",
+    // Long options that read a value, without -i.
+    "ruby --encoding utf-8 script.rb",
+    "ruby --encoding utf-8 -pe s/a/b/ x.rb",
+    "ruby --encoding=utf-8 -i -pe s/a/b/ x.rb",
     // git commands that keep work recoverable.
     "git gc",
     "git gc --auto",
@@ -795,6 +820,8 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "tar xf Images.tar",
     "tar czf Image.tar.gz dir",
     "tar czf a.tgz srcIndex",
+    "tar -cf out.tar Installer.tgz",
+    "tar czf out.tgz srcIndex Image.tar",
     // cloud CLIs that read or apply without deleting.
     "terraform plan",
     "terraform apply",

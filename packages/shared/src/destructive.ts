@@ -544,15 +544,36 @@ function gcloudWords(args: Word[]): Word[] {
  * `valued` lists letters whose value may be joined OR given as the next word (-r lib / -rlib), so the word after them
  * is not read as a switch cluster (BOS-571: a value like -rdate must not hide a later -i).
  */
-function inPlaceSwitches(args: Word[], joined: string, valued = "", codeLetters = "eE"): { inPlace: boolean; code: boolean; end: number } {
+function inPlaceSwitches(args: Word[], joined: string, valued = "", codeLetters = "eE", longValued: string[] = []): { inPlace: boolean; code: boolean; end: number; unknownLong: boolean } {
   let inPlace = false;
   let code = false;
+  let unknownLong = false;
   let i = 0;
   for (; i < args.length && /^-./.test(args[i]!.text); i++) {
     const t = args[i]!.text;
     if (t === "--") {
       i++;
       break;
+    }
+    // A long option (--encoding): its value is joined (--encoding=x) or, for the ones listed, the next word. An
+    // unknown long option could take the next word as its value too, which would hide a following -i, so the read
+    // stops and the caller flags it (BOS-571 security review round 3).
+    if (t.startsWith("--")) {
+      if (t.includes("=")) {
+        if (/^--inplace=/.test(t)) inPlace = true;
+        continue;
+      }
+      // --inplace is ruby's long form of -i.
+      if (t === "--inplace") {
+        inPlace = true;
+        continue;
+      }
+      if (longValued.includes(t)) i++;
+      else {
+        unknownLong = true;
+        break;
+      }
+      continue;
     }
     for (let j = 1; j < t.length; j++) {
       const c = t[j]!;
@@ -578,7 +599,7 @@ function inPlaceSwitches(args: Word[], joined: string, valued = "", codeLetters 
       if (joined.includes(c)) break;
     }
   }
-  return { inPlace, code, end: i };
+  return { inPlace, code, end: i, unknownLong };
 }
 
 /**
@@ -785,7 +806,11 @@ export function commandRisks(command: string | string[]): Risk[] {
           // BOS-571: --delete removes entries inside the archive; the options below run a command while it archives. Both
           // are matched by name (any unambiguous start, --delet) and after --, and by a word only known when it runs.
           const rm = (t: string) => t === "--" ? false : longOf(t, ["delete"]);
-          const run = (t: string) => t === "--" ? false : longOf(t, ["to-command", "use-compress-program", "info-script", "new-volume-script"]);
+          // -I/-F and --rsh-command run a program (local for -I/-F, remote for --rsh-command), and GNU tar reads options
+          // after the file name too, so a dashed one counts in any position (BOS-571 review); the bundled tar cIf is only
+          // the first word, so an archive name like Installer.tgz stays allowed.
+          const run = (t: string) => t === "--" ? false : longOf(t, ["to-command", "use-compress-program", "info-script", "new-volume-script", "rsh-command"]);
+          const dashed = (t: string) => /^-[a-zA-Z]*[IF]/.test(t);
           // --checkpoint-action=exec=CMD runs CMD; only exec does, so other actions are left alone. The option name may
           // be abbreviated (--checkpoint-act=exec), and GNU tar accepts the value as the next word too
           // (--checkpoint-action exec=CMD), so check both forms (BOS-571 review).
@@ -802,12 +827,13 @@ export function commandRisks(command: string | string[]): Risk[] {
             return /^exec(=|$)/.test(args[i + 1]?.text ?? "");
           };
           // -I PROGRAM runs it (tar -I gzip, and the bundled tar cIf PROGRAM). Only the first word can be that bundle;
-          // a later archive name like Installer.tgz is not an option (BOS-571 review).
-          const shortRun = (t: string) => /^-[a-zA-Z]*I/.test(t) || (t === "--" ? false : /^[a-zA-Z]*I/.test(t));
+          // a later archive name like Installer.tgz is not an option (BOS-571 review). A dashed word in any position is
+          // an option, so it is checked everywhere.
+          const bundled = (t: string) => t === "--" ? false : /^[a-zA-Z]*[IF]/.test(t);
           if (args.some((a, i) => rm(a.text) || execAction(a.text) || execActionNext(i))) return destroys("deletes files or runs a command while it archives (tar --delete)");
           // A word only known when it runs could be that option, unless it is the value of -f or -C (tar czf "$OUT" dir).
           const valued = (i: number) => i > 0 && (/^(-[a-zA-Z]*[fC]|--file|--directory)$/.test(args[i - 1]!.text) || (i === 1 && /^[a-zA-Z]*f$/.test(args[0]!.text)));
-          if ((args[0] && shortRun(args[0].text)) || args.some((a) => run(a.text))) return destroys("runs a command while it archives (tar --to-command)");
+          if ((args[0] && bundled(args[0].text)) || args.some((a) => run(a.text) || dashed(a.text))) return destroys("runs a command while it archives (tar --to-command)");
           if (args.some((a, i) => mayBeOption(a) && !(valued(i) && !a.split && !a.many))) return destroys("tar with an option only known when it runs");
           return;
         }
@@ -922,8 +948,12 @@ export function commandRisks(command: string | string[]): Risk[] {
             const op = afterOptions(rest.slice(1))[0];
             if (op?.dynamic || op?.text === "remove") destroys("deletes a worktree's files (git worktree remove)");
           } else if (sub === "update-ref") {
-            // -d deletes the ref, and with it the only pointer to the commits it held (BOS-571).
+            // -d deletes the ref, and with it the only pointer to the commits it held (BOS-571). --stdin reads the
+            // commands from input, which can't be seen, and an all-zero new value deletes the ref (git update-ref x
+            // 0000…) (BOS-571 review), so both go to the owner too.
+            const words = afterOptions(rest.slice(1));
             if (unknownOpt || before.some((o) => shortHas(o, "d") || longOf(o, ["delete"]))) destroys("deletes a ref (git update-ref -d)");
+            else if (args.some((a) => longOf(a.text, ["stdin"])) || words.some((a) => a.text === "--stdin" || /^0+$/.test(a.text))) destroys("deletes or rewrites a ref the checker can't read (git update-ref --stdin/zero)");
           } else if (sub === "reflog") {
             // expire (and delete) throw away the reflogs that make a lost commit recoverable (BOS-571).
             const op = afterOptions(rest.slice(1))[0];
@@ -1165,9 +1195,17 @@ export function commandRisks(command: string | string[]): Risk[] {
           // be read as a switch cluster: `ruby -rdate -i …` and `ruby -Fe -i …` still see the -i. But -F/-K/-W/-T/-x
           // take their value joined only (-Fe, never `-F e`), so a word after them is the next switch: `ruby -W -i`
           // is the -i (BOS-571 security review round 2).
-          const edit = inPlaceSwitches(args, "0lFKWTx", "rICE", "e");
+          // ruby also has long options (--encoding, --external-encoding, --internal-encoding) whose value is the next
+          // word, and --inplace is its long form of -i; an unknown long option could hide a following -i too.
+          const edit = inPlaceSwitches(args, "0lFKWTx", "rICE", "e", ["--encoding", "--external-encoding", "--internal-encoding"]);
+          // -C/--chdir changes the directory before the files resolve, so a relative path no longer names a file in
+          // the checkout; its base is unknown, so a -i edit goes to the owner (BOS-571 review).
+          const chdirs = args.slice(0, edit.end).some((a) => a.text === "-C" || a.text === "--chdir" || /^-C./.test(a.text) || /^--chdir=/.test(a.text));
+          // An unknown long option stops the read, so a -i after it can't be shown absent: send it to the owner.
+          if (edit.unknownLong) destroys("edits files outside the working copy and /tmp (ruby -i after an unknown long option)");
           // Without -e the first word left is the script file; the rest are the files edited.
-          if (edit.inPlace) editsInPlace(args.slice(edit.code ? edit.end : edit.end + 1), "edits files outside the working copy and /tmp (ruby -i)");
+          else if (edit.inPlace && chdirs) destroys("edits files outside the working copy and /tmp (ruby -C with -i)");
+          else if (edit.inPlace) editsInPlace(args.slice(edit.code ? edit.end : edit.end + 1), "edits files outside the working copy and /tmp (ruby -i)");
         }
 
         if (SHELLS.has(prog)) {
