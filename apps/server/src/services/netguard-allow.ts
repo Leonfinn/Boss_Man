@@ -87,8 +87,9 @@ export function netguardAllowReport(input: {
   }
   if (allow && input.env?.envFound && !same(allow, lines.at(-1) ?? []))
     warnings.push("The launcher is using a different list from the one in .env now; it reads .env again when it is recreated (Build and update runners).");
-  // One row per host:port: a dropped row wins over an allowed one that shares the address (so a missing tool server
-  // shows rather than hides), and otherwise the more specific kind is kept.
+  // One row per company and host:port (a company's entries are only reachable from its own runners, so two companies
+  // sharing a tool server get a row each): a dropped row wins over an allowed one that shares the address (so a missing
+  // tool server shows rather than hides), and otherwise the more specific kind is kept.
   const keep = (old: AutomaticEntry | undefined, e: AutomaticEntry): boolean => {
     if (!old) return true;
     const oldDropped = old.notAllowed !== null;
@@ -98,10 +99,10 @@ export function netguardAllowReport(input: {
   };
   const automatic = input.automatic
     ? [...input.automatic.reduce((by, e) => {
-        const k = key(e.address);
+        const k = `${e.company ?? ""}\n${key(e.address)}`;
         if (keep(by.get(k), e)) by.set(k, e);
         return by;
-      }, new Map<string, AutomaticEntry>()).values()].sort((a, b) => a.address.localeCompare(b.address))
+      }, new Map<string, AutomaticEntry>()).values()].sort((a, b) => a.address.localeCompare(b.address) || (a.company ?? "").localeCompare(b.company ?? ""))
     : input.automatic ?? null;
   return { mode: input.launcher?.mode ?? null, entries, lineCanGo: !!entries?.length && entries.every((e) => e.coveredBy.length > 0), automatic, env: input.env, warnings };
 }

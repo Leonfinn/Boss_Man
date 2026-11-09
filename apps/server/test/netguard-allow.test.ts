@@ -87,7 +87,7 @@ describe("netguardAllowReport", () => {
       toolServers: [],
       gitHosts: [],
       automatic: [
-        auto({ address: "shared.example.lan:443", kind: "tool server", name: "typo" }),
+        auto({ address: "shared.example.lan:443", kind: "tool server", name: "typo", company: "Acme" }),
         auto({ address: "shared.example.lan:443", kind: "git host", name: "Website", company: "Acme", trusted: true }),
         auto({ address: "dropped.example.org:5432", kind: "tool server", name: "one", notAllowed: DROPPED_PRIVATE }),
         auto({ address: "dropped.example.org:5432", kind: "tool server", name: "two" }),
@@ -97,6 +97,20 @@ describe("netguardAllowReport", () => {
       expect.objectContaining({ address: "dropped.example.org:5432", name: "one", notAllowed: DROPPED_PRIVATE }),
       expect.objectContaining({ address: "shared.example.lan:443", kind: "git host" }),
     ]);
+  });
+
+  it("gives each company its own row for a shared address, since a company's entries only reach its own runners", () => {
+    const r = netguardAllowReport({
+      launcher: { mode: "auto", allow: [] },
+      env: null,
+      toolServers: [],
+      gitHosts: [],
+      automatic: [
+        auto({ address: "tools.example.net:443", kind: "tool server", name: "crawl4ai", company: "Beta" }),
+        auto({ address: "tools.example.net:443", kind: "tool server", name: "crawl4ai", company: "Acme" }),
+      ],
+    });
+    expect(r.automatic!.map((e) => e.company)).toEqual(["Acme", "Beta"]);
   });
 
   it("says the automatic list is unknown when it couldn't be worked out, and nothing breaks without it", () => {

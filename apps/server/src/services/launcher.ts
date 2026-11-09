@@ -323,37 +323,33 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
      * now drops (BOS-708: a name that resolves to a private address, unless it is trusted) is listed as not allowed, with
      * the plain reason, so a missing tool server shows rather than silently leaving the list. The same allow data the guard
      * is sent (allowFor), never a second copy. Only host:port, names and reasons come out: never a URL or a token.
+     * Calls allowFor once per company: fine for the handful of companies one server holds, and only on a Settings load.
      */
     async ownAllows(): Promise<{ toolServers: string[]; gitHosts: string[]; automatic: AutomaticEntry[] }> {
-      const mcp = await db.select({ url: mcpServers.url, allowPrivate: mcpServers.allowPrivate, name: mcpServers.name, company: companies.name }).from(mcpServers).innerJoin(companies, eq(companies.id, mcpServers.companyId));
-      const repos = await db.select({ url: projects.repoUrl, allowPrivate: projects.allowPrivate, name: projects.name, company: companies.name }).from(projects).innerJoin(companies, eq(companies.id, projects.companyId)).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
-      const toolServers = [...new Set(mcp.map((r) => sendable(toolServerAddress(r.url))).filter((a): a is string => !!a))];
-      const gitHosts = [...new Set(repos.map((r) => gitHostAddress(r.url!)).filter((a): a is string => !!a))];
-      // What the guard keeps for a private address is exactly allowFor's rule (BOS-708): a tool server only when the owner
-      // trusted it (mcp_servers.allow_private) and a git host only on a LAN address with the project's flag. The trusted flag
-      // is read from the same column allowFor sends, so a row is shown as dropped only when the guard really drops it (BOS-791).
-      const tool = await Promise.all(mcp.map(async (r): Promise<AutomaticEntry | null> => {
-        const address = sendable(toolServerAddress(r.url));
-        if (!address) return null;
-        const trusted = r.allowPrivate;
-        const where = await resolvesStack(r.url, lookup);
-        const notAllowed = !trusted && where === "stack" ? (isStackService(r.url) ? DROPPED_TIED_TO_SERVER : DROPPED_PRIVATE) : null;
-        return { address, kind: "tool server", name: r.name, company: r.company, trusted, notAllowed };
-      }));
-      const git = await Promise.all(repos.map(async (r): Promise<AutomaticEntry | null> => {
-        const address = gitHostAddress(r.url!);
-        if (!address) return null;
-        // A git host is trusted for private only on a LAN address (isLanHost), matching allowFor: a public name that resolves
-        // privately is dropped like any other untrusted name (BOS-777), and shown as not allowed.
-        const trusted = r.allowPrivate && isLanHost(r.url!);
-        const where = await resolvesStack(r.url!, lookup);
-        const notAllowed = !trusted && where === "stack" ? DROPPED_PRIVATE : null;
-        return { address, kind: "git host", name: r.name, company: r.company, trusted, notAllowed };
-      }));
+      const mcp = await db.select({ url: mcpServers.url, name: mcpServers.name, companyId: mcpServers.companyId, company: companies.name }).from(mcpServers).innerJoin(companies, eq(companies.id, mcpServers.companyId));
+      const repos = await db.select({ url: projects.repoUrl, name: projects.name, companyId: projects.companyId, company: companies.name }).from(projects).innerJoin(companies, eq(companies.id, projects.companyId)).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+      // Trust comes from allowFor itself, per company: the exact `private` flag the guard is sent for each host:port, after
+      // allowFor's own merge (an address both a trusted and an untrusted row name is trusted). Never re-derived here.
+      const sent = new Map<string, Map<string, boolean>>();
+      for (const id of new Set([...mcp, ...repos].map((r) => r.companyId))) sent.set(id, new Map((await allowFor(id)).map((e) => [e.addr, e.private])));
+      const row = async (url: string, address: string | null, kind: AutomaticEntry["kind"], name: string, companyId: string, company: string): Promise<AutomaticEntry | null> => {
+        const trust = address ? sent.get(companyId)?.get(address) : undefined;
+        if (trust === undefined) return null; // not in the list the guard is sent
+        // The guard also keeps a private IP literal whatever its flag (netguard.sh allow_rules): it can't be re-pointed.
+        const host = guardHost(url);
+        const trusted = trust || (!!host && isIP(host) !== 0 && isPrivateAddress(host));
+        const notAllowed = !trusted && (await resolvesStack(url, lookup)) === "stack" ? (isStackService(url) ? DROPPED_TIED_TO_SERVER : DROPPED_PRIVATE) : null;
+        return { address: address!, kind, name, company, trusted, notAllowed };
+      };
+      const automatic = (await Promise.all([
+        ...mcp.map((r) => row(r.url, sendable(toolServerAddress(r.url)), "tool server", r.name, r.companyId, r.company)),
+        ...repos.map((r) => row(r.url!, gitHostAddress(r.url!), "git host", r.name, r.companyId, r.company)),
+      ])).filter((e): e is AutomaticEntry => !!e);
+      // An .env line only "can go" when Boss Man really opens that address: one the guard drops still needs the line.
+      const open = (kind: AutomaticEntry["kind"]) => [...new Set(automatic.filter((e) => e.kind === kind && !e.notAllowed).map((e) => e.address))];
       // Only what the guard is actually sent: tool servers and project git hosts. Penpot and the other add-ons are not
       // opened by the guard on their own (the owner adds a BOSSMAN_NETGUARD_ALLOW line for Penpot), so they don't appear.
-      const automatic = [...tool, ...git].filter((e): e is AutomaticEntry => !!e);
-      return { toolServers, gitHosts, automatic };
+      return { toolServers: open("tool server"), gitHosts: open("git host"), automatic };
     },
 
     /** Tells the launcher the company's tool servers again (after one is added or removed). Best effort: a launcher that is down picks them up at the next start. */

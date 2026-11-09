@@ -208,6 +208,28 @@ describe("runners through the launcher (R55)", () => {
     expect(at("private.example.net:8081")).toMatchObject({ notAllowed: expect.stringContaining("Not allowed") });
   });
 
+  it("judges each row by the exact list the guard is sent, not a rule of its own (BOS-791 review)", async () => {
+    const c = (ctx = await setup({ lookup: fakeLookup({ "penpot.example.lan": ["192.168.1.5"], "both.example.net": ["172.18.0.9"] }) }));
+    const { company } = (await c.req("POST", "/api/companies", { name: "Rule Co" })).json() as { company: { id: string } };
+    const add = async (name: string, url: string, allowPrivate: boolean) => {
+      const { id } = (await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name, url, transport: "http" })).json() as { id: string };
+      await c.db.execute(sql`update mcp_servers set allow_private = ${allowPrivate} where id = ${id}`);
+    };
+    // A private IP literal: the guard keeps it whatever its flag says (it can't be re-pointed).
+    await add("literal", "http://192.168.1.7:9000/mcp", false);
+    // One host:port named by a trusted row and an untrusted one: allowFor sends it trusted, so neither row is dropped.
+    await add("trusted-copy", "http://both.example.net:7000/mcp", true);
+    await add("untrusted-copy", "http://both.example.net:7000/other", false);
+    // A dropped tool server at the address of the owner's .env line: the line still matters, so it must not say "can go".
+    await add("penpot-as-tool", "http://penpot.example.lan:9001/mcp", false);
+    const report = (await c.req("GET", "/api/netguard-allow")).json() as { report: { automatic: Array<{ address: string; notAllowed: string | null }>; entries: Array<{ entry: string; note: string | null }> } };
+    const at = (a: string) => report.report.automatic.filter((e) => e.address === a);
+    expect(at("192.168.1.7:9000")).toEqual([expect.objectContaining({ notAllowed: null })]);
+    expect(at("both.example.net:7000")).toEqual([expect.objectContaining({ notAllowed: null })]);
+    expect(at("penpot.example.lan:9001")).toEqual([expect.objectContaining({ notAllowed: expect.stringContaining("Not allowed") })]);
+    expect(report.report.entries.find((e) => e.entry === "penpot.example.lan:9001")).toMatchObject({ note: null });
+  });
+
   it("shows the owner the launcher's BOSSMAN_NETGUARD_ALLOW entries and marks the ones a project's git host covers (BOS-770)", async () => {
     const c = (ctx = await setup());
     const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
