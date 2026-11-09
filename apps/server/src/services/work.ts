@@ -78,7 +78,14 @@ type TicketPatch = {
   overLimit?: boolean;
   /** Boss Man's own move (a review sent back, a landing): not an agent starting work, so the start check (BOS-254) does not apply. */
   internal?: boolean;
+  /** Write only if the ticket is still at this version (R81, BOS-897): checked in the UPDATE itself, so a change landing after the caller's read is not overwritten. */
+  expectedVersion?: number;
 };
+
+/** The refusal for a stale expected version, in set_ticket_state's words. */
+function staleVersionError(expected: number, now: { systemState: string; version: number }) {
+  return new WorkError(409, `Nothing changed: the ticket changed since you last saw it (you had version ${expected}). It is now ${now.systemState}, version ${now.version}. Read it again with tickets, then decide.`);
+}
 
 /** Roles that may move a ticket into work whatever it waits on (BOS-254): the CEO, a manager, or the owner (no agent). */
 const START_OVERRIDE_ROLES = new Set(["ceo", "manager"]);
@@ -537,11 +544,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     async updateTicket(ticketId: string, patch: TicketPatch) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
+      const expected = patch.expectedVersion;
+      if (expected !== undefined && t.version !== expected) throw staleVersionError(expected, t);
       if (patch.assigneeAgentId) await assertAgentInCompany(patch.assigneeAgentId, t.companyId);
       if (patch.milestoneId) await assertLinkInCompany("milestone", patch.milestoneId, t.companyId);
       if (patch.keyResultId) await assertLinkInCompany("keyResult", patch.keyResultId, t.companyId);
       if (patch.featureId) await assertFeatureInCompany(patch.featureId, t.companyId);
-      const { overLimit: _ignored, internal: _internal, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
+      const { overLimit: _ignored, internal: _internal, expectedVersion: _v, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
       const dest = patch.projectId && patch.projectId !== t.projectId ? await project(patch.projectId) : null;
       const kids = dest || newParent ? await db.select().from(tickets).where(eq(tickets.parentTicketId, t.id)) : [];
       if (dest) {
@@ -614,8 +623,14 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           lastActivityAt: now(),
           ...(patch.stateNote ? { stateNoteAt: now(), stateNoteStaleAt: null } : {}),
         })
-        .where(eq(tickets.id, ticketId))
+        // The version goes in the same statement as the write, so nothing changes if another write landed after the read above.
+        .where(and(eq(tickets.id, ticketId), expected === undefined ? undefined : eq(tickets.version, expected)))
         .returning();
+      if (!updated) {
+        const [now] = await db.select({ systemState: tickets.systemState, version: tickets.version }).from(tickets).where(eq(tickets.id, ticketId));
+        if (!now) throw new WorkError(404, "No such ticket.");
+        throw staleVersionError(expected!, now);
+      }
       if (updated!.systemState !== t.systemState) await record(db, { companyId: t.companyId, ticketId: t.id, kind: "state", summary: `${t.systemState} -> ${updated!.systemState}`, at: now() });
       // Out of review without a merge (sent back, cancelled, closed by hand) ends its pass through the merge line (BOS-769).
       // A merge records "merged" first, and an unapproved ticket was never in the line, so lineEvent writes nothing for either.
