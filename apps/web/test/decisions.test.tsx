@@ -76,6 +76,22 @@ describe("decision queue", () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ body: JSON.stringify({ answer: "Hire the ticked ones", picks: [0] }) })));
   });
 
+  it("a hire card lists the skills the new agent gets from its first run (BOS-889)", () => {
+    const hire = decision({
+      kind: "approval",
+      question: "The CEO wants to hire Ada as QA.",
+      options: ["Hire", "Don't hire"],
+      recommendedOption: "Hire",
+      context: { type: "hire", proposal: { skills: ["triage", "copy"] } },
+    });
+    render(<Decisions decisions={[hire]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText(/triage, copy\. They have them from their first run\./)).toBeTruthy();
+    // A hire with no skills shows no skills line.
+    cleanup();
+    render(<Decisions decisions={[decision({ kind: "approval", question: "The CEO wants to hire Rae.", options: ["Hire", "Don't hire"], recommendedOption: "Hire", context: { type: "hire", proposal: {} } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.queryByText("Skills:", { exact: false })).toBeNull();
+  });
+
   it("shows the score, what it blocks and the recommendation, and answers with one click", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetch);

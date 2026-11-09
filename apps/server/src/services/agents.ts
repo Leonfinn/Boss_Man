@@ -76,6 +76,14 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     await db.insert(agentChanges).values({ companyId: a.companyId, agentId: a.id, byAgentId, field, before: before ?? null, after: after ?? null });
   }
 
+  /** Refuses a skill or pack the library doesn't have, so a hire never names one that can't be given. */
+  async function checkSkills(companyId: string, names: string[]) {
+    for (const name of names) {
+      const [hit] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), or(eq(skills.name, name), eq(skills.pack, name)))).limit(1);
+      if (!hit) throw new AgentError(422, `There's no skill or pack called ${name} in the library.`);
+    }
+  }
+
   async function approvals(companyId: string): Promise<AgentApprovals> {
     const [row] = await db.select().from(settings).where(eq(settings.key, `agent_approvals:${companyId}`));
     return AGENT_APPROVALS.includes(row?.value as AgentApprovals) ? (row!.value as AgentApprovals) : "hires";
@@ -184,6 +192,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       const tpl = p.template ? AGENT_TEMPLATES.find((x) => x.id === p.template) : undefined;
       if (p.template && !tpl) throw new AgentError(422, `There's no template called ${p.template}. Templates: ${AGENT_TEMPLATES.map((x) => x.id).join(", ")}.`);
       const config = await validateModelConfig(companyId, p);
+      await checkSkills(companyId, p.skills ?? []);
       const job = p.title ?? tpl?.title ?? "agent";
       const instructions = p.instructions !== undefined ? p.instructions : (tpl?.instructions ?? null);
       const [d] = await db
@@ -193,7 +202,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
           raisedByAgentId: ceoId,
           kind: "approval",
           tier: "owner",
-          question: [`The CEO wants to hire ${p.name} as ${job}.`, labelConfig(config), p.reason ? `Why: ${p.reason}` : null, instructions ? `Their instructions:\n${instructions.slice(0, 3000)}` : null, "If you want different values, choose Don't hire and ask the CEO to propose it again; you can also change them on the Agents page after hiring."].filter(Boolean).join("\n\n"),
+          question: [`The CEO wants to hire ${p.name} as ${job}.`, labelConfig(config), p.skills?.length ? `Skills: ${p.skills.join(", ")}.` : null, p.reason ? `Why: ${p.reason}` : null, instructions ? `Their instructions:\n${instructions.slice(0, 3000)}` : null, "If you want different values, choose Don't hire and ask the CEO to propose it again; you can also change them on the Agents page after hiring."].filter(Boolean).join("\n\n"),
           options: [HIRE, DONT_HIRE],
           recommendedOption: HIRE,
           context: { type: "hire", proposal: { ...p, ...config, model: config.model, fundingSourceId: config.fundingSourceId, harness: config.harness, provider: config.provider, instructions }, byAgentId: ceoId },
@@ -477,10 +486,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       const hires: TeamHire[] = [];
       for (const h of plan.hires) {
         if (h.template && !AGENT_TEMPLATES.some((x) => x.id === h.template)) throw new AgentError(422, `There's no template called ${h.template}. Templates: ${AGENT_TEMPLATES.map((x) => x.id).join(", ")}.`);
-        for (const name of h.skills ?? []) {
-          const [hit] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), or(eq(skills.name, name), eq(skills.pack, name)))).limit(1);
-          if (!hit) throw new AgentError(422, `There's no skill or pack called ${name} in the library.`);
-        }
+        await checkSkills(companyId, h.skills ?? []);
         const config = await validateModelConfig(companyId, h);
         hires.push({ ...h, ...config, harness: config.harness, provider: config.provider, model: config.model, fundingSourceId: config.fundingSourceId, fundingSourceName: config.fundingSourceName });
       }
@@ -524,13 +530,27 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     },
 
     /** The owner's answer to a hire, instructions, rename or standing-rules decision. */
-    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string } | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string } | { type: "standing_rules"; text: string; byAgentId: string }, companyId: string, approved: boolean) {
+    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string } | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string } | { type: "standing_rules"; text: string; byAgentId: string }, companyId: string, approved: boolean, give?: (agentId: string, skill: string) => Promise<unknown>) {
       if (!approved) return null;
       if (ctx.type === "rename") return this.applyRename(ctx.agentId, ctx.newName, ctx.byAgentId, "The owner approved it.");
       if (ctx.type === "standing_rules") return this.applyStandingRules(companyId, ctx.byAgentId, ctx.text);
       if (ctx.type === "hire") {
         const config = await validateModelConfig(companyId, ctx.proposal);
         const hired = await this.hire(companyId, { ...ctx.proposal, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ctx.byAgentId);
+        // The skills go on before the new agent can be woken, so its first run starts with them (BOS-889).
+        const failures: string[] = [];
+        for (const sk of ctx.proposal.skills ?? []) {
+          if (!give) {
+            failures.push(`${sk} (skills can't be given here)`);
+            continue;
+          }
+          try {
+            await give(hired.id, sk);
+          } catch (err) {
+            failures.push(`${sk}: ${(err as Error).message}`);
+          }
+        }
+        if (failures.length) throw new AgentError(409, `${hired.name} was hired but didn't get ${failures.join("; ")}. Give the skill to them on the Skills page.`);
         await opts.assignPlanned?.(companyId, hired, ctx.proposal.forTickets ?? []);
         return hired;
       }

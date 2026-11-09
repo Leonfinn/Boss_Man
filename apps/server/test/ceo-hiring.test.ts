@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, fundingSources, notifications, projects, settings, tickets } from "../src/db/schema.js";
+import { activity, agentSkills, agents, decisions, fundingSources, notifications, projects, settings, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -322,6 +322,31 @@ describe("the CEO assigns tickets, including to a planned hire", () => {
     const [dee] = await c.db.select().from(agents).where(eq(agents.name, "Dee"));
     expect((await ticketOf(c, "Design the filter bar")).assigneeAgentId).toBe(dee!.id);
     expect((await ticketOf(c, "Already taken")).assigneeAgentId).toBe(c.worker.id);
+    await client.close();
+  });
+
+  it("takes skills on a hire, lists them on the card, and the new agent has them from its first run (BOS-889)", async () => {
+    const c = (ctx = await setup());
+    const client = await c.mcp(c.ceo.id);
+    await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "triage", description: "Sorts bug reports.", body: "Steps." });
+    await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "copy", description: "Writes the copy.", body: "Steps." });
+    // An unknown skill is refused with the same words a team plan uses, and no card is raised.
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "Nope", reason: "r", skills: ["missing"] }) }))).toBe("There's no skill or pack called missing in the library.");
+    expect(await c.db.select().from(decisions)).toEqual([]);
+
+    const r = await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "Ada", template: "qa", reason: "Checks the releases.", skills: ["triage", "copy"] }) });
+    expect(textOf(r)).toContain("and skills");
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    expect(d!.question).toContain("Skills: triage, copy.");
+    expect((d!.context as { proposal: { skills?: string[] } }).proposal.skills).toEqual(["triage", "copy"]);
+    expect(await c.db.select().from(agents).where(eq(agents.name, "Ada"))).toEqual([]);
+
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire" })).statusCode).toBeLessThan(300);
+    const [ada] = await c.db.select().from(agents).where(eq(agents.name, "Ada"));
+    const held = (await c.db.select().from(agentSkills).where(eq(agentSkills.agentId, ada!.id))).length;
+    expect(held).toBe(2);
+    const list = (await c.req("GET", `/api/companies/${c.company.id}/skills`)).json() as Array<{ name: string; agents: Array<{ name: string }> }>;
+    expect(list.filter((s) => s.agents.some((a) => a.name === "Ada")).map((s) => s.name).sort()).toEqual(["copy", "triage"]);
     await client.close();
   });
 
