@@ -1,10 +1,127 @@
 // @vitest-environment jsdom
 // BOS-967: the portal's optional "← Back to …" links, and the owner's setting that turns them on.
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Feedback } from "../src/pages/Feedback";
 import { PortalApp } from "../src/pages/Portal";
+
+// jsdom's import.meta.url isn't a file URL, so find the stylesheet from the package root vitest runs in.
+const css = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+
+type Page = {
+  setContent: (html: string, opts?: { waitUntil?: "load" }) => Promise<void>;
+  evaluate: <T, A>(fn: (arg: A) => T, arg?: A) => Promise<T>;
+  close: () => Promise<void>;
+};
+type Browser = { newPage: (opts?: { viewport?: { width: number; height: number } }) => Promise<Page>; close: () => Promise<void> };
+
+async function launch(): Promise<Browser | null> {
+  let chromium: { launch: (opts?: { executablePath?: string }) => Promise<Browser> };
+  try {
+    chromium = createRequire(resolve(process.cwd(), "package.json"))("playwright").chromium;
+  } catch {
+    return null;
+  }
+  for (const executablePath of ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", undefined]) {
+    try {
+      return await chromium.launch(executablePath ? { executablePath } : {});
+    } catch {
+      // try the next one
+    }
+  }
+  return null;
+}
+
+const browser = await launch();
+afterAll(async () => {
+  await browser?.close();
+});
+
+// The real portal component rendered to markup with the owner's setting on or off, measured in a
+// headless browser at the design's desktop (1280) and phone (390) widths. This is the rendered check
+// BOS-967 asks for (criterion 2), not a CSS-text test.
+async function portalMarkup(back: { url: string; text: string } | null): Promise<string> {
+  window.location.hash = "#tok";
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => (url === "/api/portal" ? json({ title: "What's next", intro: null, hasLogo: false, back, features: [{ id: "f1", title: "Dark mode", description: null, stage: "planned", myVote: null }] }) : json({}))));
+  render(<PortalApp />);
+  await screen.findByRole("heading", { name: "What's next" });
+  const body = document.body.innerHTML;
+  cleanup();
+  vi.unstubAllGlobals();
+  window.location.hash = "";
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}
+body { margin: 0; } main.portal { padding: 16px; }
+</style></head><body>${body}</body></html>`;
+}
+
+type Rendered = {
+  barTop: number | null;
+  barHeight: number | null;
+  linkCount: number;
+  footAfterNotes: boolean;
+  hitsFirst: boolean;
+  scrollWidth: number;
+  innerWidth: number;
+};
+
+const measure = () => {
+  const bar = document.querySelector(".portal-back-bar") as HTMLElement | null;
+  const foot = document.querySelector(".portal-back-foot") as HTMLElement | null;
+  const links = Array.from(document.querySelectorAll("a.portal-back")) as HTMLAnchorElement[];
+  const notes = document.querySelector("main.portal p.muted:last-of-type") as HTMLElement | null;
+  // Tab from the top of the document: the back link should be the first focusable element.
+  const all = Array.from(document.querySelectorAll("body *")) as HTMLElement[];
+  const firstFocusable = all.find((el) => el.tabIndex >= 0 || el.matches("a[href],button,input,textarea,select")) ?? null;
+  return {
+    barTop: bar ? Math.round(bar.getBoundingClientRect().top) : null,
+    barHeight: bar ? Math.round(bar.getBoundingClientRect().height) : null,
+    linkCount: links.length,
+    footAfterNotes: foot && notes ? foot.getBoundingClientRect().top >= notes.getBoundingClientRect().bottom - 1 : false,
+    hitsFirst: links.length > 0 && firstFocusable === links[0],
+    scrollWidth: document.documentElement.scrollWidth,
+    innerWidth: window.innerWidth,
+  };
+};
+
+describe.skipIf(!browser)("portal back link renders at phone and desktop widths (BOS-967)", () => {
+  for (const { label, width, height } of [
+    { label: "desktop 1280", width: 1280, height: 800 },
+    { label: "phone 390", width: 390, height: 844 },
+  ]) {
+    it(`${label}: the back bar is the first thing on the page and the link repeats at the bottom`, async () => {
+      const page = await browser!.newPage({ viewport: { width, height } });
+      try {
+        await page.setContent(await portalMarkup({ url: "https://bossman.example/", text: "Boss Man" }), { waitUntil: "load" });
+        const m = (await page.evaluate(measure)) as Rendered;
+        expect(m.linkCount).toBe(2);
+        expect(m.barTop).toBe(0);
+        expect(m.barHeight).toBeGreaterThanOrEqual(48);
+        expect(m.footAfterNotes).toBe(true);
+        expect(m.hitsFirst).toBe(true);
+        expect(m.scrollWidth).toBeLessThanOrEqual(m.innerWidth + 1);
+      } finally {
+        await page.close();
+      }
+    }, 30_000);
+  }
+
+  it("desktop 1280: with no address there is no bar and no bottom link", async () => {
+    const page = await browser!.newPage({ viewport: { width: 1280, height: 800 } });
+    try {
+      await page.setContent(await portalMarkup(null), { waitUntil: "load" });
+      const m = (await page.evaluate(measure)) as Rendered;
+      expect(m.linkCount).toBe(0);
+      expect(m.barTop).toBeNull();
+      expect(m.barHeight).toBeNull();
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+});
 
 afterEach(() => {
   cleanup();
