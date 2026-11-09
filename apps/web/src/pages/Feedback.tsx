@@ -6,6 +6,8 @@ import { away } from "../server-watch";
 import { when } from "./Runs";
 import { STATUS_TONE } from "./Features";
 import { SaveButton, useSaveState } from "../components/SaveButton";
+import { clearDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 type State = "unprocessed" | "processed" | "archived";
 const TABS: Array<{ id: State; label: string }> = [
@@ -18,6 +20,8 @@ const SOURCE: Record<string, string> = { owner: "You", chat: "Chat", agent: "An 
 function AddNote({ companyId, onAdded }: { companyId: string; onAdded: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ text: "", title: "", name: "", email: "", segment: "", source: "owner" });
+  // The feedback text is kept in this browser as it is typed (DR-045); it goes once the feedback is saved.
+  const textKey = `feedback-new/${companyId}`;
   const [error, setError] = useState<string | null>(null);
   const customers = usePoll((signal) => (open ? api<Array<{ id: string; name: string }>>(`/api/companies/${companyId}/feedback-customers`, { signal }) : Promise.resolve([])), 60_000, `cust-${companyId}-${open}`);
   if (!open)
@@ -37,7 +41,7 @@ function AddNote({ companyId, onAdded }: { companyId: string; onAdded: (id: stri
         ...(form.name.trim() ? { customer: { name: form.name.trim(), ...(form.email.trim() ? { email: form.email.trim() } : {}), ...(form.segment.trim() ? { segment: form.segment.trim() } : {}) } } : {}),
       },
     }).then(
-      (n) => (setForm({ text: "", title: "", name: "", email: "", segment: "", source: "owner" }), setOpen(false), setError(null), onAdded(n.id)),
+      (n) => (setForm({ text: "", title: "", name: "", email: "", segment: "", source: "owner" }), clearDraft(textKey), setOpen(false), setError(null), onAdded(n.id)),
       (err: Error) => setError(err.message),
     );
   };
@@ -45,7 +49,7 @@ function AddNote({ companyId, onAdded }: { companyId: string; onAdded: (id: stri
     <form className="card" onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }} aria-label="Add feedback">
       <div className="field">
         <label htmlFor="fb-text">Feedback, as they said it</label>
-        <textarea id="fb-text" rows={5} required maxLength={20_000} autoFocus value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} placeholder="Paste an email, a message or your notes from a call." />
+        <DraftTextarea draftKey={textKey} id="fb-text" rows={5} required maxLength={20_000} autoFocus value={form.text} onChange={(text) => setForm({ ...form, text })} placeholder="Paste an email, a message or your notes from a call." />
       </div>
       <div className="form-grid">
         <div className="field">
@@ -303,6 +307,8 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
 function PortalSettings({ companyId, shown }: { companyId: string; shown: number }) {
   const s = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `portal-${companyId}`);
   const [form, setForm] = useState<{ title: string; intro: string } | null>(null);
+  // The introduction is kept in this browser as it is typed (DR-045); it goes once the portal is saved.
+  const introKey = `portal-intro/${companyId}`;
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const d = s.data;
   const sv = useSaveState(form);
@@ -358,7 +364,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
           e.preventDefault();
           setBusy(true);
           run(
-            api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { title: form.title.trim() || null, intro: form.intro.trim() || null } }).then(() => sv.markSaved()).finally(() => setBusy(false)),
+            api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { title: form.title.trim() || null, intro: form.intro.trim() || null } }).then(() => { sv.markSaved(); clearDraft(introKey); }).finally(() => setBusy(false)),
             "Saved.",
           );
         }}
@@ -385,7 +391,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
         </div>
         <div className="field">
           <label htmlFor="portal-intro">Introduction</label>
-          <textarea id="portal-intro" rows={2} maxLength={2000} value={form.intro} onChange={(e) => setForm({ ...form, intro: e.target.value })} />
+          <DraftTextarea draftKey={introKey} id="portal-intro" rows={2} maxLength={2000} value={form.intro} onChange={(text) => setForm({ ...form, intro: text })} />
         </div>
         <SaveButton {...sv} busy={busy} style={{ alignSelf: "flex-start" }} />
       </form>

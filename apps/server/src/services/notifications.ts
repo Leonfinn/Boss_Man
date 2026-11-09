@@ -5,7 +5,7 @@
 // Boss Man only ever sends outbound requests and is never exposed at the router.
 import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
-import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, type NotifyLevel } from "@boss-man/shared";
+import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, sinceHours, type NotifyLevel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, notifications, settings } from "../db/schema.js";
 import type { DecisionContext } from "./decisions.js";
@@ -154,7 +154,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       const [row] = await db
         .select({ n: count() })
         .from(notifications)
-        .where(and(eq(notifications.agentId, input.agentId), gt(notifications.createdAt, new Date(t.getTime() - 3_600_000)), sql`${notifications.level} <> 'note'`));
+        .where(and(eq(notifications.agentId, input.agentId), gt(notifications.createdAt, sinceHours(t)), sql`${notifications.level} <> 'note'`));
       overCap = Number(row?.n ?? 0) >= s.agentHourlyCap;
     }
     const { level, demotedBy } = effectiveLevel(input.level, { overCap, quiet: inQuietHours(t, s.quietHours) });

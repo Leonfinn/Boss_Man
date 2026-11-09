@@ -36,3 +36,4 @@ export * from "./owner-controls.js";
 export * from "./owner-message.js";
 export * from "./compression.js";
 export * from "./step-text.js";
+export * from "./age.js";

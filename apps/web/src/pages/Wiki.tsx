@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Menu as MenuIcon } from "lucide-react";
 import { api, type Company } from "../api";
+import { useFormDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { Markdown, headingId } from "../components/Markdown";
 import { useMediaQuery, usePoll } from "../hooks";
 import { away } from "../server-watch";
@@ -17,19 +19,33 @@ type OldVersion = { id: string; title: string; body: string; createdAt: string; 
 
 type Draft = { title: string; body: string; folder: string };
 
-function Editor({ initial, folders, onSave, onCancel, saveLabel }: { initial: Draft; folders: string[]; onSave: (v: Draft) => Promise<void>; onCancel: () => void; saveLabel: string }) {
-  const [title, setTitle] = useState(initial.title);
-  const [folder, setFolder] = useState(initial.folder);
-  const [body, setBody] = useState(initial.body);
+function Editor({ draftKey, initial, folders, onSave, onCancel, saveLabel }: { draftKey: string; initial: Draft; folders: string[]; onSave: (v: Draft) => Promise<void>; onCancel: () => void; saveLabel: string }) {
+  // The page being written is kept in this browser (BOS-773), so a reload or an update swap doesn't
+  // take it; it goes once the page is saved or the owner cancels on purpose.
+  const [fields, setFields, resetDraft, restored] = useFormDraft<Draft>(draftKey, initial);
+  const { title, folder, body } = fields;
+  const setTitle = (v: string) => setFields({ ...fields, title: v });
+  const setFolder = (v: string) => setFields({ ...fields, folder: v });
+  const setBody = (v: string) => setFields({ ...fields, body: v });
   const [preview, setPreview] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
-    onSave({ title: title.trim(), body, folder }).catch((err: Error) => setError(err.message));
+    onSave({ title: title.trim(), body, folder })
+      .then(() => resetDraft())
+      .catch((err: Error) => setError(err.message));
   };
   return (
     <form className="card wiki-editor" onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {restored && (
+        <p className="muted" role="status" style={{ margin: 0, fontSize: 13 }}>
+          Draft restored. It stays in this browser until you save the page or discard it.{" "}
+          <button type="button" className="link" style={{ padding: 0 }} onClick={resetDraft}>
+            Discard draft
+          </button>
+        </p>
+      )}
       <div className="field">
         <label htmlFor="wiki-title">Title</label>
         <input id="wiki-title" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
@@ -58,7 +74,9 @@ function Editor({ initial, folders, onSave, onCancel, saveLabel }: { initial: Dr
           <label htmlFor="wiki-body" className="sr-only">
             Page text, in Markdown
           </label>
-          <textarea id="wiki-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Write in Markdown: # headings, - lists, | tables |, **bold**, [links](#/tickets/…)." />
+          {/* The whole page (title, folder and body) is kept by the form draft above, so this box must not
+              write a second, clashing entry under the same key: it only displays the form's body. */}
+          <DraftTextarea draftKey={null} noDraft="the editor keeps the whole page, body included, with useFormDraft under the same key" id="wiki-body" value={body} onChange={setBody} placeholder="Write in Markdown: # headings, - lists, | tables |, **bold**, [links](#/tickets/…)." />
         </>
       )}
       <div style={{ display: "flex", gap: 8 }}>
@@ -198,7 +216,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
 
   if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} go={go} /> : away(page.error) ? null : <p className="error" role="alert">{page.error.message}</p>;
   if (!p) return null;
-  if (editing) return <Editor initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
+  if (editing) return <Editor draftKey={`wiki/${companyId}/${slug}`} initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <header style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-start", justifyContent: "space-between" }}>
@@ -590,7 +608,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
           </nav>
           <div>
             {creating !== null ? (
-              <Editor key={creating} initial={{ title: "", body: "", folder: creating }} folders={folders} onSave={create} onCancel={() => setCreating(null)} saveLabel="Create page" />
+              <Editor key={creating} draftKey={`wiki-new/${company.id}/${creating}`} initial={{ title: "", body: "", folder: creating }} folders={folders} onSave={create} onCancel={() => setCreating(null)} saveLabel="Create page" />
             ) : pageSlug === BRIEF ? (
               <BriefView companyId={company.id} />
             ) : pageSlug ? (

@@ -47,7 +47,11 @@ export const WatchdogSettings = z.object({
 export type WatchdogSettings = z.infer<typeof WatchdogSettings>;
 
 export const DEFAULT_WATCHDOG: WatchdogSettings = {
-  enabled: false,
+  // On for a new or imported company (BOS-762, DR-041: the safe value is the default). It is a
+  // liveness check and spends no model tokens, and until the owner picks a Scrum Master it reaches
+  // nobody, so switching it on costs nothing and a company is never left without it by accident.
+  // An existing company keeps whatever it has stored; the owner switches it off in Settings.
+  enabled: true,
   recordOnly: false,
   unassignedMinutes: 15,
   inProgressHours: 2,
@@ -110,7 +114,6 @@ export const WATCHDOG_RECORD_KINDS: readonly WatchdogActionKind[] = ["record_swe
 export const WATCHDOG_NON_CAPPED_KINDS: readonly WatchdogActionKind[] = [...WATCHDOG_RECORD_KINDS, "urgent_alert", "alert_hop", "alert_resolved", "tripped", "undo", "daily_summary", "quota_held_alert", "spare_capacity_alert"];
 
 /** True for a rehearsal entry, written while record-only mode was on. */
-export const isRecordedAction = (kind: string) => (WATCHDOG_RECORD_KINDS as readonly string[]).includes(kind);
 
 /** Actions that reach another agent or the owner; they count toward maxNudgesPerHour (an undone one still counts, so undo can't refill the cap). */
 export const WATCHDOG_NUDGE_KINDS: readonly WatchdogActionKind[] = ["nudge", "assign", "rewake", "chase_review", "escalate", "auto_escalate", "raise_decision"];

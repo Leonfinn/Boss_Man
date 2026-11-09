@@ -17,6 +17,8 @@ import {
   type ScoredFeatures,
 } from "../api";
 import { usePoll } from "../hooks";
+import { clearDraft, readDraftJson, useFormDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 
@@ -539,13 +541,24 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   const list = usePoll((signal) => api<ScoredFeatures>(`/api/companies/${companyId}/features`, { signal }), 60_000, `fl-${companyId}`);
   const settings = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `fs-page-${companyId}`);
   const tree = usePoll((signal) => api<Tree>(`/api/companies/${companyId}/objectives`, { signal }), 120_000, `tree-f-${companyId}`);
-  const [editing, setEditing] = useState<{ title: string; description: string } | null>(null);
+  const [editing, setEditing] = useState(false);
+  // Title and description while editing are kept in this browser (BOS-773), queued under this
+  // feature's id: reload or an update swap brings them back until saved or cancelled.
+  const [fields, setFields, resetFields, fieldsRestored] = useFormDraft<{ title: string; description: string }>(`feature-edit/${id}`, { title: "", description: "" });
+  const startEdit = (seed: { title: string; description: string }) => {
+    // Only seed when nothing was kept; a kept draft wins so a reload doesn't reset the owner's words.
+    if (!readDraftJson<{ title: string; description: string }>(`feature-edit/${id}`)) setFields(seed);
+    setEditing(true);
+  };
+  // The public summary is kept in this browser as it is typed (DR-045); the draft is used only while
+  // the box is being edited, and it goes once the server has taken the summary.
+  const summaryDraftKey = `feature-summary/${id}`;
   const [summaryDraft, setSummaryDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
   const saveSummary = (summary: string) =>
     void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null } }).then(
-      () => (setError(null), setSummaryDraft(null), data.reload()),
+      () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), data.reload()),
       (err: Error) => setError(err.message),
     );
   if (data.error && !away(data.error)) return <p className="error">{data.error.status === 404 ? "There's no such feature." : data.error.message}</p>;
@@ -570,7 +583,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             )}
           </p>
           {editing ? (
-            <input className="title-input" aria-label="Title" value={editing.title} maxLength={200} onChange={(e) => setEditing({ ...editing, title: e.target.value })} />
+            <input className="title-input" aria-label="Title" value={fields.title} maxLength={200} onChange={(e) => setFields({ ...fields, title: e.target.value })} />
           ) : (
             <h1>{f.title}</h1>
           )}
@@ -605,20 +618,34 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
       <section className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }} aria-label="Description">
         {editing ? (
           <>
+            {fieldsRestored && (
+              <p className="muted" role="status" style={{ margin: 0, fontSize: 13 }}>
+                Draft restored. It stays in this browser until you save or discard it.{" "}
+                <button type="button" className="link" style={{ padding: 0 }} onClick={() => { resetFields(); setEditing(false); }}>
+                  Discard draft
+                </button>
+              </p>
+            )}
             <div className="field">
               <label htmlFor="f-desc">Description</label>
-              <textarea id="f-desc" rows={6} maxLength={20_000} value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} />
+              {/* The edit form (title and description) is kept by useFormDraft above, so this box only displays
+                  its text: a second draft here could restore a different description over the form's. */}
+              <DraftTextarea draftKey={null} noDraft="the edit form keeps title and description with useFormDraft, so this box only shows them" id="f-desc" rows={6} maxLength={20_000} value={fields.description} onChange={(text) => setFields({ ...fields, description: text })} />
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 type="button"
                 className="btn primary"
-                disabled={!editing.title.trim()}
-                onClick={() => (patch({ title: editing.title.trim(), description: editing.description.trim() || null }), setEditing(null))}
+                disabled={!fields.title.trim()}
+                onClick={() => {
+                  patch({ title: fields.title.trim(), description: fields.description.trim() || null });
+                  resetFields();
+                  setEditing(false);
+                }}
               >
                 Save
               </button>
-              <button type="button" className="btn" onClick={() => setEditing(null)}>
+              <button type="button" className="btn" onClick={() => setEditing(false)}>
                 Cancel
               </button>
             </div>
@@ -626,7 +653,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
         ) : (
           <>
             {f.description ? <p style={{ whiteSpace: "pre-wrap" }}>{f.description}</p> : <p className="muted">No description yet.</p>}
-            <button type="button" className="btn small" style={{ alignSelf: "flex-start" }} onClick={() => setEditing({ title: f.title, description: f.description ?? "" })}>
+            <button type="button" className="btn small" style={{ alignSelf: "flex-start" }} onClick={() => startEdit({ title: f.title, description: f.description ?? "" })}>
               Edit title and description
             </button>
           </>
@@ -746,7 +773,14 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
         </p>
         <div className="field">
           <label htmlFor="f-public-summary">Public summary</label>
-          <textarea id="f-public-summary" rows={4} maxLength={2000} value={summaryDraft ?? f.publicSummary ?? ""} onChange={(e) => setSummaryDraft(e.target.value)} />
+          <DraftTextarea
+            draftKey={summaryDraftKey}
+            id="f-public-summary"
+            rows={4}
+            maxLength={2000}
+            value={summaryDraft ?? f.publicSummary ?? ""}
+            onChange={setSummaryDraft}
+          />
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <button type="button" className="btn small" disabled={summaryDraft === null || summaryDraft.trim() === (f.publicSummary ?? "")} onClick={() => saveSummary(summaryDraft ?? "")}>

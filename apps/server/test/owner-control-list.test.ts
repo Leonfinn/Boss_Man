@@ -109,6 +109,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Roadmap.tsx": "Roadmap",
   "pages/Rules.tsx": "Rules",
   "pages/Run.tsx": "Run",
+  "pages/Runs.tsx": "Runs",
   // No buttons of its own, but it shows ScrumMasterLog's.
   "pages/ScrumMaster.tsx": "Scrum Master",
   "pages/Secrets.tsx": "Secrets",
@@ -129,12 +130,16 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Board.tsx>ProjectRow": "Config",
   "pages/Board.tsx>ProjectBrief": "Config",
   "pages/Board.tsx>ArchiveProject": "Config",
+  // The Runs page's emergency stop, its own component in Runs.tsx (BOS-837).
+  "pages/Runs.tsx>EndAllRuns": "Runs",
   // Settings' tabs (Settings.tsx TABS): each panel the Settings page shows, by the tab that shows it (BOS-442).
+  "pages/Settings.tsx>StopAllWork": "Server and runner",
   "pages/Settings.tsx>ServerPanel": "Server and runner",
   "pages/Settings.tsx>SelfDeploy": "Server and runner",
   "pages/Settings.tsx>ThisHost": "Server and runner",
   "pages/Settings.tsx>NetguardAllow": "Server and runner",
   "pages/Settings.tsx>RunLimits": "Server and runner",
+  "pages/Settings.tsx>CheckQueueSetting": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
   "pages/Settings.tsx>RunnerUpdate": "Server and runner",
   "pages/Settings.tsx>Devices": "Server and runner",
@@ -147,6 +152,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>TicketPrefix": "Reviews and CEO",
   "pages/Settings.tsx>GoalCheck": "Reviews and CEO",
   "pages/Settings.tsx>NudgeCap": "Reviews and CEO",
+  "pages/Settings.tsx>RunTimeLimit": "Reviews and CEO",
   "pages/Settings.tsx>WorkspaceDisk": "Reviews and CEO",
   "pages/Settings.tsx>AdviceTimeout": "Reviews and CEO",
   "pages/Settings.tsx>StandingRules": "Reviews and CEO",

@@ -96,6 +96,18 @@ logged "compose up -d --no-deps launcher" || fail "--settings --now did not recr
 logged "recreate-all" || fail "--settings --now did not recreate the runners"
 [[ ! -e $T/deployer/inbox/drain.json ]] || fail "--settings --now asked for a drain"
 
+# BOS-764 (QA, BOS-826): the image is stamped with the commit it is built from, so Boss Man can close a "Build and update runners"
+# ask the image already satisfies. Outside a git checkout the stamp is empty (the runner then reports none) and the build still runs.
+run
+logged "--build-arg BOSSMAN_IMAGE_COMMIT= " || fail "a build outside a checkout did not pass an empty image commit: $(grep 'docker build --pull' "$FAKE_LOG")"
+logged "docker tag boss-man-runner:candidate boss-man-runner:current" || fail "a build outside a checkout was not promoted"
+git init -q . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+head="$(git rev-parse HEAD)"
+run
+logged "--build-arg BOSSMAN_IMAGE_COMMIT=$head " || fail "the build did not stamp the checkout's commit: $(grep 'docker build --pull' "$FAKE_LOG")"
+# ...and the stamp is the 40-character sha the runner and the server both require.
+[[ $head =~ ^[0-9a-f]{40}$ ]] || fail "the checkout commit is not a full sha: $head"
+
 # A failed canary promotes nothing and asks for nothing.
 if CANARY_RC=1 run; then fail "a failed canary succeeded"; fi
 logged "docker tag boss-man-runner:candidate" && fail "a failed canary was promoted"

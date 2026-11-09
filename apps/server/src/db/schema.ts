@@ -62,6 +62,8 @@ export const companies = pgTable("companies", {
   goalCheckDays: integer("goal_check_days").notNull().default(14),
   /** Most nudges the company's agents may send each other in an hour (BOS-73); past it they write on the ticket instead. */
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
+  /** Most minutes one run may go before the server stops it (BOS-846); null means no limit. */
+  maxRunMinutes: integer("max_run_minutes"),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
   /** Company-wide rules every agent reads at the start of every run (BOS-353); set by the owner or the CEO, capped in code. */
@@ -236,6 +238,8 @@ export const projects = pgTable("projects", {
   /** The git host ("github" or "gitea") and its API base, detected from the repo address (R59). */
   gitHost: text("git_host"),
   gitApiBase: text("git_api_base"),
+  /** The owner (or an import they ticked) let this project's git host reach a private address, so the network guard keeps it (BOS-708). */
+  allowPrivate: boolean("allow_private").notNull().default(false),
   /** A check that must pass in a ticket's worktree before it can be merged and done (R47). */
   verifyCommand: text("verify_command"),
   /** An extra, slower check run before merging high and critical risk tickets (R48). */
@@ -612,6 +616,8 @@ export const runs = pgTable("runs", {
   outcome: text("outcome"),
   /** When the owner asked to stop the run; the sweep ends it if the runner never confirms. */
   cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  /** Why Boss Man itself stopped the run, e.g. "run time limit (90 min)" (BOS-846); becomes the outcome "stopped: <reason>". */
+  stopReason: text("stop_reason"),
   /** When the run last posted on its ticket (a reply or a state note); silence is measured from it (BOS-314). */
   lastPostAt: timestamp("last_post_at", { withTimezone: true }),
   /** When Boss Man asked the silent run for a status, so it is asked once (BOS-314). */
@@ -899,6 +905,45 @@ export const reviewRequests = pgTable(
     decidedAt: timestamp("decided_at", { withTimezone: true }),
   },
   (t) => [uniqueIndex("review_requests_slot").on(t.ticketId, t.round, t.kind)],
+);
+
+/**
+ * A reviewer's "passed, but hold the merge" (BOS-808). The review itself stays approved; nothing merges while a hold
+ * is open. Kept apart from ticket_dependencies so a held ticket is never shown as "Blocked by" nor released by the
+ * blocker sweep. One open hold per ticket.
+ */
+export const reviewHolds = pgTable(
+  "review_holds",
+  {
+    id: id(),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** The reviewer's slot that carried the pass, so a cancel can put it back to pending. */
+    reviewRequestId: uuid("review_request_id").references(() => reviewRequests.id, { onDelete: "set null" }),
+    reviewerAgentId: uuid("reviewer_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    reason: text("reason").notNull(),
+    /** The date the hold ends, if it has one. */
+    releaseAt: timestamp("release_at", { withTimezone: true }),
+    /** open, released (merge went on) or cancelled (the pass was withdrawn). */
+    status: text("status").notNull().default("open"),
+    closedBy: text("closed_by"),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    /** When the reviewer was woken to re-check, once every wait had closed. */
+    wokenAt: timestamp("woken_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("review_holds_one_open").on(t.ticketId).where(sql`${t.status} = 'open'`), index("review_holds_ticket").on(t.ticketId)],
+);
+
+/** What a hold waits on: one ticket or one decision per row. */
+export const reviewHoldWaits = pgTable(
+  "review_hold_waits",
+  {
+    id: id(),
+    holdId: uuid("hold_id").notNull().references(() => reviewHolds.id, { onDelete: "cascade" }),
+    blockerTicketId: uuid("blocker_ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
+    blockerDecisionId: uuid("blocker_decision_id").references(() => decisions.id, { onDelete: "cascade" }),
+  },
+  (t) => [check("review_hold_waits_one_blocker", sql`num_nonnulls(${t.blockerTicketId}, ${t.blockerDecisionId}) = 1`), index("review_hold_waits_hold").on(t.holdId)],
 );
 
 /**
@@ -1760,6 +1805,8 @@ export const mcpServers = pgTable(
     /** {secret} is replaced by the runner with the value of secret_env. */
     headerValue: text("header_value").notNull().default("Bearer {secret}"),
     secretEnv: text("secret_env"),
+    /** The owner let this entry resolve to a private address on purpose (an import tick, or a host they added that lives on the LAN), so the network guard keeps it (BOS-708). */
+    allowPrivate: boolean("allow_private").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("mcp_servers_company_name").on(t.companyId, t.name)],

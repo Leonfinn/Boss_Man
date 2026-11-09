@@ -5,11 +5,14 @@ import { collect } from "../devices";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
+import { setHold, useHold } from "../hold";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
 import { StarButton } from "./Agents";
 import { toBase64 } from "./Skills";
+import { clearDraft, readDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
@@ -84,7 +87,7 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
               {r && !r.ok && r.detail && <p className="error" style={{ fontSize: 13, margin: "2px 0 0" }}>{r.detail}</p>}
               {!r && (
                 <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>
-                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root (on TrueNAS, in the root shell). Skills that need it stay out of runs until then.
+                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root in a root shell on that server. Skills that need it stay out of runs until then.
                 </p>
               )}
             </li>
@@ -1650,7 +1653,19 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
   type Rules = { text: string; by: string | null; at: string | null; max: number };
   const [rules, setRules] = useState<Rules | null>(null);
   const [failed, setFailed] = useState(false);
-  const [draft, setDraft] = useState<string | null>(null);
+  // What the editor box shows, kept in this browser as it is typed (DR-045). Opening the editor and
+  // having a kept draft are separate: a kept draft is never sent by itself, only with the Save button.
+  // Cancel keeps the draft (DR-045); the explicit "Discard draft" is the only thing that clears it.
+  const draftKey = `standing-rules/${company.id}`;
+  const [open, setOpen] = useState(false);
+  const [shown, setShown] = useState(() => readDraft(draftKey));
+  // Whether a draft is kept, re-read whenever the store changes so the notice and the Edit button agree.
+  const [kept, setKept] = useState(() => readDraft(draftKey));
+  const cancel = () => {
+    setOpen(false);
+    setKept(readDraft(draftKey));
+    setShown(readDraft(draftKey));
+  };
   const act = useAction();
   useEffect(() => {
     let live = true;
@@ -1671,9 +1686,9 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
         <p className="muted">Couldn't load the standing rules.</p>
       ) : !rules ? (
         <p className="muted">Loading…</p>
-      ) : draft !== null ? (
+      ) : open ? (
         <>
-          <textarea aria-label="Standing rules" value={draft} onChange={(e) => setDraft(e.target.value)} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
+          <DraftTextarea draftKey={draftKey} aria-label="Standing rules" value={shown} onChange={(text) => { setShown(text); setKept(text); }} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
             <button
               type="button"
@@ -1681,9 +1696,12 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
               disabled={act.busy}
               onClick={() =>
                 void act.run(async () => {
-                  const saved = await api<Rules>(url, { method: "PUT", body: { text: draft } });
+                  const saved = await api<Rules>(url, { method: "PUT", body: { text: shown } });
                   setRules(saved);
-                  setDraft(null);
+                  setOpen(false);
+                  clearDraft(draftKey);
+                  setKept("");
+                  setShown(saved.text);
                   onChanged();
                   return "Saved.";
                 })
@@ -1691,7 +1709,7 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
             >
               Save
             </button>
-            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(null)}>
+            <button type="button" className="btn" disabled={act.busy} onClick={cancel}>
               Cancel
             </button>
           </div>
@@ -1709,7 +1727,15 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
             {rules.at ? ` on ${when(rules.at)}` : ""}.
           </p>
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
-            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(rules.text)}>
+            {kept && (
+              <p className="muted" role="status" style={{ fontSize: 13, margin: 0 }}>
+                Draft restored: what you were writing is kept in this browser.{" "}
+                <button type="button" className="link" style={{ padding: 0 }} onClick={() => { clearDraft(draftKey); setKept(""); setShown(rules.text); }}>
+                  Discard draft
+                </button>
+              </p>
+            )}
+            <button type="button" className="btn" disabled={act.busy} onClick={() => { setShown(readDraft(draftKey) || rules.text); setOpen(true); }}>
               Edit
             </button>
             {rules.text ? (
@@ -1722,6 +1748,9 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
                   void act.run(async () => {
                     const saved = await api<Rules>(url, { method: "PUT", body: { text: "" } });
                     setRules(saved);
+                    clearDraft(draftKey);
+                    setKept("");
+                    setShown("");
                     onChanged();
                     return "Cleared.";
                   });
@@ -1738,6 +1767,9 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
                 void act.run(async () => {
                   const saved = await api<Rules>(`${url}/undo`, { method: "POST" });
                   setRules(saved);
+                  clearDraft(draftKey);
+                  setKept("");
+                  setShown(saved.text);
                   onChanged();
                   return "Undone.";
                 })
@@ -1983,6 +2015,41 @@ function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => v
   );
 }
 
+/** The longest one run may go (BOS-846). Empty means no limit. */
+export function RunTimeLimit({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [mins, setMins] = useState(company.maxRunMinutes != null ? String(company.maxRunMinutes) : "");
+  const act = useAction();
+  const n = Number(mins);
+  const empty = mins.trim() === "";
+  const valid = empty || (Number.isInteger(n) && n >= 1 && n <= 10_080);
+  return (
+    <Section id="run-time-limit-h" title="Run time limit">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Stops any single run that goes longer than this many minutes, the same as pressing Stop, and asks you whether to raise the limit. Leave it empty for no limit. Under about 50 minutes it also stops an agent that is waiting on a full check.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="run-time-limit">Most minutes per run</label>
+        <input id="run-time-limit" type="number" min={1} max={10080} step={1} placeholder="No limit" value={mins} onChange={(e) => setMins(e.target.value)} style={{ width: 100 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { maxRunMinutes: empty ? null : n } });
+              onChanged();
+              return empty ? "Saved: no limit." : "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [gb, setGb] = useState(company.diskCapBytes != null ? String(+(company.diskCapBytes / 1024 ** 3).toFixed(1)) : "");
@@ -2108,7 +2175,7 @@ type SelfDeployView = {
   enabled: boolean;
   pending: boolean;
   status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
-  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[]; bluegreen?: boolean } | null;
+  available: { tip: string; deployed: string; checkedAt: string; commits?: { sha: string; subject?: string }[]; runnerChanged?: boolean; bluegreen?: boolean } | null;
   /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
   deployer?: { reportedAt: string | null; late: boolean };
   lateAfterMinutes?: number;
@@ -2123,8 +2190,46 @@ function deployerLine(v: SelfDeployView): string {
   return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
 }
 
+/** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213). */
+const MERGE_SUBJECT = /^Merge "(.*)" \(([^)]*)\)$/;
+/** A ticket id, as the brackets of a merge subject hold it (BOS-883); anything else in them is not one. */
+const TICKET_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The merges waiting to go live, newest first (BOS-875), each with the ticket id from its subject's brackets, or null
+ * when they hold no ticket id (BOS-883). Non-merge commits and untitled ones are left out.
+ */
+function waitingMerges(commits: { subject?: string }[] | undefined): { title: string; ticketId: string | null }[] {
+  return (commits ?? []).flatMap((c) => {
+    const m = c.subject?.match(MERGE_SUBJECT);
+    if (!m?.[1]) return [];
+    const id = m[2] ?? "";
+    return [{ title: m[1], ticketId: TICKET_ID.test(id) ? id : null }];
+  });
+}
+
+/** What is waiting to go live, by ticket title, each opening its ticket (BOS-875, BOS-883). Nothing when no merges are waiting. */
+function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefined }) {
+  const changes = waitingMerges(commits);
+  if (!changes.length) return null;
+  const shown = changes.slice(0, 10);
+  return (
+    <div style={{ fontSize: 14 }}>
+      <p style={{ margin: 0 }}>{changes.length === 1 ? "1 change waiting:" : `${changes.length} changes waiting:`}</p>
+      <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+        {shown.map((c, i) => (
+          <li key={`${i}:${c.title}`}>
+            {c.ticketId ? <a href={`#/tickets/${c.ticketId}`}>{c.title}</a> : c.title}
+          </li>
+        ))}
+      </ul>
+      {changes.length > shown.length && <p style={{ margin: "4px 0 0" }}>and {changes.length - shown.length} more</p>}
+    </div>
+  );
+}
+
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
-function SelfDeploy({ go }: { go: (to: string) => void }) {
+export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
   const act = useAction();
   const v = view.data;
@@ -2140,11 +2245,13 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
       <p className="muted" style={{ fontSize: 14 }}>
         {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
+      {waiting && <WaitingChanges commits={v.available?.commits} />}
       <div>
         <button
           type="button"
           className="btn"
           disabled={act.busy || v.pending || s?.result === "running"}
+          title="Updates the server only. If the update changed the runners, press Build and update runners afterwards."
           onClick={() =>
             act.run(async () => {
               try {
@@ -2194,6 +2301,12 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
           Restart the server
         </button>
       </div>
+      {v.available?.runnerChanged && (
+        <p style={{ fontSize: 14 }}>This update changes the runners: after Deploy latest, press Build and update runners.</p>
+      )}
+      <p className="muted" style={{ fontSize: 14 }}>
+        Deploy latest updates the server only. If an update changed the runners, press Build and update runners afterwards.
+      </p>
       {act.view}
     </Section>
   );
@@ -2263,6 +2376,45 @@ export function RunLimits() {
 }
 
 type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number };
+
+/**
+ * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
+ * stops new runs; ending the ones going is on the Runs page. Resume is on the banner every page shows while it's on.
+ */
+export function StopAllWork() {
+  const hold = useHold();
+  const act = useAction();
+  const paused = hold.data?.paused;
+  return (
+    <Section id="stop-all-h" title="Stop all work">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Stops new work in every company at once: while it is on, Boss Man starts no new agent runs. Wake-ups and messages wait in line and start when you resume. Runs already going are not cut off; they finish by themselves. To end them now, use the Runs page. Press Resume on the banner at the top of any page to start work again.
+      </p>
+      {paused === true ? (
+        <p style={{ fontSize: 14 }} data-testid="stop-all-on">
+          <span className="tag red">On</span> All work is stopped.
+        </p>
+      ) : (
+        <div>
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy || paused !== false}
+            onClick={() =>
+              void act.run(async () => {
+                if (!window.confirm("Stop all work? Nothing new starts in any company until you press Resume. Runs already going finish by themselves.")) return;
+                await setHold(true);
+              })
+            }
+          >
+            Stop all work
+          </button>
+        </div>
+      )}
+      {act.view}
+    </Section>
+  );
+}
 
 /** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
 export function CheckQueueSetting() {
@@ -2503,32 +2655,86 @@ export function ThisHost() {
   );
 }
 
+type AutomaticEntryView = {
+  address: string;
+  kind: "tool server" | "git host";
+  name: string;
+  company: string | null;
+  trusted: boolean;
+  notAllowed: string | null;
+};
+
 type NetguardAllowView = {
   report: {
     mode: string | null;
     entries: { entry: string; coveredBy: string[]; note: string | null }[] | null;
     lineCanGo: boolean;
+    automatic: AutomaticEntryView[] | null;
     env: { lines: string[][]; reportedAt: string; envFound: boolean } | null;
     warnings: string[];
   } | null;
 };
 
-/** Settings → Network guard allow list (BOS-770): the BOSSMAN_NETGUARD_ALLOW entries in .env, and which ones Boss Man already covers. Read only. */
+/** What an address the guard opens by itself is, in plain words. */
+function automaticLabel(e: AutomaticEntryView): string {
+  return e.kind === "git host" ? `git host for the project "${e.name}"` : `tool server "${e.name}"`;
+}
+
+/**
+ * Settings → Network guard (BOS-770, BOS-791): what runners may reach. The addresses Boss Man opens by itself (each
+ * company's tool servers and project git hosts), then the owner's own BOSSMAN_NETGUARD_ALLOW lines from .env, with the
+ * ones Boss Man already covers marked. An address the guard now drops shows as not allowed, with the reason.
+ * Read only: it never changes .env.
+ */
 export function NetguardAllow() {
   const q = usePoll((signal) => api<NetguardAllowView>("/api/netguard-allow", { signal }), 60_000, "netguard-allow");
   const r = q.data?.report;
   if (!r) return null;
   const lines = r.env?.lines ?? [];
+  const automatic = r.automatic ?? [];
+  const notAllowed = automatic.filter((e) => e.notAllowed !== null);
   return (
-    <Section id="netguard-allow-h" title="Network guard: extra allowed addresses">
+    <Section id="netguard-allow-h" title="Network guard: addresses runners may reach">
       <p className="muted" style={{ fontSize: 14 }}>
-        Addresses on your private network that every runner may reach, from the BOSSMAN_NETGUARD_ALLOW line in your .env. Boss Man already lets each company reach its own tool servers and its projects' git hosts, so those don't need a line here. This page only reports; it never changes .env.
+        Two lists: the addresses Boss Man opens for your runners by itself, and any extra addresses you added in your .env. This page only reports; it never changes .env.
       </p>
-      {r.mode === "off" && <p>The network guard is turned off (BOSSMAN_NETGUARD=off), so this list isn't used.</p>}
+      {r.mode === "off" && <p>The network guard is turned off (BOSSMAN_NETGUARD=off), so these lists aren't used.</p>}
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Allowed automatically</h3>
+      <p className="muted" style={{ fontSize: 14 }}>
+        Addresses Boss Man opens itself: each company's tool servers and its projects' git hosts. A company's entries are only reachable from that company's own runners.
+      </p>
+      {r.automatic === null ? (
+        <p className="muted" data-testid="netguard-automatic-unknown">Boss Man couldn't work out the addresses it opens by itself just now.</p>
+      ) : automatic.length === 0 ? (
+        <p data-testid="netguard-automatic-empty">Boss Man opens no extra addresses by itself: no tool servers, no project git addresses.</p>
+      ) : (
+        <ul data-testid="netguard-automatic" style={{ fontSize: 14 }}>
+          {automatic.map((e) => (
+            <li key={`${e.company ?? ""}|${e.address}`}>
+              <span className="mono">{e.address}</span> <span className="muted">· {automaticLabel(e)}</span>
+              {e.company && <span className="muted"> · for {e.company}</span>}
+              {e.notAllowed ? (
+                <span className="error" data-testid="netguard-not-allowed"> · {e.notAllowed}</span>
+              ) : (
+                <span className="muted"> · allowed</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {notAllowed.length > 0 && (
+        <p className="error" role="alert" data-testid="netguard-not-allowed-summary">
+          {notAllowed.length === 1 ? "One address above is not allowed" : `${notAllowed.length} addresses above are not allowed`}, so runners can't reach {notAllowed.length === 1 ? "it" : "them"}.
+        </p>
+      )}
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Extra lines from your .env</h3>
+      <p className="muted" style={{ fontSize: 14 }}>
+        Addresses you added in the BOSSMAN_NETGUARD_ALLOW line in your .env, so every runner may reach them. Anything Boss Man already opens by itself doesn't need a line here.
+      </p>
       {r.entries === null ? (
         <p className="muted">The launcher didn't say which entries it uses (it isn't running, or it is older than this page).</p>
       ) : r.entries.length === 0 ? (
-        <p data-testid="netguard-allow-empty">The launcher has no extra entries.</p>
+        <p data-testid="netguard-allow-empty">You have no extra lines.</p>
       ) : (
         <ul data-testid="netguard-allow-entries" style={{ fontSize: 14 }}>
           {r.entries.map((e) => (
@@ -2646,7 +2852,9 @@ type ImportPreview = {
   agents: Array<{ name: string; role: string; title: string | null; agentKind: string; model: string | null; instructions: string | null }>;
   skills: Array<{ name: string; renamedFrom: string | null; description: string; scripts: string[] }>;
   secrets: Array<{ name: string; envName: string; agents: string[] }>;
+  projects: Array<{ name: string; verifyCommand: string | null; deepVerifyCommand: string | null }>;
   toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
+  gitHosts: Array<{ project: string; url: string; opens: string | null; stackService: boolean }>;
   warnings: string[];
 };
 
@@ -2707,6 +2915,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
   const nameChanged = !!preview && name.trim() !== preview.company.name;
   const scripts = preview?.skills.filter((s) => s.scripts.length) ?? [];
   const stackTools = preview?.toolServers.filter((t) => t.stackService) ?? [];
+  const stackGit = preview?.gitHosts.filter((g) => g.stackService) ?? [];
   return (
     <Section id="import-h" title="Import a company">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -2764,6 +2973,24 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
               </ul>
             </div>
           )}
+          {preview.projects.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Checks each project runs.</strong> These commands run on the runner before work is merged. Read them before you import:
+              <ul>
+                {preview.projects.map((p, i) => (
+                  <li key={i}>
+                    {p.name}: {p.verifyCommand ? <code style={{ whiteSpace: "pre-wrap" }}>{p.verifyCommand}</code> : "none"}
+                    {p.deepVerifyCommand && (
+                      <>
+                        {" "}
+                        (full check: <code style={{ whiteSpace: "pre-wrap" }}>{p.deepVerifyCommand}</code>)
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {preview.toolServers.length > 0 && (
             <div style={{ fontSize: 14 }}>
               <strong>Tool servers.</strong> Each address below is opened past the runner's network guard for this company:
@@ -2775,12 +3002,25 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                   </li>
                 ))}
               </ul>
-              {stackTools.length > 0 && (
-                <label>
-                  <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
-                </label>
-              )}
             </div>
+          )}
+          {preview.gitHosts.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Project git addresses.</strong> Each is opened past the runner's network guard for this company so its agents can clone:
+              <ul>
+                {preview.gitHosts.map((g) => (
+                  <li key={g.project}>
+                    {g.project}: <code>{g.opens ?? "nothing (no address the guard can allow)"}</code> ({g.url})
+                    {g.stackService && <span className="error"> This is one of Boss Man's own services or a private-network address.</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(stackTools.length > 0 || stackGit.length > 0) && (
+            <label>
+              <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
+            </label>
           )}
           {preview.secrets.length > 0 && (
             <div style={{ fontSize: 14 }}>
@@ -2932,6 +3172,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         {OWN_PAGE.has(current.id) ? <div className="embedded-page">{children}</div> : null}
         {current.id === "system" && (
           <>
+            <StopAllWork />
             <ServerPanel />
             <SelfDeploy go={go} />
             <ThisHost />
@@ -2986,6 +3227,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <NudgeCap company={company} onChanged={onChanged} />
+            <RunTimeLimit company={company} onChanged={onChanged} />
             <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
             <StandingRules company={company} onChanged={onChanged} />

@@ -7,7 +7,7 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { allowedKey } from "../src/git-config-guard.js";
+import { allowedKey, GitConfigGuard, keptSection } from "../src/git-config-guard.js";
 import { branchFor, safeGitEnv, Workspaces } from "../src/workspace.js";
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -541,5 +541,73 @@ describe("the guard's own behaviour (BOS-332)", () => {
     rmSync(path.join(f.repo, "config.lock"));
     expect(await f.ws.checkpoint(f.spec, "after a turn")).not.toBeNull();
     expect(f.p.ran()).toBe(false);
+  });
+});
+
+// BOS-797: the guard's fallback (remove the key's whole section when the unset fails) must not run on a lock failure,
+// and must never take core, extensions or the origin/shared remotes. A real lock can't be freed between the guard's
+// two git calls on cue, so a git wrapper on the guard's PATH fails every --unset-all with the chosen message and
+// leaves everything else to the real git: the lock "frees" at once, which is the race the ticket describes.
+describe("the guard's section fallback (BOS-797)", () => {
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const failingUnset = (message: string) => {
+    const d = tmp("bm797-git-");
+    writeFileSync(path.join(d, "git"), `#!/bin/sh\nfor a in "$@"; do [ "$a" = --unset-all ] && { echo "${message}" >&2; exit 255; }; done\nexec "${realGit}" "$@"\n`);
+    chmodSync(path.join(d, "git"), 0o755);
+    return `${d}:${process.env.PATH}`;
+  };
+  const repo = () => {
+    const r = tmp("bm797-repo-");
+    agent(r, "init", "-q", "--bare", "--object-format=sha256");
+    agent(r, "config", "remote.origin.url", "/somewhere");
+    agent(r, "config", "remote.shared.url", "/elsewhere");
+    agent(r, "config", "core.editor", "vi");
+    agent(r, "config", "extensions.worktreeConfig", "true");
+    agent(r, "config", "remote.origin.pushurl", "/evil");
+    agent(r, "config", "remote.shared.pushurl", "/evil");
+    agent(r, "config", "filter.x.clean", "evil");
+    const file = path.join(r, "config");
+    return { r, file, keys: () => agent(r, "config", "--file", file, "--name-only", "--list").split("\n") };
+  };
+  const kept = ["core.bare", "core.repositoryformatversion", "extensions.objectformat", "remote.origin.url", "remote.shared.url"];
+
+  it.each([
+    ["core", true],
+    ["CORE", true],
+    ["extensions", true],
+    ["remote.origin", true],
+    ["remote.shared", true],
+    ["Remote.origin", true],
+    ["remote.Origin", false],
+    ["remote.evil", false],
+    ["filter.x", false],
+    ["corex", false],
+  ])("keptSection(%s): %s", (section, ok) => {
+    expect(keptSection(section)).toBe(ok);
+  });
+
+  it("an unset that fails on a held config.lock removes no section, refuses the call, and heals on the next call", async () => {
+    const x = repo();
+    const log: string[] = [];
+    await expect(new GitConfigGuard({ PATH: failingUnset("error: could not lock config file config: File exists") }, (m) => log.push(m)).check(x.file)).rejects.toThrow(/Refusing to run git/);
+    // Nothing removed at all, not even the filter section: a lock failure is retried, never worked around.
+    expect(x.keys()).toEqual(expect.arrayContaining([...kept, "core.editor", "filter.x.clean"]));
+    expect(log.join("\n")).toContain("config.lock is held");
+    expect(agent(x.r, "rev-parse", "--show-object-format")).toBe("sha256");
+    await new GitConfigGuard({ PATH: process.env.PATH }, () => undefined).check(x.file);
+    expect(x.keys().filter((k) => !allowedKey(k))).toEqual([]);
+    expect(x.keys()).toEqual(expect.arrayContaining(kept));
+  });
+
+  it("an unset that fails for another reason drops other sections but never core, extensions or the origin/shared remotes", async () => {
+    const x = repo();
+    const log: string[] = [];
+    const guard = new GitConfigGuard({ PATH: failingUnset("error: invalid key: x") }, (m) => log.push(m));
+    await expect(guard.check(x.file)).rejects.toThrow(/core\.editor.*extensions\.worktreeconfig.*remote\.origin\.pushurl.*remote\.shared\.pushurl/);
+    const keys = x.keys();
+    expect(keys).toEqual(expect.arrayContaining(kept));
+    expect(keys.some((k) => k.startsWith("filter."))).toBe(false);
+    expect(log.join("\n")).toContain("won't remove its whole [core] section");
+    expect(agent(x.r, "rev-parse", "--show-object-format")).toBe("sha256");
   });
 });

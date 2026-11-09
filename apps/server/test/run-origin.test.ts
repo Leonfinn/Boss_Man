@@ -225,7 +225,7 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     await c.db.update(runs).set({ ticketId: null }).where(eq(runs.id, runId));
     const other = (await client.callTool({ name: "review", arguments: { action: "diff", ticketId: a.id } })) as { isError?: boolean; content: Array<{ text: string }> };
     expect(other.isError).toBeTruthy();
-    expect(other.content[0]!.text).toMatch(/Only your company/);
+    expect(other.content[0]!.text).toMatch(/code review has no reviewer set\. Ask the CEO/);
     expect(await c.latestRun(c.worker.id)).toMatchObject({ id: runId, ticketId: null });
     await client.close();
   });

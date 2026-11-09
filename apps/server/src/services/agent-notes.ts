@@ -9,7 +9,7 @@
 // ask, and only the CEO's explicit accept turns a request into a note; every note keeps its
 // source; and the owner is told in the chat and can edit or delete any note on the Agents page.
 import { and, asc, count, desc, eq, gt, notExists } from "drizzle-orm";
-import { ticketRef, untrusted } from "@boss-man/shared";
+import { sinceHours, ticketRef, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentNotes, agents, companies, noteRequests, ownerChatMessages, paAnswers, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -23,7 +23,6 @@ export const MIN_QUOTE = 20;
 const QUOTE_LOOKBACK = 50;
 /** How many of the owner's latest ticket messages, across the company, a ticket run's quote is looked for in. */
 const TICKET_QUOTE_LOOKBACK = 200;
-const HOUR = 3_600_000;
 
 export class NoteError extends Error {
   constructor(
@@ -202,10 +201,10 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
       if (requesterId === ceo.id) throw new NoteError(400, "You're the CEO: notes you keep are saved from the owner chat.");
       const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, companyId)));
       if (!t) throw new NoteError(404, "No ticket with that ID in your company.");
-      const since = async (ms: number) =>
-        (await db.select({ n: count() }).from(noteRequests).where(and(eq(noteRequests.requestedByAgentId, requesterId), gt(noteRequests.createdAt, new Date(now().getTime() - ms)))))[0]!.n;
-      if ((await since(HOUR)) >= REQUEST_LIMITS.perHour) throw new NoteError(429, `You've sent ${REQUEST_LIMITS.perHour} note requests in the last hour, the most allowed. Wait for the CEO's answers before asking again.`);
-      if ((await since(24 * HOUR)) >= REQUEST_LIMITS.perDay) throw new NoteError(429, `You've sent ${REQUEST_LIMITS.perDay} note requests in the last day, the most allowed. Try again tomorrow.`);
+      const since = async (hours: number) =>
+        (await db.select({ n: count() }).from(noteRequests).where(and(eq(noteRequests.requestedByAgentId, requesterId), gt(noteRequests.createdAt, sinceHours(now(), hours)))))[0]!.n;
+      if ((await since(1)) >= REQUEST_LIMITS.perHour) throw new NoteError(429, `You've sent ${REQUEST_LIMITS.perHour} note requests in the last hour, the most allowed. Wait for the CEO's answers before asking again.`);
+      if ((await since(24)) >= REQUEST_LIMITS.perDay) throw new NoteError(429, `You've sent ${REQUEST_LIMITS.perDay} note requests in the last day, the most allowed. Try again tomorrow.`);
       const pending = await db.select({ title: noteRequests.title, by: noteRequests.requestedByAgentId }).from(noteRequests).where(and(eq(noteRequests.agentId, ceo.id), eq(noteRequests.status, "pending")));
       if (pending.length >= REQUEST_LIMITS.pending) throw new NoteError(429, `The CEO already has ${REQUEST_LIMITS.pending} note requests waiting, the most allowed. Try again once some are answered.`);
       if (pending.some((p) => p.by === requesterId && plain(p.title) === plain(input.title))) throw new NoteError(409, `You already asked for a note called "${input.title.trim()}", and it's still waiting for the CEO.`);

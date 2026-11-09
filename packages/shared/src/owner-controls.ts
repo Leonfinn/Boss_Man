@@ -28,6 +28,8 @@ export const OWNER_CONTROLS = {
     "Actual size", "Fit to window",
     // The banner shown when Boss Man was updated after the page was opened (BOS-550).
     "Reload",
+    // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
+    "Resume",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -41,6 +43,8 @@ export const OWNER_CONTROLS = {
     "Show less", "Show all …", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
     "Reassign to the one I picked", "Let the CEO decide", "Back to the options", "Write my own answer", "Use suggestion",
     "Send my answer", "Ask the CEO for advice",
+    // An update card's ticket list (BOS-809): "+N more" opens it, "Show fewer" folds it back.
+    "Show fewer",
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
@@ -51,14 +55,15 @@ export const OWNER_CONTROLS = {
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
     "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Working now", "Show fewer",
-    "Show all done tasks", "Run now",
+    "Show all done tasks", "Run now", "Discard draft",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
+    "Release hold", "Cancel hold and review again",
     "Approve and open a pull request", "Approve and merge", "Request changes", "Run now", "Description", "Edit",
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
-    "Mark urgent", "Marked urgent", "Edit steps", "Save steps",
+    "Mark urgent", "Marked urgent", "Edit steps", "Save steps", "Discard draft",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // The Scrum Master's log of this ticket.
@@ -70,16 +75,23 @@ export const OWNER_CONTROLS = {
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
   Projects: ["Open …", "Unarchive", "Re-detect"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
+  // The Runs page's emergency stop: every run going now, in every company (BOS-837).
+  Runs: ["End all running runs", "Ending"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
-  Plan: ["Refresh"],
+  Plan: [
+    "Refresh",
+    // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
+    // the count), and below a long list "Show all …" (with the count) and "Show fewer" open and shorten it.
+    "What's holding work up …", "Show all …", "Show fewer",
+  ],
   Wiki: [
     "Show older versions", "Loading",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
-    "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page",
+    "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
   ],
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
-    "Save summary", "Delete feature",
+    "Save summary", "Delete feature", "Discard draft",
   ],
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Back to the list", "Unlink",
@@ -94,7 +106,7 @@ export const OWNER_CONTROLS = {
   ],
   Skills: [
     "Add", "Adding", "Search", "Added", "Add to …", "Edit", "Check for updates", "Delete", "Save", "Cancel", "Remove pack",
-    "Add a skill",
+    "Add a skill", "Discard draft",
   ],
   "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …"],
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
@@ -105,6 +117,8 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
+    "Stop all work",
     // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
     "Restart the server",
     // This host: confirm a fact only the owner can give.
@@ -118,7 +132,7 @@ export const OWNER_CONTROLS = {
     "Reset to defaults", "Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours", "Run a retro now",
     "Cancel", "Edit", "Test", "Start a new chapter",
     // Standing rules.
-    "Clear", "Undo last change",
+    "Clear", "Undo last change", "Discard draft",
   ],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
   // Spend, the hold and the Claude accounts' order.
@@ -209,6 +223,8 @@ export const OWNER_FIELDS = {
   "Server and runner": [
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background (infinite mode) runs at once (0 to 16)",
+    // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
+    "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
   ],
   "Access and funding": [
     "Server name", "Server URL", "Transport", "Token secret", "Header name", "Header value",
@@ -219,7 +235,7 @@ export const OWNER_FIELDS = {
   ],
   "Reviews and CEO": [
     "Prefix", "Record only (rehearse)", "Scrum Master", "Ask after (days)", "Who runs it", "Minutes the CEO has", "Advice",
-    "Ask a model for a second opinion", "Provider address", "Model", "API key", "Nudges per hour", "Disk cap (GB)",
+    "Ask a model for a second opinion", "Provider address", "Model", "API key", "Nudges per hour", "Most minutes per run", "Disk cap (GB)",
     // The agent fence's mode (BOS-325).
     "Fence",
   ],

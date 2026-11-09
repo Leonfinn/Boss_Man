@@ -8,6 +8,8 @@ import { Avatar } from "../components/Avatar";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { clearDraft, saveDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; instructions: string };
 type AgentRow = {
@@ -199,10 +201,14 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
   const [form, setForm] = useState({ name: "", title: "", instructions: "", model: "", thinking: "", fundingSourceId: "", agentKind: "claude" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The instructions box is kept in this browser as it is typed (DR-045); it goes once the hire goes
+  // through, and Cancel/the sheet closing keeps it on purpose.
+  const instructionsKey = `hire-instructions/${companyId}`;
   const choose = (t: Template | null) => {
     setTpl(t);
     // Swap the name along with the template unless the owner typed their own.
     setForm({ ...form, name: form.name === (tpl?.title ?? "") ? (t?.title ?? "") : form.name, title: t?.title ?? "", instructions: t?.instructions ?? "" });
+    saveDraft(instructionsKey, t?.instructions ?? "");
   };
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -222,6 +228,7 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
           agentKind: form.agentKind,
         },
       });
+      clearDraft(instructionsKey);
       onDone(form.name.trim());
     } catch (err) {
       setError((err as Error).message);
@@ -287,7 +294,7 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
       </div>
       <div className="field">
         <label htmlFor="hire-instructions">Instructions</label>
-        <textarea id="hire-instructions" rows={7} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
+        <DraftTextarea draftKey={instructionsKey} id="hire-instructions" rows={7} value={form.instructions} onChange={(text) => setForm({ ...form, instructions: text })} />
         <small className="muted">Given to the agent at the start of every run. Tailor them to your company.</small>
       </div>
       <small className="muted">
@@ -334,6 +341,8 @@ function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, do
 
 function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void; template?: { title: string; instructions: string }; policy?: { rules: ReviewPolicy; companyId: string } | null }) {
   const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", thinking: a.thinking ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
+  // The instructions box is kept in this browser as it is typed (DR-045); it goes once saved.
+  const instructionsKey = `agent-instructions/${a.id}`;
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const sv = useSaveState(form);
@@ -356,7 +365,10 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
     setBusy(true);
     const ok = await run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body }), "Saved.");
     setBusy(false);
-    if (ok) sv.markSaved();
+    if (ok) {
+      sv.markSaved();
+      clearDraft(instructionsKey);
+    }
   };
   const retired = !!a.retiredAt;
   return (
@@ -406,14 +418,14 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
           </div>
           <div className="field">
             <label htmlFor={`instructions-${a.id}`}>Instructions</label>
-            <textarea id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
+            <DraftTextarea draftKey={instructionsKey} id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(text) => setForm({ ...form, instructions: text })} />
             <small className="muted">{a.role === "ceo"
                 ? "The CEO picks up new instructions in its next chapter (Settings › CEO chapters)."
                 : a.duty === "wiki"
                   ? "Boss Man gives the wiki maintainer its job in every run (the Index, Log, Status pages, filing finished work, the health check). Add only extra house rules here; they're used from its next run."
                   : "Used from the agent's next run."}</small>
             {template && form.instructions.trim() !== template.instructions.trim() && (
-              <button type="button" className="linkish" style={{ alignSelf: "flex-start" }} onClick={() => setForm({ ...form, instructions: template.instructions })}>
+              <button type="button" className="linkish" style={{ alignSelf: "flex-start" }} onClick={() => { setForm({ ...form, instructions: template.instructions }); saveDraft(instructionsKey, template.instructions); }}>
                 {form.instructions.trim() ? `Replace with the current ${template.title} template` : `Fill in from the ${template.title} template`}
               </button>
             )}
@@ -499,12 +511,18 @@ type NoteLimits = { count: number; title: number; text: number; why: number };
 /** One note's fields, for adding or editing. */
 function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: { title: string; text: string; why: string }; limits: NoteLimits; onSave: (f: { title: string; text: string; why: string }) => Promise<boolean>; onCancel?: () => void }) {
   const [f, setF] = useState(start);
+  // The note text is kept in this browser as it is typed (DR-045); it goes once the note is saved.
+  const textKey = `agent-note/${id}`;
   return (
     <form
       style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}
       onSubmit={(e) => {
         e.preventDefault();
-        void onSave({ title: f.title.trim(), text: f.text.trim(), why: f.why.trim() }).then((ok) => ok && !onCancel && setF({ title: "", text: "", why: "" }));
+        void onSave({ title: f.title.trim(), text: f.text.trim(), why: f.why.trim() }).then((ok) => {
+          if (!ok) return;
+          clearDraft(textKey);
+          if (!onCancel) setF({ title: "", text: "", why: "" });
+        });
       }}
     >
       <div className="field">
@@ -513,7 +531,7 @@ function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: 
       </div>
       <div className="field">
         <label htmlFor={`${id}-text`}>Note</label>
-        <textarea id={`${id}-text`} rows={2} maxLength={limits.text} value={f.text} onChange={(e) => setF({ ...f, text: e.target.value })} required />
+        <DraftTextarea draftKey={textKey} id={`${id}-text`} rows={2} maxLength={limits.text} value={f.text} onChange={(text) => setF({ ...f, text })} required />
       </div>
       <div className="field">
         <label htmlFor={`${id}-why`}>Why (what you said)</label>

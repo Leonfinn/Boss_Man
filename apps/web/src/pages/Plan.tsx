@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Company, type Plan as PlanData, type PlanNode } from "../api";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
+import { ageLabel } from "../age";
 
 const MIN_W = 230;
 const MAX_W = 360;
@@ -15,17 +16,6 @@ function cardWidth(available: number, columns: number) {
   if (!available || columns < 1) return MIN_W;
   const room = (available - PAD * 2 - (columns - 1) * GAP_X) / columns;
   return Math.max(MIN_W, Math.min(MAX_W, Math.floor(room)));
-}
-
-/** "just now", "4 min ago", "2h ago", "3d ago". */
-function ageLabel(ms: number) {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} min ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
 }
 
 const KIND = { ticket: "Task", engagement: "Engagement", decision: "Decision" } as const;
@@ -153,18 +143,61 @@ function Graph({ plan }: { plan: PlanData }) {
   );
 }
 
+const CAUSES_OPEN_KEY = "bossman.plan.causesOpen";
+const CAUSES_ROLLED_KEY = "bossman.plan.causesRolledUp";
+/** How many items show before "Show all" (BOS-745). */
+export const CAUSES_SHOWN = 5;
+
+/**
+ * A choice kept in the browser as "1" (on) or "0" (off). Read is guarded so a page without a
+ * local store (a server render, or a browser that refuses it) still works.
+ */
+function readChoice(key: string): boolean {
+  try {
+    return globalThis.localStorage?.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeChoice(key: string, value: boolean) {
+  try {
+    globalThis.localStorage?.setItem(key, value ? "1" : "0");
+  } catch {}
+}
+
 /** The things to move first: open blockers that aren't waiting on anything, biggest first. */
-function Causes({ plan }: { plan: PlanData }) {
+export function Causes({ plan }: { plan: PlanData }) {
   const causes = plan.nodes.filter((n) => n.open && !n.blocked && n.holdingUp > 0).sort((a, b) => b.holdingUp - a.holdingUp);
   const byId = new Map(plan.nodes.map((n) => [n.id, n]));
+  const [showAll, setShowAll] = useState(() => readChoice(CAUSES_OPEN_KEY));
+  const [rolled, setRolled] = useState(() => readChoice(CAUSES_ROLLED_KEY));
   if (!causes.length) return null;
+  const total = causes.length;
+  const shown = showAll ? causes : causes.slice(0, CAUSES_SHOWN);
+  const toggleAll = () => {
+    const next = !showAll;
+    setShowAll(next);
+    writeChoice(CAUSES_OPEN_KEY, next);
+  };
+  const toggleRolled = () => {
+    const next = !rolled;
+    setRolled(next);
+    writeChoice(CAUSES_ROLLED_KEY, next);
+  };
   return (
     <section className="card" aria-labelledby="causes-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <h2 id="causes-h" style={{ fontSize: 17, fontWeight: 600 }}>
-        What's holding work up
-      </h2>
-      <ul className="pl-causes">
-        {causes.map((c) => {
+      <div className="pl-causes-head">
+        <h2 id="causes-h" style={{ fontSize: 17, fontWeight: 600 }}>
+          <button type="button" className="pl-causes-toggle" aria-expanded={!rolled} aria-controls="causes-body" onClick={toggleRolled}>
+            <span className="pl-arrow" aria-hidden="true">{rolled ? "▸" : "▾"}</span>
+            What's holding work up ({total})
+          </button>
+        </h2>
+      </div>
+      <div id="causes-body" hidden={rolled} style={rolled ? { display: "none" } : { display: "flex", flexDirection: "column", gap: 10 }}>
+      <ul className="pl-causes" id="causes-list">
+        {shown.map((c) => {
           const waiting = plan.nodes.filter((n) => n.causes.includes(c.id));
           return (
             <li key={c.id}>
@@ -177,6 +210,13 @@ function Causes({ plan }: { plan: PlanData }) {
           );
         })}
       </ul>
+      {total > CAUSES_SHOWN && (
+        <button type="button" className="pl-causes-more" aria-expanded={showAll} aria-controls="causes-list" onClick={toggleAll}>
+          <span className="pl-arrow" aria-hidden="true">{showAll ? "▴" : "▾"}</span>
+          {showAll ? "Show fewer" : `Show all ${total}`}
+        </button>
+      )}
+      </div>
     </section>
   );
 }

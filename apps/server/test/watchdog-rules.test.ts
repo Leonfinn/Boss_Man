@@ -44,6 +44,9 @@ describe("watchdog rules (BOS-58)", () => {
     expect(rules([ticket({ state: "review", stateChangedAt: ago(120) })])).toEqual(["t1:stale_review"]);
     // Approved by everyone and waiting for the merge sweep: not chased as stale review (BOS-362).
     expect(rules([ticket({ state: "review", stateChangedAt: ago(240), mergeWaiting: true })])).toEqual([]);
+    // A reviewer's hold on the merge (BOS-808) is quiet too, even if the other reviews are still open.
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(240), held: true })])).toEqual([]);
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(240), held: false })])).toEqual(["t1:stale_review"]);
     expect(rules([ticket({ state: "blocked", stateChangedAt: ago(479) })])).toEqual([]);
     expect(rules([ticket({ state: "blocked", stateChangedAt: ago(480) })])).toEqual(["t1:stale_blocked"]);
     // Limits come from settings. A run that moved it to in-progress, then stalled: the long rule reads its setting.
