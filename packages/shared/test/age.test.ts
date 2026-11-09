@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ageWords } from "../src/age.js";
+import { ageWords, HOUR_MS, sinceHours } from "../src/age.js";
 
 const MIN = 60_000;
 const H = 60 * MIN;
@@ -39,5 +39,30 @@ describe("ageWords: one way to say how long ago something was (BOS-887)", () => 
     expect(ageWords(90 * MIN, { short: true })).toBe("90 min");
     expect(ageWords(2 * H, { short: true })).toBe("2 h");
     expect(ageWords(2 * D, { short: true })).toBe("2 days");
+  });
+});
+
+describe("sinceHours: the one hourly cut-off for a rolling cap (BOS-894)", () => {
+  const now = new Date("2026-11-09T12:00:00.000Z");
+
+  it("is exactly one hour in milliseconds", () => {
+    expect(HOUR_MS).toBe(3_600_000);
+  });
+
+  it("is an hour before now by default, and n hours before with a count", () => {
+    expect(sinceHours(now).toISOString()).toBe("2026-11-09T11:00:00.000Z");
+    expect(sinceHours(now, 2).toISOString()).toBe("2026-11-09T10:00:00.000Z");
+    expect(sinceHours(now, 24).toISOString()).toBe("2026-11-08T12:00:00.000Z");
+  });
+
+  it("takes the injected clock, so a test's fixed now gives a fixed cut-off", () => {
+    expect(sinceHours(new Date(0)).toISOString()).toBe("1969-12-31T23:00:00.000Z");
+  });
+
+  it("counts a row 59 min 59 s old and not one 60 min 1 s old, against the cap's `gt` cut-off", () => {
+    const inWindow = (at: Date) => at.getTime() > sinceHours(now).getTime();
+    expect(inWindow(new Date(now.getTime() - (59 * 60 + 59) * 1000))).toBe(true);
+    expect(inWindow(new Date(now.getTime() - (60 * 60 + 1) * 1000))).toBe(false);
+    expect(inWindow(new Date(now.getTime() - 60 * 60 * 1000))).toBe(false);
   });
 });

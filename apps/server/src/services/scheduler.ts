@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
@@ -1273,7 +1273,7 @@ export function schedulerService(
       // A wake someone is waiting on, or one Boss Man scheduled, is never dropped for it and does
       // not use the allowance up (R68, BOS-272, DR-002).
       if (!base.ticketId && cls === "agent") {
-        const since = new Date(now().getTime() - 3_600_000);
+        const since = sinceHours(now());
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
           .from(wakes)
@@ -1455,7 +1455,7 @@ export function schedulerService(
         const [hour] = await db
           .select({ n: sql<number>`count(*)::int` })
           .from(nudges)
-          .where(and(eq(nudges.companyId, from.companyId), eq(nudges.dropped, false), gt(nudges.createdAt, new Date(now().getTime() - 60 * 60_000)), sm.length ? notInArray(nudges.fromAgentId, sm) : undefined));
+          .where(and(eq(nudges.companyId, from.companyId), eq(nudges.dropped, false), gt(nudges.createdAt, sinceHours(now())), sm.length ? notInArray(nudges.fromAgentId, sm) : undefined));
         if ((hour?.n ?? 0) >= cap) return { ok: false, error: `Your company has sent its limit of ${cap} nudges in the last hour, so this one wasn't sent. ${ticketId ? "Write it on the ticket with ticket_reply" : "Write it on a ticket with ticket_reply (create one if needed)"}; ${to.name} reads it there.` };
       }
       const since = new Date(now().getTime() - 10 * 60_000);

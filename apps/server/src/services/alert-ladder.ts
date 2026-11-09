@@ -14,7 +14,7 @@
 // reason, it parks on the CEO's rung with its clock stopped and is offered again when the reason
 // is gone. Only a kind allowed to reach the owner goes past the CEO.
 import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { readWatchdogSettings, untrusted } from "@boss-man/shared";
+import { readWatchdogSettings, sinceHours, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -236,7 +236,7 @@ export function alertLadder(
       const [n] = await db
         .select({ n: sql<number>`count(*)::int` })
         .from(watchdogActions)
-        .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, ["sweep_wake", "alert_hop"]), eq(watchdogActions.targetAgentId, sm.id), gt(watchdogActions.createdAt, new Date(now().getTime() - 3_600_000))));
+        .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, ["sweep_wake", "alert_hop"]), eq(watchdogActions.targetAgentId, sm.id), gt(watchdogActions.createdAt, sinceHours(now()))));
       if ((n?.n ?? 0) >= s.maxSmRunsPerHour) return { skip: "the Scrum Master is at its hourly limit" };
       return { agent: sm };
     }
@@ -252,7 +252,7 @@ export function alertLadder(
     const [n] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(watchdogActions)
-      .where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "alert_hop"), eq(watchdogActions.targetAgentId, ceo.id), gt(watchdogActions.createdAt, new Date(now().getTime() - 3_600_000))));
+      .where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "alert_hop"), eq(watchdogActions.targetAgentId, ceo.id), gt(watchdogActions.createdAt, sinceHours(now()))));
     if ((n?.n ?? 0) >= readWatchdogSettings(c.watchdog).maxCeoAlertsPerHour) return { skip: "the CEO has had its hourly limit of alerts" };
     return { agent: ceo };
   }

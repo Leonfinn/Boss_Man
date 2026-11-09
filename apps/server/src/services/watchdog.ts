@@ -4,7 +4,7 @@
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
 // called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
 import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { ageWords, formatDate, readWatchdogSettings, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
+import { ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
@@ -266,7 +266,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const [row] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(watchdogActions)
-      .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, kinds), gt(watchdogActions.createdAt, new Date(now().getTime() - H)), group === "runs" ? sql`${watchdogActions.after}->>'dropped' is null` : undefined, sql`coalesce(${watchdogActions.after} ? 'recorded', false) = false`, notInArray(watchdogActions.kind, [...WATCHDOG_NON_CAPPED_KINDS])));
+      .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, kinds), gt(watchdogActions.createdAt, sinceHours(now())), group === "runs" ? sql`${watchdogActions.after}->>'dropped' is null` : undefined, sql`coalesce(${watchdogActions.after} ? 'recorded', false) = false`, notInArray(watchdogActions.kind, [...WATCHDOG_NON_CAPPED_KINDS])));
     if ((row?.n ?? 0) < max) return true;
     await trip(companyId, group === "runs" ? `it would have woken the Scrum Master more than ${max} times in an hour${detail ? ` (${detail})` : ""}` : `the Scrum Master would have taken more than ${max} actions that reach someone in an hour`);
     return false;
