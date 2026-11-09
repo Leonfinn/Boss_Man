@@ -3109,9 +3109,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           log(`answering decision ${id} was saved, but recording the owner's host check on its ticket failed: ${(err as Error).message}`);
         }
       }
-      // The activity line is cut at 300 characters, so a long permission card is shortened here to keep the answer and reason in it.
-      const asked = settled && d.question.length > 120 ? `${d.question.slice(0, 119)}…` : d.question;
-      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
+      // The activity line is cut at 300 characters, and the brief shows 100, so a long question is shortened here to
+      // keep the answer in it (BOS-951 criterion 3: the whats_new line shows the option chosen, not only the question).
+      const asked = d.question.length > 80 ? `${d.question.slice(0, 79)}…` : d.question;
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${asked}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       // Linked tickets the card never moved (BOS-919: one in review keeps its state): not released, but still
       // the ticket the answer is about, so the asker is woken on it and its assignee hears the answer too.
