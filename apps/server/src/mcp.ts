@@ -1749,7 +1749,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
   server.registerTool(
     "propose_hire",
     {
-      description: `Hire a new agent for the company (CEO only). Start from a template (${AGENT_TEMPLATES.map((t) => `${t.id}: ${t.summary}`).join("; ")}), give it a name, and tailor its title and instructions to the company. Call model_options first, then fill in harness (${HARNESSES.map((h) => `${h.value}: ${h.label}`).join(", ")}), provider (${FUNDING_PROVIDERS.join(", ")}), model and fundingSourceId (paid from) with real values; the tool refuses a setup the server can't run. Say why you're hiring. Pass forTickets (ticket ids) for tickets waiting for this person: they are assigned to them once the hire is approved. Every hire waits for the owner's approval in Decisions, whatever the hire-approval setting says. Use board to see who there is first. A reviewer hire (security, infra, adversarial, or code beyond the Senior Developer) reviews only once the owner names them in Settings > Reviews; say so in the reason.`,
+      description: `Hire a new agent for the company (CEO only). Start from a template (${AGENT_TEMPLATES.map((t) => `${t.id}: ${t.summary}`).join("; ")}), give it a name, and tailor its title and instructions to the company. Call model_options first, then fill in harness (${HARNESSES.map((h) => `${h.value}: ${h.label}`).join(", ")}), provider (${FUNDING_PROVIDERS.join(", ")}), model and fundingSourceId (paid from) with real values; the tool refuses a setup the server can't run. Say why you're hiring. Pass skills (skills or packs from the library) the job needs, so the new agent has them from its first run. Pass forTickets (ticket ids) for tickets waiting for this person: they are assigned to them once the hire is approved. Every hire waits for the owner's approval in Decisions, whatever the hire-approval setting says. Use board to see who there is first. A reviewer hire (security, infra, adversarial, or code beyond the Senior Developer) reviews only once the owner names them in Settings > Reviews; say so in the reason.`,
       inputSchema: {
         name: z.string().trim().min(1).max(80),
         template: z.string().max(40).optional(),
@@ -1759,6 +1759,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         provider: z.enum(FUNDING_PROVIDERS),
         model: z.string().trim().min(1).max(200),
         fundingSourceId: z.string().uuid(),
+        skills: z.array(z.string().max(200)).max(30).optional(),
         forTickets: z.array(z.string().uuid()).max(20).optional(),
         reason: z.string().trim().min(1).max(2000),
       },
@@ -1772,7 +1773,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       }
       try {
         const r = await team.proposeHire(scope.companyId, ceo, input);
-        return text(`The hire is waiting for the owner's approval (decision ${r.decisionId}). The card shows the harness, provider, model and paid from.`);
+        return text(`The hire is waiting for the owner's approval (decision ${r.decisionId}). The card shows the harness, provider, model, paid from${input.skills?.length ? " and skills" : ""}.`);
       } catch (err) {
         if (err instanceof AgentError) return fail(err.message);
         throw err;

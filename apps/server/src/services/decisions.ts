@@ -724,7 +724,7 @@ export type AgentModelConfig = { harness: string; provider: string; model: strin
 
 /** One proposed hire in a team plan (docs/13). */
 export type TeamHire = { name: string; template?: string; title?: string | null; model?: string | null; fundingSourceId?: string | null; fundingSourceName?: string; harness?: string; provider?: string; skills?: string[]; reason: string; serves?: string | null };
-export type HireProposal = { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; harness?: string; provider?: string; reason?: string; /** Tickets waiting for this hire; they go to the new agent once hired. */ forTickets?: string[] };
+export type HireProposal = { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; harness?: string; provider?: string; reason?: string; /** Skills or packs the new agent gets before its first run. */ skills?: string[]; /** Tickets waiting for this hire; they go to the new agent once hired. */ forTickets?: string[] };
 export const TEAM_HIRE = "Hire the ticked ones";
 export const TEAM_NOT_NOW = "Not now";
 export const MODEL_APPROVE = "Approve";
