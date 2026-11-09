@@ -592,4 +592,24 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(await getHold(c.db)).toBeNull();
     expect(await c.titles()).toContain("note: Runners updated");
   });
+
+  it("an update-runner.sh trigger file during a wrap-up takes the hold over, swaps, and lifts by itself", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup" });
+    // The script asks for the update through drain.json, not the button: the hold must still take it over (BOS-929).
+    await writeFile(path.join(c.dir, "inbox", "drain.json"), JSON.stringify({ by: "update-runner.sh" }));
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update" });
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP_ASKED}`, `Message from Boss Man: ${WRAP_UP}`]);
+    // The run ends, the drain swaps the idle company's runner and lifts the hold by itself: new work is not stuck held.
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual(["POST /runners/app-co/recreate"]);
+    expect(await c.titles()).toContain("note: Runners updated");
+  });
 });

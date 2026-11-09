@@ -311,7 +311,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         await rm(trigger, { force: true });
       }
       let h = await getHold(db);
-      if (asked && (!h || (asked === "settings" && h.kind !== "settings"))) h = await self.start({ kind: asked });
+      // A real update or setting change takes over a wrap-up hold here too, not only from the button (BOS-929): its
+      // trigger file must end the wrap-up and swap, or new work stays held until the owner cancels by hand.
+      const takesOver = !!h && h.kind === "wrapup" && (asked === "update" || asked === "settings");
+      if (asked && (!h || (asked === "settings" && h.kind !== "settings") || takesOver)) h = await self.start({ kind: asked });
       if (!h) return;
 
       // A wrap-up hold (BOS-929) swaps nothing and asks nothing: it only keeps new runs from starting until the
