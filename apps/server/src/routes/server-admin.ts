@@ -88,7 +88,10 @@ export function serverAdminRoutes(
 
   owner.post("/api/self-deploy/update-runners",async (_req, reply) => {
     const r = await selfDeploy.updateRunners();
-    return "error" in r ? reply.code(409).send({ error: "cannot_update_runners", message: r.error }) : r;
+    // BOS-953: during the trial the refusal says when it can work, and carries the time so the panel shows it too.
+    return "error" in r
+      ? reply.code(409).send({ error: "cannot_update_runners", message: r.error, ...("retryAt" in r && r.retryAt ? { retryAt: r.retryAt } : {}) })
+      : r;
   });
 
   // "Restart the server" (BOS-647): owner session only; it writes a request file the host deployer acts on. No MCP tool reaches it.

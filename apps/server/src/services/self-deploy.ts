@@ -18,6 +18,7 @@ import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold } from "./maintenance.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { imageContains, mergeCommitOrder, runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
+import type { BlueGreen } from "./bluegreen.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
@@ -115,7 +116,7 @@ const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed:
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -639,7 +640,6 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (due?.needs && imageContains(image, due.needs, order)) await putSetting(RUNNER_DUE, null);
   }
   const DEFAULT_SOAK_SECONDS = 900;
-  const TRIAL_MARGIN_SECONDS = 120;
   type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };
   /** The window for this deploy: what the host wrote into status.json for it (BOS-401), else the length it publishes in available.json (BOS-384), else 900. */
   const statusSoak = (s?: DeployStatus | null) => {
@@ -648,17 +648,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 86400 ? Math.floor(n) : null;
   };
   const soakSeconds = (a: Available | null, s?: DeployStatus | null) => statusSoak(s) ?? a?.soakSeconds ?? DEFAULT_SOAK_SECONDS;
-  const trialMs = (a: Available | null, s?: DeployStatus | null) => (soakSeconds(a, s) + TRIAL_MARGIN_SECONDS) * 1000;
+  /** The trial runs for the host's standby window from the moment the update went live (BOS-953). */
+  const trialMs = (a: Available | null, s?: DeployStatus | null) => soakSeconds(a, s) * 1000;
   const trialWords = (seconds: number) => {
     const min = Math.round(seconds / 60);
     if (seconds === DEFAULT_SOAK_SECONDS) return "15-minute";
     if (seconds % 60 === 0) return `${min}-minute`;
     return seconds === 0 ? "trial" : `${seconds}-second`;
   };
-  const trialMessage = (seconds: number) =>
-    `The server update is still in its ${trialWords(seconds)} trial, so the runners can't be updated yet. Boss Man offers the runner update by itself when the trial ends.`;
-  /** The trial length as Settings and the cards should show it now (the last host report, if any). */
-  const currentTrial = async () => soakSeconds(await available());
+  /** "15:33", in the browser's own clock, from an ISO instant. */
+  const clock = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   async function getSetting<T>(key: string): Promise<T | null> {
     const [row] = await db.select().from(settings).where(eq(settings.key, key));
     return (row?.value as T | undefined) ?? null;
@@ -667,15 +666,65 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (value === null) await db.delete(settings).where(eq(settings.key, key));
     else await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
   }
-  /** The held runner update, if its server update is still in its trial. */
-  async function inTrial() {
-    const due = await getSetting<RunnerDue>(RUNNER_DUE);
-    return due && Date.now() < Date.parse(due.after) ? due : null;
+
+  /**
+   * Whether the standby colour the host kept for the trial is already stopped (BOS-953): with blue/green on and
+   * the live colour answering, the other colour being down is the deployer saying the trial is over (it stopped
+   * the standby when the window ended). Derived from the same colour probe Settings shows, so the red line can
+   * never disagree with the BLUE/GREEN rows. A single server (no blue/green rows) has no standby to read, so the
+   * clock ends the trial there.
+   */
+  async function standbyStopped(): Promise<boolean> {
+    const bg = deps.colours ? await deps.colours().catch(() => null) : null;
+    // No probe, or a single server with no colour rows: don't guess, let the clock end the trial.
+    if (!bg || bg.enabled === false) return false;
+    const live = bg.colours.find((c) => c.colour === bg.self);
+    const other = bg.colours.find((c) => c.colour !== bg.self);
+    // Only when the live colour is up: a failed probe of both is not "stopped".
+    return !!live?.up && !!other && other.up === false;
   }
+
+  /**
+   * The held runner update and where its trial stands (BOS-953). The trial is over as soon as the standby has
+   * stopped, or the host's window has passed, whichever comes first: never wait for a later deployer poll or a
+   * page reload. `endsAt` is the window's end from the deploy's own time (the last deployer status), so a later
+   * refused deploy that overwrote the status file still ends the older trial on time.
+   */
+  async function trialState(a: Available | null): Promise<{ due: RunnerDue; endsAt: string } | null> {
+    const due = await getSetting<RunnerDue>(RUNNER_DUE);
+    if (!due) return null;
+    const ends = Date.parse(due.after);
+    if (!Number.isFinite(ends)) return null;
+    if (Date.now() >= ends) return null;
+    if (await standbyStopped()) return null;
+    return { due, endsAt: due.after };
+  }
+  /** What the owner's Build and update runners press says during the trial: the very time it can work (BOS-953). */
+  const trialMessage = (endsAt: string, seconds: number) => {
+    const mins = Math.max(1, Math.ceil((Date.parse(endsAt) - Date.now()) / 60_000));
+    return `The server update is still in its ${trialWords(seconds)} trial, so the runners can't be updated yet. Runners can be updated from ${clock(endsAt)}, in about ${mins} minute${mins === 1 ? "" : "s"}. Boss Man offers the runner update by itself then, so you don't need to press again.`;
+  };
+
+  /**
+   * A rate-limit refusal ("Try again in N minute(s)") waits until its own end, not the frozen text (BOS-953): the
+   * host's message is stamped when it refused, so the wait ends N minutes after `ended`. The panel counts down to
+   * `until` and, once it has passed, says the owner can deploy now (a later result replaces the line). Null when the
+   * last status is not a rate-limit refusal.
+   */
+  function deployWait(s: DeployStatus | null): { until: string } | null {
+    if (!s || s.result !== "rejected" || s.target === "runner") return null;
+    const mins = s.message.match(/Try again in (\d+) minute\(s\)/i)?.[1];
+    const ended = Date.parse(s.ended || s.started);
+    if (!mins || !Number.isFinite(ended)) return null;
+    return { until: new Date(ended + Number(mins) * 60_000).toISOString() };
+  }
+
   /** Raises the held runner update once its trial is over, if the server is still on that commit; otherwise drops it quietly. */
   async function releaseRunnerDue(a: Available | null) {
     const due = await getSetting<RunnerDue>(RUNNER_DUE);
-    if (!due || Date.now() < Date.parse(due.after)) return;
+    if (!due) return;
+    const stillHeld = await trialState(a);
+    if (stillHeld) return;
     await putSetting(RUNNER_DUE, null);
     if (due.offer === false) return;
     // The image was rebuilt from a commit that already has the runner change (BOS-764): nothing to ask.
@@ -683,8 +732,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       deps.log?.(`self-deploy: runner update for ${short(due.commit)} not offered; the live runner image already has the change`);
       return;
     }
+    // The server must still be running the commit the runner update is for. A later refused deploy (e.g. the
+    // rate limit) overwrites the host's last status but changes nothing that runs, so it must not drop the offer
+    // (BOS-953). A switch-back or failure clears the hold in finished(), so it never reaches here.
     const last = await getSetting<LastServer>(LAST_SERVER);
-    if (last?.result === "deployed" && last.to === due.commit && a?.deployed === due.commit) await raise("runner", due.commit, due.fromCommit, a);
+    const switchedBack = last?.result === "rolled_back" || last?.result === "failed";
+    if (!switchedBack && a?.deployed === due.commit) await raise("runner", due.commit, due.fromCommit, a);
     else deps.log?.(`self-deploy: runner update for ${short(due.commit)} dropped; the server is not on it after its trial`);
   }
 
@@ -944,7 +997,14 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (!dir) return { error: "Self-deploy is not set up on this install." } as const;
       const a = await available();
       if (!a?.deployed) return { error: await noOfferReason(a, await status()) } as const;
-      if (await inTrial()) return { error: trialMessage(soakSeconds(a)) } as const;
+      // BOS-953: during the trial say plainly when it can work, and remember the press so the offer is raised by
+      // itself when the trial ends. Never a silent refusal, and never a press that is quietly lost.
+      const trial = await trialState(a);
+      if (trial) {
+        const due = trial.due;
+        await putSetting(RUNNER_DUE, { ...due, offer: true, needs: due.needs ?? a.deployed } satisfies RunnerDue);
+        return { error: trialMessage(trial.endsAt, soakSeconds(a)), retryAt: trial.endsAt } as const;
+      }
       const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
       // The plain key when no card for this commit is open (DR-042 point 5). Only if an answered card still holds it
       // (the owner said "Not now" before) does the button fall back to a keyed copy, so the ask is not silently dropped.
@@ -955,8 +1015,21 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     /** What Settings shows. */
     async overview() {
       const [s, a] = [await status(), await available()];
+      // BOS-953: the runner trial (with the time it ends) and any "try again in N minutes" wait, both worked out
+      // from the real time rather than the frozen text in the host's last status, so the panel counts down by itself.
+      const trial = await trialState(a);
+      const wait = deployWait(s);
       // BOS-753: when the host deployer last showed it is alive, so Settings only says "not reported" when it really is overdue.
-      return { enabled: !!dir, status: s, available: a, pending: await pending(), deployer: await deployerSeen(a, s), lateAfterMinutes: DEPLOYER_LATE_MS / 60_000 };
+      return {
+        enabled: !!dir,
+        status: s,
+        available: a,
+        pending: await pending(),
+        deployer: await deployerSeen(a, s),
+        lateAfterMinutes: DEPLOYER_LATE_MS / 60_000,
+        trial: trial ? { endsAt: trial.endsAt, seconds: soakSeconds(a) } : null,
+        deployWait: wait,
+      };
     },
 
     /**
@@ -984,7 +1057,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const s = await status();
       if (s?.result === "running") throw new AnswerError("A deploy is running now. Wait for it to finish.");
       if (await pending()) throw new AnswerError("A deploy request is already waiting for the host. Try again in a minute.");
-      if (ctx.target === "runner" && (await inTrial())) throw new AnswerError(trialMessage(await currentTrial()));
+      if (ctx.target === "runner") {
+        const a = await available();
+        const trial = await trialState(a);
+        if (trial) throw new AnswerError(trialMessage(trial.endsAt, soakSeconds(a)));
+      }
       // Only the commit that failed to deploy is refused: after a rollback or a deploy by hand, what runs can still be built.
       if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed" && s.to_commit === ctx.commit) throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
     },

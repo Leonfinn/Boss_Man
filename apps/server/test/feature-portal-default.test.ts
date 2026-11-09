@@ -41,7 +41,8 @@ describe("features go on the portal by default (BOS-957)", () => {
 
     expect((await visitor()).json().features).toEqual([]);
     expect((await c.req("PATCH", `/api/features/${f.id}`, { publicSummary: "A dark theme you can switch on." })).statusCode).toBe(200);
-    expect((await visitor()).json().features.map((x: { title: string }) => x.title)).toEqual(["Dark mode"]);
+    // Visitors see the summary's first line as the title, not the internal title (BOS-991).
+    expect((await visitor()).json().features.map((x: { title: string }) => x.title)).toEqual(["A dark theme you can switch on."]);
   });
 
   it("takes a feature off the portal the moment it is marked sensitive, and cannot be voted on", async () => {
@@ -76,8 +77,23 @@ describe("features go on the portal by default (BOS-957)", () => {
     const { portalToken } = await c.portal(c.company.id);
     const body = (await t!.app.inject({ method: "GET", url: "/api/portal", headers: { "x-portal-token": portalToken } })).json();
     expect(body.features).toHaveLength(1);
-    expect(body.features[0]).toMatchObject({ title: f.title, description: "A dark theme you can switch on." });
+    expect(body.features[0]).toMatchObject({ title: "A dark theme you can switch on.", description: "A dark theme you can switch on." });
+    // The internal description does not reach the page (BOS-991); the public title test below covers the title.
     expect(JSON.stringify(body)).not.toContain("Internal: owner's private note");
+  });
+
+  it("shows visitors a public title, or the public summary's first line, never the internal title (BOS-991)", async () => {
+    const c = await setup();
+    const withTitle = await c.feature({ title: "Internal: rework the settings screen", description: "Internal note.", publicTitle: "Settings, tidied", publicSummary: "Every setting in one clear place." });
+    const summaryOnly = await c.feature({ title: "Internal: dark mode work", description: "Owner's private note.", publicSummary: "A dark theme you can switch on.\nMore detail only for the team." });
+    const { portalToken } = await c.portal(c.company.id);
+    const body = (await t!.app.inject({ method: "GET", url: "/api/portal", headers: { "x-portal-token": portalToken } })).json();
+    const show = (id: string) => body.features.find((x: { id: string }) => x.id === id);
+    expect(show(withTitle.id)).toMatchObject({ title: "Settings, tidied", description: "Every setting in one clear place." });
+    // No public title: the summary's first line stands in, and the rest of the summary stays the description.
+    expect(show(summaryOnly.id).title).toBe("A dark theme you can switch on.");
+    expect(show(summaryOnly.id).description).toContain("More detail only for the team.");
+    expect(JSON.stringify(body)).not.toContain("Internal:");
   });
 
   it("still keeps a marked feature off even when its portalVisible flag says on", async () => {

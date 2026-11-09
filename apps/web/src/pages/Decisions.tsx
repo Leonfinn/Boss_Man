@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, type StepPiece, type Where } from "@boss-man/shared";
-import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
+import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
@@ -246,7 +246,8 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
         </div>
       )}
       <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
+        {/* Sideways only (BOS-962 sweep, same as BOS-554): the command wraps, so it never needs to scroll vertically, and without overflow-y: hidden a one-pixel overflow would swallow the wheel. */}
+        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", overflowY: "hidden", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
           <code>{command}</code>
         </pre>
         <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
@@ -458,7 +459,7 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
   );
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[] }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [alwaysScopes, setAlwaysScopes] = useState<Record<string, "agent" | "company">>({});
@@ -577,6 +578,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const queueCards = shown.filter((d) => !d.waiting);
   const waitingCards = shown.filter((d) => !!d.waiting);
   const open = shown.filter((d) => !answered[d.id]);
+  // (BOS-969) The heading takes its numbers from the same server tally as the menu badge, over the cards
+  // this page is showing, so the two always agree. The menu badge shows only "open": what needs the owner now.
+  const tallyQuery = `?open=${open.length}&waiting=${waitingCards.length}`;
+  const tallyPoll = usePoll((signal) => api<DecisionTally>(`/api/decisions/tally${tallyQuery}`, { signal }).catch(() => null), 10_000, "decisions-tally");
+  // Until the first answer arrives, the cards themselves stand in, so the heading is never blank.
+  const counts = tallyPoll.data ?? tally ?? { open: open.length, waiting: waitingCards.length };
   // Too long for an answer: the text goes in a .txt file, and the agent is told where to read it whole.
   const answerAsFile = async (d: Decision, long: string) => {
     if (inFlight.current.has(d.id)) return;
@@ -653,7 +660,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         <div>
           <h1>Decisions</h1>
           <p className="sub">
-            {open.length === 1 ? "1 decision waiting" : `${open.length} decisions waiting`}
+            {counts.open === 1 ? "1 decision to do" : `${counts.open} decisions to do`}
+            {counts.waiting > 0 ? ` · ${counts.waiting === 1 ? "1 waiting" : `${counts.waiting} waiting`}` : ""}
             {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
           </p>
           {elsewhere.length > 0 && (

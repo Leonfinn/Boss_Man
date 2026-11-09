@@ -315,6 +315,8 @@ export async function buildApp(opts: AppOptions) {
   const hostFacts = hostFactsService({ dir: opts.deployerDir, db, now: opts.now, log: (m) => app.log.warn(m) });
   const deviceProfiles = deviceProfilesService(db);
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
+    // Both colours, the same probe Settings shows: the runner trial ends as soon as the standby is stopped (BOS-953). `build` is defined further down; this only runs per request.
+    colours: () => probeColours(colour(), build),
     // Quiet = no agent run in flight (an owner chat doesn't count) and no merge landing: a few seconds' outage of the database or proxy would cut them short (BOS-487).
     // DR-008's memory-headroom check is not built; this is the part that exists today.
     hostQuiet: async () => {
@@ -526,7 +528,7 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => semantic.stop());
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
-  const dashboard = dashboardService(db, { now: opts.now });
+  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc });
   const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
@@ -2297,6 +2299,7 @@ export async function buildApp(opts: AppOptions) {
       portalVisible: z.boolean(),
       keepOffPortal: z.boolean(),
       publicSummary: z.string().trim().max(2000).nullable(),
+      publicTitle: z.string().trim().max(200).nullable(),
       showPublicly: z.boolean(),
     });
     owner.get("/api/companies/:id/feedback-settings", async (req) => {
@@ -2624,6 +2627,19 @@ export async function buildApp(opts: AppOptions) {
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
+    // The number for the menu badge (BOS-969): how many cards need the owner now, and how many are
+    // folded into "Waiting, nothing to do yet", from the same rows and rule as the queue above. The
+    // screen passes what it is showing by company (open, waiting) so its own heading agrees with it.
+    owner.get("/api/decisions/tally", async (req) => {
+      const q = z
+        .object({ companyId: z.string().uuid().optional(), includeAll: z.string().optional(), open: z.coerce.number().int().min(0).max(10_000).optional(), waiting: z.coerce.number().int().min(0).max(10_000).optional() })
+        .parse(req.query ?? {});
+      return decisionsSvc.queueTally({
+        ...(q.companyId ? { companyId: q.companyId } : {}),
+        ...(q.includeAll ? { includeAll: true } : {}),
+        ...(q.open !== undefined && q.waiting !== undefined ? { visible: { open: q.open, waiting: q.waiting } } : {}),
+      });
+    });
     // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.
     owner.get("/api/decisions/with-team", async () => decisionsSvc.withTeam());
 

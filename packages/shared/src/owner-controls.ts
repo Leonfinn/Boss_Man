@@ -210,7 +210,7 @@ export const OWNER_FIELDS = {
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
     "New feature", "Area", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
-    "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Public summary", "Show publicly",
+    "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Public title (optional)", "Public summary", "Show publicly",
     "On portal",
   ],
   Feedback: [

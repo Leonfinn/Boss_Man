@@ -1440,6 +1440,8 @@ export const features = pgTable(
     keepOffPortal: boolean("keep_off_portal").notNull().default(false),
     /** A plain-language summary for readers outside the team; null until written. */
     publicSummary: text("public_summary"),
+    /** The title visitors see on the feedback portal; null falls back to the summary's first line (BOS-991). */
+    publicTitle: text("public_title"),
     /** Off by default; nothing is published anywhere until a later public roadmap uses it. */
     showPublicly: boolean("show_publicly").notNull().default(false),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),

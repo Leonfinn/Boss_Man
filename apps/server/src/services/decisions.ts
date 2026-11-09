@@ -2094,6 +2094,29 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * in the company, any tier, including lesson cards and cards still with the CEO or the
      * Scrum Master. `companyId` narrows that view to one company.
      */
+    /**
+     * What the owner has to do now (BOS-969). The number on the Decisions menu and the page's heading
+     * must never drift, so both take it from here, over the same rows and the same rule as the list:
+     * a card is actionable when it is not in the "Waiting, nothing to do yet" group. It walks the
+     * owner's own queue (CEO-tier and lesson cards are left out there, so they wait for the ladder).
+     * `companyId` narrows it to one company, and `visible` (open, waiting) is what the page is showing
+     * by company, so a page's own heading agrees with the menu.
+     */
+    async queueTally(opts: { includeAll?: boolean; companyId?: string; visible?: { open: number; waiting: number } } = {}): Promise<{ open: number; waiting: number }> {
+      const query: { includeAll?: boolean; companyId?: string } = {};
+      if (opts.includeAll) query.includeAll = true;
+      if (opts.companyId) query.companyId = opts.companyId;
+      const rows = (await this.queue(query)) as unknown as Array<{ waiting?: string | null }>;
+      const waitingTotal = rows.filter((r) => !!r.waiting).length;
+      const openTotal = rows.length - waitingTotal;
+      // The page works its counts out over the cards it is showing; they can only be stale against this
+      // read, never bigger, so nothing is let past the list itself.
+      const v = opts.visible;
+      const waiting = v ? Math.min(Math.max(v.waiting, 0), waitingTotal) : waitingTotal;
+      const open = v ? Math.min(Math.max(v.open, 0), openTotal) : openTotal;
+      return { open, waiting };
+    },
+
     async queue(opts: { includeAll?: boolean; companyId?: string } = {}) {
       const t = now();
       const open = await db
