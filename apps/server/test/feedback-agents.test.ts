@@ -228,6 +228,34 @@ describe("placing features on the roadmap", () => {
     expect(await row()).toMatchObject({ publicSummary: null, showPublicly: false });
   });
 
+  it("refuses to put a feature the rule calls security work on the portal, though the owner still can (BOS-991)", async () => {
+    const c = await setup();
+    // A security-worded feature is held off by the default; the guard uses the same rule as the default.
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Rotate the host-deployer token", description: "Rotate it every week." })).json();
+    const row = async () => (await c.db.select().from(features).where(eq(features.id, f.id)))[0]!;
+    expect(f).toMatchObject({ portalVisible: false, keepOffPortal: false });
+
+    const ceo = await c.mcp(c.ceo.id);
+    const refused = textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: true, publicSummary: "A tidier weekly routine for the team.", reason: "A portal note asked for this." } }));
+    expect(refused).toMatch(/security work/);
+    expect(await row()).toMatchObject({ portalVisible: false, publicSummary: null });
+    // The refusal is the tick only: the same agent can still write the summary or take it off.
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: "A tidier weekly routine for the team.", reason: "Write its public summary." } }))).toBe('Updated "Rotate the host-deployer token": wrote its public summary.');
+    expect((await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: false, reason: "Take it off." } })).isError).toBe(false);
+    await ceo.close();
+
+    // An ordinary feature may still be put on the portal by an agent, and the public title is written too.
+    const ordinary = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Dark mode", description: "A dark theme." })).json();
+    const ceo2 = await c.mcp(c.ceo.id);
+    expect(textOf(await ceo2.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: ordinary.id, portalVisible: false, reason: "Hold it back." } }))).toContain("took it off the feedback portal");
+    expect(textOf(await ceo2.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: ordinary.id, portalVisible: true, publicTitle: "Dark mode", publicSummary: "A dark theme you can switch on.", reason: "Show it again." } }))).toBe('Updated "Dark mode": wrote its public title, wrote its public summary, put it on the feedback portal.');
+    await ceo2.close();
+    expect((await c.db.select().from(features).where(eq(features.id, ordinary.id)))[0]).toMatchObject({ portalVisible: true, publicTitle: "Dark mode" });
+
+    // The owner can still tick it on in the app, as BOS-957 intends.
+    expect((await c.req("PATCH", `/api/features/${f.id}`, { portalVisible: true })).json()).toMatchObject({ portalVisible: true });
+  });
+
   it("lets an agent mark a feature sensitive but never clear that mark", async () => {
     const c = await setup();
     const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Roadmap feature" })).json();

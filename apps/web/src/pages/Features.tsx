@@ -453,7 +453,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
           <h1>Features</h1>
           <p className="sub">What people have asked for, how much it matters to them, and what to build next.</p>
           <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-            New features go on the feedback portal by default, unless they look like security work. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
+            New features go on the feedback portal by default, unless they look like security work. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. Visitors see the public summary and its first line as the title, or the public title when you write one, never the internal title. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
           </p>
         </div>
       </header>
@@ -643,11 +643,15 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   // the box is being edited, and it goes once the server has taken the summary.
   const summaryDraftKey = `feature-summary/${id}`;
   const [summaryDraft, setSummaryDraft] = useState<string | null>(null);
+  // The public title is saved with the summary, so the owner is not left with a summary that still shows the internal
+  // title to visitors (BOS-991).
+  const publicTitleDraftKey = `feature-public-title/${id}`;
+  const [publicTitleDraft, setPublicTitleDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
   const saveSummary = (summary: string) =>
-    void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null } }).then(
-      () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), data.reload()),
+    void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null, ...(publicTitleDraft !== null ? { publicTitle: publicTitleDraft.trim() || null } : {}) } }).then(
+      () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), clearDraft(publicTitleDraftKey), setPublicTitleDraft(null), data.reload()),
       (err: Error) => setError(err.message),
     );
   if (data.error && !away(data.error)) return <p className="error">{data.error.status === 404 ? "There's no such feature." : data.error.message}</p>;
@@ -846,7 +850,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           <input type="checkbox" checked={f.portalVisible} onChange={(e) => patch({ portalVisible: e.target.checked })} />
           Show on the feedback portal, where visitors can vote on it
         </label>
-        {f.portal?.reason === "needs public summary" && <p className="muted" style={{ fontSize: 13 }}>Held off the portal until you write a public summary below: visitors see the public summary, not the internal description.</p>}
+        {f.portal?.reason === "needs public summary" && <p className="muted" style={{ fontSize: 13 }}>Held off the portal until you write a public summary below: visitors see the public summary and its first line, not the internal title or description.</p>}
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
           <input type="checkbox" checked={f.keepOffPortal} onChange={(e) => patch({ keepOffPortal: e.target.checked })} />
           Keep off the portal (sensitive)
@@ -863,8 +867,18 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           Public roadmap
         </h2>
         <p className="muted" style={{ fontSize: 13 }}>
-          A plain-language summary for readers outside the team. Nothing is published by Boss Man yet; these fields are ready for a public roadmap.
+          A plain-language summary for readers outside the team. Nothing is published by Boss Man yet; these fields are ready for a public roadmap. Visitors to the feedback portal see the public summary as the description and its first line as the title, or the public title below when you write one; they never see this feature's internal title.
         </p>
+        <div className="field">
+          <label htmlFor="f-public-title">Public title (optional)</label>
+          <input
+            id="f-public-title"
+            maxLength={200}
+            placeholder="Shown to visitors; leave empty to use the public summary's first line"
+            value={publicTitleDraft ?? f.publicTitle ?? ""}
+            onChange={(e) => setPublicTitleDraft(e.target.value)}
+          />
+        </div>
         <div className="field">
           <label htmlFor="f-public-summary">Public summary</label>
           <DraftTextarea
@@ -877,7 +891,12 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           />
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <button type="button" className="btn small" disabled={summaryDraft === null || summaryDraft.trim() === (f.publicSummary ?? "")} onClick={() => saveSummary(summaryDraft ?? "")}>
+          <button
+            type="button"
+            className="btn small"
+            disabled={(summaryDraft === null || summaryDraft.trim() === (f.publicSummary ?? "")) && (publicTitleDraft === null || publicTitleDraft.trim() === (f.publicTitle ?? ""))}
+            onClick={() => saveSummary(summaryDraft ?? f.publicSummary ?? "")}
+          >
             Save summary
           </button>
           <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>

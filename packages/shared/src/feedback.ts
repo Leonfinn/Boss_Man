@@ -107,6 +107,18 @@ export function suggestFeatures<T extends { id: string; title: string; descripti
   return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
+/**
+ * The title a visitor sees on the feedback portal (BOS-991): the public title when one is written, otherwise the first
+ * line of the public summary, so the internal title never reaches visitors. Null when neither is written.
+ */
+export function portalTitle(publicTitle: string | null | undefined, publicSummary: string | null | undefined): string | null {
+  const title = publicTitle?.trim();
+  if (title) return title;
+  const summary = publicSummary?.trim();
+  if (!summary) return null;
+  return summary.split(/\r?\n/, 1)[0]!.trim().slice(0, 200) || null;
+}
+
 /** A feature is kept off the portal for one of two reasons: someone marked it, or the words say it's security work. */
 export type PortalHoldReason = "sensitive" | "security";
 /** What the portal rule says about a feature. */

@@ -4,7 +4,7 @@
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
+import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
@@ -36,6 +36,8 @@ type FeaturePatch = {
   portalVisible?: boolean;
   keepOffPortal?: boolean;
   publicSummary?: string | null;
+  /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
+  publicTitle?: string | null;
   showPublicly?: boolean;
 };
 
@@ -107,10 +109,10 @@ export function feedbackService(
   }
 
   /** The features that actually reach visitors: ticked on, not marked keep-off, and with a public summary (that summary
-   * replaces the internal description, so internal text never reaches visitors). */
+   * replaces the internal description and title, so internal text never reaches visitors). */
   async function livePortalFeatures(companyId: string) {
     const rows = await db
-      .select({ id: features.id, title: features.title, publicSummary: features.publicSummary, status: features.status, releasedAt: features.releasedAt })
+      .select({ id: features.id, title: features.title, publicSummary: features.publicSummary, publicTitle: features.publicTitle, status: features.status, releasedAt: features.releasedAt })
       .from(features)
       .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), eq(features.keepOffPortal, false), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
       .orderBy(asc(features.title));
@@ -247,9 +249,13 @@ export function feedbackService(
 
     // ---- Features ----
     scored,
+    /** One feature in the company; the MCP tool reads it to check what the portal rule says before publishing (BOS-991). */
+    feature,
+    portalFacts,
     async createFeature(companyId: string, input: FeaturePatch & { title: string; createdByAgentId?: string | null }) {
       await checkLinks(companyId, input);
       const publicSummary = input.publicSummary?.trim() || null;
+      const publicTitle = input.publicTitle?.trim() || null;
       if (input.showPublicly && !publicSummary) throw new FeedbackError(422, "Write a public summary before showing the feature publicly.");
       const keepOffPortal = input.keepOffPortal ?? false;
       // A new feature goes on the portal by default (BOS-957), unless it is marked sensitive or reads as security work.
@@ -275,6 +281,7 @@ export function feedbackService(
           portalVisible: input.portalVisible ?? mayGoOn,
           keepOffPortal,
           publicSummary,
+          publicTitle,
           showPublicly: input.showPublicly ?? false,
           createdByAgentId: input.createdByAgentId ?? null,
           releasedAt: input.status === "released" ? now() : null,
@@ -298,6 +305,7 @@ export function feedbackService(
           ...patch,
           ...(portalVisible !== undefined ? { portalVisible } : {}),
           ...(patch.publicSummary !== undefined ? { publicSummary } : {}),
+          ...(patch.publicTitle !== undefined ? { publicTitle: patch.publicTitle?.trim() || null } : {}),
           ...(driverScores ? { driverScores } : {}),
           ...(patch.status === "released" && f.status !== "released" ? { releasedAt: now() } : patch.status && patch.status !== "released" ? { releasedAt: null } : {}),
           updatedAt: now(),
@@ -634,8 +642,9 @@ export function feedbackService(
           const v = mine.find((m) => m.featureId === f.id);
           return {
             id: f.id,
-            title: f.title,
-            // The public summary stands in for the internal description: anonymous visitors never see internal text.
+            // The public title (or the summary's first line) stands in for the internal title, as the summary does for
+            // the description: anonymous visitors never see internal text (BOS-991).
+            title: portalTitle(f.publicTitle, f.publicSummary),
             description: f.publicSummary!.trim().slice(0, 1000),
             stage: f.status === "released" ? "released" : f.status === "planned" || f.status === "in_progress" ? "planned" : "considering",
             myVote: v ? { importance: v.importance, comment: v.hasComment ? v.comment : null } : null,

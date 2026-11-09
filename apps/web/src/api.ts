@@ -489,6 +489,8 @@ export type Feature = {
   /** Marked "keep off the portal (sensitive)"; the default never overrides it. */
   keepOffPortal: boolean;
   publicSummary: string | null;
+  /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
+  publicTitle: string | null;
   showPublicly: boolean;
   /** Why the feature is on or off the portal: onPortal, or the reason it is held off (BOS-957). */
   portal?: { onPortal: boolean; reason: "sensitive" | "security" | "needs public summary" | null };
