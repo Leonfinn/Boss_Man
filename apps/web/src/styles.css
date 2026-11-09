@@ -172,11 +172,18 @@ p { margin: 0; }
 .decision .parts { display: flex; flex-direction: column; gap: 3px; width: 48px; }
 .decision .parts span { height: 4px; border-radius: 2px; min-width: 4px; }
 .decision .body { padding: 18px 20px 18px 8px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.decision h2 { font-size: 17px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.decision h2 { font-size: 17px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
 .decision .meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); }
 .decision .rec { font-size: 14px; background: var(--accent-soft); border-radius: 6px; padding: 8px 12px; }
 .decision .rec strong { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--link); margin-right: 6px; }
 .decision .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* "Not enough detail?": the note and its button are one row on a wide card, the button reading as the
+   field's send and lining up with Approve / Reject; on a narrow card the button drops under the field
+   with the card's normal gap (BOS-756). */
+.decision .advice-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.decision .advice-row .field { flex: 1 1 240px; min-width: 0; }
+.decision .advice-row .actions { flex: none; }
+@media (max-width: 640px) { .decision .advice-row .field { flex-basis: 100%; } }
 @media (max-width: 520px) { .decision .actions { flex-direction: column; } .decision .actions .btn { width: 100%; } .decision { grid-template-columns: 1fr; } .decision .score { flex-direction: row; align-items: center; padding: 14px 16px 0; } .decision .body { padding: 10px 16px 16px; } }
 
 /* ---------- Board ---------- */
