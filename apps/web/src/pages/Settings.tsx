@@ -2144,7 +2144,7 @@ type SelfDeployView = {
   enabled: boolean;
   pending: boolean;
   status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
-  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[]; bluegreen?: boolean } | null;
+  available: { tip: string; deployed: string; checkedAt: string; commits?: { sha: string; subject?: string }[]; runnerChanged?: boolean; bluegreen?: boolean } | null;
   /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
   deployer?: { reportedAt: string | null; late: boolean };
   lateAfterMinutes?: number;
@@ -2157,6 +2157,35 @@ function deployerLine(v: SelfDeployView): string {
   if (!d.reportedAt) return "The host deployer has not reported yet. Check that its cron job is running.";
   if (d.late) return `The host deployer last reported ${when(d.reportedAt)}, more than ${v.lateAfterMinutes ?? 10} minutes ago; it should report every minute. Check that its cron job is running.`;
   return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
+}
+
+/** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213); the server reads them the same way. */
+const MERGE_SUBJECT = /^Merge "(.*)" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i;
+
+/** The titles of the merges waiting to go live, newest first (BOS-875). Non-merge commits and untitled ones are left out. */
+function waitingMerges(commits: { subject?: string }[] | undefined): string[] {
+  return (commits ?? []).flatMap((c) => {
+    const m = c.subject?.match(MERGE_SUBJECT);
+    return m?.[1] ? [m[1]] : [];
+  });
+}
+
+/** What is waiting to go live, by ticket title, so the owner needn't read commit hashes (BOS-875). Nothing when no merges are waiting. */
+function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefined }) {
+  const titles = waitingMerges(commits);
+  if (!titles.length) return null;
+  const shown = titles.slice(0, 10);
+  return (
+    <div style={{ fontSize: 14 }}>
+      <p style={{ margin: 0 }}>{titles.length === 1 ? "1 change waiting:" : `${titles.length} changes waiting:`}</p>
+      <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+        {shown.map((title, i) => (
+          <li key={`${i}:${title}`}>{title}</li>
+        ))}
+      </ul>
+      {titles.length > shown.length && <p style={{ margin: "4px 0 0" }}>and {titles.length - shown.length} more</p>}
+    </div>
+  );
 }
 
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
@@ -2176,6 +2205,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       <p className="muted" style={{ fontSize: 14 }}>
         {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
+      {waiting && <WaitingChanges commits={v.available?.commits} />}
       <div>
         <button
           type="button"
@@ -2231,6 +2261,9 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           Restart the server
         </button>
       </div>
+      {v.available?.runnerChanged && (
+        <p style={{ fontSize: 14 }}>This update changes the runners: after Deploy latest, press Build and update runners.</p>
+      )}
       <p className="muted" style={{ fontSize: 14 }}>
         Deploy latest updates the server only. If an update changed the runners, press Build and update runners afterwards.
       </p>
