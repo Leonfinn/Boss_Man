@@ -1107,6 +1107,13 @@ export class SessionManager {
       dropTmp();
       dropMcp();
     };
+    // A tool that can't be started (missing, not executable) emits "error" and, with no listener, throws and takes the
+    // whole runner down. End just this run with the reason; finish() ignores a run already ended, so a following "close"
+    // does not end it twice.
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      const why = err.code === "ENOENT" ? "not found" : err.code === "EACCES" ? "not allowed to run" : String(err.message ?? err).slice(0, 300);
+      finish(null, `Couldn't start ${cmd.agentKind === "claude" ? "claude-code-acp" : cmd.agentKind}: ${why}${err.code && !["ENOENT", "EACCES"].includes(err.code) ? ` (${err.code})` : ""}.`);
+    });
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
       if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderrTail(stderr)}`.trim());
