@@ -9,6 +9,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Which field a save conflict is about (BOS-905): title, body or acceptanceCriteria. */
+    readonly field?: string,
   ) {
     super(message);
   }
@@ -63,7 +65,7 @@ export async function apiOnce<T>(path: string, init: { method?: string; body?: u
   if (!res.ok) {
     // A rejected secret lists what's wrong with it; other errors carry a message.
     const problems = Array.isArray(data.problems) ? (data.problems as string[]).join(" ") : null;
-    const failed = new ApiError(res.status, problems ?? String(data.message ?? plainStatus(res.status, data.error)));
+    const failed = new ApiError(res.status, problems ?? String(data.message ?? plainStatus(res.status, data.error)), typeof data.field === "string" ? data.field : undefined);
     reportFailure(failed);
     throw failed;
   }
@@ -392,6 +394,10 @@ export type NotifySettings = {
   ntfy: { url: string; topic: string; hasToken: boolean } | null;
   pushLevels: NotifyLevel[];
   publicUrl: string | null;
+  /** Phone Approve buttons (BOS-243): on unless switched off. */
+  approveButtons?: boolean;
+  /** Whether Approve buttons are actually offered, and if not why. */
+  approve?: { on: true } | { on: false; why: string };
 };
 
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";

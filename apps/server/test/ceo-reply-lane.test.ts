@@ -6,7 +6,8 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runs, tickets, wakes } from "../src/db/schema.js";
+import { runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { HOLD_REASON, MAINTENANCE_KEY } from "../src/services/maintenance.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -100,5 +101,48 @@ describe("CEO reply lane", () => {
     await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision", replyLane: true, note: "A permission card is waiting." });
     const [w] = await c.db.select().from(wakes).where(eq(wakes.reason, "ceo reply"));
     expect(w).toMatchObject({ priority: 4, note: "A permission card is waiting." });
+  });
+
+  it("DR-048 A: an idle CEO's card wake asking for the lane is queued as the reply wake, not the plain one", async () => {
+    const c = (ctx = await setup());
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision", replyLane: true, note: "A permission card is waiting." });
+    const rows = await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id));
+    expect(rows.map((w) => w.reason)).toEqual(["ceo reply"]);
+    // Without the lane the plain wake is queued as before.
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision", note: "plain" });
+    expect((await c.db.select().from(wakes).where(eq(wakes.reason, "decision"))).length).toBe(1);
+  });
+
+  const startHold = (c: Awaited<ReturnType<typeof setup>>) =>
+    c.db.insert(settings).values({ key: MAINTENANCE_KEY, value: { reason: "runner update", kind: "update", since: new Date().toISOString(), deadline: new Date(Date.now() + 30 * 60_000).toISOString(), minutes: 30 } });
+
+  it("DR-048 A: under a runner-update hold with a worker's run live, an idle CEO's card still gets one reply run", async () => {
+    const c = (ctx = await setup());
+    // A worker's (paused) run keeps the update waiting; the CEO itself is idle.
+    await c.db.insert(runs).values({ id: randomUUID(), companyId: c.company.id, agentId: c.worker.id, ticketId: null, origin: "decision", startedAt: new Date() });
+    await startHold(c);
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision", replyLane: true, note: "A CEO-tier permission card is waiting." });
+    await c.scheduler.tick();
+    expect(c.commands).toHaveLength(1);
+    const [run] = await c.db.select().from(runs).where(eq(runs.id, c.commands[0]!.runId));
+    expect(run).toMatchObject({ purpose: "reply", origin: "ceo reply", agentId: c.ceo.id });
+    // Asking again while that reply run is open starts no second one (one slot per CEO).
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision", replyLane: true, note: "Another card." });
+    await c.scheduler.tick();
+    expect(c.commands).toHaveLength(1);
+  });
+
+  it("DR-048 A: under a hold with no work run live, nothing launches (the update may swap at any moment)", async () => {
+    const c = (ctx = await setup());
+    await startHold(c);
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision", replyLane: true, note: "A CEO-tier permission card is waiting." });
+    await c.scheduler.tick();
+    expect(c.commands).toHaveLength(0);
+    // The reply wake stays queued, held, and launches once the hold lifts.
+    const [w] = await c.db.select().from(wakes).where(eq(wakes.reason, "ceo reply"));
+    expect(w).toMatchObject({ status: "queued", statusReason: HOLD_REASON });
+    await c.db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
+    await c.scheduler.tick();
+    expect(c.commands).toHaveLength(1);
   });
 });

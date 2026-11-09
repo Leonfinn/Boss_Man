@@ -17,6 +17,7 @@ import { raiseDueGoalChecks } from "./goal-check.js";
 import { record } from "./activity.js";
 import { checkPriority } from "./check-gate.js";
 import { getHold } from "./maintenance.js";
+import { sweepPhoneApprove } from "./approve-tokens.js";
 import { heldTicketIds, wakeReadyHolds } from "./review-holds.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type SignoffCover } from "./signoff.js";
@@ -1327,7 +1328,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   // A whole company with work waiting and nothing finishing (BOS-593). Its cause test asks whether a live run waits in the check line.
   const noProgress = noProgressSweep(db, { alert: opts.alert, isConnected: opts.isConnected, inCheckLine: async (runId) => !!(await busyInCommand(runId))?.checkScript });
   // `run` is a property so a test can stand in for one sweep step and watch the pass around it (BOS-611).
-  type Pass = { holdWakes: number; goalChecks: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; mergeJam: { alerted: number; reminded: number; cleared: number } };
+  type Pass = { holdWakes: number; goalChecks: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; mergeJam: { alerted: number; reminded: number; cleared: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>> };
 
   return {
     limits,
@@ -1342,6 +1343,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // Runs past the company's time limit (BOS-846). Off by default; a failing read must not take the pass down.
       if (opts.cancelRun) await runTimeLimitSweep(db, { now, cancel: opts.cancelRun, alert: opts.alert }).run().catch(() => ({ stopped: 0 }));
       await opts.expireAdvice?.();
+      // Phone Approve links and tap records are kept a day (BOS-243 rule 8).
+      const phoneApprove = await sweepPhoneApprove(db, t);
       const neverStarted = await neverStartedRuns(t);
       const lost = await lostRuns(t);
       const staleB = await staleBlockers(t);
@@ -1383,7 +1386,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A feature the roadmap commits to with nothing working on it (BOS-595): the CEO is asked to give
       // it a ticket. Raised after the closer, so a feature whose ticket was linked in the same pass gets none.
       const featuresWithoutTickets = (await opts.featuresWithoutTickets?.().catch(() => 0)) ?? 0;
-      return { holdWakes, noProgress: noProgressResult, goalChecks, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress, mergeJam: jam };
+      return { holdWakes, noProgress: noProgressResult, goalChecks, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress, mergeJam: jam, phoneApprove };
     },
   };
 }
