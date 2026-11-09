@@ -271,7 +271,10 @@ function SettingsForm() {
           <ol style={{ fontSize: 14, margin: 0, paddingLeft: 20 }}>
             <li>Tick "Use another server" in the ntfy app, and enter the address above. It is not Boss Man's own address: leaving off the port reaches Boss Man, not ntfy.</li>
             <li>Subscribe to the topic shown above: {form.topic ? <code>{form.topic}</code> : "the Topic"}.</li>
-            <li>Log in with the phone's read-only ntfy user and its password, not the publish access token Boss Man uses.</li>
+            <li>In the ntfy app, Settings → Users → Add user: Service URL is the address above, Username and Password are the phone's read-only ntfy user (not the publish access token Boss Man uses).</li>
+            <li>
+              No phone login yet? On the host that runs ntfy, make one (the container name is in <code>docker ps</code>; it has "ntfy" in it): <code>docker exec -it &lt;ntfy container&gt; ntfy user add phone-read</code>, then <code>docker exec &lt;ntfy container&gt; ntfy access phone-read {form.topic || "<topic>"} read-only</code>. To reset the password, run <code>ntfy user change-pass phone-read</code> the same way.
+            </li>
           </ol>
           {phoneAddress && (
             <p style={{ fontSize: 14 }}>
