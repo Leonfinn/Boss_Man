@@ -542,6 +542,19 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const notStarted = t.systemState === "backlog" || t.systemState === "ready";
   // One hold notice, computed once, so the headline and detail always agree.
   const hold = holdBanner(t);
+  // A reviewer's hold on the merge (BOS-808): the owner can let it go on (the normal approval and merge follow) or withdraw the reviewer's pass.
+  const endReviewHold = async (how: "release" | "cancel") => {
+    setBusy(true);
+    try {
+      const r = await api<{ delivered?: string | null }>(`/api/tickets/${id}/hold/${how}`, { method: "POST" });
+      setNote({ ok: true, text: how === "release" ? `Hold released${r.delivered ? `: ${r.delivered}` : ""}.` : "Hold cancelled; the work is reviewed again." });
+      ticket.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
   const approveLabel = !t.repoUrl || t.noCode ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge";
   const decide = (
     <>
@@ -557,8 +570,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                     <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} placeholder={t.acceptanceCriteria?.length ? "Name the failing criterion, e.g. \"Acceptance criteria: Migration is expand-only fails.\"" : undefined} />
                   </div>
                   <div className="field">
-                    {/* A lesson learned goes to a decision, so it only reaches the brief if the owner approves it. */}
-                    <label htmlFor="review-lesson">Lesson learned (optional) — you'll be asked whether to add it to the project brief</label>
+                    {/* A lesson learned goes to a CEO decision (BOS-105), so it only reaches the brief if the CEO approves it; the owner is told the outcome. */}
+                    <label htmlFor="review-lesson">Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome</label>
                     <input id="review-lesson" value={lesson} onChange={(e) => setLesson(e.target.value)} maxLength={240} placeholder={'One line, e.g. "Check the migration is expand-only before approving."'} />
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -592,6 +605,25 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <h1>{t.title}</h1>
         </div>
       </header>
+
+      {t.hold && t.systemState === "review" && (
+        <div className="card review-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ flex: "1 1 320px" }}>
+            <strong>Held: {t.hold.label}</strong> <span className="muted">· by {t.hold.reviewer ?? "a reviewer"}</span>
+            <br />
+            <span className="muted">
+              {t.hold.reason} The review passed; the merge starts only after the hold is released.
+              {t.hold.ready ? " What it waited for is done, so the reviewer has been asked to re-check it." : ""}
+            </span>
+          </span>
+          <button type="button" className="btn primary" disabled={busy} onClick={() => void endReviewHold("release")}>
+            Release hold
+          </button>
+          <button type="button" className="btn" disabled={busy} onClick={() => void endReviewHold("cancel")}>
+            Cancel hold and review again
+          </button>
+        </div>
+      )}
 
       {/* Only when the ticket's next step really needs its agent to run (BOS-471): in review, waiting on the
           owner, or done, the hold changes nothing for this ticket, so it is not shown. */}

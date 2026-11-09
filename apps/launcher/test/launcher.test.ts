@@ -6,15 +6,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DockerError } from "../src/docker.js";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, serverAddress, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, parseTrusted, serverAddress, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
 
 /** A stand-in Docker that keeps containers in memory and records each call. */
 function fakeDocker() {
-  const containers = new Map<string, { id: string; labels: Record<string, string>; spec: unknown; state: string; imageId: string; startedAt: number; health?: string; exitCode?: number }>();
-  const fail = { guard: false, nft: false, bad: false, hang: false, slow: false };
+  const containers = new Map<string, { id: string; labels: Record<string, string>; spec: unknown; state: string; imageId: string; startedAt: number; health?: string; exitCode?: number; networks: Set<string> }>();
+  const fail = { guard: false, nft: false, bad: false, hang: false, slow: false, connect: false };
+  /** BOS-576: for each runner start, whether it was on a network then, and whether a guard was in its namespace and healthy when it joined one. */
+  const timeline: string[] = [];
+  const byId = (id: string) => [...containers.values()].find((c) => c.id === id);
+  const guardReadyFor = (runnerId: string) => [...containers.values()].some((g) => g.labels["boss-man.netguard"] && g.state === "running" && g.health === "healthy" && (g.spec as { HostConfig: { NetworkMode: string } }).HostConfig.NetworkMode === `container:${runnerId}`);
   let clock = 0;
   const image = { current: "img1" };
   const calls: string[] = [];
@@ -30,7 +34,7 @@ function fakeDocker() {
     async inspect(name) {
       calls.push(`inspect ${name}`);
       const c = containers.get(name);
-      return c ? ({ Id: c.id, Name: `/${name}`, Config: { Labels: c.labels }, State: { Status: c.state, StartedAt: new Date(c.startedAt).toISOString(), ExitCode: c.exitCode, ...(c.health ? { Health: { Status: c.health } } : {}) } } as ContainerInfo) : null;
+      return c ? ({ Id: c.id, Name: `/${name}`, Config: { Labels: c.labels }, State: { Status: c.state, StartedAt: new Date(c.startedAt).toISOString(), ExitCode: c.exitCode, ...(c.health ? { Health: { Status: c.health } } : {}) }, NetworkSettings: { Networks: Object.fromEntries([...c.networks].map((n) => [n, {}])) } } as ContainerInfo) : null;
     },
     async imageId() {
       return image.current;
@@ -41,7 +45,8 @@ function fakeDocker() {
       if (fail.slow) await new Promise((r) => setTimeout(r, 5));
       if (containers.has(name)) throw new Error(`409 name conflict: ${name}`);
       const id = `id${++n}`;
-      containers.set(name, { id, labels: (spec as { Labels: Record<string, string> }).Labels, spec, state: "created", imageId: image.current, startedAt: 0 });
+      const mode = (spec as { HostConfig: { NetworkMode: string } }).HostConfig.NetworkMode;
+      containers.set(name, { id, labels: (spec as { Labels: Record<string, string> }).Labels, spec, state: "created", imageId: image.current, startedAt: 0, networks: new Set(mode.startsWith("container:") ? [] : [mode]) });
       return id;
     },
     async start(id) {
@@ -50,11 +55,30 @@ function fakeDocker() {
         if (c.id !== id) continue;
         Object.assign(c, { state: "running", startedAt: ++clock * 1000 });
         if (c.labels["boss-man.netguard"]) Object.assign(c, fail.nft ? { state: "exited", exitCode: 3 } : fail.bad ? { state: "exited", exitCode: 4 } : fail.hang ? { health: "starting" } : { health: "healthy" });
+        // A runner starting on a network is reachable at once: its guard (if any) is in its old namespace.
+        else timeline.push(c.networks.size ? `runner ${id} started on a network` : `runner ${id} started off the network`);
       }
     },
     async restart(id) {
       calls.push(`restart ${id}`);
-      for (const c of containers.values()) if (c.id === id) Object.assign(c, { state: "running", startedAt: ++clock * 1000 });
+      for (const c of containers.values()) {
+        if (c.id !== id) continue;
+        Object.assign(c, { state: "running", startedAt: ++clock * 1000 });
+        if (!c.labels["boss-man.netguard"]) timeline.push(c.networks.size ? `runner ${id} started on a network` : `runner ${id} started off the network`);
+      }
+    },
+    async disconnect(network, id) {
+      calls.push(`disconnect ${id}`);
+      byId(id)?.networks.delete(network);
+    },
+    async connect(network, id) {
+      calls.push(`connect ${id}`);
+      if (fail.connect) throw new DockerError(500, "Connecting the runner to its network failed: boom");
+      timeline.push(guardReadyFor(id) ? `runner ${id} connected, guarded` : `runner ${id} connected, unguarded`);
+      byId(id)?.networks.add(network);
+    },
+    async signal(id, sig) {
+      calls.push(`signal ${id} ${sig}`);
     },
     async remove(id) {
       calls.push(`remove ${id}`);
@@ -65,7 +89,7 @@ function fakeDocker() {
       return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     },
   };
-  return { docker, containers, calls, image, fail };
+  return { docker, containers, calls, image, fail, timeline };
 }
 
 const config = (): LauncherConfig => ({ dataRoot: mkdtempSync(path.join(tmpdir(), "bm-launch-")), network: "boss-man_default", serverUrl: "ws://server:3100/api/runner/connect", memoryBytes: 4 * 1024 ** 3, pidsLimit: 4096, guardReadyMs: 300 });
@@ -183,10 +207,11 @@ describe("the runner launcher (R55)", () => {
     expect(readFileSync(file, "utf8")).toBe(TOKEN);
     expect(statSync(file).mode & 0o777).toBe(0o600);
     for (const sub of ["workspaces", "runner-data", "claude", "opencode"]) expect(existsSync(path.join(s.cfg.dataRoot, "companies/app-co", sub))).toBe(true);
-    expect(s.calls).toEqual(["inspect boss-man-runner-app-co", "create boss-man-runner-app-co", "start id1", "inspect boss-man-netguard-app-co", "create boss-man-netguard-app-co", "start id2", "inspect boss-man-netguard-app-co"]);
+    // BOS-576: off the network before it starts, on it only after the guard is healthy; then the guard is woken.
+    expect(s.calls).toEqual(["inspect boss-man-runner-app-co", "create boss-man-runner-app-co", "disconnect id1", "start id1", "inspect boss-man-netguard-app-co", "create boss-man-netguard-app-co", "start id2", "inspect boss-man-netguard-app-co", "connect id1", "inspect boss-man-netguard-app-co", "signal id2 USR1"]);
 
     await s.call("PUT", "/runners/app-co", { token: TOKEN });
-    expect(s.calls.slice(7)).toEqual(["inspect boss-man-runner-app-co", "remove id1", "create boss-man-runner-app-co", "start id3", "inspect boss-man-netguard-app-co", "remove id2", "create boss-man-netguard-app-co", "start id4", "inspect boss-man-netguard-app-co"]);
+    expect(s.calls.slice(11)).toEqual(["inspect boss-man-runner-app-co", "remove id1", "create boss-man-runner-app-co", "disconnect id3", "start id3", "inspect boss-man-netguard-app-co", "remove id2", "create boss-man-netguard-app-co", "start id4", "inspect boss-man-netguard-app-co", "connect id3", "inspect boss-man-netguard-app-co", "signal id4 USR1"]);
     expect(await (await s.call("GET", "/runners")).json()).toEqual([{ slug: "app-co", state: "running", status: "running", image: "boss-man-runner:current", current: true, guard: "on" }]);
 
     // Every call is logged, never the token.
@@ -212,7 +237,7 @@ describe("the runner launcher (R55)", () => {
 
   it("won't touch a container it didn't make, and removes its own without the data", async () => {
     const s = await serve();
-    s.containers.set("boss-man-runner-app-co", { id: "theirs", labels: {}, spec: {}, state: "running", imageId: "x", startedAt: 0 });
+    s.containers.set("boss-man-runner-app-co", { id: "theirs", labels: {}, spec: {}, state: "running", imageId: "x", startedAt: 0, networks: new Set() });
     expect((await s.call("PUT", "/runners/app-co", { token: TOKEN })).status).toBe(409);
     expect((await s.call("POST", "/runners/app-co/restart")).status).toBe(409);
     expect((await s.call("DELETE", "/runners/app-co")).status).toBe(409);
@@ -233,7 +258,7 @@ describe("the runner launcher (R55)", () => {
     const api = launcher(cfg, fake.docker);
     await api.put("app-co", TOKEN);
     await api.put("homelab", TOKEN);
-    fake.containers.set("someone-else", { id: "x", labels: { "boss-man.launcher": "1", "boss-man.company": "app-co" }, spec: {}, state: "running", imageId: "x", startedAt: 0 });
+    fake.containers.set("someone-else", { id: "x", labels: { "boss-man.launcher": "1", "boss-man.company": "app-co" }, spec: {}, state: "running", imageId: "x", startedAt: 0, networks: new Set() });
     // A folder added to MOUNTS after the runner was first made (e.g. opencode) is created on recreate, not left to Docker.
     rmSync(path.join(cfg.dataRoot, "companies/app-co/opencode"), { recursive: true });
     expect(await api.recreateAll()).toEqual(["app-co", "homelab"]);
@@ -524,6 +549,111 @@ describe("the runner launcher (R55)", () => {
     expect(parseAllow("a:1, b:2 a:1")).toEqual(["a:1", "b:2"]);
     expect(parseGuardMode(undefined)).toBe("auto");
     expect(() => parseGuardMode("maybe")).toThrow();
+  });
+
+  it("marks the allow-file entries the owner trusted for private addresses (BOS-708)", async () => {
+    const s = await serve();
+    const file = path.join(s.cfg.dataRoot, "companies/app-co/netguard/allow");
+    // An entry in `private` is written with the marker; an entry not in it stays plain.
+    expect((await s.call("PUT", "/runners/app-co/allow", { allow: ["lan.local:8080", "evil.example.org:5432"], private: ["lan.local:8080"] })).status).toBe(200);
+    expect(readFileSync(file, "utf8")).toBe("lan.local:8080 private\nevil.example.org:5432\n");
+    // A trusted entry that isn't in the allow list does nothing (it can't open a port on its own).
+    expect((await s.call("PUT", "/runners/app-co/allow", { allow: ["a.lan:1"], private: ["ghost.lan:2"] })).status).toBe(200);
+    expect(readFileSync(file, "utf8")).toBe("a.lan:1\n");
+    // The token PUT takes the same marker body.
+    await s.call("PUT", "/runners/app-co", { token: TOKEN, allow: ["lan.local:8080"], private: ["lan.local:8080"] });
+    expect(readFileSync(file, "utf8")).toBe("lan.local:8080 private\n");
+    // A bad `private` body is refused, like a bad `allow`.
+    expect((await s.call("PUT", "/runners/app-co/allow", { allow: ["a.lan:1"], private: ["x:99999"] })).status).toBe(400);
+    expect(parseTrusted(["a:1"]).has("a:1")).toBe(true);
+  });
+
+  describe("network hold (BOS-576): no runner is on its network before its guard is loaded", () => {
+    const unsafe = (timeline: string[]) => timeline.filter((t) => t.endsWith("started on a network") || t.endsWith("connected, unguarded"));
+
+    it("on every create path: put, restart, recreate, the drain's recreate-all and the self-heal", async () => {
+      const cfg = config();
+      const fake = fakeDocker();
+      const api = launcher(cfg, fake.docker);
+      await api.put("app-co", TOKEN);
+      await api.put("homelab", TOKEN);
+      await api.restart("app-co");
+      await api.recreate("app-co");
+      await api.recreateAll();
+      fake.containers.delete("boss-man-runner-homelab"); // gone, token left: the self-heal makes it again
+      expect(await api.healMissing(1_000)).toEqual(["homelab"]);
+      expect(fake.timeline.filter((t) => t.endsWith("started off the network"))).toHaveLength(7);
+      expect(fake.timeline.filter((t) => t.endsWith("connected, guarded"))).toHaveLength(7);
+      expect(unsafe(fake.timeline)).toEqual([]);
+      for (const slug of ["app-co", "homelab"]) expect(fake.containers.get(`boss-man-runner-${slug}`)!.networks).toEqual(new Set(["boss-man_default"]));
+    });
+
+    it("a guard that keeps failing never lets its runner onto the network, through put, restart and every self-heal try", async () => {
+      const cfg = config();
+      const fake = fakeDocker();
+      const api = launcher(cfg, fake.docker);
+      await api.put("app-co", TOKEN);
+      fake.timeline.length = 0;
+      fake.fail.guard = true;
+      await expect(api.restart("app-co")).rejects.toThrow();
+      await expect(api.put("app-co", TOKEN)).rejects.toThrow();
+      for (const at of [1_000, 12_000, 40_000, 100_000, 300_000, 700_000]) await expect(api.healMissing(at)).rejects.toThrow("app-co");
+      fake.fail.guard = false;
+      fake.fail.hang = true; // a guard that never gets its rules in
+      await expect(api.healMissing(1_100_000)).rejects.toThrow("in time");
+      expect(fake.timeline.filter((t) => t.includes("connected"))).toEqual([]);
+      expect(unsafe(fake.timeline)).toEqual([]);
+      expect(fake.timeline.length).toBeGreaterThanOrEqual(8);
+      expect(fake.containers.has("boss-man-runner-app-co")).toBe(false);
+    });
+
+    it("a runner whose network can't be connected is removed, and reconcile puts back one the launcher left off its network", async () => {
+      const cfg = config();
+      const fake = fakeDocker();
+      const api = launcher(cfg, fake.docker);
+      fake.fail.connect = true;
+      await expect(api.put("app-co", TOKEN)).rejects.toThrow("network");
+      expect(fake.containers.has("boss-man-runner-app-co")).toBe(false);
+      fake.fail.connect = false;
+      await api.put("app-co", TOKEN);
+      // The launcher stopped between hold and release: guarded, but off its network.
+      const id = fake.containers.get("boss-man-runner-app-co")!.id;
+      await fake.docker.disconnect("boss-man_default", id);
+      fake.calls.length = 0;
+      expect(await api.reconcileGuards()).toEqual(["app-co"]);
+      expect(fake.calls.filter((c) => !c.startsWith("inspect") && !c.startsWith("list"))).toEqual([`connect ${id}`, `signal ${fake.containers.get("boss-man-netguard-app-co")!.id} USR1`]);
+      expect(await api.reconcileGuards()).toEqual([]);
+    });
+
+    it("a runner Docker restarted by itself is taken off the network while its new guard loads", async () => {
+      const cfg = config();
+      const fake = fakeDocker();
+      const api = launcher(cfg, fake.docker);
+      await api.put("app-co", TOKEN);
+      const id = fake.containers.get("boss-man-runner-app-co")!.id;
+      await fake.docker.restart(id);
+      fake.calls.length = 0;
+      expect(await api.reconcileGuards()).toEqual(["app-co"]);
+      const order = fake.calls.filter((c) => /^(disconnect|create|start|connect)/.test(c));
+      expect(order).toEqual([`disconnect ${id}`, "create boss-man-netguard-app-co", expect.stringMatching(/^start /), `connect ${id}`]);
+      expect(fake.timeline.at(-1)).toBe(`runner ${id} connected, guarded`);
+    });
+
+    it("with the guard off nothing is held; on a host that can't load nftables (auto) the runner still gets its network", async () => {
+      const off = fakeDocker();
+      await launcher({ ...config(), guardMode: "off" }, off.docker).put("app-co", TOKEN);
+      expect(off.calls.filter((c) => /^(disconnect|connect|signal)/.test(c))).toEqual([]);
+      expect(off.timeline).toEqual(["runner id1 started on a network"]);
+
+      const auto = fakeDocker();
+      auto.fail.nft = true;
+      const a = launcher(config(), auto.docker);
+      await a.put("app-co", TOKEN);
+      expect(auto.containers.get("boss-man-runner-app-co")!.networks).toEqual(new Set(["boss-man_default"]));
+      // Its guard exited (3), so it isn't woken.
+      expect(auto.calls.filter((c) => c.startsWith("signal"))).toEqual([]);
+      expect(await a.reconcileGuards()).toEqual([]);
+    });
   });
 
   it("treats a removal racing another ('already in progress') as success once the container is gone, and a problem only if it is still there", async () => {

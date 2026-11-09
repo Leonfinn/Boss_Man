@@ -5,6 +5,7 @@ import { collect } from "../devices";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
+import { setHold, useHold } from "../hold";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
@@ -84,7 +85,7 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
               {r && !r.ok && r.detail && <p className="error" style={{ fontSize: 13, margin: "2px 0 0" }}>{r.detail}</p>}
               {!r && (
                 <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>
-                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root (on TrueNAS, in the root shell). Skills that need it stay out of runs until then.
+                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root in a root shell on that server. Skills that need it stay out of runs until then.
                 </p>
               )}
             </li>
@@ -636,6 +637,226 @@ export function ToolServers({ company }: { company: Company }) {
           <button className="btn" type="submit" disabled={act.busy}>
             Add tool server
           </button>
+        </div>
+      </form>
+      {act.view}
+    </Section>
+  );
+}
+
+type DeployTargetRow = {
+  id: string;
+  name: string;
+  kind: "ssh" | "docker" | "git";
+  endpoint: string;
+  isProduction: boolean;
+  rules: { requiresApproval?: boolean; liveTag?: { projectId: string; name: string } | null };
+  lastDeploy: { id: string; ref: string; commit: string | null; at: string | null; tagName: string | null; tagResult: string | null } | null;
+};
+
+const ENDPOINT_HINT = { ssh: "deploy@host or ssh://deploy@host:22", docker: "tcp://socket-proxy:2375", git: "https://git.example.com/you/app.git" } as const;
+
+/** What a deploy tag result means, in plain words. */
+function tagResultText(r: string | null) {
+  if (!r) return "";
+  if (r === "moved") return "tag moved";
+  if (r === "unchanged") return "tag already there";
+  if (r === "pending") return "moving the tag…";
+  return r.replace(/^skipped: /, "tag not moved: ").replace(/^failed: /, "tag move failed: ");
+}
+
+/**
+ * Deploy targets (R14, R15, DR-033): where agents ship work, which deploys wait for you, and the tag
+ * Boss Man moves after a successful deploy. Owner-only: agents can list targets but never edit them.
+ */
+export function DeployTargets({ company }: { company: Company }) {
+  const targets = usePoll((signal) => api<DeployTargetRow[]>(`/api/companies/${company.id}/deploy-targets`, { signal }), 30_000, `deploy-targets-${company.id}`);
+  const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 120_000, `projects-${company.id}`);
+  const repoProjects = (projects.data ?? []).filter((p) => p.repoUrl && !p.archivedAt);
+  const blank = { name: "", kind: "ssh" as DeployTargetRow["kind"], endpoint: "", isProduction: false, requiresApproval: false, tagOn: false, tagProject: "", tagName: "" };
+  const [form, setForm] = useState(blank);
+  const [editing, setEditing] = useState<string | null>(null);
+  const act = useAction();
+  const edit = (t: DeployTargetRow) => {
+    setEditing(t.id);
+    const lt = t.rules.liveTag;
+    setForm({ name: t.name, kind: t.kind, endpoint: t.endpoint, isProduction: t.isProduction, requiresApproval: !!t.rules.requiresApproval, tagOn: !!lt, tagProject: lt?.projectId ?? "", tagName: lt?.name ?? "" });
+  };
+  const cancel = () => {
+    setEditing(null);
+    setForm(blank);
+  };
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      const tagProject = form.tagProject || repoProjects[0]?.id || "";
+      const body = {
+        name: form.name,
+        kind: form.kind,
+        endpoint: form.endpoint,
+        isProduction: form.isProduction,
+        requiresApproval: form.requiresApproval,
+        liveTag: form.tagOn ? { projectId: tagProject, name: form.tagName.trim() } : null,
+      };
+      if (editing) await api(`/api/deploy-targets/${editing}`, { method: "PATCH", body });
+      else await api(`/api/companies/${company.id}/deploy-targets`, { method: "POST", body });
+      const what = editing ? "Saved" : "Added";
+      cancel();
+      targets.reload();
+      return `${what}.${form.tagOn ? ` After each successful deploy to ${form.name}, Boss Man moves the tag ${form.tagName.trim()}.` : ""}`;
+    });
+  };
+  const remove = (t: DeployTargetRow) =>
+    window.confirm(`Delete the deploy target ${t.name}? Agents can no longer deploy to it, and its deploy history goes with it.`) &&
+    void act.run(async () => {
+      await api(`/api/deploy-targets/${t.id}`, { method: "DELETE" });
+      if (editing === t.id) cancel();
+      targets.reload();
+      return `Deleted ${t.name}.`;
+    });
+  const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.name ?? "a project";
+  return (
+    <Section id="deploy-targets-h" title="Deploy targets">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Where agents ship work. A deploy to a production target, or to one that requires approval, waits for you in Decisions. Only the run carrying out an approved deploy gets the target's secrets (grant them on the Secrets page, "only for deploys to …").
+      </p>
+      {targets.data?.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Where</th>
+                <th scope="col">Approval</th>
+                <th scope="col">Tag after deploy</th>
+                <th scope="col">Last successful deploy</th>
+                <th scope="col">
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {targets.data.map((t) => (
+                <tr key={t.id}>
+                  <td>
+                    {t.name}
+                    {t.isProduction && <span className="tag amber" style={{ marginLeft: 6 }}>production</span>}
+                  </td>
+                  <td>
+                    <span className="muted">{t.kind}</span> <span className="mono">{t.endpoint}</span>
+                  </td>
+                  <td>{t.isProduction || t.rules.requiresApproval ? "You approve each deploy" : "Starts straight away"}</td>
+                  <td>
+                    {t.rules.liveTag ? <span className="mono">{t.rules.liveTag.name}</span> : <span className="muted">none</span>}
+                    {t.rules.liveTag && <span className="muted"> in {projectName(t.rules.liveTag.projectId)}</span>}
+                  </td>
+                  <td>
+                    {t.lastDeploy ? (
+                      <>
+                        <span className="mono">{t.lastDeploy.commit ? t.lastDeploy.commit.slice(0, 7) : t.lastDeploy.ref}</span>
+                        {t.lastDeploy.at && <span className="muted"> {when(t.lastDeploy.at)}</span>}
+                        {t.lastDeploy.tagResult && (
+                          <div className={t.lastDeploy.tagResult.startsWith("failed") ? "error" : "muted"} style={{ fontSize: 13 }}>
+                            {tagResultText(t.lastDeploy.tagResult)}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <span className="muted">none yet</span>
+                    )}
+                  </td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => edit(t)} aria-label={`Edit deploy target ${t.name}`}>
+                      Edit
+                    </button>{" "}
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(t)} aria-label={`Delete deploy target ${t.name}`}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        targets.data && <p className="muted" style={{ fontSize: 14 }}>No deploy targets yet: agents can't deploy until you add one.</p>
+      )}
+      <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 10 }} aria-labelledby="deploy-target-form-h">
+        <h3 id="deploy-target-form-h" style={{ fontSize: 15, fontWeight: 600 }}>
+          {editing ? `Edit ${form.name || "deploy target"}` : "Add a deploy target"}
+        </h3>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Name
+            <input required maxLength={80} value={form.name} placeholder="Production" onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Kind
+            <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as DeployTargetRow["kind"] })}>
+              <option value="ssh">SSH host</option>
+              <option value="docker">Docker endpoint</option>
+              <option value="git">Git remote</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: "1 1 260px" }}>
+            Address
+            <input required maxLength={500} className="mono" value={form.endpoint} placeholder={ENDPOINT_HINT[form.kind]} onChange={(e) => setForm({ ...form, endpoint: e.target.value })} />
+          </label>
+        </div>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.isProduction} onChange={(e) => setForm({ ...form, isProduction: e.target.checked })} />
+          Production (you approve every deploy, and high-risk work must deploy to staging first)
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.requiresApproval || form.isProduction} disabled={form.isProduction} onChange={(e) => setForm({ ...form, requiresApproval: e.target.checked })} />
+          Requires approval (you approve each deploy here too)
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.tagOn} onChange={(e) => setForm({ ...form, tagOn: e.target.checked, tagProject: form.tagProject || repoProjects[0]?.id || "" })} />
+          After a successful deploy, move tag
+        </label>
+        {form.tagOn && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingLeft: 26 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                Tag name
+                <input required maxLength={100} className="mono" value={form.tagName} placeholder="live-deployed" onChange={(e) => setForm({ ...form, tagName: e.target.value })} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                In the repo of
+                <select required value={form.tagProject} onChange={(e) => setForm({ ...form, tagProject: e.target.value })}>
+                  {!repoProjects.length && <option value="">No project has a git repo yet</option>}
+                  {repoProjects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p className="muted" style={{ fontSize: 13 }}>
+              After each deploy to this target reports success, Boss Man moves this tag on the project's git host to the exact commit that was deployed, using the company's git token. It only moves the tag to work already merged into the main branch, and never deletes it. <strong>Moving this tag can start pipelines on your git host</strong> (for example a GitHub Actions, GitLab CI, Gitea or Woodpecker job that runs when a tag is pushed), so only turn this on for a tag you want to follow the deploy. Deploy scripts must not push this tag themselves. The name can't contain "/" or be the name of a branch.
+            </p>
+            <details>
+              <summary style={{ fontSize: 13 }}>If the git host protects the tag</summary>
+              <ul className="muted" style={{ fontSize: 13, marginTop: 6 }}>
+                <li>GitHub: the token needs Contents read and write (the same as merges). A tag ruleset that blocks updates will refuse the move: allow updates to this tag, or exempt the token's user.</li>
+                <li>GitLab: the token needs write_repository. A protected tag can't be moved, so don't protect this tag, or pick a name that isn't protected.</li>
+                <li>Gitea or Forgejo: the token needs repository write. If the tag is protected, allow the token's user to push it under the repo's Settings → Tags.</li>
+                <li>Others (Bitbucket, plain git over https): set GIT_USERNAME as you would for merges. A repo reached only over ssh isn't supported.</li>
+              </ul>
+            </details>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="submit" className="btn primary" disabled={act.busy || (form.tagOn && (!form.tagName.trim() || !(form.tagProject || repoProjects[0])))}>
+            {editing ? "Save" : "Add target"}
+          </button>
+          {editing && (
+            <button type="button" className="btn" onClick={cancel}>
+              Cancel
+            </button>
+          )}
         </div>
       </form>
       {act.view}
@@ -1763,6 +1984,41 @@ function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => v
   );
 }
 
+/** The longest one run may go (BOS-846). Empty means no limit. */
+export function RunTimeLimit({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [mins, setMins] = useState(company.maxRunMinutes != null ? String(company.maxRunMinutes) : "");
+  const act = useAction();
+  const n = Number(mins);
+  const empty = mins.trim() === "";
+  const valid = empty || (Number.isInteger(n) && n >= 1 && n <= 10_080);
+  return (
+    <Section id="run-time-limit-h" title="Run time limit">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Stops any single run that goes longer than this many minutes, the same as pressing Stop, and asks you whether to raise the limit. Leave it empty for no limit. Under about 50 minutes it also stops an agent that is waiting on a full check.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="run-time-limit">Most minutes per run</label>
+        <input id="run-time-limit" type="number" min={1} max={10080} step={1} placeholder="No limit" value={mins} onChange={(e) => setMins(e.target.value)} style={{ width: 100 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { maxRunMinutes: empty ? null : n } });
+              onChanged();
+              return empty ? "Saved: no limit." : "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [gb, setGb] = useState(company.diskCapBytes != null ? String(+(company.diskCapBytes / 1024 ** 3).toFixed(1)) : "");
@@ -1981,16 +2237,19 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
 
 type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 
-/** How many agents may run at once, in total and per company; the per-agent limit is fixed at one. */
-function RunLimits() {
-  const view = usePoll((signal) => api<{ instance: number; company: number; defaults: { instance: number; company: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
+/**
+ * How many agents may run at once, in total and per company, plus the separate background slots for
+ * Infinite-mode agents (BOS-279); the per-agent limit is fixed at one.
+ */
+export function RunLimits() {
+  const view = usePoll((signal) => api<{ instance: number; company: number; background: number; defaults: { instance: number; company: number; background: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
   const act = useAction();
-  const [edit, setEdit] = useState<{ instance: string; company: string } | null>(null);
+  const [edit, setEdit] = useState<{ instance: string; company: string; background: string } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { instance: String(d.instance), company: String(d.company) };
-  const [i, c] = [Number(v.instance), Number(v.company)];
-  const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i;
+  const v = edit ?? { instance: String(d.instance), company: String(d.company), background: String(d.background) };
+  const [i, c, g] = [Number(v.instance), Number(v.company), Number(v.background)];
+  const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i && Number.isInteger(g) && g >= 0 && g <= 16;
   return (
     <Section id="run-limits-h" title="How many agents run at once">
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -2007,6 +2266,13 @@ function RunLimits() {
           Agents running at once in one company (default {d.defaults.company}). Stops one busy company from using every slot. Higher: that company's tickets and reviews start sooner; spend can rise faster. Lower: tickets wait in the queue (you'll see "at a concurrency limit: this company").
         </p>
       </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="limit-background">Background (infinite mode) runs at once (0 to 16)</label>
+        <input id="limit-background" type="number" min={0} max={16} value={v.background} onChange={(e) => setEdit({ ...v, background: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Agents on Synthetic's Infinite mode ("free, slow" models) get their own slots (default {d.defaults.background}), separate from the two numbers above. They don't spend your Synthetic plan's credits, so they never wait for the quota; keeping them on their own small number means a slow free run can't take a normal slot or hold up paid work. 0 stops background runs starting.
+        </p>
+      </div>
       <p className="muted" style={{ fontSize: 14 }}>
         Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits.
       </p>
@@ -2017,10 +2283,116 @@ function RunLimits() {
           disabled={act.busy || !valid}
           onClick={() =>
             void act.run(async () => {
-              await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c } });
+              await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c, background: g } });
               setEdit(null);
               view.reload();
               return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number };
+
+/**
+ * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
+ * stops new runs; ending the ones going is on the Runs page. Resume is on the banner every page shows while it's on.
+ */
+export function StopAllWork() {
+  const hold = useHold();
+  const act = useAction();
+  const paused = hold.data?.paused;
+  return (
+    <Section id="stop-all-h" title="Stop all work">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Stops new work in every company at once: while it is on, Boss Man starts no new agent runs. Wake-ups and messages wait in line and start when you resume. Runs already going are not cut off; they finish by themselves. To end them now, use the Runs page. Press Resume on the banner at the top of any page to start work again.
+      </p>
+      {paused === true ? (
+        <p style={{ fontSize: 14 }} data-testid="stop-all-on">
+          <span className="tag red">On</span> All work is stopped.
+        </p>
+      ) : (
+        <div>
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy || paused !== false}
+            onClick={() =>
+              void act.run(async () => {
+                if (!window.confirm("Stop all work? Nothing new starts in any company until you press Resume. Runs already going finish by themselves.")) return;
+                await setHold(true);
+              })
+            }
+          >
+            Stop all work
+          </button>
+        </div>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
+/** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
+export function CheckQueueSetting() {
+  const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
+  const act = useAction();
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string } | null>(null);
+  const d = view.data;
+  if (!d) return null;
+  const v = edit ?? { mode: d.mode, slots: String(d.slots) };
+  const n = Number(v.slots);
+  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots;
+  const changed = v.mode !== d.mode || n !== d.slots;
+  return (
+    <Section id="check-queue-h" title="Checks">
+      <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+        <legend>Who runs agents' checks</legend>
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input type="radio" name="check-queue-mode" value="legacy" checked={v.mode === "legacy"} onChange={() => setEdit({ ...v, mode: "legacy" })} />
+          <span>
+            <strong>Agents run their own (legacy).</strong> <span className="muted">Each agent runs the quick check inside its own session. A check dies if the session ends or the runner restarts, and agents wait in line for a free slot.</span>
+          </span>
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input type="radio" name="check-queue-mode" value="server" checked={v.mode === "server"} onChange={() => setEdit({ ...v, mode: "server" })} />
+          <span>
+            <strong>Boss Man runs them (server queue).</strong> <span className="muted">Agents ask for a check and Boss Man runs it on the runner. The check keeps going after the agent's session ends or the runner restarts, a pass on the same code is reused, and the agent is woken with the result. The merge check before each merge uses this queue too.</span>
+          </span>
+        </label>
+      </fieldset>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="check-slots">Checks at once (1 to {d.maxSlots})</label>
+        <input id="check-slots" type="number" min={1} max={d.maxSlots} value={v.slots} onChange={(e) => setEdit({ ...v, slots: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors.
+        </p>
+      </div>
+      {d.runnersTooOld.length > 0 && (
+        <p style={{ fontSize: 14 }} data-testid="check-queue-old-runner">
+          <span className="tag red">Update needed</span> The runner for {d.runnersTooOld.join(", ")} is too old to run queued checks; their checks would wait until you update the runners (Updates → Build and update runners).
+        </p>
+      )}
+      <p className="muted" style={{ fontSize: 14 }}>
+        Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid || !changed}
+          onClick={() =>
+            void act.run(async () => {
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n } });
+              setEdit(null);
+              view.reload();
+              return r.cancelled ? `Saved. ${r.cancelled} waiting check${r.cancelled === 1 ? " was" : "s were"} cancelled.` : "Saved.";
             })
           }
         >
@@ -2387,7 +2759,7 @@ function ColourRow({ c }: { c: Colour }) {
 
 const TABS = [
   { id: "system", label: "Server and runner", help: "This install's server and updates, and the company's runner." },
-  { id: "access", label: "Access and funding", help: "Where agents get their keys, tools and model accounts." },
+  { id: "access", label: "Access and funding", help: "Where agents get their keys, tools and model accounts, and where they deploy." },
   { id: "workflow", label: "Reviews and CEO", help: "Who approves and reviews work at each risk level, and the CEO's chapters." },
   { id: "transfer", label: "Import and export", help: "Move a company in or out of Boss Man as one file: a backup, a copy for another Boss Man, or a template." },
   // These three are pages of their own (#/funding, #/rules, #/secrets), shown inside Settings.
@@ -2403,7 +2775,9 @@ type ImportPreview = {
   agents: Array<{ name: string; role: string; title: string | null; agentKind: string; model: string | null; instructions: string | null }>;
   skills: Array<{ name: string; renamedFrom: string | null; description: string; scripts: string[] }>;
   secrets: Array<{ name: string; envName: string; agents: string[] }>;
+  projects: Array<{ name: string; verifyCommand: string | null; deepVerifyCommand: string | null }>;
   toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
+  gitHosts: Array<{ project: string; url: string; opens: string | null; stackService: boolean }>;
   warnings: string[];
 };
 
@@ -2464,6 +2838,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
   const nameChanged = !!preview && name.trim() !== preview.company.name;
   const scripts = preview?.skills.filter((s) => s.scripts.length) ?? [];
   const stackTools = preview?.toolServers.filter((t) => t.stackService) ?? [];
+  const stackGit = preview?.gitHosts.filter((g) => g.stackService) ?? [];
   return (
     <Section id="import-h" title="Import a company">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -2521,6 +2896,24 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
               </ul>
             </div>
           )}
+          {preview.projects.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Checks each project runs.</strong> These commands run on the runner before work is merged. Read them before you import:
+              <ul>
+                {preview.projects.map((p, i) => (
+                  <li key={i}>
+                    {p.name}: {p.verifyCommand ? <code style={{ whiteSpace: "pre-wrap" }}>{p.verifyCommand}</code> : "none"}
+                    {p.deepVerifyCommand && (
+                      <>
+                        {" "}
+                        (full check: <code style={{ whiteSpace: "pre-wrap" }}>{p.deepVerifyCommand}</code>)
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {preview.toolServers.length > 0 && (
             <div style={{ fontSize: 14 }}>
               <strong>Tool servers.</strong> Each address below is opened past the runner's network guard for this company:
@@ -2532,12 +2925,25 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                   </li>
                 ))}
               </ul>
-              {stackTools.length > 0 && (
-                <label>
-                  <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
-                </label>
-              )}
             </div>
+          )}
+          {preview.gitHosts.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Project git addresses.</strong> Each is opened past the runner's network guard for this company so its agents can clone:
+              <ul>
+                {preview.gitHosts.map((g) => (
+                  <li key={g.project}>
+                    {g.project}: <code>{g.opens ?? "nothing (no address the guard can allow)"}</code> ({g.url})
+                    {g.stackService && <span className="error"> This is one of Boss Man's own services or a private-network address.</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(stackTools.length > 0 || stackGit.length > 0) && (
+            <label>
+              <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
+            </label>
           )}
           {preview.secrets.length > 0 && (
             <div style={{ fontSize: 14 }}>
@@ -2689,11 +3095,13 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         {OWN_PAGE.has(current.id) ? <div className="embedded-page">{children}</div> : null}
         {current.id === "system" && (
           <>
+            <StopAllWork />
             <ServerPanel />
             <SelfDeploy go={go} />
             <ThisHost />
             <NetguardAllow />
             <RunLimits />
+            <CheckQueueSetting />
           </>
         )}
         {current.id === "transfer" && <ImportCompany go={go} onChanged={onChanged} />}
@@ -2728,6 +3136,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
               </p>
             </section>
             <ToolServers company={company} />
+            <DeployTargets company={company} />
             <Funding company={company} onChanged={onChanged} />
           </div>
         ) : (
@@ -2741,6 +3150,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <NudgeCap company={company} onChanged={onChanged} />
+            <RunTimeLimit company={company} onChanged={onChanged} />
             <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
             <StandingRules company={company} onChanged={onChanged} />

@@ -4,7 +4,7 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
-import { and, eq, isNotNull, isNull, like, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, mcpServers, projects, runners, settings } from "../db/schema.js";
 import { DROPPED_PRIVATE, DROPPED_TIED_TO_SERVER, type AutomaticEntry } from "./netguard-allow.js";
@@ -84,6 +84,22 @@ export function isPrivateAddress(ip: string): boolean {
 export type HostLookup = (host: string) => Promise<string[]>;
 const systemLookup: HostLookup = async (host) => (await dnsLookup(host, { all: true })).map((r) => r.address);
 
+/** A name meant for the LAN or the compose network: no dot (a container name), or a .local/.internal/.lan/.home/.docker/.localhost name. */
+const STACK_LIKE_NAME = (host: string) => !host.includes(".") || /\.(local|internal|localhost|lan|home|docker)$/.test(host);
+
+/** The URL's host name, lower-cased and without a trailing dot, or null if it isn't one the guard handles (a bad URL, an IPv6 literal). */
+function guardHost(url: string): string | null {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+    return host.startsWith("[") ? null : host;
+  } catch {
+    // An ssh scp-style git remote (git@host:path) isn't a URL; read its host the same way rawGitHostAddress does, so a
+    // project's ssh git address is checked and trusted like any other (BOS-708).
+    const scp = /^[\w.-]+@([A-Za-z0-9.-]+):(?!\/\/)/.exec(url);
+    return scp ? scp[1]!.toLowerCase().replace(/\.$/, "") : null;
+  }
+}
+
 /**
  * Whether a tool server's URL could reach Boss Man's own services (best effort; the preview's host:port is the owner's real control).
  * Flags: the known service names, any name with no dot (a compose or container name such as boss-man-db-1, localhost),
@@ -93,15 +109,10 @@ const systemLookup: HostLookup = async (host) => (await dnsLookup(host, { all: t
  */
 export async function reachesStack(url: string, lookup: HostLookup = systemLookup): Promise<boolean> {
   if (isStackService(url)) return true;
-  let host: string;
-  try {
-    host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
-  } catch {
-    return false;
-  }
-  if (host.startsWith("[")) return true;
+  const host = guardHost(url);
+  if (host === null) return true;
   if (isIP(host)) return isPrivateAddress(host);
-  if (!host.includes(".") || /\.(local|internal|localhost|lan|home|docker)$/.test(host)) return true;
+  if (STACK_LIKE_NAME(host)) return true;
   try {
     const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
     return addrs.length === 0 || addrs.some(isPrivateAddress);
@@ -111,21 +122,37 @@ export async function reachesStack(url: string, lookup: HostLookup = systemLooku
 }
 
 /**
+ * Whether the owner meant a tool server to reach a private address, so the guard keeps private addresses for it (BOS-708).
+ * Unlike the preview's reachesStack (fail closed so it flags generously), this decides trust so it fails closed the other way:
+ * true only for a private IP literal (can't be re-pointed), a stack or LAN-style name (the owner typed a LAN host), or a name
+ * that actually resolved with every address private. A lookup that errors, times out or comes back empty is not trusted, so a
+ * public name can't be trusted by making its DNS fail at add time and then re-pointed at the stack.
+ */
+export async function allowsPrivate(url: string, lookup: HostLookup = systemLookup): Promise<boolean> {
+  const host = guardHost(url);
+  if (host === null) return false;
+  if (isIP(host)) return isPrivateAddress(host);
+  if (STACK_LIKE_NAME(host)) return true;
+  try {
+    const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
+    return addrs.length > 0 && addrs.every(isPrivateAddress);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Where a name's addresses sit for the page (BOS-791): "stack" when it names Boss Man's own service or resolves to a
- * private address, "lookup-failed" when the name can't be looked up from here, "ok" for a public address. Unlike
- * `reachesStack`, a failed lookup is its own answer: only a name that really resolves to a private address is dropped.
+ * private address, "lookup-failed" when the name can't be looked up from here, "ok" for a public address. This is the
+ * "resolves to a private address" half of the guard's rule (apps/netguard/netguard.sh `allow_rules`); the guide on
+ * whether that is dropped is `allowsPrivate` (the owner trusted it). Only a name that really resolves private is dropped.
  */
 export async function resolvesStack(url: string, lookup: HostLookup = systemLookup): Promise<"stack" | "lookup-failed" | "ok"> {
   if (isStackService(url)) return "stack";
-  let host: string;
-  try {
-    host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
-  } catch {
-    return "lookup-failed";
-  }
-  if (host.startsWith("[")) return "stack";
+  const host = guardHost(url);
+  if (host === null) return "lookup-failed";
   if (isIP(host)) return isPrivateAddress(host) ? "stack" : "ok";
-  if (!host.includes(".") || /\.(local|internal|localhost|lan|home|docker)$/.test(host)) return "stack";
+  if (STACK_LIKE_NAME(host)) return "stack";
   try {
     const addrs = await Promise.race([lookup(host), new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]);
     return addrs.some(isPrivateAddress) ? "stack" : "ok";
@@ -135,52 +162,26 @@ export async function resolvesStack(url: string, lookup: HostLookup = systemLook
 }
 
 /**
- * Whether the guard drops one of Boss Man's own tool-server addresses (BOS-708, shown on the page by BOS-791). The guard
- * keeps a private address it can't be tricked into: a private IP literal (it can't be re-pointed in DNS) and an entry the
- * owner trusted for private (an import tick or a tool server they added on a LAN host, which `trusted` carries). Any other
- * name that resolves to a private address is dropped. Mirrors `allow_rules` in apps/netguard/netguard.sh. Pure, so the test
- * needs neither the database nor a lookup.
+ * Whether a git remote is a LAN host by its address alone: a private IP literal or a LAN-style name (the rule reachesStack
+ * uses), with no DNS. A git host is trusted for private addresses only then, because whoever runs a public name's DNS (an
+ * expired domain, a small forge) could point it at the stack network later (BOS-777). An ssh git@host:path remote counts too.
  */
-export function toolServerDropped(url: string, where: "stack" | "lookup-failed" | "ok", trusted = false): boolean {
-  if (trusted || where !== "stack") return false;
-  try {
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
-    return !(isIP(host) && isPrivateAddress(host));
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The tool-server and project ids the owner trusted for a private address (BOS-708's `allow_private`: an imported tool
- * server ticked on purpose, or a tool server added on a LAN host). BOS-708 may not have merged yet, so the column is read
- * only when it is there: until it is, no ids are trusted and a name that resolves privately is shown as dropped on the
- * page, exactly as the guard treats it on this base. Read-only; never throws.
- */
-async function trustedPrivateIds(db: Db): Promise<{ toolServers: Set<string>; projects: Set<string> }> {
-  const rowsOf = <T,>(r: unknown): T[] => (Array.isArray(r) ? (r as T[]) : (((r as { rows?: T[] }).rows) ?? []));
-  const empty = { toolServers: new Set<string>(), projects: new Set<string>() };
-  try {
-    const has = await db.execute(sql`
-      select table_name from information_schema.columns
-       where table_schema = current_schema() and column_name = 'allow_private' and table_name in ('mcp_servers', 'projects')`);
-    const tables = new Set(rowsOf<{ table_name: string }>(has).map((r) => r.table_name));
-    const read = async (table: "mcp_servers" | "projects", into: Set<string>) => {
-      if (!tables.has(table)) return;
-      const r = await db.execute(sql`select id from ${sql.identifier(table)} where allow_private = true`);
-      for (const row of rowsOf<{ id: string }>(r)) into.add(row.id);
-    };
-    await Promise.all([read("mcp_servers", empty.toolServers), read("projects", empty.projects)]);
-    return empty;
-  } catch {
-    return empty;
-  }
+export function isLanHost(url: string): boolean {
+  const host = guardHost(url);
+  if (host === null) return false;
+  return isIP(host) ? isPrivateAddress(host) : STACK_LIKE_NAME(host);
 }
 
 /** The launcher's own check for an allow entry (apps/launcher/src/spec.ts): one bad entry makes it refuse the whole list, so never send one it would refuse. */
 const LAUNCHER_ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
 /** The host:port the guard would be told to allow for a tool server's URL, or null. */
 export const sendableAddress = (url: string): string | null => sendable(toolServerAddress(url));
+
+/**
+ * One host:port the guard may open. `private` means the owner let it resolve to private addresses on purpose (an import tick,
+ * a tool server they added on the LAN, or a LAN git host they set), so the guard keeps private addresses for it (BOS-708).
+ */
+export type AllowEntry = { addr: string; private: boolean };
 function sendable(addr: string | null): string | null {
   if (!addr || !LAUNCHER_ALLOW_ENTRY.test(addr)) return null;
   const [host, port] = [addr.slice(0, addr.lastIndexOf(":")), Number(addr.slice(addr.lastIndexOf(":") + 1))];
@@ -204,8 +205,9 @@ function rawGitHostAddress(repoUrl: string): string | null {
   }
 }
 
-export function launcherService(db: Db, deps: { runners: ReturnType<typeof runnersService>; options?: LauncherOptions; fetch?: typeof fetch }) {
+export function launcherService(db: Db, deps: { runners: ReturnType<typeof runnersService>; options?: LauncherOptions; fetch?: typeof fetch; lookup?: HostLookup }) {
   const http = deps.fetch ?? fetch;
+  const lookup = deps.lookup ?? systemLookup;
   const opts = deps.options;
 
   async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -259,12 +261,35 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     return slug;
   }
 
-  /** The company's tool servers and git remotes as host:port: the runner's network guard keeps these reachable on private addresses. */
-  async function allowFor(companyId: string): Promise<string[]> {
-    const rows = await db.select({ url: mcpServers.url }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
+  /**
+   * The company's tool servers and git remotes as host:port, each saying whether the owner allowed it on a private address.
+   * A tool server the owner marked (import tick or a LAN host they added) and a LAN git host they set are trusted for private;
+   * anything else is not, so the guard drops a private address a name may resolve to later (BOS-708).
+   */
+  async function allowFor(companyId: string): Promise<AllowEntry[]> {
+    const rows = await db.select({ url: mcpServers.url, allowPrivate: mcpServers.allowPrivate }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
     // The company's own git remotes: each project's host and port only, so its runner can clone and fetch from a LAN git server.
-    const repos = await db.select({ url: projects.repoUrl }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
-    return [...new Set([...rows.map((r) => sendable(toolServerAddress(r.url))), ...repos.map((r) => gitHostAddress(r.url!))].filter((a): a is string => !!a))];
+    // Only a project the owner (or a ticked import) let reach private addresses is trusted, so a git address that arrives in
+    // a package can't open the stack network by resolving private (BOS-708).
+    const repos = await db.select({ url: projects.repoUrl, allowPrivate: projects.allowPrivate }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+    const entries = [
+      ...rows.map((r) => ({ addr: sendable(toolServerAddress(r.url)), private: r.allowPrivate })),
+      // A public git name is never trusted, even with the project's flag on (rows saved before BOS-777 have it on for any host).
+      ...repos.map((r) => ({ addr: gitHostAddress(r.url!), private: r.allowPrivate && isLanHost(r.url!) })),
+    ];
+    // Same host:port twice: keep it trusted if either source trusts it.
+    const byAddr = new Map<string, boolean>();
+    for (const e of entries) if (e.addr) byAddr.set(e.addr, (byAddr.get(e.addr) ?? false) || e.private);
+    return [...byAddr].map(([addr, priv]) => ({ addr, private: priv }));
+  }
+
+  /**
+   * The launcher body for a company's allow list: `allow` is plain host:port (an older launcher reads only that), `private`
+   * names the entries the owner trusted for private addresses, so the guard keeps their private addresses (BOS-708).
+   */
+  async function allowBody(companyId: string): Promise<{ allow: string[]; private: string[] }> {
+    const entries = await allowFor(companyId);
+    return { allow: entries.map((e) => e.addr), private: entries.filter((e) => e.private).map((e) => e.addr) };
   }
 
   return {
@@ -300,28 +325,31 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
      * is sent (allowFor), never a second copy. Only host:port, names and reasons come out: never a URL or a token.
      */
     async ownAllows(): Promise<{ toolServers: string[]; gitHosts: string[]; automatic: AutomaticEntry[] }> {
-      const mcp = await db.select({ id: mcpServers.id, url: mcpServers.url, name: mcpServers.name, company: companies.name }).from(mcpServers).innerJoin(companies, eq(companies.id, mcpServers.companyId));
-      const repos = await db.select({ id: projects.id, url: projects.repoUrl, name: projects.name, company: companies.name }).from(projects).innerJoin(companies, eq(companies.id, projects.companyId)).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
-      const trustedPrivate = await trustedPrivateIds(db);
+      const mcp = await db.select({ url: mcpServers.url, allowPrivate: mcpServers.allowPrivate, name: mcpServers.name, company: companies.name }).from(mcpServers).innerJoin(companies, eq(companies.id, mcpServers.companyId));
+      const repos = await db.select({ url: projects.repoUrl, allowPrivate: projects.allowPrivate, name: projects.name, company: companies.name }).from(projects).innerJoin(companies, eq(companies.id, projects.companyId)).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
       const toolServers = [...new Set(mcp.map((r) => sendable(toolServerAddress(r.url))).filter((a): a is string => !!a))];
       const gitHosts = [...new Set(repos.map((r) => gitHostAddress(r.url!)).filter((a): a is string => !!a))];
+      // What the guard keeps for a private address is exactly allowFor's rule (BOS-708): a tool server only when the owner
+      // trusted it (mcp_servers.allow_private) and a git host only on a LAN address with the project's flag. The trusted flag
+      // is read from the same column allowFor sends, so a row is shown as dropped only when the guard really drops it (BOS-791).
       const tool = await Promise.all(mcp.map(async (r): Promise<AutomaticEntry | null> => {
         const address = sendable(toolServerAddress(r.url));
         if (!address) return null;
-        // A tool server the owner trusted for a private address (BOS-708's allow_private: an import tick or a LAN host they
-        // added) is kept by the guard, so it is never shown as dropped. Until that column ships, none is trusted.
-        const trusted = trustedPrivate.toolServers.has(r.id);
-        const where = await resolvesStack(r.url);
-        const notAllowed = toolServerDropped(r.url, where, trusted) ? (isStackService(r.url) ? DROPPED_TIED_TO_SERVER : DROPPED_PRIVATE) : null;
+        const trusted = r.allowPrivate;
+        const where = await resolvesStack(r.url, lookup);
+        const notAllowed = !trusted && where === "stack" ? (isStackService(r.url) ? DROPPED_TIED_TO_SERVER : DROPPED_PRIVATE) : null;
         return { address, kind: "tool server", name: r.name, company: r.company, trusted, notAllowed };
       }));
-      const git = repos.map((r): AutomaticEntry | null => {
+      const git = await Promise.all(repos.map(async (r): Promise<AutomaticEntry | null> => {
         const address = gitHostAddress(r.url!);
         if (!address) return null;
-        // A git host the owner set is trusted for a private address (a LAN git server), so the guard keeps it even if its
-        // name resolves privately: never looked up here, so no row is ever shown as not allowed for a git host (BOS-708).
-        return { address, kind: "git host", name: r.name, company: r.company, trusted: true, notAllowed: null };
-      });
+        // A git host is trusted for private only on a LAN address (isLanHost), matching allowFor: a public name that resolves
+        // privately is dropped like any other untrusted name (BOS-777), and shown as not allowed.
+        const trusted = r.allowPrivate && isLanHost(r.url!);
+        const where = await resolvesStack(r.url!, lookup);
+        const notAllowed = !trusted && where === "stack" ? DROPPED_PRIVATE : null;
+        return { address, kind: "git host", name: r.name, company: r.company, trusted, notAllowed };
+      }));
       // Only what the guard is actually sent: tool servers and project git hosts. Penpot and the other add-ons are not
       // opened by the guard on their own (the owner adds a BOSSMAN_NETGUARD_ALLOW line for Penpot), so they don't appear.
       const automatic = [...tool, ...git].filter((e): e is AutomaticEntry => !!e);
@@ -332,7 +360,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     async syncAllow(companyId: string) {
       if (!opts) return;
       try {
-        await call("PUT", `/runners/${await slugFor(companyId)}/allow`, { allow: await allowFor(companyId) });
+        await call("PUT", `/runners/${await slugFor(companyId)}/allow`, await allowBody(companyId));
       } catch {
         /* the next runner start sends the list again */
       }
@@ -356,7 +384,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
             if (gone) {
               await call("DELETE", `/runners/${row.value as string}`);
               await db.delete(settings).where(eq(settings.key, row.key));
-            } else await call("PUT", `/runners/${row.value as string}/allow`, { allow: await allowFor(companyId) });
+            } else await call("PUT", `/runners/${row.value as string}/allow`, await allowBody(companyId));
             break;
           } catch (err) {
             if (!(err instanceof LauncherError) || err.status === 404 || i === attempts - 1) break;
@@ -373,7 +401,12 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       await call("GET", "/runners");
       await expectRestart(db, companyId, "owner restart");
       const { token } = await deps.runners.register(companyId);
-      await call("PUT", `/runners/${slug}`, { token, allow: await allowFor(companyId) });
+      const body = await allowBody(companyId);
+      // Keep the token body to { token, allow }: an older launcher refuses the unknown `private` key with a 400, and the
+      // token was already rotated, which would cut the runner off until the launcher is rebuilt (BOS-708). The private list
+      // goes in a second call that an older launcher accepts, so a refusal there does no harm.
+      await call("PUT", `/runners/${slug}`, { token, allow: body.allow });
+      await call("PUT", `/runners/${slug}/allow`, body);
       return { slug };
     },
 

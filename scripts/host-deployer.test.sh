@@ -422,7 +422,8 @@ case "$a" in
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
   "kill -s USR1 server-"*) c=${a##*server-}; echo "signal USR1 $c" >>"$DL"; [[ -n ${FAKE_NO_DEMOTE:-} ]] || echo standby >"$W/role.$c" ;;
   "kill -s USR2 server-"*) c=${a##*server-}; echo "signal USR2 $c" >>"$DL"; echo leader >"$W/role.$c" ;;
-  "stop server-"*) c=${a##*server-}; rm -f "$W/running.$c"; touch "$W/exists.$c"; echo "stopped $c" >>"$DL" ;;
+  "stop server-"*) echo "plain stop without a grace: $a" >>"$DL"; exit 98 ;; # BOS-794: every planned stop names its grace
+  "stop -t "*" server-"*) c=${a##*server-}; echo "stop grace ${a#stop -t }" >>"$DL"; rm -f "$W/running.$c"; touch "$W/exists.$c"; echo "stopped $c" >>"$DL" ;;
   "exec -T server-"*)
     c=${a#exec -T server-}; c=${c%% *}
     case "$a" in
@@ -846,9 +847,36 @@ swap; echo true >"$W/oom.green"; bg; [[ $(hget check_restarts) == fail ]] || fai
 swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
 [[ $(hget phase) == end ]] || fail "no end-of-window check"; all_pass
 grep -qx blue "$D/state/stopped-by-plan" || fail "planned stop not recorded"
-# ...but stopped with a non-zero exit code, or running when the plan says stopped, is not.
-swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; bg
-[[ $(hget phase) == end && $(hget check_other) == fail ]] || fail "exit 137 after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exit code 137"
+has "$DL" "stop grace 60 server-blue"; has "$D/deployer.log" "Stopped server-blue in"
+# 31h1 (QA, BOS-826 on BOS-794). The grace is BG_STOP_SECONDS; a value that is not 1-4 digits falls back to 60 rather than
+# reaching `compose stop -t` (an empty or negative -t, or a shell injection through the env, must not).
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; BG_STOP_SECONDS=7 bg
+has "$DL" "stop grace 7 server-blue"; all_pass
+for bad in abc -5 12345 "7; touch $T/injected" ""; do
+  swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; BG_STOP_SECONDS="$bad" bg
+  has "$DL" "stop grace 60 server-blue"
+done
+[[ ! -e $T/injected ]] || fail "BG_STOP_SECONDS was run as shell"
+# 31h2 (BOS-794). A planned stop that outlived its grace and needed SIGKILL (137), or ended on SIGTERM (143), is still planned:
+# healthy, not paged, and the detail says it needed SIGKILL.
+for x in 137 143; do
+  swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo "$x" >"$W/exit.blue"; bg
+  [[ $(hget phase) == end ]] || fail "no end check for a planned stop with exit $x"; all_pass
+  [[ $(status result) != partial ]] || fail "a planned stop with exit $x paged: $(cat "$D/outbox/status.json")"
+  [[ $x != 137 ]] || has "$D/outbox/health.json" "needed SIGKILL after"
+done
+# The same grace on a stop by hand or a recreate: the compose file sets it for both colours.
+grep -qE '^  stop_grace_period: [0-9]+s$' "$here/../deploy/truenas-bluegreen.yml" || fail "x-server has no stop_grace_period"
+# ...but OOM-killed after the plan stop, a planned stop with another exit code, an unplanned 137, or running when the plan says stopped, is not.
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; echo true >"$W/oom.blue"; bg
+[[ $(hget phase) == end && $(hget check_other) == fail ]] || fail "OOM kill after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "server-blue was killed for running out of memory"
+rm -f "$W/oom.blue"
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 1 >"$W/exit.blue"; bg
+[[ $(hget check_other) == fail ]] || fail "exit 1 after the plan stop: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exited with code 1"
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; echo 137 >"$W/exit.blue"; bg; all_pass
+grep -vx blue "$D/state/stopped-by-plan" >"$T/sbp" || true; cp "$T/sbp" "$D/state/stopped-by-plan"
+! BG_POLL_SECONDS=0 SOAK_CHECK_SECONDS=1 "$T/hd.sh" --ack-health >"$T/out" 2>&1 || fail "ack passed with an unplanned exit 137: $(cat "$T/out")"
+[[ $(hget check_other) == fail ]] || fail "unplanned exit 137: $(cat "$D/outbox/health.json")"; has "$D/outbox/health.json" "exit code 137, so it crashed or was killed"
 # 31j. A failed item other than the live colour does not keep the window open: the old colour is still stopped at the deadline,
 # the stop is recorded, the end check says degraded, and there is one page that names the way to accept the new state.
 swap; echo 1 >"$W/restarts.proxy"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
@@ -860,6 +888,11 @@ has "$D/outbox/status.json" "--ack-health"
 live_is green
 # ...and --ack-health accepts the current state: baseline renewed, checklist healthy.
 bg --ack-health; all_pass; [[ $(hget phase) == ack ]] || fail "ack did not re-run the checklist: $(cat "$D/outbox/health.json")"
+# BOS-794: the passing ack replaces the page in the status file, so the server stops saying "degraded"; nothing_new, not deployed.
+[[ $(status result) == nothing_new && $(status target) == server ]] || fail "ack did not clear the partial status: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "Health accepted"; has "$D/outbox/status.json" '"stack": "healthy"'
+# A second ack has no page to replace and leaves the status file alone.
+cp "$D/outbox/status.json" "$T/st.before"; bg --ack-health; cmp -s "$T/st.before" "$D/outbox/status.json" || fail "a second ack rewrote the status file"
 # 31k. The same for the database, and an unreadable database start time (a hung or unreachable psql) is a failed db item.
 swap; echo 2026-11-07T09:00:00Z >"$W/start.db"; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
 [[ ! -e $D/state/soak ]] || fail "a db failure kept the window open"; [[ $(hget check_db) == fail ]] || fail "db at window end"

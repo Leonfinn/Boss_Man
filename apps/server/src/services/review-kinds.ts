@@ -8,6 +8,7 @@ import { activity, agents, companies, reviewRequests, runs, tickets, wakes } fro
 import { record } from "./activity.js";
 import { isAfterMerge, readVerdicts } from "@boss-man/shared";
 import { effectivePolicy, otherReviewers, resolveKindReviewer } from "./review-policy.js";
+import { endHolds } from "./review-holds.js";
 
 export type ReviewRow = typeof reviewRequests.$inferSelect;
 type Ticket = typeof tickets.$inferSelect;
@@ -163,6 +164,8 @@ export async function wakeReviewers(db: Db, t: Ticket, rows: ReviewRow[], notify
 export async function requestReviews(db: Db, t: Ticket): Promise<ReviewRow[]> {
   const open = await latestRows(db, t.id);
   if (open.some((r) => r.status === "pending")) await skipPending(db, open);
+  // A new round makes the old pass moot, and with it any hold that rode on it (BOS-808).
+  await endHolds(db, t.id, "a new review round started");
   const rule = ruleFor(await effectivePolicy(db, t), t.risk);
   const wanted: Array<[ReviewSlot, ReviewerRefValue]> = [["code", rule.reviewer], ...REVIEW_KINDS.flatMap((k): Array<[ReviewSlot, ReviewerRefValue]> => (rule.kinds?.[k] ? [[k, rule.kinds[k]!]] : []))];
   const round = (open[0]?.round ?? 0) + 1;

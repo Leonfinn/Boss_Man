@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, formatDate, parkedOnPurpose, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
@@ -28,7 +28,7 @@ import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 import { ceoNotesLines } from "./agent-notes.js";
 import { skillsForRun } from "./skills.js";
-import { fairOrder, HELD_AGENT, HELD_ALL_COMPANIES, HELD_CHAT, HELD_COMPANY, HELD_REPLY } from "./fair-share.js";
+import { fairOrder, HELD_AGENT, HELD_ALL_COMPANIES, HELD_BACKGROUND, HELD_CHAT, HELD_COMPANY, HELD_REPLY } from "./fair-share.js";
 import { conversationLines } from "./ticket-chat.js";
 import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
@@ -51,6 +51,11 @@ export type Limits = {
   wikiBatchMs: number;
   /** Subscription utilisation at which low-priority work waits for the reset. */
   quotaHoldAt: number;
+  /**
+   * Agents on an `infinite:` model (BOS-279) run in the background: their own slots, so slow free runs can't
+   * starve normal work. This is the count when the owner hasn't saved one in Settings (default 2).
+   */
+  background: number;
   /** Wakes at or above this priority ignore the quota hold. */
   highPriority: number;
   /**
@@ -149,7 +154,7 @@ function finishedSince(open: Array<{ reason: string; createdAt: Date }>, t: { sy
   return open.every((w) => w.createdAt.getTime() <= t.stateChangedAt!.getTime());
 }
 
-export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
+export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, background: 2, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
   agentId: string;
@@ -292,6 +297,22 @@ export function schedulerService(
     return samples.filter((s) => !off.has(s.window) && s.utilization >= threshold && (!s.resetsAt || s.resetsAt > t));
   }
 
+  /**
+   * The funding source ids Infinite mode runs are paid from (BOS-279): a Synthetic plan with an agent on an
+   * `infinite:` model and no other live agent. Those runs don't spend the plan's credits (checked on the live
+   * API), so the quota hold never applies to them and there is no "paused" note to send. A plan that also pays
+   * for a normal agent is held for that agent, so the owner is told (BOS-852: it used to be skipped).
+   */
+  async function infiniteSourceIds() {
+    const rows = await db
+      .select({ id: fundingSources.id, model: agents.model })
+      .from(fundingSources)
+      .innerJoin(agents, eq(agents.fundingSourceId, fundingSources.id))
+      .where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "synthetic"), isNull(agents.retiredAt)));
+    const mixed = new Set(rows.filter((r) => !isInfiniteModel(r.model)).map((r) => r.id));
+    return new Set(rows.filter((r) => !mixed.has(r.id)).map((r) => r.id));
+  }
+
   /** Whether a ticket the owner marked Urgent: the only tickets whose wakes pass the quota hold (BOS-227). */
   async function isUrgentTicket(ticketId: string | null | undefined) {
     if (!ticketId) return false;
@@ -343,7 +364,10 @@ export function schedulerService(
   async function quotaNotices(t: Date) {
     if (!deps.notifyOwner) return;
     const sources = await db.select().from(fundingSources).where(eq(fundingSources.kind, "subscription"));
+    // A Synthetic plan whose work is all Infinite mode can't be held (BOS-279), so there is nothing to announce about it.
+    const infinite = await infiniteSourceIds();
     for (const source of sources) {
+      if (infinite.has(source.id)) continue;
       const samples = await latestQuotaWindows(source.id);
       if (samples.length === 0) continue;
       const full = holdingWindows(source, samples, t);
@@ -688,7 +712,8 @@ export function schedulerService(
     // The CEO's notes and waiting note requests (BOS-85) go in this wake prompt, which every run gets,
     // rather than the chapter's frozen directive, so a note saved mid-chapter shows on the next run.
     const notes = agent.role === "ceo" ? await ceoNotesLines(db, agent.companyId, agent.id) : [];
-    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, ...notes, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
+    // The built-in rules sit in the trusted prompt, ahead of the brief whose standing rules add to them (BOS-754).
+    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, ...notes, "", ...BUILT_IN_RULES, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
     const toolServers = await toolServersFor(agent);
     if (toolServers.length)
       lines.push(
@@ -1035,11 +1060,11 @@ export function schedulerService(
       .onConflictDoNothing();
   }
 
-  /** The all-companies and per-company run limits: the owner's Settings when saved (settings.run_limits), else the defaults. */
+  /** The all-companies, per-company and background run limits: the owner's Settings when saved (settings.run_limits), else the defaults. */
   async function limitsNow() {
     const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
-    const stored = lrow?.value as { instance?: number; company?: number } | undefined;
-    return { maxTotal: stored?.instance ?? limits.instance, maxCompany: stored?.company ?? limits.company };
+    const stored = lrow?.value as { instance?: number; company?: number; background?: number } | undefined;
+    return { maxTotal: stored?.instance ?? limits.instance, maxCompany: stored?.company ?? limits.company, maxBackground: stored?.background ?? limits.background };
   }
 
   const self = {
@@ -1058,7 +1083,9 @@ export function schedulerService(
       if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
       const { maxTotal, maxCompany } = await limitsNow();
       const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
-      const live = await db.select({ companyId: runs.companyId, agentId: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
+      const live = await db.select({ companyId: runs.companyId, agentId: runs.agentId, model: runs.model }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
+      // Infinite-mode runs (BOS-279) take no normal slot, so they don't fill one here either.
+      const work = live.filter((r) => !isInfiniteModel(r.model));
       // Only wakes that would take a slot of their own (BOS-667). A wake held until later (quiet hours, a
       // retry time) or by the quota can't start now, and a wake whose agent already has its runs going
       // starts only in the slot that run frees, so neither stands in for a slot that is in use. Counting
@@ -1084,8 +1111,8 @@ export function schedulerService(
         room.set(w.agentId, left - 1);
         waiting.push(w);
       }
-      const total = live.length + waiting.length;
-      const mine = live.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
+      const total = work.length + waiting.length;
+      const mine = work.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
       // A company with nothing running or waiting still gets one, however full other companies'
       // queues are: the scheduler gives an idle company's wake the next free slot (BOS-582, DR-032).
       const allCompanies = mine === 0 ? Math.max(1, maxTotal - reserved - total) : maxTotal - reserved - total;
@@ -1099,8 +1126,10 @@ export function schedulerService(
      */
     async runLimits(companyId: string) {
       const { maxTotal, maxCompany } = await limitsNow();
-      const live = await db.select({ companyId: runs.companyId }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`));
-      return { allCompanies: { limit: maxTotal, running: live.length }, company: { limit: maxCompany, running: live.filter((r) => r.companyId === companyId).length } };
+      const live = await db.select({ companyId: runs.companyId, purpose: runs.purpose, model: runs.model }).from(runs).where(isNull(runs.endedAt));
+      // Infinite-mode runs (BOS-279) sit in the background slots, so they don't count against the normal limits.
+      const work = live.filter((r) => r.purpose !== "chat" && r.purpose !== REPLY_PURPOSE && !isInfiniteModel(r.model));
+      return { allCompanies: { limit: maxTotal, running: work.length }, company: { limit: maxCompany, running: work.filter((r) => r.companyId === companyId).length } };
     },
 
     /**
@@ -1109,7 +1138,7 @@ export function schedulerService(
      * waits instead of landing on the owner.
      */
     async ceoCanRun(companyId: string): Promise<boolean> {
-      const [ceo] = await db.select({ id: agents.id, fundingSourceId: agents.fundingSourceId, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      const [ceo] = await db.select({ id: agents.id, fundingSourceId: agents.fundingSourceId, paused: agents.paused, model: agents.model }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo) return true;
       // A clean run since the last usage/auth failure says the account has room again.
       const since = new Date(now().getTime() - 24 * 3_600_000);
@@ -1122,7 +1151,8 @@ export function schedulerService(
       const lastFail = recent.findIndex((r) => /error:.*(usage limit|rate limit|weekly limit|5-hour limit|five-hour limit|quota|limit reached|authentication|unauthori[sz]ed|forbidden|identity verification|invalid api key|credit balance)/i.test(r.outcome ?? ""));
       if (lastFail !== -1 && !recent.slice(0, lastFail).some((r) => r.endedAt && !/^(error|lost|interrupted)/i.test(r.outcome ?? ""))) return false;
       // The account test the scheduler uses for a routine run: soft hold only, and no window at its limit.
-      if (ceo.fundingSourceId) {
+      // A CEO on an Infinite-mode model is never held by the quota (BOS-279), so the plan's reading doesn't stop it.
+      if (ceo.fundingSourceId && !isInfiniteModel(ceo.model)) {
         const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, ceo.fundingSourceId));
         if (source) {
           const samples = await latestQuotaWindows(source.id);
@@ -1545,12 +1575,12 @@ export function schedulerService(
         if (through.length === 0) return { ...result, waiting: queue.length };
       }
 
-      const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
-      // An owner chat has its own slot per agent and uses none of the work slots below.
-      const working = active.filter((r) => r.purpose !== "chat" && r.purpose !== REPLY_PURPOSE);
-      // The owner's Settings override the instance and company limits when saved (settings.run_limits).
-      const { maxTotal, maxCompany } = await limitsNow();
-      let total = working.length;
+      const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, model: runs.model }).from(runs).where(isNull(runs.endedAt));
+      // The owner's Settings override the instance, company and background limits when saved (settings.run_limits).
+      const { maxTotal, maxCompany, maxBackground } = await limitsNow();
+      // Infinite-mode runs (BOS-279) have slots of their own, so slow free work can't take a normal one or be starved by it.
+      let total = 0;
+      let background = 0;
       const byCompany = new Map<string, number>();
       const byAgent = new Map<string, number>();
       // An agent's chat run doesn't hold up its own work, or the other way round: one of each.
@@ -1561,7 +1591,13 @@ export function schedulerService(
         if (r.purpose === "chat") chatting.add(r.agentId ?? r.companyId);
         else if (r.purpose === REPLY_PURPOSE) replying.add(r.agentId ?? r.companyId);
         else {
-          byCompany.set(r.companyId, (byCompany.get(r.companyId) ?? 0) + 1);
+          // An Infinite-mode run takes a background slot, not a normal one: deliberately not counted in
+          // total or byCompany, or slow free work would eat the company's normal capacity (BOS-279).
+          if (isInfiniteModel(r.model)) background++;
+          else {
+            total++;
+            byCompany.set(r.companyId, (byCompany.get(r.companyId) ?? 0) + 1);
+          }
           if (r.agentId) byAgent.set(r.agentId, (byAgent.get(r.agentId) ?? 0) + 1);
         }
       }
@@ -1617,6 +1653,10 @@ export function schedulerService(
         }
         const isChat = w.reason === CHAT_REASON;
         const isReply = w.reason === CEO_REPLY_REASON;
+        // An Infinite-mode agent (BOS-279) takes a background slot instead of the instance and company ones, and
+        // no card slot is kept among the background ones: they are slow and low-priority by design.
+        const [waker] = isChat || isReply ? [] : await db.select({ model: agents.model }).from(agents).where(eq(agents.id, w.agentId));
+        const backgroundWake = !isChat && !isReply && isInfiniteModel(waker?.model);
         // Chats with the owner are held only by their agent's one chat slot; work wakes face all three limits.
         const spare = wakeClassOf(w) === "waiting" ? 0 : reserved;
         // The most specific limit that holds the wake is the one named, so server_status tells the
@@ -1634,11 +1674,15 @@ export function schedulerService(
             : null
           : (byAgent.get(w.agentId) ?? 0) >= limits.agent
             ? HELD_AGENT
-            : mine + spare >= maxCompany
-              ? HELD_COMPANY
-              : total + (mine === 0 ? 0 : spare) >= maxTotal
-                ? HELD_ALL_COMPANIES
-                : null;
+            : backgroundWake
+              ? background >= maxBackground
+                ? HELD_BACKGROUND
+                : null
+              : mine + spare >= maxCompany
+                ? HELD_COMPANY
+                : total + (mine === 0 ? 0 : spare) >= maxTotal
+                  ? HELD_ALL_COMPANIES
+                  : null;
         if (held) {
           // A review stuck behind its busy reviewer goes to another qualified reviewer who is free.
           const waited = t.getTime() - w.createdAt.getTime();
@@ -1734,7 +1778,9 @@ export function schedulerService(
         let onSource: string | undefined;
         if (agent?.fundingSourceId) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));
-          if (source?.kind === "subscription") {
+          // Infinite mode doesn't spend the plan's credits (BOS-279), so an agent on an infinite model never waits for the
+          // quota. It's the agent's own model that matters, not its plan: a normal agent sharing the plan is still held.
+          if (source?.kind === "subscription" && !isInfiniteModel(agent?.model)) {
             // An agent on one of the owner's ranked Claude subscriptions goes to the first one with
             // room (BOS-383); an agent on any other source is checked against its own as before.
             const pool = source.fallbackRank != null && source.provider === "anthropic" ? await claudeAccounts(source) : [];
@@ -1788,13 +1834,20 @@ export function schedulerService(
         if (isReply) replying.add(w.agentId);
         else if (isChat) chatting.add(w.agentId);
         else {
-          total++;
-          byCompany.set(w.companyId, (byCompany.get(w.companyId) ?? 0) + 1);
           byAgent.set(w.agentId, (byAgent.get(w.agentId) ?? 0) + 1);
+          // Same as the pass's initial count: an Infinite-mode run takes a background slot, not a company one.
+          if (backgroundWake) background++;
+          else {
+            total++;
+            byCompany.set(w.companyId, (byCompany.get(w.companyId) ?? 0) + 1);
+          }
         }
       }
       return result;
     },
+
+    /** The server-wide hold the tick honours, for the owner's "Stop all work" switch and banner (BOS-836). */
+    globallyPaused,
 
     async setGlobalPause(paused: boolean) {
       await db.insert(settings).values({ key: "paused", value: paused }).onConflictDoUpdate({ target: settings.key, set: { value: paused } });

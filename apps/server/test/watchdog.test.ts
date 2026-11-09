@@ -111,11 +111,22 @@ describe("the ticket state clock and 'blocked until' (BOS-58, BOS-59 shape)", ()
 });
 
 describe("the watchdog sweep (BOS-58)", () => {
-  it("is off by default and needs a Scrum Master to switch on", async () => {
-    await ctx.ticket({ assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
-    await ctx.watchdog.run();
-    expect(await ctx.smWakes()).toHaveLength(0);
-    const r = await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { enabled: true });
+  it("is on by default (BOS-762), the owner can switch it off, and switching on needs a Scrum Master", async () => {
+    // A new company starts with the watchdog on (DR-041), but nobody has been picked to wake yet, so
+    // it reaches nobody until the owner picks a Scrum Master.
+    const st = await ctx.watchdog.status(ctx.companyId);
+    expect(st.settings.enabled).toBe(true);
+    expect(st.scrumMaster).toBeNull();
+    // Editing limits on the default-on company works even before a Scrum Master is picked (BOS-762).
+    expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { inProgressHours: 3 })).statusCode).toBe(200);
+    // Picking a Scrum Master is allowed and is reported back.
+    expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { scrumMasterAgentId: ctx.sm.id, enabled: true })).statusCode).toBe(200);
+    expect((await ctx.watchdog.status(ctx.companyId)).scrumMaster?.id).toBe(ctx.sm.id);
+    // The owner can switch it off, and past a pause it stays off.
+    expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { enabled: false })).statusCode).toBe(200);
+    expect((await ctx.watchdog.status(ctx.companyId)).settings.enabled).toBe(false);
+    // Switching it back on with nobody to wake is refused.
+    const r = await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { scrumMasterAgentId: null, enabled: true });
     expect(r.statusCode).toBe(422);
     expect(r.json().message).toContain("Pick the Scrum Master");
     const bad = await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { inProgressHours: -1 });
@@ -311,6 +322,28 @@ describe("the Scrum Master's actions (BOS-58)", () => {
     const r = await call({ action: "nudge", ticketId: t.id, reason: "Just checking in on this one." });
     expect(textOf(r)).toContain("isn't among the problems");
     expect(await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.dev.id))).toHaveLength(0);
+  });
+
+  it("lists only flags it can act on (BOS-857): list, then nudge every listed flag works", async () => {
+    await ctx.switchOn();
+    const t = await handed();
+    // Open flags the Scrum Master can't act on: never handed over, an owner's wait, and an escalated one.
+    const never = await ctx.ticket();
+    const owner = await ctx.ticket();
+    const esc = await ctx.ticket();
+    await ctx.db.insert(watchdogFlags).values([
+      { companyId: ctx.companyId, ticketId: never.id, rule: "idle_agent" },
+      { companyId: ctx.companyId, ticketId: owner.id, rule: "owner_decision_waiting", lastFlaggedAt: ctx.now() },
+      { companyId: ctx.companyId, ticketId: esc.id, rule: "idle_agent", lastFlaggedAt: ctx.now(), escalatedAt: ctx.now() },
+    ]);
+    const listed = JSON.parse(textOf(await call({ action: "list" }))) as Array<{ flagId: string; ticketId: string }>;
+    expect(listed.map((f) => f.ticketId)).toEqual([t.id]);
+    for (const f of listed) {
+      const r = await call({ action: "nudge", ticketId: f.ticketId, reason: "Listed, so it must be actionable." });
+      expect(textOf(r)).toContain("Done and logged");
+    }
+    // Once actioned it is no longer offered.
+    expect(textOf(await call({ action: "list" }))).toBe("No open flags.");
   });
 
   it("nudges with a logged reason, once per hand-off, and the owner's undo takes back a wake not yet delivered", async () => {

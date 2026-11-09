@@ -17,6 +17,8 @@ export type SnapTicket = {
   withOwner: boolean;
   /** In review with every review passed: it waits for the merge sweep, not for a reviewer or its author (BOS-362). */
   mergeWaiting?: boolean;
+  /** A reviewer passed it but holds the merge on purpose (BOS-808): quiet, whatever the other reviews say. */
+  held?: boolean;
   /** The ticket was made ready and then released from its last blocker at this time (BOS-659). */
   unblockedAt?: Date | null;
   /** Send-backs so far. */
@@ -163,7 +165,7 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
       }
     } else if (x.state === "review") {
       // Approved by everyone: the merge sweep owns it, and raises a merge card of its own if it can't land.
-      if (x.mergeWaiting) continue;
+      if (x.mergeWaiting || x.held) continue;
       const idle = t - since - covered(runs.map((r) => [r.startedAt.getTime(), (r.endedAt ?? now).getTime()]), since, t);
       if (idle >= s.reviewHours * H) add("stale_review", { idleMs: idle, limitMs: s.reviewHours * H });
     } else if (x.state === "blocked") {

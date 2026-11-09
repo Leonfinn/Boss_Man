@@ -118,6 +118,7 @@ p { margin: 0; }
 .side a.nav svg { flex: none; }
 .side a.nav .nav-label { flex: 1; min-width: 0; }
 .side .count { font-family: var(--mono); font-size: 12px; min-width: 22px; text-align: center; padding: 1px 6px; border-radius: 999px; background: var(--badge); color: var(--ink); }
+.side .count.warn { background: var(--amber); color: #fff; }
 .side h2 { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.08em; color: var(--side-muted); text-transform: uppercase; }
 .side .companies { display: flex; flex-direction: column; gap: 10px; padding: 0 8px; }
 .side .company { display: flex; gap: 10px; align-items: baseline; }
@@ -171,12 +172,28 @@ p { margin: 0; }
 .decision .parts { display: flex; flex-direction: column; gap: 3px; width: 48px; }
 .decision .parts span { height: 4px; border-radius: 2px; min-width: 4px; }
 .decision .body { padding: 18px 20px 18px 8px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.decision h2 { font-size: 17px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.decision h2 { font-size: 17px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
 .decision .meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); }
 .decision .rec { font-size: 14px; background: var(--accent-soft); border-radius: 6px; padding: 8px 12px; }
 .decision .rec strong { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--link); margin-right: 6px; }
 .decision .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* "Not enough detail?": the note and its button are one row on a wide card, the button reading as the
+   field's send and lining up with Approve / Reject; on a narrow card the button drops under the field
+   with the card's normal gap (BOS-756). */
+.decision .advice-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.decision .advice-row .field { flex: 1 1 240px; min-width: 0; }
+.decision .advice-row .actions { flex: none; }
+@media (max-width: 640px) { .decision .advice-row .field { flex-basis: 100%; } }
 @media (max-width: 520px) { .decision .actions { flex-direction: column; } .decision .actions .btn { width: 100%; } .decision { grid-template-columns: 1fr; } .decision .score { flex-direction: row; align-items: center; padding: 14px 16px 0; } .decision .body { padding: 10px 16px 16px; } }
+
+/* (BOS-809) Closed cards fold to one clipped line each inside the "Closed (N)" group, so the full-size
+   card (and its narrow "A newer update card covers this one" column that wrapped one word per line) is
+   gone. A line opens to reveal its kept steps in .closed-body, which keeps a readable minimum width. */
+.closed-covers .covered-line { list-style: none; cursor: pointer; display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+.closed-covers .covered-line::-webkit-details-marker { display: none; }
+.closed-covers .covered-line::before { content: "▸ "; color: var(--muted); }
+.closed-covers details[open] > .covered-line::before { content: "▾ "; }
+.closed-covers .closed-body { min-width: min(240px, 100%); }
 
 /* ---------- Board ---------- */
 /* A sideways scroller must not become a vertical one too: `overflow-x: auto` alone computes
@@ -394,6 +411,12 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .pl-node.cause .pl-foot b { color: var(--amber-ink); }
 .pl-causes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
 .pl-causes li { overflow-wrap: anywhere; }
+.pl-causes-head { display: flex; align-items: center; }
+.pl-causes-toggle { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0; background: none; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.pl-causes-toggle:hover h2 { text-decoration: underline; }
+.pl-arrow { color: var(--muted); width: 12px; flex: none; }
+.pl-causes-more { align-self: flex-start; min-height: 36px; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--card); color: var(--ink); font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.pl-causes-more:hover { border-color: var(--muted); }
 .pl-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 14px; }
 .pl-refresh { min-height: 32px; padding: 4px 12px; font-size: 13px; }
 
@@ -883,6 +906,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
   .side.collapsed .count { display: none; }
   /* The badge count stays visible as a small dot when the strip is too narrow for the number. */
   .side.collapsed .count-dot { display: block; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--badge); }
+  .side.collapsed .count-dot.warn { background: var(--amber); }
   .side.collapsed .foot { padding: 0; }
   /* Log out stays reachable from the strip as an icon (BOS-290). */
   .side.collapsed .foot .logout { display: inline-flex; align-items: center; justify-content: center; width: 100%; padding: 8px; }

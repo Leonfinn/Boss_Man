@@ -82,11 +82,11 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (!command) return judgeWithoutCommand(question, ownFolder, ownProject);
   // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
-  // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
+  // Every heredoc body is judged like any other command text: a cat/tee body is no longer skipped as data, because each
+  // rule for telling "data" from "code" was bypassed in review (BOS-725, 726, 727, 728). Fail closed.
   // A quoted word reads as the word it is: quote removal (`"..."`, `'...'`, `$'...'`, `$"..."`, `\-`, backslash-newline)
   // is applied to every plain word before every check below, not only to flags (BOS-715).
-  const own0 = withoutOwnMemory(command, ownProject);
-  const base = dropCatHeredocBodies(dequoteWords(own0), own0);
+  const base = dequoteWords(withoutOwnMemory(command, ownProject));
   // The command string of each shell `-c` runs too, so `bash -c 'r''m -rf /'`, `bash -c $'\x72m -rf /'` and
   // `sh -c 'echo '$'\x24(cat /tmp/x)'` are all read (BOS-715). It is judged as its own command rather than glued onto the
   // outer line, so its redirects do not change how the outer line is read. A shell nested inside a shell is bounded by
@@ -272,8 +272,11 @@ export function judgePermission(question: string, command: string | null, ownFol
       let prog: string | undefined;
       for (let i = 0; i < words.length; i++) {
         const w = words[i]!;
-        if (w === "" || w === ":::" || w === "::::") continue;
-        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJN]$|^--(?:max-args|replace|delimiter|max-procs|max-lines|eof|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
+        if (w === "") continue;
+        // `parallel ::: a b` with no program runs every argument as a command (BOS-732): no Allow.
+        if (w === ":::" || w === "::::") return result("outside");
+        // `--replace`, `--eof` and `--max-lines` take a value only as `--opt=value` (one word), so the next word is the program.
+        if (w.startsWith("-")) { if (/^-[nIdPLEsajSJN]$|^--(?:max-args|delimiter|max-procs|max-chars|arg-file|jobs|sshlogin|colsep|results)$/.test(w)) i++; continue; }
         prog = w.replace(/^.*\//, "");
         break;
       }
@@ -844,8 +847,10 @@ function runsUnreadFile(c: string, inOwn: (p: string) => boolean): boolean {
  * code or write by themselves, so a value mistaken for one of them cannot hide a different program. A file tool reads its
  * targets from the runner's input, so it is never listed; neither is an interpreter or any other program.
  */
-const XARGS_PROGRAM_SAFE = new Set(("cat grep egrep fgrep rg ls ll head tail wc diff cmp stat file echo printf test du df cut tr " +
-  "jq md5sum sha256sum sha1sum realpath dirname basename readlink sort uniq od xxd hexdump column nl tree true false sleep date").split(" "));
+// BOS-776: readers that can write a file or run code through an option are not listed (`sort -o`, `tree -o`, `uniq in out`,
+// `xxd in out`, `rg --pre`, `file -C`, `date -s`).
+const XARGS_PROGRAM_SAFE = new Set(("cat grep egrep fgrep ls ll head tail wc diff cmp stat echo printf test du df cut tr " +
+  "jq md5sum sha256sum sha1sum realpath dirname basename readlink od hexdump column nl true false sleep").split(" "));
 // Options of `xargs`/`parallel` the scan fully understands: short letters that are bare vs take a value, and long names the
 // same way. Any other option gives no Allow: it may take the next word as its value, and that value is not the program
 // (`xargs --process-slot-var echo perl` runs perl, not echo; BOS-744). A list of value options always misses some, so an
@@ -854,18 +859,28 @@ const XARGS_OPTS: Record<string, { bare: string; value: string; bareLong: string
   xargs: {
     bare: "0rtpxei",
     value: "EILPdnsa",
-    bareLong: ["--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit", "--show-limits", "--open-tty", "--help", "--version"],
-    valueLong: ["--eof", "--replace", "--max-lines", "--max-procs", "--delimiter", "--max-args", "--max-chars", "--arg-file", "--process-slot-var"],
+    // `--eof`, `--replace` and `--max-lines` take their value only attached (`--eof=X`), so the next word is not a value (BOS-776).
+    bareLong: ["--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit", "--show-limits", "--open-tty", "--help", "--version",
+      "--eof", "--replace", "--max-lines"],
+    valueLong: ["--max-procs", "--delimiter", "--max-args", "--max-chars", "--arg-file", "--process-slot-var"],
   },
+  // Checked against the GNU parallel 20221122 man page (BOS-776). Left out on purpose, so they give no Allow: `-e`, `-i`, `-l` and
+  // the long forms with an optional value (the next word may or may not be taken), `--rpl` (its value is Perl code), and
+  // options that write a file (`--joblog`, `--results`, `--compress-program`...). Short `-s` (--max-chars) takes a value.
   parallel: {
-    bare: "kqtsX",
-    value: "jS",
-    bareLong: ["--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--serial", "--interactive", "--help", "--version"],
-    valueLong: ["--workdir", "--env", "--tmpdir", "--halt", "--delay", "--timeout", "--basefile", "--transfer-file", "--joblog", "--sshlogin",
-      "--sshloginfile", "--results", "--colsep", "--rpl", "--max-args", "--max-lines", "--max-procs", "--max-chars", "--number-of-cpus", "--load",
-      "--memfree", "--nice", "--tag", "--block", "--recstart", "--recend", "--pipepart", "--unbuffer", "--template"],
+    bare: "0kmoptuvxXqhVM",
+    // `-J` (profile) is left out: it loads options from a file the scan can't see (BOS-776).
+    value: "jPSaCdEnNLIs",
+    bareLong: ["--null", "--keep-order", "--quote", "--dry-run", "--verbose", "--progress", "--bar", "--eta", "--interactive", "--help",
+      "--version", "--tag", "--pipe", "--pipepart", "--pipe-part", "--ungroup", "--group", "--line-buffer", "--lb", "--xargs", "--open-tty",
+      "--link", "--xapply", "--semaphore", "--no-keep-order", "--shuf", "--fg", "--bg", "--plus"],
+    valueLong: ["--workdir", "--wd", "--env", "--halt", "--halt-on-error", "--delay", "--timeout", "--sshlogin", "--sshloginfile", "--slf",
+      "--colsep", "--max-args", "--max-procs", "--jobs", "--max-chars", "--load", "--memfree", "--nice", "--block", "--block-size",
+      "--recstart", "--recend", "--tagstring", "--arg-file", "--delimiter", "--arg-sep", "--retries", "--max-replace-args"],
   },
 };
+// Under `parallel` the command is run through a shell, so a word with one of these is a second command (BOS-776).
+const PARALLEL_SHELL_META = /[;|&<>\n`]|\$\(|\{=/;
 
 function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk = true): boolean {
   let relOk = startRelOk;
@@ -877,7 +892,7 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
   }
   // BOS-722: a relative `cd` may follow a symlink the same command made (`ln -s /tmp/p l && cd l`), so it is outside.
   if (relCd && /(?:^|[;&|(\n{]\s*|\b(?:then|do|else)\s+)(?:\S*\/)?ln(?=\s)/.test(c)) relOk = false;
-  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|parallel|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
+  const wrapper = /^(?:then|do|else|elif|if|while|until|coproc|eval|builtin|\{|!|exec|env|nohup|time|sudo|command|nice|setsid|stdbuf|timeout|xargs|parallel|sem|ionice|flock|watch|strace|ltrace|taskset|chrt|script|unshare|setpriv|nsenter|chroot|doas)$/;
   // Wrappers whose first plain words are not the command (`flock l ./foo`, `taskset 1 ./foo`, `chroot dir ./foo`).
   const positional: Record<string, number> = { flock: 1, taskset: 1, chrt: 1, chroot: 1 };
   // Wrappers that run the string after `-c` / `--command` (`flock -c ./foo l`, `script -qc ./foo`) as a shell command.
@@ -918,6 +933,11 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
     let lead = "";
     let pos = 0;
     let xargsOptionsDone = false;
+    // BOS-776: the `-I` replace string, and whether the next word is it. A program word that holds it is replaced by the input
+    // (`parallel -I echo echo -rf ~ ::: rm` runs `rm -rf ~`), and a `parallel`/`xargs` with no program word runs its input.
+    let replStr: string | null = null;
+    let replNext = false;
+    let progSeen = false;
     // Classify one option of `xargs`/`parallel`: "value" takes the next word, "bare" takes none, "unknown" may take either.
     const classify = (w: string, s: { bare: string; value: string; bareLong: string[]; valueLong: string[] }): "bare" | "value" | "unknown" => {
       if (w.startsWith("--")) {
@@ -934,13 +954,24 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
       }
       return "bare";
     };
-    for (const w of words) {
+    for (const [wi, w] of words.entries()) {
       if (cmdNext) { if (runsByPathOutside(w, inOwn, relOk)) return true; break; }
-      if (skipNext) { skipNext = false; continue; }
+      if (skipNext) { skipNext = false; if (replNext) { replNext = false; replStr = w; } continue; }
       // A system binary that runs its argument counts as that wrapper (`/usr/bin/env ./foo`).
       const base = sysBin.test(w) ? w.replace(/^.*\//, "") : w;
+      // BOS-776: `sem` is `parallel --semaphore`.
+      const leadName = base === "sem" ? "parallel" : base;
       // Skip assignment prefixes, wrapper words, their options and numeric arguments (`timeout 5`, `nice -n 5`).
-      if (wrapper.test(base)) { lead = base; pos = positional[base] ?? 0; xargsOptionsDone = false; continue; }
+      if (wrapper.test(base)) {
+        // BOS-776: a wrapper (`nice`, `env`, `timeout`...) as the program under `xargs`/`parallel` hides the program it runs, and
+        // only a known-safe reader may be the program, so it gets no Allow.
+        if (lead === "xargs" || lead === "parallel") return true;
+        lead = leadName; pos = positional[base] ?? 0; xargsOptionsDone = false;
+        replStr = null; replNext = false; progSeen = false;
+        // BOS-776: `parallel` runs its command through a shell, so a shell metacharacter in any later word is a second command.
+        if (leadName === "parallel" && words.slice(wi + 1).some((x) => PARALLEL_SHELL_META.test(x))) return true;
+        continue;
+      }
       const xopts = lead === "xargs" || lead === "parallel" ? XARGS_OPTS[lead] : null;
       if (/^-/.test(w)) {
         if (cmdOpt.test(lead) && /^-[A-Za-z]*c$|^--command$/.test(w)) cmdNext = true;
@@ -952,6 +983,11 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
             const k = classify(w, xopts);
             if (k === "unknown") return true;
             if (k === "value") skipNext = true;
+            // Note the replace string: `-I STR`, `-ISTR`, `--replace=STR`, or `-i` / `--replace` (default `{}`).
+            const ii = w.startsWith("--") ? -1 : w.indexOf("I", 1);
+            if (ii > 0) { if (ii === w.length - 1) replNext = true; else replStr = w.slice(ii + 1); }
+            else if (w === "--replace" || /^-[A-Za-z]*i$/.test(w)) replStr = "{}";
+            else if (w.startsWith("--replace=")) replStr = w.slice(10);
           }
         } else if (takesValue[lead]?.test(w)) skipNext = true;
         continue;
@@ -961,9 +997,13 @@ function runsByPathOutside(c: string, inOwn: (p: string) => boolean, startRelOk 
       // Under `xargs`/`parallel` the first plain word is the program, and only a known-safe reader may be it: otherwise the
       // value of an option was read as the program in an earlier scan, and the real program got Allow (BOS-744).
       if (xopts && !XARGS_PROGRAM_SAFE.has(base)) return true;
+      if (xopts && replStr !== null && (replStr === "" || w.includes(replStr))) return true;
+      progSeen = true;
       if (bad(w)) return true;
       break; // the first real command word of the segment
     }
+    // BOS-776: `parallel` with no program word runs each input line as a command (`parallel -a cmds.txt`, `cat cmds | parallel`).
+    if (lead === "parallel" && !progSeen && !cmdNext) return true;
     return false;
   };
   for (const seg of shellSegments(c)) {
@@ -2009,111 +2049,6 @@ function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
     if (touchesFiles && /\+|\bjoin\b|%[sdr(]|\bformat\b|\bchr\b|fromCharCode|base64|b64|decode|\\x[0-9a-fA-F]|\\u|environ|\benv\b|HOME|argv|getenv|\$\{/.test(code)) return false;
   }
   return true;
-}
-
-/** Commands a cat/tee heredoc may be piped into without its body becoming code (BOS-727); any other stage keeps the body. */
-const HEREDOC_SINK_SAFE = new Set("cat tee head tail wc sort uniq tr cut grep".split(" "));
-
-/**
- * True when a `<<` in the original command may not be a real heredoc operator (or may be hidden from the operator
- * count): inside quotes, after a comment `#`, backslash-escaped, in `((...))` arithmetic, or on a command line that
- * leaves a quote open. Only command lines are scanned: heredoc bodies are skipped using the real operators found, so an
- * apostrophe in a file's text does not matter. One pass over the lines, so it is linear. (BOS-727)
- */
-function hasUnreliableHeredocOps(original: string): boolean {
-  const lines = original.split("\n");
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i++]!;
-    let quote = "";
-    const ends: { dash: boolean; end: string }[] = [];
-    let ops = 0;
-    for (let k = 0; k < line.length; k++) {
-      const ch = line[k]!;
-      if (quote === "'") { if (ch === "'") quote = ""; else if (ch === "<" && line[k + 1] === "<") return true; continue; }
-      if (ch === "\\") {
-        if (line[k + 1] === "<" && line[k + 2] === "<") return true;
-        k++;
-        continue;
-      }
-      if (quote === '"') { if (ch === '"') quote = ""; else if (ch === "<" && line[k + 1] === "<") return true; continue; }
-      if (ch === "'" || ch === '"') { quote = ch; continue; }
-      if (ch === "#" && (k === 0 || /[\s;&|(]/.test(line[k - 1]!))) return /<</.test(line.slice(k));
-      if (ch === "<" && line[k + 1] === "<") {
-        if (line[k + 2] === "<") { k += 2; continue; } // a here-string, no body
-        ops++;
-        const m = /^(-?)[ \t]*(['"]?)(\w+)\2/.exec(line.slice(k + 2, k + 202));
-        if (m) ends.push({ dash: m[1] === "-", end: m[3]! });
-        k++;
-      }
-    }
-    if (quote) return true;
-    if (ops > 0 && /\(\(/.test(line)) return true;
-    for (const e of ends) {
-      while (i < lines.length && (e.dash ? lines[i]!.replace(/^\t+/, "") : lines[i]!) !== e.end) i++;
-      if (i >= lines.length) return false;
-      i++;
-    }
-  }
-  return false;
-}
-
-/**
- * Drops the bodies of heredocs that belong to cat/tee (text written to a file is data), and nothing else (BOS-727).
- * Every `<<` on a line is read in order, and the bodies that follow the line are taken in that order, so an earlier
- * interpreter heredoc keeps its body even when a cat heredoc comes later on the same line. A body is also kept when
- * the cat/tee output is run: sent to a process substitution (`> >(bash)`) or piped to anything but a plain text tool
- * (`| xargs rm`, `| python3`). A body whose end is not found, or one with `$(…)`/backticks under an unquoted delimiter
- * (bash expands those, BOS-725), is kept. One pass over the lines, so linear in the command.
- */
-function dropCatHeredocBodies(text: string, original: string): string {
-  if (!text.includes("<<")) return text;
-  // `text` has had its quotes removed, so a `<<` that sat inside quotes or a comment looks like a real heredoc there.
-  // Such a fake would pair with the wrong body and swallow a real interpreter's body, so the original is checked first.
-  if (hasUnreliableHeredocOps(original)) return text;
-  const lines = text.split("\n");
-  const out: string[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i]!;
-    out.push(line);
-    i++;
-    const ops = [...line.matchAll(/(?<!<)<<(?!<)(-?)[ \t]*(['"]?)(\w+)\2/g)];
-    if (ops.length === 0) continue;
-    // Read the bodies in order; if any end is missing, keep everything from here on as it is.
-    const bodies: { body: string[]; term: string; drop: boolean }[] = [];
-    let j = i;
-    let ok = true;
-    for (const op of ops) {
-      const [, dash, q, end] = op as unknown as [string, string, string, string];
-      const body: string[] = [];
-      while (j < lines.length && (dash ? lines[j]!.replace(/^\t+/, "") : lines[j]!) !== end) body.push(lines[j++]!);
-      if (j >= lines.length) { ok = false; break; }
-      const k = op.index!;
-      const segStart = Math.max(line.lastIndexOf(";", k), line.lastIndexOf("&", k), line.lastIndexOf("|", k), line.lastIndexOf("(", k)) + 1;
-      let drop = /^[ \t]*(?:cat|tee)\b/.test(line.slice(segStart, k)) && !/[;&|()]/.test(line.slice(segStart, k));
-      if (drop && q === "" && /\$\(|\x60/.test(body.join("\n"))) drop = false;
-      if (drop) {
-        const rest = line.slice(segStart);
-        // A process substitution is found from the `<<` on, not only as `>(`/`<(` after a space: `tee <<'EOF' >(bash)` and
-        // `> >(bash)` put a separate `>` before the `(`, and `>>(bash)` glues it on, so neither matched (BOS-744).
-        if (/[<>]\(/.test(rest.slice(k - segStart))) drop = false;
-        else {
-          const stages = rest.split(/(?<!\|)\|(?!\|)&?/).slice(1);
-          if (stages.some((s) => !HEREDOC_SINK_SAFE.has(/^[ \t]*([\w.-]+)/.exec(s)?.[1] ?? ""))) drop = false;
-        }
-      }
-      bodies.push({ body, term: lines[j]!, drop });
-      j++;
-    }
-    if (!ok) { while (i < lines.length) out.push(lines[i++]!); break; }
-    for (const b of bodies) {
-      if (!b.drop) out.push(...b.body);
-      out.push(b.term);
-    }
-    i = j;
-  }
-  return out.join("\n");
 }
 
 /**

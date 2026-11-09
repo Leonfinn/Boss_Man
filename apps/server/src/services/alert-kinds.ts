@@ -81,6 +81,11 @@ export const ALERT_KINDS = {
     topRung: "ceo",
     clearWhen: (c) => (c.runId ? [{ kind: "runActive", runId: c.runId }] : []),
   },
+  // run-time-limit.ts (BOS-846): a run was stopped for passing the owner's per-run time limit. The limit is the
+  // owner's own setting, so the card starts with them. One card per stopped run; it doesn't clear by itself.
+  run_time_limit: {
+    topRung: "owner",
+  },
   // sweeps.ts longTicketlessRuns: a run with no ticket going for a long time.
   ticketless_run: {
     topRung: "ceo",
@@ -162,6 +167,12 @@ export const ALERT_KINDS = {
   quota_held: {
     topRung: "ceo",
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
+  },
+  // deploys.ts finishTag / runTag (DR-033): a deploy tag that couldn't be moved after a successful deploy,
+  // or a runner offline for 30 minutes with the move waiting. The deploy stands; the CEO fixes the host settings
+  // or tells the owner. One card per deploy.
+  deploy_tag: {
+    topRung: "ceo",
   },
   // no-progress.ts (BOS-593, N4): a company with work waiting and no clean run for an hour, or one error
   // hitting several agents. One card per company. It may reach the owner: a stopped company usually can't

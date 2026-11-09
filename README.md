@@ -40,6 +40,7 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 | Doc | What's in it |
 |---|---|
 | [docs/00-first-time-install.md](docs/00-first-time-install.md) | **Start here to install:** from an empty Linux host (or TrueNAS SCALE) to a company with an agent working its first ticket |
+| [docs/23-updating.md](docs/23-updating.md) | **Read before you update:** the update steps, backups and how to check one restores, breaking changes that need a hand step, and where release notes are |
 | [docs/01-scope.md](docs/01-scope.md) | The problem, goals, non-goals and requirements, plus the v1, v1.1 and later scope |
 | [docs/02-architecture.md](docs/02-architecture.md) | Components, the runner model, the data model, the decision queue, engagements, budgets and secrets |
 | [docs/03-phased-plan.md](docs/03-phased-plan.md) | Spikes first, then the build phases to v1, and the plan for Boss Man to build itself |

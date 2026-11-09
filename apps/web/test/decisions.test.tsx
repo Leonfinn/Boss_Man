@@ -79,10 +79,11 @@ describe("decision queue", () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetch);
     const onAnswered = vi.fn();
-    render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
+    const { container } = render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
 
     expect(screen.getByRole("heading", { name: "App Co has used 92% of its $60 budget. Raise it?" })).toBeTruthy();
     expect(screen.getByLabelText("Score 52")).toBeTruthy();
+    expect(container.querySelector(".parts")).toBeTruthy();
     expect(screen.getByRole("link", { name: "APP-3 Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
     expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
     // The legend folds away behind one line (BOS-245), so it opens before it can be read.
@@ -232,7 +233,47 @@ describe("decision queue", () => {
 
   it("explains a paused agent's score", () => {
     render(<Decisions decisions={[decision({ score: 5, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 5 } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByText("Score 5: 5 for a paused agent + 0 for waiting.")).toBeTruthy();
+    expect(screen.getByText("Score 5: 5 for a paused agent.")).toBeTruthy();
+  });
+
+  it("shows no score line or number for a card scoring 0 (BOS-804)", () => {
+    const { container } = render(<Decisions decisions={[decision({ score: 0, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 0 }, reasons: ["Raised just now"], blocks: [] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.queryByText(/Score 0/)).toBeNull();
+    expect(screen.queryByText(/for waiting/)).toBeNull();
+    expect(screen.queryByLabelText(/^Score/)).toBeNull();
+    expect(container.querySelector(".parts")).toBeNull();
+  });
+
+  it("says how long ago a card was raised, not 'just now', once it is minutes old (BOS-804)", () => {
+    const eightMin = new Date(Date.now() - 8 * 60_000).toISOString();
+    // The server sends the age as a rank reason too ("Raised just now" under an hour): the card must not
+    // repeat it beside the "8 min ago" label, or it contradicts itself.
+    render(<Decisions decisions={[decision({ createdAt: eightMin, reasons: ["Raised just now"] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("8 min ago")).toBeTruthy();
+    expect(screen.queryByText("just now")).toBeNull();
+  });
+
+  it("drops the rank's age reason but keeps the others (BOS-804)", () => {
+    const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    render(<Decisions decisions={[decision({ createdAt: hours, reasons: ["Waiting 3 h", "Blocks 1 ticket"] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("3h ago")).toBeTruthy();
+    expect(screen.queryByText("Waiting 3 h")).toBeNull();
+    expect(screen.getByText("Blocks 1 ticket")).toBeTruthy();
+  });
+
+  it("shows the age in hours and days as the card gets older (BOS-804)", () => {
+    const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const { unmount } = render(<Decisions decisions={[decision({ createdAt: hours })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("3h ago")).toBeTruthy();
+    unmount();
+    const days = new Date(Date.now() - 5 * 86_400_000).toISOString();
+    render(<Decisions decisions={[decision({ createdAt: days })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("5d ago")).toBeTruthy();
+  });
+
+  it("still says 'just now' for a card raised in the last minute (BOS-804)", () => {
+    render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("just now")).toBeTruthy();
   });
 
   it("says why an answer was refused", async () => {
@@ -428,16 +469,19 @@ describe("references in steps and folded text", () => {
 });
 
 describe("raised time", () => {
-  it("every card kind shows when it was raised, in the notifications format, from the original time", () => {
+  it("every card kind shows how long ago it was raised, with the exact time on hover (BOS-804)", () => {
     const earlier = "2026-10-20T09:30:00.000Z";
     const now = new Date().toISOString();
     const kinds = ["budget", "question", "permission", "approval"];
     const ds = kinds.map((kind, i) => decision({ id: `d${i}`, kind, createdAt: i === 0 ? earlier : now, question: `Card ${kind}` }));
     render(<Decisions decisions={ds} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    const times = Array.from(document.querySelectorAll("time")).map((t) => t.textContent);
+    const times = Array.from(document.querySelectorAll("time"));
     expect(times).toHaveLength(4);
-    expect(times[0]).toBe(when(earlier));
-    expect(times[1]).toBe(when(now));
+    // Old cards say how many days, as the Plan page does; the flat Notifications wording is on hover.
+    expect(times[0]!.textContent).toMatch(/^\d+d ago$/);
+    expect(times[0]!.getAttribute("title")).toBe(when(earlier));
+    expect(times[1]!.textContent).toBe("just now");
+    expect(times[1]!.getAttribute("title")).toBe(when(now));
   });
 
   it("Reassign on a stale-blocker card opens a picker of that company's agents, and won't send without a pick", async () => {
@@ -571,6 +615,69 @@ describe("write my own answer", () => {
   });
 });
 
+describe("attaching a picture or file to my own answer (BOS-759)", () => {
+  const IMG = "11111111-2222-3333-4444-555555555555";
+  const openWithFetch = () => {
+    const d = decision({ kind: "question", question: "Which screen is wrong?", options: ["The list", "The detail"], recommendedOption: "The list", blocks: [{ ticketId: "t1", ref: "APP-3", title: "Checkout" }] });
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/companies/c1/images") {
+        const { name } = JSON.parse(String(init!.body)) as { name: string };
+        return new Response(JSON.stringify({ markdown: `![${name}](/api/ticket-images/${IMG})` }), { status: 201 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Write my own answer" }));
+    return { fetch, box: screen.getByLabelText("Your answer, in your own words") as HTMLTextAreaElement };
+  };
+  const send = () => screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement;
+
+  it("pastes a screenshot, shows it under the box, and sends its link on the end of the answer", async () => {
+    const { fetch, box } = openWithFetch();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeTruthy();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "wrong.png", { type: "image/png" });
+    fireEvent.paste(box, { clipboardData: { files: [file], getData: () => "" } });
+    await waitFor(() => expect(screen.getByRole("img", { name: "wrong.png" })).toBeTruthy());
+    expect(box.value).toBe("");
+    // Uploaded through the message box's own route, onto the ticket the card is about.
+    const [url, init] = fetch.mock.calls.find((c) => c[0] === "/api/companies/c1/images") as unknown as [string, RequestInit];
+    expect(url).toBe("/api/companies/c1/images");
+    expect(JSON.parse(String(init.body))).toMatchObject({ name: "wrong.png", ticketId: "t1" });
+    // An attachment alone is enough to send.
+    expect(send().disabled).toBe(false);
+    fireEvent.change(box, { target: { value: "It's the detail screen." } });
+    fireEvent.click(send());
+    await waitFor(() => expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(true));
+    const [, answer] = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer") as unknown as [string, RequestInit];
+    expect(JSON.parse(String(answer.body))).toEqual({ answer: `It's the detail screen.\n![wrong.png](/api/ticket-images/${IMG})`, custom: true });
+  });
+
+  it("a removed attachment is not sent", async () => {
+    const { fetch, box } = openWithFetch();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "wrong.png", { type: "image/png" });
+    fireEvent.paste(box, { clipboardData: { files: [file], getData: () => "" } });
+    await waitFor(() => expect(screen.getByRole("img", { name: "wrong.png" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.queryByRole("img")).toBeNull();
+    fireEvent.change(box, { target: { value: "Only text." } });
+    fireEvent.click(send());
+    await waitFor(() => expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(true));
+    const [, answer] = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer") as unknown as [string, RequestInit];
+    expect(JSON.parse(String(answer.body))).toEqual({ answer: "Only text.", custom: true });
+  });
+
+  it("Back to the options drops what was attached", async () => {
+    const { box } = openWithFetch();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "again.png", { type: "image/png" });
+    fireEvent.paste(box, { clipboardData: { files: [file], getData: () => "" } });
+    await waitFor(() => expect(screen.getByRole("img", { name: "again.png" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Back to the options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Write my own answer" }));
+    expect(screen.queryByRole("img")).toBeNull();
+  });
+});
+
 describe("approval card while the merge runs", () => {
   const approval = (over: Partial<Decision> = {}) =>
     decision({
@@ -617,5 +724,37 @@ describe("approval card while the merge runs", () => {
     expect(await screen.findByText(/Already being checked and merged since .*nothing more to do\./)).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
+  });
+
+  it("a workflow-change card says why Apply and Skip are greyed out until a reason is typed (BOS-799)", () => {
+    const change = decision({
+      kind: "approval",
+      question: "Apply this workflow change?",
+      options: ["Apply the change", "Skip the change"],
+      recommendedOption: "Apply the change",
+      context: { type: "workflow_change" },
+    });
+    render(<Decisions decisions={[change]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const apply = screen.getByRole("button", { name: "Apply the change" });
+    expect((apply as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Skip the change" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(apply.getAttribute("title")).toBe("Type a reason above to Apply or Skip");
+    expect(screen.getByText("Type a reason above to Apply or Skip")).toBeTruthy();
+
+    const box = screen.getByLabelText(/Why \(shown on the Changes table, required\)/) as HTMLTextAreaElement;
+    fireEvent.click(apply);
+    expect(document.activeElement === box).toBe(true);
+
+    fireEvent.change(box, { target: { value: "Adds a skill; waits for BOS-172" } });
+    expect(screen.queryByText("Type a reason above to Apply or Skip")).toBeNull();
+    expect((screen.getByRole("button", { name: "Apply the change" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Apply the change" }).getAttribute("title")).toBeNull();
+  });
+
+  it("other card kinds never show the reason hint (BOS-799)", () => {
+    const ask = decision({ kind: "budget", question: "Raise the budget?", context: undefined });
+    render(<Decisions decisions={[ask]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.queryByText("Type a reason above to Apply or Skip")).toBeNull();
+    expect((screen.getByRole("button", { name: "Raise to $80" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

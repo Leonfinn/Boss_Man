@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
 import { useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
+import { setHold, useHold } from "./hold";
 import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
@@ -121,6 +122,36 @@ export function NewBuildBanner({ newer }: { newer: boolean }) {
   );
 }
 
+/** On every page while the owner's "Stop all work" hold is on (BOS-836), with the one button that lifts it. */
+export function HoldBanner() {
+  const hold = useHold();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (hold.data?.paused !== true) return null;
+  const resume = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setHold(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span>
+        <strong>All work is stopped.</strong> No new agent runs start in any company until you resume; runs already going finish by themselves.
+      </span>
+      <button className="btn" type="button" disabled={busy} onClick={() => void resume()}>
+        Resume
+      </button>
+      {error && <span role="alert" className="error">{error}</span>}
+    </p>
+  );
+}
+
 function useServerDown(): boolean {
   const [down, setDown] = useState(serverDown);
   useEffect(() => {
@@ -211,9 +242,10 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
   // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
-  // the badge and the page share one request. A failure just leaves the badge off.
+  // the badge and the page share one request. A failure just leaves the badge off. Its stuck count (BOS-767)
+  // turns the badge to the warning colour when a jam is there to see.
   const mergeQueue = usePoll(
-    (signal) => (current ? api<{ waitingCount: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
+    (signal) => (current ? api<{ waitingCount: number; stuckCount?: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
     20_000,
     `merge-badge-${current?.id}`,
   );
@@ -260,12 +292,14 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
         mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
+        mergeStuck={mergeQueue.data?.stuckCount ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <HoldBanner />
         <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>

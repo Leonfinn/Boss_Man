@@ -2,7 +2,7 @@
 import { randomBytes } from "node:crypto";
 import { and, asc, eq, gt, inArray, isNotNull, isNull, like, lt, max, sql } from "drizzle-orm";
 import { z } from "zod";
-import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
+import { AddonReport, isInfiniteModel, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -78,6 +78,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
 
   /** Marks a run ended and logs it. Runs inside the caller's transaction so a failed apply rolls the stored event back. */
   async function markEnded(tx: Tx, runId: string, at: Date, outcome: string | null, usage?: { inputTokens: number; outputTokens: number; cachedReadTokens: number; cachedWriteTokens: number }) {
+    // A run Boss Man stopped on purpose (the run time limit, BOS-846) says why, unless it ended in an error or was lost.
+    if (!outcome?.startsWith("error") && !outcome?.startsWith("lost") && outcome !== "interrupted") {
+      const [r] = await tx.select({ stopReason: runs.stopReason }).from(runs).where(eq(runs.id, runId));
+      if (r?.stopReason) outcome = `stopped: ${r.stopReason}`;
+    }
     const [ended] = await tx
       .update(runs)
       .set({
@@ -222,6 +227,9 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       case "run.cost": {
         if (event.costMicrosDelta === 0) return [];
         const [run] = await tx.select().from(runs).where(eq(runs.id, event.runId));
+        // Infinite mode (BOS-279) doesn't spend the plan's credits, so its runs add nothing to any usage or budget
+        // reading. The adapter's figure for a free model is a list-price guess, not money spent.
+        if (isInfiniteModel(run?.model) || isInfiniteModel(event.model)) return [];
         const [eng] = run?.engagementId ? await tx.select().from(engagements).where(eq(engagements.id, run.engagementId)) : [];
         const base = {
           fundingSourceId: event.fundingSourceId,
@@ -450,9 +458,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       timer.unref();
     },
 
-    async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>) {
-      // An older runner sends none: keep what we last knew rather than blanking it.
-      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
+    async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>, imageCommit?: string) {
+      // An older runner sends none: keep what we last knew rather than blanking it. A new image with no
+      // commit (built outside a checkout) clears the old one, so a stale commit never vouches for it (BOS-764).
+      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, imageCommit: imageCommit?.toLowerCase() ?? null, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
     },
 
     /**

@@ -181,7 +181,9 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
             );
           })}
           <span className="muted" style={{ fontSize: 12 }}>
-            These names come from Claude Code and aren't documented, so Boss Man doesn't guess what each one means.
+            {s.source.provider === "synthetic"
+              ? "These come from Synthetic's own usage reading, checked every 5 minutes. Infinite-mode agents are never held."
+              : "These names come from Claude Code and aren't documented, so Boss Man doesn't guess what each one means."}
           </span>
         </fieldset>
       )}
