@@ -38,7 +38,13 @@ function harness(model: string | null, opts: { expectError?: boolean; skills?: A
   // (expectError): under load the agent can fail to start, and the test should then read "the run ended with: <reason>"
   // instead of a bare "undefined" or "expected false to be true" further down (BOS-965).
   const ended = new Promise<void>((resolve, reject) => {
-    done = (error) => (error && !opts.expectError ? reject(new Error(`The run ended with an error: ${error}`)) : resolve());
+    done = (error) => {
+      if (!error || opts.expectError) return resolve();
+      // No stack frames: they push the reason out of a short log tail, and the reason is what matters.
+      const failure = new Error(`The run ended with an error: ${error}`);
+      failure.stack = `Error: ${failure.message}`;
+      reject(failure);
+    };
   });
   ended.catch(() => {});
   const manager: SessionManager = new SessionManager({
