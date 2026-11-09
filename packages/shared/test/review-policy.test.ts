@@ -94,9 +94,9 @@ describe("reviewer lists", () => {
     const bare: ReviewPolicy = {
       trivial: DEFAULT_REVIEW_POLICY.trivial,
       low: DEFAULT_REVIEW_POLICY.low,
-      medium: { ...DEFAULT_REVIEW_POLICY.medium, reviewer: "ceo" },
-      high: { ...DEFAULT_REVIEW_POLICY.high, reviewer: "ceo" },
-      critical: { ...DEFAULT_REVIEW_POLICY.critical, reviewer: "ceo" },
+      medium: { ...DEFAULT_REVIEW_POLICY.medium, reviewer: "ceo", kinds: {} },
+      high: { ...DEFAULT_REVIEW_POLICY.high, reviewer: "ceo", kinds: {} },
+      critical: { ...DEFAULT_REVIEW_POLICY.critical, reviewer: "ceo", kinds: {} },
     };
     const r = noLooserThan(bare, floor);
     for (const tier of ["medium", "high", "critical"] as const) {

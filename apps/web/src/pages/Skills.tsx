@@ -9,6 +9,8 @@ import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
+import { clearDraft, readDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { Section, useAction } from "./Settings";
 
 type SkillInstructions = { path: string | null; body: string | null; empty: boolean; unreadable: boolean };
@@ -45,6 +47,8 @@ function AddSkill({ companyId, onAdded }: { companyId: string; onAdded: (names: 
   const [tab, setTab] = useState<"link" | "written" | "upload">("link");
   const [url, setUrl] = useState("");
   const [form, setForm] = useState({ name: "", description: "", body: "" });
+  // The skill's text is kept in this browser as it is typed (DR-045); it goes once the skill is made.
+  const bodyKey = `skill-new/${companyId}`;
   const [files, setFiles] = useState<Upload[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,6 +61,7 @@ function AddSkill({ companyId, onAdded }: { companyId: string; onAdded: (names: 
       const added = await api<Array<{ name: string }>>(`/api/companies/${companyId}/skills`, { method: "POST", body });
       setUrl("");
       setForm({ name: "", description: "", body: "" });
+      clearDraft(bodyKey);
       setFiles([]);
       onAdded(added.map((s) => s.name));
     } catch (err) {
@@ -113,7 +118,7 @@ function AddSkill({ companyId, onAdded }: { companyId: string; onAdded: (names: 
           </div>
           <div className="field">
             <label htmlFor="skill-body">Instructions, in Markdown</label>
-            <textarea id="skill-body" rows={10} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
+            <DraftTextarea draftKey={bodyKey} id="skill-body" rows={10} value={form.body} onChange={(text) => setForm({ ...form, body: text })} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
           </div>
         </>
       )}
@@ -211,6 +216,8 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
   const [savedHolders, setSavedHolders] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  // The edit box is kept in this browser as it is typed (DR-045); it goes once saved, or on Cancel.
+  const editKey = `skill-edit/${id}`;
   const [editing, setEditing] = useState<{ name: string; description: string; body: string } | null>(null);
   const s = skill.data;
   if (skill.error && !away(skill.error)) return <p className="error" role="alert">{skill.error.message}</p>;
@@ -250,6 +257,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
         }
       }
       setEditing(null);
+      clearDraft(editKey);
       return "Saved. Agents get the new version from their next run.";
     });
   return (
@@ -286,7 +294,14 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {editable && !editing && (
-            <button type="button" className="btn" onClick={() => setEditing({ name: s.name, description: s.description, body })}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                const kept = readDraft(editKey);
+                setEditing({ name: s.name, description: s.description, body: kept || body });
+              }}
+            >
               Edit
             </button>
           )}
@@ -363,6 +378,14 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
 
       {editing ? (
         <section aria-label="Edit skill" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {readDraft(editKey) && (
+            <p className="muted" role="status" style={{ fontSize: 13, margin: 0 }}>
+              Draft restored: what you were writing is kept in this browser.{" "}
+              <button type="button" className="link" style={{ padding: 0 }} onClick={() => { clearDraft(editKey); setEditing({ ...editing, body }); }}>
+                Discard draft
+              </button>
+            </p>
+          )}
           <div className="field">
             <label htmlFor="edit-skill-name">Name</label>
             <input id="edit-skill-name" maxLength={64} value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
@@ -373,7 +396,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
           </div>
           <div className="field">
             <label htmlFor="edit-skill-body">Instructions, in Markdown</label>
-            <textarea id="edit-skill-body" rows={18} value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
+            <DraftTextarea draftKey={editKey} id="edit-skill-body" rows={18} value={editing.body} onChange={(text) => setEditing({ ...editing, body: text })} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" className="btn primary" disabled={!editing.name.trim() || !editing.description.trim()} onClick={() => save()}>

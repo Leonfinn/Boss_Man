@@ -29,7 +29,8 @@ function stub(first: unknown, backtest?: unknown) {
 
 describe("watchdog settings (BOS-58)", () => {
   it("is off by default; picking a Scrum Master and switching on sends the limits too", async () => {
-    const calls = stub(status());
+    // BOS-762 made it on for a new company; this test covers a company that has it switched off.
+    const calls = stub(status({ settings: { ...DEFAULT_WATCHDOG, enabled: false } }));
     render(<Watchdog company={company} />);
     expect(await screen.findByText("Off.")).toBeTruthy();
     // The CEO and agents with another standing job can't be the Scrum Master.

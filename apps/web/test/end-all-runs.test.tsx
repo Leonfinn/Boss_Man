@@ -81,6 +81,25 @@ describe("the Runs page's 'End all running runs' button (BOS-837)", () => {
     expect(screen.queryByText(/Ended \d+ run/)).toBeNull();
   });
 
+  it("says how many could not be ended, and tells the owner to open them one by one (BOS-862)", async () => {
+    const calls: Array<{ method: string; url: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method ?? "GET", url });
+        if (url === "/api/runs/cancel-all") return json({ cancelled: 2, failed: ["run-3"] });
+        if (url.startsWith("/api/runs/recent")) return json([]);
+        if (url.startsWith("/api/runs")) return json([liveRun(), liveRun({ id: "run-2" }), liveRun({ id: "run-3" })]);
+        return json({});
+      }),
+    );
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(<Runs companies={companies} />);
+    fireEvent.click(await screen.findByRole("button", { name: "End all running runs" }));
+    expect(await screen.findByText(/Ended 2 runs\. 1 run could not be ended\. Open it to stop it one by one\./)).toBeTruthy();
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url === "/api/runs/cancel-all")).toBe(true));
+  });
+
   it("says one run, not one runs", async () => {
     stub([liveRun()], 1);
     const asked = vi.fn((_text: string) => true);

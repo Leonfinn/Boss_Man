@@ -55,6 +55,7 @@ const decision = (over: Partial<Decision> = {}): Decision => ({
   score: 10,
   parts: { blocking: 0, urgency: 0, age: 10, liveRun: 0 },
   reasons: [],
+  ageReason: "",
   dueDate: null,
   ...over,
 });
@@ -86,9 +87,12 @@ describe("Settled or withdrawn (BOS-740)", () => {
         ]}
       />,
     );
-    expect(screen.getByText(/Settled or withdrawn by the team in the last 30 days \(2\)/)).toBeTruthy();
-    expect(screen.getByText(/withdrawn by Boss Man: Switched back: not running any more\. \(You can stop: there is nothing to finish\.\)/)).toBeTruthy();
-    const ceoLine = screen.getByText(/withdrawn by the CEO: Stale\./);
-    expect(ceoLine.textContent).not.toContain("(");
+    // BOS-804/805: closed cards fold into one "Closed (N)" list; each is a one-line summary that opens to its note.
+    expect(screen.getByText("Closed (2)")).toBeTruthy();
+    expect(screen.getByText(/withdrawn by Boss Man/)).toBeTruthy();
+    expect(screen.getByText("Switched back: not running any more. (You can stop: there is nothing to finish.)")).toBeTruthy();
+    expect(screen.getByText(/withdrawn by the CEO/)).toBeTruthy();
+    const ceoNote = screen.getByText("Stale.");
+    expect(ceoNote.textContent).not.toContain("(");
   });
 });

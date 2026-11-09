@@ -3,6 +3,7 @@
 // shows that state. A ticket that waits with no open card (lost, never raised, the policy switched on after the
 // reviews) is "missing": the sweep raises the card again, and no merge path lands it in the meantime.
 import { and, desc, eq, gt, gte, inArray, sql } from "drizzle-orm";
+import { mergeContext } from "./decision-context.js";
 import { RISK_TIERS, riskOf, ruleFor, type RiskTier } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
@@ -256,7 +257,7 @@ async function closeExtraCards(db: Db, ticketId: string) {
     const at = new Date().toISOString();
     const [done] = await db
       .update(decisions)
-      .set({ status: "withdrawn", answeredAt: new Date(at), dedupeKey: null, context: { ...(extra.context as object), withdrawn: { by: "system", note: "A second sign-off card for the same ticket; the newer one stays open.", at } } })
+      .set({ status: "withdrawn", answeredAt: new Date(at), dedupeKey: null, context: mergeContext({ withdrawn: { by: "system", note: "A second sign-off card for the same ticket; the newer one stays open.", at } }) })
       .where(and(eq(decisions.id, extra.id), eq(decisions.status, "open")))
       .returning({ id: decisions.id });
     if (done) await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, extra.id));

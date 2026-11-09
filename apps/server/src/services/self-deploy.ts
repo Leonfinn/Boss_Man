@@ -15,6 +15,7 @@ import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clear
 import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
+import { getHold } from "./maintenance.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { imageContains, mergeCommitOrder, runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 
@@ -929,7 +930,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const rec = await deps.facts?.().catch(() => ({} as Record<string, string>)) ?? {};
       const installDir = folder(a?.srcDir ?? rec["paths.src"]) ?? undefined;
       const open = (await openFor("server")).map((d) => (d.context as SelfDeployContext)).find((c) => !!c.commit);
-      return { enabled: true, ...(installDir ? { installDir } : {}), ...(open?.commit ? { openCommit: open.commit } : {}) };
+      // DR-046 part 2: a runner image update already waiting for runs, so R16 refuses a card that asks the owner to
+      // press Build and update runners again. `null` (not absent) says Boss Man looked and found nothing pending.
+      const hold = await getHold(db).catch(() => null);
+      return { enabled: true, ...(installDir ? { installDir } : {}), ...(open?.commit ? { openCommit: open.commit } : {}), hold: hold ? { kind: hold.kind, ...(hold.since ? { since: hold.since } : {}), ...(hold.swapped ? { swapped: hold.swapped } : {}) } : null };
     },
 
     /** Checked before an approval is recorded: one request at a time. */

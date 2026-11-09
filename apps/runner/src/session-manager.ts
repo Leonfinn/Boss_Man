@@ -92,6 +92,35 @@ const textOf = (content: ToolCallContent[] | null | undefined) =>
     .flatMap((c) => (c.type === "content" && c.content?.type === "text" && c.content.text ? [c.content.text] : []))
     .join("\n\n");
 
+/** The permission option kinds ACP defines; the runner answers with these only. */
+const KNOWN_PERMISSION_KINDS = new Set(["allow_once", "allow_always", "reject_once", "reject_always"]);
+/** Where `setAsideUnknownPermissionKinds` keeps every kind the agent offered. */
+const OFFERED_KINDS_META = "bossman/offeredKinds";
+
+/**
+ * BOS-895: the ACP SDK refuses a permission request whose options use a kind it doesn't know with an
+ * "Invalid params" error, before the runner's handler runs, so a harness that renamed its kinds would
+ * get every request refused and Boss Man would never hear of it. This drops the unknown options from
+ * the request (an option the runner can't classify must never be picked as an allow) and keeps the
+ * full list of offered kinds in its `_meta`, so the request reaches the handler, which answers with a
+ * known option or a cancel and logs why. Everything else passes through untouched, SDK checks included.
+ */
+export function setAsideUnknownPermissionKinds<M>(stream: { readable: ReadableStream<M>; writable: WritableStream<M> }) {
+  const readable = stream.readable.pipeThrough(
+    new TransformStream<M, M>({
+      transform(message, out) {
+        const m = message as { method?: unknown; params?: { options?: unknown; _meta?: unknown } };
+        const options = m.method === "session/request_permission" && Array.isArray(m.params?.options) ? (m.params.options as Array<{ kind?: unknown }>) : null;
+        if (!options?.some((o) => !KNOWN_PERMISSION_KINDS.has(o?.kind as string))) return out.enqueue(message);
+        const meta = m.params!._meta && typeof m.params!._meta === "object" ? m.params!._meta : {};
+        const offered = options.map((o) => String(o?.kind));
+        out.enqueue({ ...m, params: { ...m.params, options: options.filter((o) => KNOWN_PERMISSION_KINDS.has(o?.kind as string)), _meta: { ...meta, [OFFERED_KINDS_META]: offered } } } as M);
+      },
+    }),
+  );
+  return { readable, writable: stream.writable };
+}
+
 /**
  * Writes skills as <dir>/.claude/skills/<name>/<files> and returns dir. Paths are checked
  * to stay inside each skill's folder.
@@ -180,6 +209,8 @@ export function opencodeEnv(granted: string | undefined, verdict: "ask" | "deny"
       share: "disabled",
       permission,
       disabled_providers: disabled,
+      // A refused tool call must not end the run (BOS-864/870): the model sees the refusal and goes on.
+      experimental: { ...(existing.experimental as object | undefined), continue_loop_on_deny: true },
     }),
     OPENCODE_DISABLE_AUTOUPDATE: "1",
     OPENCODE_DISABLE_CLAUDE_CODE: "1", // don't read ~/.claude as OpenCode config
@@ -875,6 +906,8 @@ export class SessionManager {
           cmd = { ...cmd, cwd: ws.path };
           emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
         }
+        // BOS-853: the agent's `git fetch` reads origin from the shared repo's origin view, with no login; its pushes go nowhere.
+        for (const [key, value] of workspaces.copyGitConfig(spec.projectId)) addGitConfig(env, key, value);
       } catch (err) {
         emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't prepare the git workspace: ${String((err as Error)?.message ?? err).slice(0, 500)}` });
         return;
@@ -985,12 +1018,20 @@ export class SessionManager {
       const seen = toolCalls.get(id);
       const rawInput = isEmpty(req.toolCall.rawInput) ? (seen?.rawInput ?? req.toolCall.rawInput ?? null) : req.toolCall.rawInput;
       const detail = (textOf(req.toolCall.content) || seen?.text || planOf(rawInput) || "").slice(0, 20_000);
+      const offeredMeta = (req._meta as Record<string, unknown> | null | undefined)?.[OFFERED_KINDS_META];
+      const offeredKinds = Array.isArray(offeredMeta) ? offeredMeta.map(String) : req.options.map((o) => o.kind as string);
       // Register for the verdict before announcing the request, so a fast verdict can't be lost.
       const verdict = new Promise<RequestPermissionResponse>((resolve) => {
         const settle = (v: "allow" | "deny") => {
           clearTimeout(timer);
           state.pendingPermissions.delete(requestId);
           const option = v === "allow" ? pick("allow_once") ?? pick("allow_always") : pick("reject_once") ?? pick("reject_always");
+          // A cancel is the safe answer when no known kind fits (never guess which unknown option means allow),
+          // but say so: a harness update that renamed its kinds would otherwise turn every approval into a refusal with no clue (BOS-895).
+          if (!option) {
+            const tool = (req.toolCall.title ?? req.toolCall.kind ?? "a tool").slice(0, 200);
+            emit({ type: "runner.log", level: "warn", message: `Run ${cmd.runId}: the "${v}" answer for ${tool} was sent as a cancel, because ${cmd.agentKind} offered no known permission option for it (offered: ${offeredKinds.join(", ") || "none"}).` });
+          }
           resolve(option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } });
         };
         const timer = setTimeout(() => settle("deny"), this.opts.permissionTimeoutMs ?? 10 * 60_000);
@@ -1003,7 +1044,7 @@ export class SessionManager {
         title: req.toolCall.title ?? null,
         kind: req.toolCall.kind ?? null,
         rawInput,
-        optionKinds: req.options.map((o) => o.kind),
+        optionKinds: offeredKinds,
         ...(id ? { toolCallId: id.slice(0, 200) } : {}),
         ...(detail ? { detail } : {}),
       });
@@ -1070,9 +1111,11 @@ export class SessionManager {
       .onNotification(methods.client.session.update, (ctx) => onUpdate(ctx.params as SessionNotification))
       .onRequest(methods.client.session.requestPermission, (ctx) => onPermission(ctx.params))
       .connect(
-        ndJsonStream(
-          Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
-          Readable.toWeb(child.stdout!) as unknown as ReadableStream<Uint8Array>,
+        setAsideUnknownPermissionKinds(
+          ndJsonStream(
+            Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
+            Readable.toWeb(child.stdout!) as unknown as ReadableStream<Uint8Array>,
+          ),
         ),
       );
     const agent = connection.agent;
@@ -1103,6 +1146,13 @@ export class SessionManager {
       dropTmp();
       dropMcp();
     };
+    // A tool that can't be started (missing, not executable) emits "error" and, with no listener, throws and takes the
+    // whole runner down. End just this run with the reason; finish() ignores a run already ended, so a following "close"
+    // does not end it twice.
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      const why = err.code === "ENOENT" ? "not found" : err.code === "EACCES" ? "not allowed to run" : String(err.message ?? err).slice(0, 300);
+      finish(null, `Couldn't start ${cmd.agentKind === "claude" ? "claude-code-acp" : cmd.agentKind}: ${why}${err.code && !["ENOENT", "EACCES"].includes(err.code) ? ` (${err.code})` : ""}.`);
+    });
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
       if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderrTail(stderr)}`.trim());

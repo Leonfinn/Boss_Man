@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, gte, lt, notInArray, sql, type SQL } from "drizzle-orm";
 import {
   billingCycle,
   boundsAsEpoch,
@@ -42,6 +42,14 @@ const weeklyReading = (q: Extract<SyntheticQuota, { weekly: unknown }>) => ({
 
 /** How long the newest Synthetic reading is served before asking Synthetic again (BOS-239). */
 export const PROVIDER_QUOTA_REFRESH_MS = 5 * 60_000;
+/**
+ * How long a Synthetic reading keeps counting towards the quota hold when no newer one comes (BOS-852):
+ * three refreshes, so one missed sweep doesn't drop a hold, but an outage at Synthetic can't hold the plan
+ * on an old reading for long (an unknown reading never blocks a run).
+ */
+export const SYNTHETIC_HOLD_SAMPLE_MS = 3 * 5 * 60_000;
+/** The quota_samples windows a Synthetic reading is fed into, so the scheduler's hold sees it (BOS-852). */
+export const SYNTHETIC_WINDOWS = { weekly: "synthetic_weekly", requests: "synthetic_requests" } as const;
 /** Readings older than this are pruned; the history is for the trend, not forever (BOS-239). */
 export const PROVIDER_QUOTA_HISTORY_MS = 30 * 86_400_000;
 /** The newest readings returned as the trend, count and age. */
@@ -157,6 +165,32 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return row ?? null;
   }
 
+  /**
+   * Feeds a good Synthetic reading into quota_samples, the only table the scheduler's quota hold reads
+   * (BOS-852), so a Synthetic plan is held at its hold level like a Claude one (Infinite-mode agents stay
+   * exempt in the scheduler). resetsAt is the renewal (for weekly credits the next regeneration, which is
+   * when the share used drops), but never less than SYNTHETIC_HOLD_SAMPLE_MS after the reading: each
+   * 5-minute refresh then replaces the sample before it lapses, and when Synthetic stops answering the
+   * hold lifts on its own instead of sticking on a stale number. An unchanged reading moves the newest
+   * row forward instead of adding one, so the table only grows when usage changes.
+   */
+  async function holdSample(fundingSourceId: string, q: ProviderQuota, takenAt: Date) {
+    if (q.used === null || q.limit === null || q.limit <= 0) return;
+    const window = SYNTHETIC_WINDOWS[q.measure];
+    const utilization = q.used / q.limit;
+    const renews = q.renewsAt ? Date.parse(q.renewsAt) : NaN;
+    const resetsAt = new Date(Math.max(Number.isNaN(renews) ? 0 : renews, takenAt.getTime() + SYNTHETIC_HOLD_SAMPLE_MS));
+    const [last] = await db
+      .select({ id: quotaSamples.id, utilization: quotaSamples.utilization })
+      .from(quotaSamples)
+      .where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), eq(quotaSamples.window, window)))
+      .orderBy(desc(quotaSamples.observedAt))
+      .limit(1);
+    // utilization is a 4-byte real, so it never reads back exactly equal to the JS number.
+    if (last && Math.abs(last.utilization - utilization) < 1e-6) await db.update(quotaSamples).set({ observedAt: takenAt, resetsAt }).where(eq(quotaSamples.id, last.id));
+    else await db.insert(quotaSamples).values({ fundingSourceId, window, utilization, resetsAt, observedAt: takenAt });
+  }
+
   async function refreshProviderQuota(source: FundingRow): Promise<ProviderQuota | null> {
     if (source.provider !== "synthetic") return null;
     const running = refreshing.get(source.id);
@@ -173,6 +207,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         // Weekly credits move 2% at a time, so a refresh between ticks repeats the same point; drop the
         // older copy so the trend counts real changes, not how often the page was refreshed (BOS-260).
         if (previous && previous.used === q.used && previous.limit === q.limit) await db.delete(providerQuotaReadings).where(eq(providerQuotaReadings.id, previous.id));
+        await holdSample(source.id, q, takenAt);
         lastFailed.delete(source.id);
       } else {
         // Store nothing on failure, so remember the attempt: the next few loads reuse the old reading
@@ -340,7 +375,11 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
       if (!source) return null;
       // Both tables cascade, so deleting would silently erase them.
       const [costs] = await db.select({ n: count() }).from(costEvents).where(eq(costEvents.fundingSourceId, id));
-      const [samples] = await db.select({ n: count() }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id));
+      // Synthetic's hold samples (BOS-852) are copies of readings Synthetic still has, not history only Boss Man holds.
+      const [samples] = await db
+        .select({ n: count() })
+        .from(quotaSamples)
+        .where(and(eq(quotaSamples.fundingSourceId, id), notInArray(quotaSamples.window, Object.values(SYNTHETIC_WINDOWS))));
       if (costs!.n + samples!.n > 0) return "has_history" as const;
       const [agentsOn] = await db.select({ n: count() }).from(agents).where(eq(agents.fundingSourceId, id));
       await db.delete(fundingSources).where(eq(fundingSources.id, id));

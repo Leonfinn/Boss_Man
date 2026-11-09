@@ -36,6 +36,7 @@ const decision = (over: Partial<Decision> = {}): Decision => ({
   score: 52.4,
   parts: { blocking: 30, urgency: 12, age: 10.4, liveRun: 0 },
   reasons: ["Waiting 40 min"],
+  ageReason: "Waiting 40 min",
   dueDate: null,
   ...over,
 });
@@ -75,14 +76,31 @@ describe("decision queue", () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ body: JSON.stringify({ answer: "Hire the ticked ones", picks: [0] }) })));
   });
 
+  it("a hire card lists the skills the new agent gets from its first run (BOS-889)", () => {
+    const hire = decision({
+      kind: "approval",
+      question: "The CEO wants to hire Ada as QA.",
+      options: ["Hire", "Don't hire"],
+      recommendedOption: "Hire",
+      context: { type: "hire", proposal: { skills: ["triage", "copy"] } },
+    });
+    render(<Decisions decisions={[hire]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText(/triage, copy\. They have them from their first run\./)).toBeTruthy();
+    // A hire with no skills shows no skills line.
+    cleanup();
+    render(<Decisions decisions={[decision({ kind: "approval", question: "The CEO wants to hire Rae.", options: ["Hire", "Don't hire"], recommendedOption: "Hire", context: { type: "hire", proposal: {} } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.queryByText("Skills:", { exact: false })).toBeNull();
+  });
+
   it("shows the score, what it blocks and the recommendation, and answers with one click", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetch);
     const onAnswered = vi.fn();
-    render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
+    const { container } = render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
 
     expect(screen.getByRole("heading", { name: "App Co has used 92% of its $60 budget. Raise it?" })).toBeTruthy();
     expect(screen.getByLabelText("Score 52")).toBeTruthy();
+    expect(container.querySelector(".parts")).toBeTruthy();
     expect(screen.getByRole("link", { name: "APP-3 Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
     expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
     // The legend folds away behind one line (BOS-245), so it opens before it can be read.
@@ -232,7 +250,56 @@ describe("decision queue", () => {
 
   it("explains a paused agent's score", () => {
     render(<Decisions decisions={[decision({ score: 5, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 5 } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByText("Score 5: 5 for a paused agent + 0 for waiting.")).toBeTruthy();
+    expect(screen.getByText("Score 5: 5 for a paused agent.")).toBeTruthy();
+  });
+
+  it("shows no score line or number for a card scoring 0 (BOS-804)", () => {
+    const { container } = render(<Decisions decisions={[decision({ score: 0, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 0 }, reasons: ["Raised just now"], ageReason: "Raised just now", blocks: [] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.queryByText(/Score 0/)).toBeNull();
+    expect(screen.queryByText(/for waiting/)).toBeNull();
+    expect(screen.queryByLabelText(/^Score/)).toBeNull();
+    expect(container.querySelector(".parts")).toBeNull();
+  });
+
+  it("says how long ago a card was raised, not 'just now', once it is minutes old (BOS-804)", () => {
+    const eightMin = new Date(Date.now() - 8 * 60_000).toISOString();
+    // The server sends the age as a rank reason too ("Raised just now" under an hour): the card must not
+    // repeat it beside the "8 min ago" label, or it contradicts itself.
+    render(<Decisions decisions={[decision({ createdAt: eightMin, reasons: ["Raised just now"], ageReason: "Raised just now" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("8 min ago")).toBeTruthy();
+    expect(screen.queryByText("just now")).toBeNull();
+  });
+
+  it("drops the rank's age reason but keeps the others (BOS-804)", () => {
+    const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    render(<Decisions decisions={[decision({ createdAt: hours, reasons: ["Waiting 3 h", "Blocks 1 ticket"], ageReason: "Waiting 3 h" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("3h ago")).toBeTruthy();
+    expect(screen.queryByText("Waiting 3 h")).toBeNull();
+    expect(screen.getByText("Blocks 1 ticket")).toBeTruthy();
+  });
+
+  it("drops a reworded age reason by its mark, not its wording (BOS-869)", () => {
+    // The server now writes the age differently; the card follows the mark, so no second age shows.
+    const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    render(<Decisions decisions={[decision({ createdAt: hours, reasons: ["Open a while (about 3 hours)", "Blocks 1 ticket"], ageReason: "Open a while (about 3 hours)" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("3h ago")).toBeTruthy();
+    expect(screen.queryByText("Open a while (about 3 hours)")).toBeNull();
+    expect(screen.getByText("Blocks 1 ticket")).toBeTruthy();
+  });
+
+  it("shows the age in hours and days as the card gets older (BOS-804)", () => {
+    const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const { unmount } = render(<Decisions decisions={[decision({ createdAt: hours })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("3h ago")).toBeTruthy();
+    unmount();
+    const days = new Date(Date.now() - 5 * 86_400_000).toISOString();
+    render(<Decisions decisions={[decision({ createdAt: days })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("5d ago")).toBeTruthy();
+  });
+
+  it("still says 'just now' for a card raised in the last minute (BOS-804)", () => {
+    render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("just now")).toBeTruthy();
   });
 
   it("says why an answer was refused", async () => {
@@ -281,7 +348,7 @@ describe("decision queue", () => {
       />,
     );
     expect(screen.getByRole("link", { name: "Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
-    expect(screen.getByText("Last activity 14 minutes ago: Run npm test in_progress")).toBeTruthy();
+    expect(screen.getByText("Last activity 14 min ago: Run npm test in_progress")).toBeTruthy();
     expect(screen.getByText("Runner: offline since", { exact: false })).toBeTruthy();
     expect(screen.getByText("It is not waiting on you.")).toBeTruthy();
     expect(screen.getByText("Cancel run: stops it; message the agent on the task to start again.")).toBeTruthy();
@@ -289,6 +356,19 @@ describe("decision queue", () => {
     expect((await screen.findByRole("link", { name: "See the whole run" })).getAttribute("href")).toBe("#/runs/r1");
     expect(screen.queryByText("Step 1")).toBeNull();
     expect(screen.getByText("Step 6")).toBeTruthy();
+  });
+
+  it("gives a stalled run's age in one wording, the same as its Raised line (BOS-888)", () => {
+    // 119 minutes: the card used to say "for 119 minutes" and "119 min ago" is "1h ago" (age.ts floors).
+    const at = new Date(Date.now() - 119 * 60_000).toISOString();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ run: { id: "r1", endedAt: null }, items: [], next: 0, more: false }), { status: 200 })));
+    const evidence = { runId: "r1", agent: "CEO", ticketId: null, ticket: null, startedAt: at, lastEventAt: at, lastStep: null, runner: { connected: true, lastSeenAt: null }, waitingOnOwner: false };
+    render(<Decisions decisions={[decision({ kind: "stalled_run", createdAt: at, question: "CEO has sent nothing for 119 minutes.", options: ["Keep waiting", "Cancel run"], recommendedOption: "Keep waiting", evidence })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("Last activity 1h ago", { exact: false })).toBeTruthy();
+    // The Raised line is the same age in its long words, and both floor 119 minutes to the same hour.
+    expect(screen.getByText("Raised", { exact: false }).textContent).toContain("1h ago");
+    expect(screen.queryByText(/119 minutes ago/)).toBeNull();
+    expect(screen.queryByText(/2 hours ago/)).toBeNull();
   });
 
   it("says when a stalled run never gave a sign of life", () => {
@@ -428,16 +508,19 @@ describe("references in steps and folded text", () => {
 });
 
 describe("raised time", () => {
-  it("every card kind shows when it was raised, in the notifications format, from the original time", () => {
+  it("every card kind shows how long ago it was raised, with the exact time on hover (BOS-804)", () => {
     const earlier = "2026-10-20T09:30:00.000Z";
     const now = new Date().toISOString();
     const kinds = ["budget", "question", "permission", "approval"];
     const ds = kinds.map((kind, i) => decision({ id: `d${i}`, kind, createdAt: i === 0 ? earlier : now, question: `Card ${kind}` }));
     render(<Decisions decisions={ds} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    const times = Array.from(document.querySelectorAll("time")).map((t) => t.textContent);
+    const times = Array.from(document.querySelectorAll("time"));
     expect(times).toHaveLength(4);
-    expect(times[0]).toBe(when(earlier));
-    expect(times[1]).toBe(when(now));
+    // Old cards say how many days, as the Plan page does; the flat Notifications wording is on hover.
+    expect(times[0]!.textContent).toMatch(/^\d+d ago$/);
+    expect(times[0]!.getAttribute("title")).toBe(when(earlier));
+    expect(times[1]!.textContent).toBe("just now");
+    expect(times[1]!.getAttribute("title")).toBe(when(now));
   });
 
   it("Reassign on a stale-blocker card opens a picker of that company's agents, and won't send without a pick", async () => {
@@ -568,6 +651,69 @@ describe("write my own answer", () => {
     const box = open();
     fireEvent.change(box, { target: { value: "   " } });
     expect((screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("attaching a picture or file to my own answer (BOS-759)", () => {
+  const IMG = "11111111-2222-3333-4444-555555555555";
+  const openWithFetch = () => {
+    const d = decision({ kind: "question", question: "Which screen is wrong?", options: ["The list", "The detail"], recommendedOption: "The list", blocks: [{ ticketId: "t1", ref: "APP-3", title: "Checkout" }] });
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/companies/c1/images") {
+        const { name } = JSON.parse(String(init!.body)) as { name: string };
+        return new Response(JSON.stringify({ markdown: `![${name}](/api/ticket-images/${IMG})` }), { status: 201 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Write my own answer" }));
+    return { fetch, box: screen.getByLabelText("Your answer, in your own words") as HTMLTextAreaElement };
+  };
+  const send = () => screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement;
+
+  it("pastes a screenshot, shows it under the box, and sends its link on the end of the answer", async () => {
+    const { fetch, box } = openWithFetch();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeTruthy();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "wrong.png", { type: "image/png" });
+    fireEvent.paste(box, { clipboardData: { files: [file], getData: () => "" } });
+    await waitFor(() => expect(screen.getByRole("img", { name: "wrong.png" })).toBeTruthy());
+    expect(box.value).toBe("");
+    // Uploaded through the message box's own route, onto the ticket the card is about.
+    const [url, init] = fetch.mock.calls.find((c) => c[0] === "/api/companies/c1/images") as unknown as [string, RequestInit];
+    expect(url).toBe("/api/companies/c1/images");
+    expect(JSON.parse(String(init.body))).toMatchObject({ name: "wrong.png", ticketId: "t1" });
+    // An attachment alone is enough to send.
+    expect(send().disabled).toBe(false);
+    fireEvent.change(box, { target: { value: "It's the detail screen." } });
+    fireEvent.click(send());
+    await waitFor(() => expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(true));
+    const [, answer] = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer") as unknown as [string, RequestInit];
+    expect(JSON.parse(String(answer.body))).toEqual({ answer: `It's the detail screen.\n![wrong.png](/api/ticket-images/${IMG})`, custom: true });
+  });
+
+  it("a removed attachment is not sent", async () => {
+    const { fetch, box } = openWithFetch();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "wrong.png", { type: "image/png" });
+    fireEvent.paste(box, { clipboardData: { files: [file], getData: () => "" } });
+    await waitFor(() => expect(screen.getByRole("img", { name: "wrong.png" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.queryByRole("img")).toBeNull();
+    fireEvent.change(box, { target: { value: "Only text." } });
+    fireEvent.click(send());
+    await waitFor(() => expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(true));
+    const [, answer] = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer") as unknown as [string, RequestInit];
+    expect(JSON.parse(String(answer.body))).toEqual({ answer: "Only text.", custom: true });
+  });
+
+  it("Back to the options drops what was attached", async () => {
+    const { box } = openWithFetch();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "again.png", { type: "image/png" });
+    fireEvent.paste(box, { clipboardData: { files: [file], getData: () => "" } });
+    await waitFor(() => expect(screen.getByRole("img", { name: "again.png" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Back to the options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Write my own answer" }));
+    expect(screen.queryByRole("img")).toBeNull();
   });
 });
 

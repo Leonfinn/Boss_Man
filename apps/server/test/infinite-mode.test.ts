@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { costEvents, quotaSamples, runners, runs, wakes } from "../src/db/schema.js";
+import { costEvents, notifications, quotaSamples, runners, runs, wakes } from "../src/db/schema.js";
 import type { Limits } from "../src/services/scheduler.js";
 import type { SweepLimits } from "../src/services/sweeps.js";
 
@@ -17,11 +17,11 @@ afterEach(async () => {
   await ctx.close();
 });
 
-async function setup(opts: { limits?: Partial<Limits>; sweep?: Partial<SweepLimits> } = {}) {
+async function setup(opts: { limits?: Partial<Limits>; sweep?: Partial<SweepLimits>; fetch?: typeof globalThis.fetch } = {}) {
   const { db, close } = await openPglite();
   let offset = 0;
   const clock = () => new Date(Date.now() + offset);
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0, ...opts.limits }, sweepLimits: opts.sweep, workspaceRoot: "/ws", now: clock });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0, ...opts.limits }, sweepLimits: opts.sweep, workspaceRoot: "/ws", now: clock, fetch: opts.fetch });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -65,6 +65,43 @@ describe("Synthetic Infinite mode (BOS-279)", () => {
     const held = rows.find((w) => w.agentId === normal.id)!;
     expect(held.status).toBe("deferred");
     expect(held.notBefore).not.toBeNull();
+  });
+
+  // BOS-852: before this, Synthetic's reading never reached the hold, so only a hand-made sample (above) could hold a plan.
+  it("holds a normal agent when Synthetic itself reports the week's credits past the hold level, and never an infinite one", async () => {
+    const synthetic = { percentRemaining: 4 };
+    const fetch = (async (input: string | URL | Request) => {
+      if (String(input) !== "https://api.synthetic.new/v2/quotas") return new Response("{}", { status: 404 });
+      return new Response(JSON.stringify({ planWeeklyLimit: { nextRegenAt: new Date(Date.now() + 3_600_000).toISOString(), percentRemaining: synthetic.percentRemaining, nextRegenPercent: 2 } }), { status: 200 });
+    }) as typeof globalThis.fetch;
+    ctx = await setup({ limits: { agent: 5 }, fetch });
+    const { secret } = (await ctx.req("POST", "/api/secrets", { name: "Synthetic key", kind: "generic", value: "sk-syn-test" })).json() as { secret: { id: string } };
+    await ctx.req("POST", `/api/secrets/${secret.id}/grants`, { companyId: ctx.company.id, envName: "SYNTHETIC_API_KEY" });
+    const p = await ctx.plan();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { model: INF, fundingSourceId: p.id });
+    const normal = await ctx.worker("Normal");
+    await ctx.req("PATCH", `/api/agents/${normal.id}`, { fundingSourceId: p.id, model: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" });
+    await ctx.refreshSyntheticQuota(); // 96% used, past the default 95% hold
+
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    await ctx.req("POST", `/api/agents/${normal.id}/wake`, { priority: 2 });
+    await ctx.req("POST", "/api/scheduler/tick");
+    let rows = await ctx.db.select().from(wakes);
+    expect(rows.find((w) => w.agentId === ctx.ceo.id)!.status).toBe("launched");
+    expect(rows.find((w) => w.agentId === normal.id)!).toMatchObject({ status: "deferred", statusReason: expect.stringContaining("synthetic_weekly") });
+    // The plan also pays for a normal agent, so the owner is told routine work paused (it used to be skipped).
+    await ctx.scheduler.slow();
+    expect((await ctx.db.select().from(notifications)).filter((n) => /Routine work paused/.test(n.title))).toHaveLength(1);
+    // An infinite CEO can still run, so the alert ladder doesn't think it is stopped by the plan.
+    expect(await ctx.scheduler.ceoCanRun(ctx.company.id)).toBe(true);
+
+    // Credits come back below the hold level: the next reading lets the normal agent go.
+    synthetic.percentRemaining = 10;
+    ctx.advance(5 * 60_000);
+    await ctx.refreshSyntheticQuota();
+    await ctx.req("POST", "/api/scheduler/tick");
+    rows = await ctx.db.select().from(wakes);
+    expect(rows.find((w) => w.agentId === normal.id)!.status).toBe("launched");
   });
 
   it("gives infinite-mode runs their own background slots instead of the normal ones", async () => {

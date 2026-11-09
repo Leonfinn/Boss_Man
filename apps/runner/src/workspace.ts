@@ -53,6 +53,18 @@ function ownAdminDir(repo: string, dir: string, pointer: string | undefined): st
 const VERIFY_KILL_GRACE_MS = 2000;
 /** A review copy's install (BOS-693): seconds from a warm store; a cold one on a slow link can take a few minutes. */
 export const REVIEW_INSTALL_TIMEOUT_MS = 5 * 60_000;
+/**
+ * The run-start refresh's upstream fetch (BOS-853) holds the project's repo lock, so every other run start and merge
+ * for the project waits behind it. A hung connection (a stalled TCP link, dropped packets, a slow host) is cut off
+ * here, git's helpers and all, and the run starts with the copy it has.
+ */
+export const RUN_START_FETCH_TIMEOUT_MS = 60_000;
+/**
+ * Every other fetch from upstream (BOS-893): making a ticket's copy, a reviewer's copy, a review's base and the merge
+ * gate's migration check. A stalled connection would otherwise leave that step hanging until the run is killed, with
+ * nothing saying it was git. The fetch runs in its own process group, so its transport helper goes with it too.
+ */
+export const FETCH_TIMEOUT_MS = 60_000;
 
 /** Runs a command in its own process group, killed whole at the timeout; output kept to the last 4 KB. Never rejects on exit. */
 function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; timedOut: boolean; output: string }> {
@@ -112,6 +124,24 @@ export function gitAuthEnv(secrets: Record<string, string | undefined>): Record<
 export const branchFor = (ticketId: string) => `bossman/${ticketId}`;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Where a session's push to the upstream address is sent instead (BOS-853): a path that is no repo, so the push fails
+ * at once, with no network call and no login asked for. Boss Man merges a ticket's branch; copies never push.
+ */
+export const NO_PUSH_URL = "/bossman/copies-never-push--Boss-Man-merges-the-branch";
+
+/** Whether an address carries a user or password (https://user:token@host/...), which must never reach a session. */
+export function hasCredential(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return !!(u.username || u.password) && u.protocol !== "ssh:";
+  } catch {
+    return false;
+  }
+}
+
+const firstLine = (err: unknown) => String((err as { stderr?: string })?.stderr || (err as Error)?.message || err).trim().split("\n")[0]!.slice(0, 300);
 
 /** A ticket's copy that is its own clone (a .git folder), not a worktree of the shared repo (a .git file). */
 export const isClone = (dir: string) => statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
@@ -265,6 +295,12 @@ export class Workspaces {
    */
   fenceCloneGit = Workspaces.fenceCloneGitByDefault;
 
+  /** How long the run-start refresh's upstream fetch may take (BOS-853); see RUN_START_FETCH_TIMEOUT_MS. */
+  runStartFetchTimeoutMs = RUN_START_FETCH_TIMEOUT_MS;
+
+  /** How long every other upstream fetch may take (BOS-893); see FETCH_TIMEOUT_MS. */
+  fetchTimeoutMs = FETCH_TIMEOUT_MS;
+
   /**
    * Where a fenced merge check lives (BOS-323), set at start-up when the runner can fence: its own
    * home, shared by every fenced check (caches, harness state), and the pnpm store it installs from.
@@ -286,7 +322,7 @@ export class Workspaces {
    *   to that folder, so a planted .git/commondir can't send git elsewhere, and its own config is checked.
    * - neither: only `init`/`clone`, which make a repo; run from the repos folder, which is no repo at all.
    */
-  private async git(args: string[], opts: { cwd?: string; env?: Record<string, string>; repo?: string; reads?: string[] } = {}) {
+  private async git(args: string[], opts: { cwd?: string; env?: Record<string, string>; repo?: string; reads?: string[]; timeoutMs?: number } = {}) {
     const repo = opts.repo ?? opts.cwd;
     if (repo && !this.isRepoDir(repo)) throw new Error(`The runner's git only runs in one of its own repos, not ${repo} (BOS-332).`);
     let place: Record<string, string>;
@@ -316,6 +352,13 @@ export class Workspaces {
     // A clone is always fenced. So is any ticket folder of a runner that makes clones, whatever its .git now is: an agent that swaps the clone's .git for a pointer at a git dir it controls would otherwise move the runner's git out of the fence.
     if (this.fenceCloneGit && opts.cwd && opts.repo && (clone || this.newCopiesAreClones())) return this.fencedGit(args, opts.cwd, opts.repo, extra, opts.reads);
     const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(extra) };
+    if (opts.timeoutMs !== undefined) {
+      // Its own process group, so a timeout also ends git's transport helper (git-remote-https, ssh), not just git.
+      const r = await runGroup("git", args, opts.cwd ?? this.reposRoot(), env as NodeJS.ProcessEnv, opts.timeoutMs);
+      if (r.timedOut) throw new Error(`git ${args[0]} timed out after ${Math.round(opts.timeoutMs / 1000)} s and was stopped`);
+      if (r.code !== 0) throw new Error(`git ${args[0]} failed (exit ${r.code}): ${r.output.split("\n").filter(Boolean).pop() ?? ""}`);
+      return r.output;
+    }
     const { stdout } = await run("git", args, { cwd: opts.cwd ?? this.reposRoot(), env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
     return stdout.trim();
   }
@@ -389,9 +432,104 @@ export class Workspaces {
     return urls[0]!;
   }
 
-  /** Fetches origin's branches from the recorded address into refs/remotes/origin, as `git fetch origin` did. */
-  private async fetchOrigin(repo: string, auth: Record<string, string>) {
-    await this.git(["fetch", "--quiet", await this.remoteUrl(repo), "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo, env: auth });
+  /**
+   * Fetches origin's branches from the recorded address into refs/remotes/origin, as `git fetch origin` did.
+   * Always time-limited (BOS-893), so a stalled network can't hang the step: every caller says how long it may take.
+   */
+  private async fetchOrigin(repo: string, auth: Record<string, string>, timeoutMs: number, tags = false) {
+    await this.git(["fetch", "--quiet", await this.remoteUrl(repo), "+refs/heads/*:refs/remotes/origin/*", ...(tags ? ["+refs/tags/*:refs/tags/*"] : [])], { cwd: repo, env: auth, timeoutMs });
+    // Every fetch keeps the agents' view current; a failure there never fails the caller (a merge, a check).
+    await this.writeOriginView(repo).catch((err: unknown) => console.warn(`[runner] couldn't update ${repo}'s origin view (BOS-853): ${firstLine(err)}`));
+  }
+
+  /**
+   * The origin view (BOS-853): a small bare repo inside the shared repo whose branches are origin's branches as the
+   * shared repo last fetched them (its refs/remotes/origin/*) and whose tags are its tags. It borrows the shared repo's
+   * objects. An agent's `git fetch` in a copy is sent here (copyGitConfig), so it works with no git login and gets
+   * exactly what `git fetch origin` would, with the copy's usual refspec. It sits under the shared repo's root, which
+   * fenced sessions can read but not write, so a push into it fails there too. The daemon writes its few files itself
+   * and never runs git in it, so nothing an agent could plant in it is ever run by the runner.
+   */
+  originViewDir = (repo: string) => path.join(repo, "bossman-origin");
+
+  private async writeOriginView(repo: string) {
+    const view = this.originViewDir(repo);
+    const listing = await this.git(["for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes/origin/", "refs/tags/"], { cwd: repo });
+    const lines: string[] = [];
+    const heads = new Set<string>();
+    for (const line of listing.split("\n").filter(Boolean)) {
+      const [sha, ref] = line.split(" ") as [string, string];
+      if (ref === "refs/remotes/origin/HEAD") continue;
+      if (ref.startsWith("refs/remotes/origin/")) {
+        const name = ref.slice("refs/remotes/origin/".length);
+        heads.add(name);
+        lines.push(`${sha} refs/heads/${name}`);
+      } else lines.push(`${sha} ${ref}`);
+    }
+    const format = await this.git(["rev-parse", "--show-object-format"], { cwd: repo }).catch(() => "sha1");
+    const head = heads.has("main") ? "main" : heads.has("master") ? "master" : ([...heads].sort()[0] ?? "main");
+    // Built aside and swapped in, so a fetch reading it never sees a half-made one. Whatever was in the old folder
+    // (an unfenced agent's push, a planted hook) is dropped, not merged with.
+    const tmp = `${view}.new`;
+    const old = `${view}.old`;
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(old, { recursive: true, force: true });
+    mkdirSync(path.join(tmp, "objects", "info"), { recursive: true });
+    mkdirSync(path.join(tmp, "refs", "heads"), { recursive: true });
+    mkdirSync(path.join(tmp, "refs", "tags"), { recursive: true });
+    writeFileSync(path.join(tmp, "objects", "info", "alternates"), `${path.join(repo, "objects")}\n`);
+    writeFileSync(
+      path.join(tmp, "config"),
+      format === "sha1" ? "[core]\n\trepositoryformatversion = 0\n\tbare = true\n" : `[core]\n\trepositoryformatversion = 1\n\tbare = true\n[extensions]\n\tobjectformat = ${format}\n`,
+    );
+    writeFileSync(path.join(tmp, "HEAD"), `ref: refs/heads/${head}\n`);
+    // No traits in the header: git sorts and peels the refs itself as it reads them.
+    writeFileSync(path.join(tmp, "packed-refs"), `# pack-refs with: \n${lines.map((l) => `${l}\n`).join("")}`);
+    if (lstatSync(view, { throwIfNoEntry: false })) renameSync(view, old);
+    renameSync(tmp, view);
+    rmSync(old, { recursive: true, force: true });
+  }
+
+  /**
+   * Git config for a session working in one of the project's copies (BOS-853), as GIT_CONFIG_* pairs: the upstream
+   * address is read from the origin view instead, so `git fetch` needs no login, and a push to it goes nowhere. Only
+   * the session's own git reads these, never the runner's, and the copy's and shared repo's config files are untouched,
+   * so this covers clones, worktrees, review copies and copies made before the change alike. Nothing when the
+   * project has no recorded address yet, or the address carries a credential (which must never reach a session).
+   */
+  copyGitConfig(projectId: string): Array<[string, string]> {
+    const repo = this.repoDir(projectId);
+    const file = this.urlFile(repo);
+    if (!existsSync(file) || !existsSync(path.join(this.originViewDir(repo), "HEAD"))) return [];
+    const url = readFileSync(file, "utf8").trim();
+    if (!url || hasCredential(url)) return [];
+    return [
+      [`url.${this.originViewDir(repo)}.insteadOf`, url],
+      [`url.${NO_PUSH_URL}.pushInsteadOf`, url],
+    ];
+  }
+
+  /**
+   * At the start of a run in an existing copy (BOS-853): the shared repo is fetched from upstream (best effort: a
+   * failure is logged once and the copy keeps what it has), then a clone gets origin's branches and the tags from it.
+   * A worktree shares the shared repo's refs, so it is current already. The copy's own branch, HEAD, files and
+   * shared/* refs are never touched. Callers hold the repo lock, so the upstream fetch is cut off at
+   * runStartFetchTimeoutMs: a hung one would otherwise hold up every run start and merge in the project.
+   */
+  private async refreshCopy(projectId: string, repo: string, dir: string, auth: Record<string, string>) {
+    try {
+      await this.fetchOrigin(repo, auth, this.runStartFetchTimeoutMs, true);
+    } catch (err) {
+      console.warn(`[runner] couldn't refresh project ${projectId} from upstream at run start; the copy keeps the origin/main it has (BOS-853): ${firstLine(err)}`);
+      // The view may not exist yet (a copy made before BOS-853): it's made from what the shared repo has.
+      await this.writeOriginView(repo).catch(() => undefined);
+    }
+    if (!isClone(dir)) return;
+    const r = await this.git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", repo, "+refs/remotes/origin/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], { cwd: dir, repo }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    if (r) console.warn(`[runner] couldn't bring origin's branches into ticket copy ${dir} at run start (BOS-853): ${firstLine(r)}`);
   }
 
   /**
@@ -624,11 +762,12 @@ export class Workspaces {
           await this.gitCode(["worktree", "unlock", dir], { cwd: repo });
         }
         if (this.newCopiesAreClones() || isClone(dir)) await this.convertToClone(repo, dir);
+        await this.refreshCopy(spec.projectId, repo, dir, auth);
         const baseCommit = await this.git(["config", "--get", baseKey], { cwd: repo }).catch(() => "");
         return { path: dir, branch, baseCommit, created: false, restoredPatch: false };
       }
 
-      await this.fetchOrigin(repo, auth);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
       await this.git(["worktree", "prune"], { cwd: repo });
       // Branch reflogs are how the real start point of a branch moved onto another ticket's work is found later (BOS-687).
       await this.git(["config", "core.logAllRefUpdates", "true"], { cwd: repo });
@@ -717,7 +856,7 @@ export class Workspaces {
           await this.syncBranch(repo, dev, spec.ticketId);
         }
       } else {
-        await this.fetchOrigin(repo, auth);
+        await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
         const branch = branchFor(spec.ticketId);
         commit = await this.git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`], { cwd: repo }).catch(() =>
           this.git(["rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`], { cwd: repo }).catch(() => {
@@ -733,6 +872,8 @@ export class Workspaces {
         mkdirSync(path.dirname(dir), { recursive: true });
         await this.addCopy(repo, dir, commit, null);
       }
+      // A reviewer compares against origin/main too (BOS-853).
+      await this.refreshCopy(spec.projectId, repo, dir, auth);
       return { path: dir, commit };
     });
   }
@@ -904,7 +1045,7 @@ export class Workspaces {
   private async reviewBase(repo: string, dir: string, head: string, recorded: string, baseRef: string | undefined, secrets: Record<string, string | undefined>): Promise<{ base: string; tip?: string }> {
     if (!baseRef) return { base: recorded };
     try {
-      await this.fetchOrigin(repo, gitAuthEnv(secrets));
+      await this.fetchOrigin(repo, gitAuthEnv(secrets), this.fetchTimeoutMs);
       const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${baseRef}^{commit}`], { cwd: repo });
       // Where the branch split from main's current tip, however far main has moved since. Run in the
       // ticket's folder: a clone's own commits live in the clone, not the shared repo, which has only
@@ -1052,7 +1193,7 @@ export class Workspaces {
       if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       // Fetch from the recorded address (BOS-332), never `origin` from config, which an agent can repoint to take the token.
       // A failed fetch isn't fatal: the check then reads the refs it already has, as before.
-      await this.fetchOrigin(repo, auth).catch(() => undefined);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs).catch(() => undefined);
       return checkMigrations((args) => this.gitCode(args, { cwd: repo }), repo, { branch: branchFor(spec.ticketId), target, others });
     });
   }
@@ -1464,7 +1605,7 @@ export class Workspaces {
 
   /** Fetches, then tries the ticket's branch on top of origin's target with merge-tree. */
   private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>) {
-    await this.fetchOrigin(repo, auth);
+    await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
     const targetSha = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
     const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
     const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
@@ -1525,7 +1666,7 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
-      await this.fetchOrigin(repo, auth);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
       const head = await this.git(["rev-parse", "--verify", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
       // The caller checked this head; if the branch ref says otherwise, the answer would be about different code (BOS-734).
       if (expectHead && !head.startsWith(expectHead) && !expectHead.startsWith(head)) {
@@ -1597,7 +1738,7 @@ export class Workspaces {
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
       const dir = this.ticketDir(spec.ticketId);
       if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
-      await this.fetchOrigin(repo, auth);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
       // A failed rev-list mustn't look like "no commits": a safety gate that can't answer has to
       // say so, not report the branch clean (BOS-130).
       const refs = async (ref: string, firstParent = false) => {
@@ -1686,7 +1827,7 @@ export class Workspaces {
     const checks = await this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       await this.cloneIfMissing(spec, auth);
-      await this.fetchOrigin(repo, auth);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
       const ref = `refs/remotes/origin/${spec.baseRef}`;
       const files = (await this.git(["ls-tree", "--name-only", ref], { cwd: repo })).split("\n").filter(Boolean);
       const texts = new Map<string, string | null>();

@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
@@ -299,16 +299,18 @@ export function schedulerService(
 
   /**
    * The funding source ids Infinite mode runs are paid from (BOS-279): a Synthetic plan with an agent on an
-   * `infinite:` model. Those runs don't spend the plan's credits (checked on the live API), so the quota hold
-   * never applies to them, and the owner's "paused" note about the plan leaves them running.
+   * `infinite:` model and no other live agent. Those runs don't spend the plan's credits (checked on the live
+   * API), so the quota hold never applies to them and there is no "paused" note to send. A plan that also pays
+   * for a normal agent is held for that agent, so the owner is told (BOS-852: it used to be skipped).
    */
   async function infiniteSourceIds() {
     const rows = await db
-      .select({ id: fundingSources.id })
+      .select({ id: fundingSources.id, model: agents.model })
       .from(fundingSources)
       .innerJoin(agents, eq(agents.fundingSourceId, fundingSources.id))
-      .where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "synthetic"), isNull(agents.retiredAt), like(agents.model, "%/infinite:%")));
-    return new Set(rows.map((r) => r.id));
+      .where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "synthetic"), isNull(agents.retiredAt)));
+    const mixed = new Set(rows.filter((r) => !isInfiniteModel(r.model)).map((r) => r.id));
+    return new Set(rows.filter((r) => !mixed.has(r.id)).map((r) => r.id));
   }
 
   /** Whether a ticket the owner marked Urgent: the only tickets whose wakes pass the quota hold (BOS-227). */
@@ -1136,7 +1138,7 @@ export function schedulerService(
      * waits instead of landing on the owner.
      */
     async ceoCanRun(companyId: string): Promise<boolean> {
-      const [ceo] = await db.select({ id: agents.id, fundingSourceId: agents.fundingSourceId, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      const [ceo] = await db.select({ id: agents.id, fundingSourceId: agents.fundingSourceId, paused: agents.paused, model: agents.model }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo) return true;
       // A clean run since the last usage/auth failure says the account has room again.
       const since = new Date(now().getTime() - 24 * 3_600_000);
@@ -1149,7 +1151,8 @@ export function schedulerService(
       const lastFail = recent.findIndex((r) => /error:.*(usage limit|rate limit|weekly limit|5-hour limit|five-hour limit|quota|limit reached|authentication|unauthori[sz]ed|forbidden|identity verification|invalid api key|credit balance)/i.test(r.outcome ?? ""));
       if (lastFail !== -1 && !recent.slice(0, lastFail).some((r) => r.endedAt && !/^(error|lost|interrupted)/i.test(r.outcome ?? ""))) return false;
       // The account test the scheduler uses for a routine run: soft hold only, and no window at its limit.
-      if (ceo.fundingSourceId) {
+      // A CEO on an Infinite-mode model is never held by the quota (BOS-279), so the plan's reading doesn't stop it.
+      if (ceo.fundingSourceId && !isInfiniteModel(ceo.model)) {
         const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, ceo.fundingSourceId));
         if (source) {
           const samples = await latestQuotaWindows(source.id);
@@ -1270,7 +1273,7 @@ export function schedulerService(
       // A wake someone is waiting on, or one Boss Man scheduled, is never dropped for it and does
       // not use the allowance up (R68, BOS-272, DR-002).
       if (!base.ticketId && cls === "agent") {
-        const since = new Date(now().getTime() - 3_600_000);
+        const since = sinceHours(now());
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
           .from(wakes)
@@ -1452,7 +1455,7 @@ export function schedulerService(
         const [hour] = await db
           .select({ n: sql<number>`count(*)::int` })
           .from(nudges)
-          .where(and(eq(nudges.companyId, from.companyId), eq(nudges.dropped, false), gt(nudges.createdAt, new Date(now().getTime() - 60 * 60_000)), sm.length ? notInArray(nudges.fromAgentId, sm) : undefined));
+          .where(and(eq(nudges.companyId, from.companyId), eq(nudges.dropped, false), gt(nudges.createdAt, sinceHours(now())), sm.length ? notInArray(nudges.fromAgentId, sm) : undefined));
         if ((hour?.n ?? 0) >= cap) return { ok: false, error: `Your company has sent its limit of ${cap} nudges in the last hour, so this one wasn't sent. ${ticketId ? "Write it on the ticket with ticket_reply" : "Write it on a ticket with ticket_reply (create one if needed)"}; ${to.name} reads it there.` };
       }
       const since = new Date(now().getTime() - 10 * 60_000);
