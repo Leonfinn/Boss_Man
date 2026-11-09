@@ -842,7 +842,7 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
       expect(list[0]!.question).toContain("Developer");
       expect(list[0]!.question).toContain("Add rate limiting");
       expect(list[0]!.question).toContain("seven_day");
-      expect(list[0]!.question).toMatch(/held 1 h|held 61 min/);
+      expect(list[0]!.question).toContain("held 61 minutes");
       expect(list[0]!.question).toContain("No other account is set up");
       expect((await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "quota_held_alert")))).toHaveLength(1);
     });
