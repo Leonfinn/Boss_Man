@@ -311,6 +311,14 @@ describe("the review tool", () => {
     expect(await call(c.worker.id)).toBe("You can't review a ticket assigned to you.");
   });
 
+  it("names every open review's reviewer in the refusal (BOS-900)", async () => {
+    const c = await setup();
+    const t = await c.ticket({ state: "review", risk: "high" });
+    await requestReviews(c.db, await c.row(t.id));
+    const out = textOf(await (await c.mcp(c.other.id)).callTool({ name: "review", arguments: { action: "diff", ticketId: t.id } }));
+    expect(out).toBe("This ticket's code review is with Sam and its security review is with CEO. Nudge them, or ask the CEO to add you.");
+  });
+
   it("labels the reviewer with name and title, and sign-off decides between an owner decision and a merge", async () => {
     const c = await setup();
     const t = await c.ticket({ state: "review" });
