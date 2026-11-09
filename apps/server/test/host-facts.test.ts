@@ -128,6 +128,31 @@ describe("host facts settings record (BOS-419)", () => {
     await close();
   });
 
+  it("names the stopped containers and carries the code-host read's reason (BOS-986)", async () => {
+    // A real report from a deployer that names what is wrong: the containers that are down, and why the code-host read failed.
+    const dir = await withHost({
+      ...REPORT,
+      repo: { origin: "ssh", originHost: "github.com", embeddedCredentials: false, probe: "failed", probedAt: "2026-11-09T15:20:00Z", probeWhy: "ssh: connect to host <code host> port 22: Connection timed out" },
+      checks: {
+        container_status: { total: 18, notRunning: 2, unhealthy: 0, stopped: [{ name: "bm-worker-1", status: "exited", exit: 137, since: "2 hours ago" }, { name: "bm-cache-1", status: "exited", exit: "255", since: "5 minutes ago" }] },
+        restart_counts: { max: 0 },
+      },
+    });
+    const flat = flattenHostRecord((await hostFactsService({ dir }).read())!);
+    expect(flat["check.container_status.notRunning"]).toBe("2");
+    expect(flat["check.container_status.stopped"]).toBe("2"); // the raw count stays, for the folded list
+    expect(flat["check.container_status.stopped.names"]).toBe("bm-worker-1 (exited, exit 137, 2 hours ago), bm-cache-1 (exited, exit 255, 5 minutes ago)");
+    expect(flat["repo.probeWhy"]).toContain("Connection timed out");
+  });
+
+  it("still reads a report from an older deployer with no names and no reason (BOS-986)", async () => {
+    const dir = await withHost({ ...REPORT, checks: { container_status: { total: 18, notRunning: 2, unhealthy: 0 } } });
+    const flat = flattenHostRecord((await hostFactsService({ dir }).read())!);
+    expect(flat["check.container_status.notRunning"]).toBe("2");
+    expect(flat["check.container_status.stopped.names"]).toBeUndefined();
+    expect(flat["repo.probeWhy"]).toBe(""); // present as a value, so the panel can say "no reason was given"
+  });
+
   it("merges host add-on states with the server's own, keeping the worse", () => {
     const own = unknownAddons("test");
     own.ntfy = { state: "running", since: null, source: "x" };

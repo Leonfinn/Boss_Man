@@ -11,6 +11,7 @@ import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
 import { StarButton } from "./Agents";
 import { toBase64 } from "./Skills";
+import { CHECK_OK, CHECK_TROUBLE, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, type HostFactsView } from "../host-facts-display";
 import { clearDraft, readDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 
@@ -2688,18 +2689,6 @@ type Colour = { colour: "blue" | "green"; up: boolean; role: string | null; comm
 type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; colours: Colour[] };
 const ROLE_NOTE = { leader: "", standby: " (another copy is in charge; changes here are refused)", single: " (no leader lock)" };
 
-/** This copy of the server ("leader" runs the work, "standby" only serves reads; docs/09-self-deploy.md) and, when blue/green is on, both colours. */
-type HostFactsView = {
-  hostName: string | null;
-  reportedAt: string | null;
-  ownerFacts: string[];
-  facts: Record<string, { value: string; source: "host" | "owner"; at: string; conflict?: { confirmed: string; reported: string } }>;
-};
-const OWNER_FACT_LABELS: Record<string, string> = {
-  "network.publicAddress": "Address you reach Boss Man at from outside",
-  "repo.deployKeyAdded": "Deploy key added to the code host (yes or no)",
-};
-
 /** Kept in the browser (BOS-924): the owner folds the reported facts away, and the choice stays as they left it. */
 const HOST_FACTS_OPEN_KEY = "bossman.hostFacts.open";
 const readHostFactsOpen = () => {
@@ -2710,13 +2699,10 @@ const readHostFactsOpen = () => {
   }
 };
 
-/** A check fact that is a count of things wrong or of something that went wrong: a non-zero value is a problem.
- * These keep their plain meaning, so `check.restart_counts.max` of 1 is not read as a failure. */
-const CHECK_TROUBLE = /^(unhealthy|notRunning|stale|ageSeconds|lastExitCode)$/;
-/** The host's own answer to "can Boss Man reach the code host": any value but "ok" is a failing check. */
-const CHECK_OK = /(^|\.)(probe|health)$/;
 /** An add-on state saying it is not up (host-deployer.sh's states: running, stopped, needs_login, not installed). */
 const ADDON_RUNNING = "running";
+/** An add-on's name as the owner knows it (BOS-986), for the "isn't running" line. */
+const ADDON_NAME: Record<string, string> = { tailscale: "private-network", ntfy: "phone-notification", penpot: "design-tool" };
 
 /**
  * What is wrong with the reported facts, for the folded header, so folding never hides a problem (BOS-924):
@@ -2728,7 +2714,7 @@ function reportedProblems(d: HostFactsView): { missing: string[]; failing: strin
   const addonsDown: string[] = [];
   for (const [k, f] of Object.entries(d.facts)) {
     const v = f.value.trim();
-    if (!v) missing.push(k);
+    if (!v) { if (!missing.includes(k)) missing.push(k); }
     else if (k.startsWith("addon.") && v.toLowerCase() !== ADDON_RUNNING) addonsDown.push(k.slice("addon.".length));
     else if (k.startsWith("check.")) {
       const last = k.slice(k.lastIndexOf(".") + 1);
@@ -2740,7 +2726,7 @@ function reportedProblems(d: HostFactsView): { missing: string[]; failing: strin
       if (wrong) failing.push(k);
     }
   }
-  for (const k of d.ownerFacts) if (!d.facts[k]?.value.trim()) missing.push(OWNER_FACT_LABELS[k] ?? k);
+  for (const k of d.ownerFacts) if (!d.facts[k]?.value.trim() && !missing.includes(k)) missing.push(k);
   return { missing, failing, addonsDown };
 }
 
@@ -2764,6 +2750,13 @@ export function ThisHost() {
   const keys = Object.keys(d.facts).sort();
   const problems = reportedProblems(d);
   const trouble = problemLine(problems);
+  // BOS-986: name what is wrong, not the raw key. The stopped containers come from the host as a list; its reason the
+  // code-host read failed comes with the probe result. Both are plain text the host wrote, shown as text only.
+  const stopped = (d.facts[STOPPED_CONTAINERS_KEY]?.value ?? "")
+    .split(", ")
+    .filter(Boolean);
+  const probeWhy = d.facts["repo.probeWhy"]?.value?.trim() ?? "";
+  const problemTexts = [...problems.missing, ...problems.failing].map((k) => ({ key: k, text: problemText(k, d, stopped, probeWhy) }));
   const toggle = () => {
     const next = !open;
     setOpen(next);
@@ -2800,9 +2793,19 @@ export function ThisHost() {
           </button>
           <div id="host-facts-body" hidden={!open} style={open ? undefined : { display: "none" }}>
             {trouble && (
-              <p className="muted" data-testid="host-facts-problem-detail" style={{ fontSize: 13 }}>
-                Worth a look: {[...problems.missing, ...problems.failing, ...problems.addonsDown.map((a) => `addon.${a}`)].join(", ")}.
-              </p>
+              <div className="muted" data-testid="host-facts-problem-detail" style={{ fontSize: 13 }}>
+                <p style={{ marginTop: 0, marginBottom: 4 }}>Worth a look. Raw keys are in the list below.</p>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {problemTexts.map((p) => (
+                    <li key={p.key}>{p.text}</li>
+                  ))}
+                  {problems.addonsDown.map((a) => (
+                    <li key={`addon.${a}`}>
+                      The {ADDON_NAME[a] ?? a} add-on isn't running, so whatever uses it can't be reached. Turn it back on for this host and it starts again; its own log says why it stopped.
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
             <dl data-testid="host-facts" className="host-facts-list">
               {keys.map((k) => {
