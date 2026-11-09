@@ -126,7 +126,7 @@ describe("the last post on the ticket", () => {
     render(<Ticket id="t1" companies={[company]} />);
     await screen.findByText("Last activity");
     expect(screen.getByText("Last post")).toBeTruthy();
-    expect(screen.getByText("12m ago")).toBeTruthy();
+    expect(screen.getByText("12 min ago")).toBeTruthy();
   });
 
   it("has nothing to show when no agent has posted", async () => {

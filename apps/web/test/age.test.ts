@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ageLabel, ageShort, raisedAgo } from "../src/age";
+import { ago } from "../src/pages/Dashboard";
 
 describe("card age (BOS-869)", () => {
   it("says the same words the Decisions and Plan pages show", () => {
@@ -37,5 +38,15 @@ describe("short age for card footers (BOS-888)", () => {
       const unit = (s: string) => /\d+/.exec(s)?.[0] ?? "now";
       expect(unit(ageShort(ms)), `${ms} ms`).toBe(unit(ageLabel(ms)));
     }
+  });
+});
+
+describe("the Dashboard's 'how long ago' (BOS-888)", () => {
+  it("uses age.ts's words and floors, so the Dashboard and Decisions agree", () => {
+    const now = new Date("2026-11-09T12:00:00Z").getTime();
+    // 10m 40s: the old helper rounded to "11m ago", age.ts floors to "10 min ago".
+    const iso = new Date(now - (10 * 60 + 40) * 1_000).toISOString();
+    expect(ago(iso, now)).toBe("10 min ago");
+    expect(ago("2026-11-09T11:59:40Z", now)).toBe("just now");
   });
 });
