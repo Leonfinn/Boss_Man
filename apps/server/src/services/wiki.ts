@@ -25,6 +25,7 @@ export const HISTORY_PAGE_MAX = 500;
 // with no version of the text before it — the 4 Nov release-log state, where the wipe was not
 // undoable. Every write in this process queues here, so one save's read, version and page change
 // finish before the next starts. Module-level: a process-wide lock, not per-call state.
+// shortcut: a lock in this process only, lost on restart harmlessly: a restart has no write in flight, and the DB write + version insert are ordered per save; it does not span two servers (an older build beside this one can still interleave, hence BOS-496's DB-side fix).
 let writeQueue: Promise<unknown> = Promise.resolve();
 
 /**
