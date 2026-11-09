@@ -8,7 +8,7 @@ import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
-import { SUPERSEDED_REASON } from "../src/services/check-queue.js";
+import { SUPERSEDED_TEXT } from "../src/services/check-queue.js";
 import { activity, checkJobs, projects, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
 import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, INFRA_RETRY_ATTEMPTS, LOCK_RETRY_ATTEMPTS, setInfraRetryBase, setLockRetryBase, landingText } from "../src/services/review.js";
 import { supersedeSignoffs } from "../src/services/decisions.js";
@@ -365,7 +365,7 @@ describe("server-owned check queue (BOS-316)", () => {
       const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
       await on(c);
       const res = approve(c);
-      await finishJob(c, { state: "cancelled", reason: SUPERSEDED_REASON });
+      await finishJob(c, { state: "cancelled", reason: SUPERSEDED_TEXT });
       expect((await res).json()).toMatchObject({ outcome: "check_stuck" });
       expect(await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${c.ticket.id}`))).toHaveLength(0);
       expect((await state(c)).systemState).toBe("review");
