@@ -48,6 +48,7 @@ import {
 import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
+import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { type CardLint, type HostFacts, type SelfDeployFacts, NOT_OVERRIDABLE, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
@@ -273,7 +274,6 @@ export const LEAVE_BUDGET = "Leave it";
 export const APPROVE_PLAN = "Approve plan";
 export const KEEP_PLANNING = "Keep planning";
 export const APPROVE_MERGE = "Approve and merge";
-export const SEND_IT_BACK = "Send it back";
 /** The stuck-review card's third choice (BOS-422): offered when the reviewers fail only checks that need the live work. */
 export const MOVE_AFTER_MERGE = "Move these checks to after the merge";
 export const CHECK_AGAIN = "Run the check again";
@@ -1040,7 +1040,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
     const open = deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
     if (open) return null;
-    const [t] = await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, ticketId), eq(tickets.systemState, "blocked"))).returning();
+    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "what it waited on is resolved", now: now() });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
   }
@@ -2993,17 +2993,22 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const asked = settled && d.question.length > 120 ? `${d.question.slice(0, 119)}…` : d.question;
       await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
+      // Linked tickets the card never moved (BOS-919: one in review keeps its state): not released, but still
+      // the ticket the answer is about, so the asker is woken on it and its assignee hears the answer too.
+      let kept: Array<typeof tickets.$inferSelect> = [];
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         for (const f of freed) {
           const t = await releaseIfFree(f.ticketId, false);
           if (t) unblocked.push(t);
         }
+        const rest = [...new Set(freed.map((f) => f.ticketId))].filter((tid) => !unblocked.some((u) => u.id === tid));
+        if (rest.length) kept = await db.select().from(tickets).where(and(inArray(tickets.id, rest), eq(tickets.systemState, "review")));
       }
       // The agent that asked is woken with the answer (on the ticket it blocked, if any).
       // A rule proposal answered with a button needs nothing more from the CEO.
       if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords) && !(ctx.type === "lesson_replace" && ownWords)) {
-        const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
+        const onTicket = [...unblocked, ...kept].find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0] ?? kept[0];
         // An answer in the owner's own words can carry pictures or files (BOS-759): say so plainly, so
         // the agent opens them with open_attachment instead of reading the links as part of the answer.
         const pictures = ownWords && ATTACHMENT_LINK.test(answer) ? " It includes picture(s) or file(s) they attached; open each with open_attachment." : "";
@@ -3011,6 +3016,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
+      }
+      for (const t of kept) {
+        if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `The card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });
       }
       return { id, answer, delivered, endedHere };
     },

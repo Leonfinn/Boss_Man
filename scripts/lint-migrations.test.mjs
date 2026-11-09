@@ -49,6 +49,18 @@ test("in-memory state check wants a note", () => {
   assert.equal(findUnannotated("f.ts", "  const out = new Map(); // not state: built per call").length, 0);
 });
 
+test("in-memory state check also flags a top-level let (BOS-907)", () => {
+  assert.equal(findUnannotated("f.ts", "let count = 0;").length, 1);
+  assert.equal(findUnannotated("f.ts", "export let BASE = 60_000;").length, 1);
+  assert.equal(findUnannotated("f.ts", "let resumed: Date | null = null;").length, 1);
+  assert.equal(findUnannotated("f.ts", "  let local = 0;").length, 0); // inside a function or factory
+  assert.equal(findUnannotated("f.ts", "// shortcut: per process\nlet count = 0;").length, 0);
+  assert.equal(findUnannotated("f.ts", "let count = 0;\nlet other = 1;").length, 2);
+  assert.equal(findUnannotated("f.ts", "let count = 0; // lost on restart, harmless because it is rebuilt on demand").length, 0);
+  // A const stays a declaration the check only looks at when it holds a Map/Set.
+  assert.equal(findUnannotated("f.ts", "const BASE = 60_000;").length, 0);
+});
+
 test("journal: flags a when value not later than the entry before it", () => {
   const e = (idx, tag, when) => ({ idx, tag, when });
   assert.deepEqual(lintJournal({ entries: [e(0, "0000_a", 10), e(1, "0001_b", 20)] }), []);

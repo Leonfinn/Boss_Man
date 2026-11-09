@@ -162,6 +162,16 @@ describe("runners through the launcher (R55)", () => {
     expect(toolServerAddress("http://[fd00::1]/mcp")).toBeNull();
   });
 
+  it("answers a bad repo address with a neutral example address, not the owner's own (BOS-906)", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+    const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
+    const res = await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "ftp://files.example.org/o/r.git" });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.stringify(res.json())).toContain("http://192.0.2.10:3003/you/repo.git");
+    expect(JSON.stringify(res.json())).not.toContain("192.168.68.67");
+  });
+
   it("lists the addresses Boss Man opens by itself, per company, with what each one is (BOS-791)", async () => {
     // A made-up DNS: `repointed.example.net` now resolves to a private address, every other name to a public one.
     const c = (ctx = await setup({ lookup: fakeLookup({ "repointed.example.net": ["172.18.0.2"] }) }));

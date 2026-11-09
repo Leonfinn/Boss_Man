@@ -83,7 +83,7 @@ export function projectRoutes(
           .string()
           .trim()
           .max(500)
-          .refine(repoUrlAllowed, "Give an https://, ssh://, git@ or local path address. Plain http:// works for a LAN address such as http://192.168.68.67:3003/you/repo.git.")
+          .refine(repoUrlAllowed, "Give an https://, ssh://, git@ or local path address. Plain http:// works for a LAN address such as http://192.0.2.10:3003/you/repo.git.")
           .refine((u) => !findCredential(u), "The address looks like it contains a credential. Grant a GIT_TOKEN secret to the company instead.")
           .nullable(),
         defaultBranch: z.string().trim().min(1).max(200),

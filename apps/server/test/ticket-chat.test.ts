@@ -43,8 +43,8 @@ async function setup() {
     }
     throw new Error("the run never ended");
   };
-  const mcp = async (runId: string) => {
-    const token = await issueRunToken(db, { companyId: company.id, agentId: worker.id, runId });
+  const mcp = async (runId: string, agentId: string = worker.id) => {
+    const token = await issueRunToken(db, { companyId: company.id, agentId, runId });
     const c = new Client({ name: "t", version: "0" });
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
@@ -169,6 +169,32 @@ describe("ticket conversation (R65)", () => {
     // Once an open decision blocks this ticket, the reply needs no hint.
     await client.callTool({ name: "raise_decision", arguments: { question: "Apply the deploy by hand?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: t.id, triedFirst: "I tried to deploy from here, but the change touches deployment files the host refuses." } });
     expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please run scripts/deploy.sh on the server, then let me know." } }))).toBe("Posted on the ticket's conversation.");
+    await client.close();
+  });
+
+  it("holds a CEO reply that asks the owner to act until a card covers it (BOS-901)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Rule order", assigneeAgentId: c.ceo.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId, c.ceo.id);
+    const posted = async () => (await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).length;
+    const ask = "Please run scripts/deploy.sh on the server, then let me know.";
+    // A status report posts as before.
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "The rule order is fixed." } }))).toBe("Posted on the ticket's conversation.");
+    expect(await posted()).toBe(1);
+    // An owner ask with no card is refused and not posted.
+    const held = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: ask } });
+    expect(held).toMatchObject({ isError: true });
+    expect(textOf(held)).toContain("raise_decision");
+    expect(textOf(held)).toContain("notAnAsk");
+    expect(await posted()).toBe(1);
+    // notAnAsk posts it anyway.
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: ask, notAnAsk: true } }))).toContain("Posted on the ticket's conversation.");
+    expect(await posted()).toBe(2);
+    // With an open card blocking the ticket it posts with no flag.
+    await client.callTool({ name: "raise_decision", arguments: { question: "Apply the deploy by hand?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: t.id, triedFirst: "I tried to deploy from here, but the change touches deployment files the host refuses." } });
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: ask } }))).toBe("Posted on the ticket's conversation.");
+    expect(await posted()).toBe(3);
     await client.close();
   });
 
