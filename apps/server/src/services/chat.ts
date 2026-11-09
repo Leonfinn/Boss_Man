@@ -10,7 +10,7 @@ import { agentIdentity, BUILT_IN_RULES } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, ownerChatMessages, projects, runs, tickets, wakes } from "../db/schema.js";
 import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
-import { forgetRunTrace, runTrace } from "../mcp.js";
+import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
 
 export const CHAT_REASON = "owner_chat";
