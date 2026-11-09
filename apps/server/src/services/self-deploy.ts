@@ -18,7 +18,6 @@ import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { imageContains, mergeCommitOrder, runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
-import { allMergeOrder } from "./go-live-wait.js";
 import type { BlueGreen } from "./bluegreen.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
@@ -205,25 +204,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   }
 
   /**
-   * BOS-1037: which of the host's report and this process's own commit is what runs. A deploy leaves the host's
-   * report ahead of the build (the old process is still up while status.json names the new commit); a hand-apply
-   * leaves the build ahead of the host's stale report. In both cases the newer commit (by merge order) is the one
-   * that runs. When the two can't be placed (one not a known merge), or only one is usable, the host's report wins,
-   * as it did before, since it is what the deployer last saw.
+   * BOS-1037: what is really live. This process's own commit is the ground truth for what runs: a deploy restarts
+   * into the new commit (a single server) or switches to the new colour's process, which is already the new commit
+   * (blue/green), so the build is never behind reality. A hand-apply leaves the host's own files stale (its
+   * status.json describes the last deployer run, an older commit), which is why the build has to win there. With no
+   * build commit (a `dev` build, or a test that drives the pass directly), the host's report is used, as before.
    */
-  async function newestRunning(reported: string, build: string): Promise<string> {
+  function newestRunning(reported: string, build: string): string {
     const isSha = (x: string) => /^[0-9a-f]{40}$/i.test(x);
-    if (!isSha(reported) || !isSha(build) || reported.toLowerCase() === build.toLowerCase()) return reported || build;
-    const want = reported.toLowerCase();
-    const built = build.toLowerCase();
-    const rows = await db.select({ id: companies.id }).from(companies);
-    for (const c of rows) {
-      const order = await allMergeOrder(db, c.id);
-      const rAt = order.indexOf(want);
-      const bAt = order.indexOf(built);
-      if (rAt >= 0 && bAt >= 0) return bAt > rAt ? build : reported;
-    }
-    return reported;
+    if (isSha(build)) return build;
+    return isSha(reported) ? reported : "";
   }
 
   /**
@@ -1104,7 +1094,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (!deps.releaseLog) return 0;
       const reported = a?.deployed || ((s && (s.result === "deployed" || s.result === "rolled_back") && s.to_commit) || "") || "";
       const build = process.env.BOSSMAN_COMMIT || "";
-      const live = await newestRunning(reported, build);
+      const live = newestRunning(reported, build);
       if (!z.string().regex(/^[0-9a-f]{40}$/i).safeParse(live).success) return 0;
       const rows = await db.select({ id: companies.id }).from(companies);
       for (const c of rows) await deps.releaseLog.note(c.id, live);
