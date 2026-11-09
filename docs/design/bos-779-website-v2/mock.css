@@ -171,6 +171,10 @@ a { color: inherit; text-underline-offset: 3px; }
 .install .need { margin-top: 32px; padding: 0; list-style: none; display: grid; gap: 14px; }
 .install .need li { padding-left: 34px; position: relative; }
 .install .need li::before { content: ""; position: absolute; left: 2px; top: 6px; width: 8px; height: 14px; border: solid var(--amber-deep); border-width: 0 3px 3px 0; transform: rotate(45deg); }
+.install .why { margin-top: 32px; padding: 20px 24px; border-left: 4px solid var(--amber); background: var(--paper); border-radius: 0 12px 12px 0; font-size: 16px; color: var(--ink-2); }
+.install .why h3 { font-size: 18px; color: var(--ink); margin-bottom: 6px; }
+.install .why p + p { margin-top: 10px; }
+.install .why .beta { color: var(--ink); }
 .install .actions { margin-top: 40px; display: flex; gap: 16px 28px; flex-wrap: wrap; align-items: center; }
 /* Boss Man on the corner of the steps card (the owner's preferred spot), blended the same way as the hero drawing,
    which the owner preferred to a round badge: no white sticker halo (his own outline is the edge), a soft amber
