@@ -1071,7 +1071,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
 
     /** When the current server update's standby window (its trial) ends, if one is running. */
     async trialUntil(): Promise<string | null> {
-      return (await inTrial())?.after ?? null;
+      return (await trialState(await available()))?.endsAt ?? null;
     },
 
     /** Whether a runner update card is open (the drain hands over to it after a server update). */
