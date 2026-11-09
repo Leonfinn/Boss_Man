@@ -6,8 +6,8 @@ import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { companies, notifications, settings } from "../src/db/schema.js";
-import { allowsPrivate, gitHostAddress, slugify, toolServerAddress } from "../src/services/launcher.js";
+import { companies, notifications, projects, settings } from "../src/db/schema.js";
+import { allowsPrivate, gitHostAddress, isLanHost, slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -184,8 +184,17 @@ describe("runners through the launcher (R55)", () => {
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
     await vi.waitFor(() => expect(last()).toEqual({ allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] }));
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "https://github.com/o/r.git" });
-    // A git host is the owner's own setting, so it is trusted for private however its name resolves now.
-    await vi.waitFor(() => expect(last()).toEqual({ allow: ["github.com:443"], private: ["github.com:443"] }));
+    // A public git name is allowed but never trusted for private: its DNS could be pointed at the stack later (BOS-777).
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["github.com:443"], private: [] }));
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "https://git.example.org/o/r.git" });
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["git.example.org:443"], private: [] }));
+    // A LAN-style name, ssh scp-style too, is still the owner's LAN host.
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "git@git.lan:o/r.git" });
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["git.lan:22"], private: ["git.lan:22"] }));
+    // A row saved before BOS-777 has the flag on for a public name; it is still not trusted.
+    await c.db.update(projects).set({ repoUrl: "https://git.example.org/o/r.git", allowPrivate: true }).where(eq(projects.id, p.id));
+    await c.launcher.syncAllow(company.id);
+    expect(last()).toEqual({ allow: ["git.example.org:443"], private: [] });
     expect(gitHostAddress("http://192.168.68.67:3003/o/r.git")).toBe("192.168.68.67:3003");
     expect(gitHostAddress("git@git.lan:o/r.git")).toBe("git.lan:22");
     expect(gitHostAddress("ssh://git@h.lan:2222/o/r")).toBe("h.lan:2222");
@@ -265,6 +274,13 @@ describe("runners through the launcher (R55)", () => {
     expect((await c.req("POST", `/api/companies/${company.id}/runner/launch`)).statusCode).toBe(409);
     expect((await c.req("GET", `/api/companies/${company.id}/runner`)).json()).toEqual({ registered: false, launcher: null });
     expect(c.fake.calls).toEqual([]);
+  });
+});
+
+describe("isLanHost (BOS-777): whether a git host is trusted for private addresses, with no DNS", () => {
+  it("trusts private IP literals and LAN-style names only", () => {
+    for (const u of ["http://192.168.68.67:3003/o/r.git", "https://10.0.0.5/o/r", "git@git.lan:o/r.git", "ssh://git@h.local:2222/o/r", "http://gitea/o/r", "https://git.corp.internal/o/r", "http://nas.home/o/r"]) expect(isLanHost(u), u).toBe(true);
+    for (const u of ["https://git.example.org/o/r.git", "https://github.com/o/r.git", "git@github.com:o/r.git", "http://8.8.8.8/o/r", "https://lan.example.org/o/r", "/srv/repos/r", "not a url"]) expect(isLanHost(u), u).toBe(false);
   });
 });
 

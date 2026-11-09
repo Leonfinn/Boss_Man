@@ -140,6 +140,17 @@ export async function allowsPrivate(url: string, lookup: HostLookup = systemLook
   }
 }
 
+/**
+ * Whether a git remote is a LAN host by its address alone: a private IP literal or a LAN-style name (the rule reachesStack
+ * uses), with no DNS. A git host is trusted for private addresses only then, because whoever runs a public name's DNS (an
+ * expired domain, a small forge) could point it at the stack network later (BOS-777). An ssh git@host:path remote counts too.
+ */
+export function isLanHost(url: string): boolean {
+  const host = guardHost(url);
+  if (host === null) return false;
+  return isIP(host) ? isPrivateAddress(host) : STACK_LIKE_NAME(host);
+}
+
 /** The launcher's own check for an allow entry (apps/launcher/src/spec.ts): one bad entry makes it refuse the whole list, so never send one it would refuse. */
 const LAUNCHER_ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
 /** The host:port the guard would be told to allow for a tool server's URL, or null. */
@@ -147,7 +158,7 @@ export const sendableAddress = (url: string): string | null => sendable(toolServ
 
 /**
  * One host:port the guard may open. `private` means the owner let it resolve to private addresses on purpose (an import tick,
- * a tool server they added on the LAN, or a git host they set), so the guard keeps private addresses for it (BOS-708).
+ * a tool server they added on the LAN, or a LAN git host they set), so the guard keeps private addresses for it (BOS-708).
  */
 export type AllowEntry = { addr: string; private: boolean };
 function sendable(addr: string | null): string | null {
@@ -230,7 +241,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
 
   /**
    * The company's tool servers and git remotes as host:port, each saying whether the owner allowed it on a private address.
-   * A tool server the owner marked (import tick or a LAN host they added) and every git host they set are trusted for private;
+   * A tool server the owner marked (import tick or a LAN host they added) and a LAN git host they set are trusted for private;
    * anything else is not, so the guard drops a private address a name may resolve to later (BOS-708).
    */
   async function allowFor(companyId: string): Promise<AllowEntry[]> {
@@ -241,7 +252,8 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     const repos = await db.select({ url: projects.repoUrl, allowPrivate: projects.allowPrivate }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
     const entries = [
       ...rows.map((r) => ({ addr: sendable(toolServerAddress(r.url)), private: r.allowPrivate })),
-      ...repos.map((r) => ({ addr: gitHostAddress(r.url!), private: r.allowPrivate })),
+      // A public git name is never trusted, even with the project's flag on (rows saved before BOS-777 have it on for any host).
+      ...repos.map((r) => ({ addr: gitHostAddress(r.url!), private: r.allowPrivate && isLanHost(r.url!) })),
     ];
     // Same host:port twice: keep it trusted if either source trusts it.
     const byAddr = new Map<string, boolean>();
