@@ -13,11 +13,12 @@ import { companies, decisions, owners, settings, tickets } from "../db/schema.js
 import { record } from "./activity.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
-import { leaveClosedNotice, liveNotice, newerNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
+import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
-import { getHold } from "./maintenance.js";
+import { getHold, runnerCardHold } from "./maintenance.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { imageContains, mergeCommitOrder, runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
+import type { BlueGreen } from "./bluegreen.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
@@ -96,7 +97,7 @@ const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed:
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -291,6 +292,99 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       .select()
       .from(decisions)
       .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'self_deploy'`, sql`${decisions.context}->>'target' = ${target}`));
+  }
+
+  /** The plain audit reason on a runner-update card a newer one replaced (BOS-1010, the owner's rule of 9 Nov). */
+  const replacedWhy = (commit: string) => `Replaced by a newer runner update for ${short(commit)}`;
+
+  /**
+   * The one place a runner-update card is raised (BOS-1010). Every path (the trial end, the BOS-947 replacement,
+   * the Settings button, a retry) goes through here, so no path can skip the two rules that hold for all of them:
+   *  1. Never more than one open runner card, and it names the version Boss Man runs now. Every earlier open runner
+   *     card, for this commit or another, is withdrawn first, in the same step, with a plain audit reason (the
+   *     owner's rule of 9 Nov: a later card withdraws every earlier one).
+   *  2. The card is only raised when it can be acted on now: not while a server deploy is approved or waiting for
+   *     the host, running, in its trial, or in a deploy rate-limit wait. Until then it is held, and released by the
+   *     next pass once those clear. `askAnyway` is the Settings button: the owner pressed it, so the card is raised
+   *     either way (it says the same as the panel when it can't run); only the automatic paths hold.
+   * Returns the problem that stops it being raised now (`blocked`), or the new card.
+   */
+  async function raiseRunner(commit: string, fromCommit: string, a: Available | null, opts: { again?: boolean; requested?: boolean; askAnyway?: boolean } = {}): Promise<{ blocked: string } | { row: typeof decisions.$inferSelect } | null> {
+    const companyId = await homeCompany();
+    if (!companyId) return null;
+    const blocker = await runnerBlocker(a);
+    if (blocker && !opts.askAnyway) {
+      deps.log?.(`self-deploy: runner update for ${short(commit)} held; ${blocker}`);
+      return { blocked: blocker };
+    }
+    const row = await raise("runner", commit, fromCommit, a, opts.again ?? false, opts.requested ?? false);
+    if (!row) return null;
+    // Rule 1 (the owner's rule of 9 Nov): the new card replaces every earlier open runner card, in the same step.
+    await withdrawOtherRunnerCards(row.id, commit);
+    return { row };
+  }
+
+  /** Withdraws every open runner card but `keepId`, with the plain "replaced by a newer one" reason (BOS-1010 rule 7). */
+  async function withdrawOtherRunnerCards(keepId: string, commit: string) {
+    const companyId = await homeCompany();
+    if (!companyId) return;
+    const why = replacedWhy(commit);
+    const now = new Date();
+    for (const d of await openFor("runner")) {
+      if (d.id === keepId) continue;
+      // The owner's own button press is left alone: it is their explicit ask, not a stale automatic card (BOS-764 pattern).
+      if ((d.context as SelfDeployContext).requested || /^self-deploy:runner:[0-9a-f]+:[0-9a-f]{6}$/.test(d.dedupeKey ?? "")) continue;
+      await withdrawOpen(d.id, replacedNotice({ commit, text: why, now }));
+      await record(db, { companyId, kind: "decision_withdrawn", summary: why, at: now });
+    }
+  }
+
+  /**
+   * Clears leftover duplicates already on the owner's queue when this ships (BOS-1010 rule 7): if more than one runner
+   * card is open, keep the one naming the live version (the newest of those if several), and withdraw the rest with the
+   * plain replaced reason. Raising a card now always leaves one, so this only ever fires for a duplicate a release left.
+   */
+  async function dedupeRunnerCards(a: Available | null) {
+    const open = await openFor("runner");
+    if (open.length <= 1) return;
+    const live = a?.deployed;
+    // Keep the card for the live version (the newest of those if several), else the newest card; prefer the owner's own
+    // button press when there is one, since it is their explicit ask and must never be the card folded away.
+    const mine = live ? open.filter((d) => (d.context as SelfDeployContext).commit === live) : [];
+    const pool = mine.length ? mine : open;
+    const keep = (pool.find((d) => (d.context as SelfDeployContext).requested) ?? pool.sort((x, y) => +new Date(y.createdAt) - +new Date(x.createdAt))[0])!;
+    // Withdraws the rest; the requested-card guard inside leaves any other owner press alone (BOS-1010 rule 7).
+    await withdrawOtherRunnerCards(keep.id, (keep.context as SelfDeployContext).commit ?? live ?? "");
+  }
+
+  /**
+   * Why a runner-update card can't be acted on right now, in plain words, or null when it can (BOS-1010). The
+   * same reasons the Settings panel gives: a server update approved or waiting for the host (BOS-953), one running
+   * now, one in its trial, or the host's "try again in N minutes" wait. It reads the host's own files, never a
+   * guessed state, so it holds on any Docker host and on blue/green or single-colour alike.
+   */
+  async function runnerBlocker(a: Available | null): Promise<string | null> {
+    const s = await status();
+    if (s?.result === "running") return "a server update is running now, so the runners can't be updated until it finishes.";
+    if (await pending()) return "a server update is already waiting for the host, so the runners can't be updated until it has run.";
+    const server = await openServerCard(a);
+    if (server) return `a server update is waiting for your answer ("${server.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80)}"), so the runners can't be updated until that is done.`;
+    const trial = await trialState(a);
+    if (trial) return `the server update is still in its ${trialWords(soakSeconds(a))} trial, so the runners can't be updated yet. Runners can be updated from ${clock(trial.endsAt)}.`;
+    const wait = deployWait(s);
+    if (wait && Date.parse(wait.until) > Date.now()) return `the host is still in a wait before it will take another update, so the runners can't be updated until ${clock(wait.until)}.`;
+    return null;
+  }
+
+  /**
+   * The first open server-update card that genuinely still needs the owner, or null. A card naming the version
+   * Boss Man already runs is stale (its deploy has gone out, and the pass withdraws it a little later in the same
+   * pass): it is not a real blocker, and counting it would hold a runner update for something already done — the
+   * 18:26 case, one pass on (BOS-1010).
+   */
+  async function openServerCard(a: Available | null) {
+    const live = a?.deployed;
+    return (await openFor("server")).find((d) => !live || (d.context as SelfDeployContext).commit !== live) ?? null;
   }
 
   /** Raises the decision for a commit. `again` lets the owner be asked about one they already put off; `requested` marks the button's card (DR-042 point 5). */
@@ -501,6 +595,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // BOS-739: each leaves a notice where it was, naming this card to follow instead.
       const label = infra ? `Main has moved to ${short(commit)}` : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}`;
       for (const d of await openFor("server")) if (d.id !== row.id) await withdrawOpen(d.id, (steps) => newerNotice({ newerId: row.id, label, steps, now: new Date() }));
+      // BOS-1010: a server update about to be offered makes any open runner card useless (it names a version that
+      // will change, and nothing updates runners during a server update). It is closed here, with a plain reason,
+      // and the runner update is offered again for the new version once its trial ends.
+      await closeRunnerCardsForServerUpdate(commit);
       // BOS-683 (DR-036): an older server hand-apply to-do, still open or waiting in the owner's queue, is now
       // covered by this newer card — applying the newer commit brings the older one's changes in too. So it is
       // cleared with a note naming the new card, instead of sitting beside it. A to-do for the same commit is left
@@ -523,6 +621,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         }
       }
     }
+    // BOS-947 / BOS-1010: one runner card at a time. The replace-on-raise lives in raiseRunner (via
+    // withdrawOtherRunnerCards), the one place a runner card is raised, so every path uses the same plain
+    // "replaced by a newer runner update for <version>" reason and no path can skip it.
     return row ?? null;
   }
 
@@ -540,6 +641,28 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const handApply = !!steps?.length || !!ctx?.ownerOpenedAt;
     const n = handApply ? (typeof notice === "function" ? notice(steps) : notice) : undefined;
     if (n) await leaveClosedNotice(db, id, n, { notify: deps.notify });
+  }
+
+  /**
+   * Closes every open runner-update card when a server update starts (BOS-1010): once a server update is approved,
+   * waiting for the host or running, the runners can't be updated (its trial holds them, and the live version is
+   * about to change), so a card naming the old version can't be acted on and must not sit there. Each is withdrawn
+   * with a plain reason, and the runner update is offered again for the new version once its trial ends (the hold
+   * finished() sets, released by releaseRunnerDue). Never touches a server card, and is safe to run on every pass.
+   */
+  async function closeRunnerCardsForServerUpdate(commit?: string) {
+    const open = await openFor("runner");
+    if (!open.length) return;
+    const now = new Date();
+    for (const o of open) {
+      const text = `A server update started${commit ? ` (to ${short(commit)})` : ""}; this will be offered again for the new version once its trial ends. You don't need to do anything.`;
+      await withdrawOpen(o.id, replacedNotice({ commit: commit || (o.context as SelfDeployContext).commit || "", text, now }));
+      // The notice goes on the card itself too, whether or not the owner had opened it, so Decisions shows why it went
+      // and that a fresh one will follow (BOS-1010).
+      await leaveClosedNotice(db, o.id, replacedNotice({ commit: commit || (o.context as SelfDeployContext).commit || "", text, now }), { notify: deps.notify });
+      await record(db, { companyId: o.companyId, kind: "decision_withdrawn", summary: text, at: now });
+      deps.log?.(`self-deploy: runner update card ${o.id} closed; a server update started (BOS-1010)`);
+    }
   }
 
   /** One request for the host: written beside its final name, then renamed, so the host never reads half a file. */
@@ -606,7 +729,6 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (due?.needs && imageContains(image, due.needs, order)) await putSetting(RUNNER_DUE, null);
   }
   const DEFAULT_SOAK_SECONDS = 900;
-  const TRIAL_MARGIN_SECONDS = 120;
   type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };
   /** The window for this deploy: what the host wrote into status.json for it (BOS-401), else the length it publishes in available.json (BOS-384), else 900. */
   const statusSoak = (s?: DeployStatus | null) => {
@@ -615,17 +737,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 86400 ? Math.floor(n) : null;
   };
   const soakSeconds = (a: Available | null, s?: DeployStatus | null) => statusSoak(s) ?? a?.soakSeconds ?? DEFAULT_SOAK_SECONDS;
-  const trialMs = (a: Available | null, s?: DeployStatus | null) => (soakSeconds(a, s) + TRIAL_MARGIN_SECONDS) * 1000;
+  /** The trial runs for the host's standby window from the moment the update went live (BOS-953). */
+  const trialMs = (a: Available | null, s?: DeployStatus | null) => soakSeconds(a, s) * 1000;
   const trialWords = (seconds: number) => {
     const min = Math.round(seconds / 60);
     if (seconds === DEFAULT_SOAK_SECONDS) return "15-minute";
     if (seconds % 60 === 0) return `${min}-minute`;
     return seconds === 0 ? "trial" : `${seconds}-second`;
   };
-  const trialMessage = (seconds: number) =>
-    `The server update is still in its ${trialWords(seconds)} trial, so the runners can't be updated yet. Boss Man offers the runner update by itself when the trial ends.`;
-  /** The trial length as Settings and the cards should show it now (the last host report, if any). */
-  const currentTrial = async () => soakSeconds(await available());
+  /** "15:33", in the browser's own clock, from an ISO instant. */
+  const clock = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   async function getSetting<T>(key: string): Promise<T | null> {
     const [row] = await db.select().from(settings).where(eq(settings.key, key));
     return (row?.value as T | undefined) ?? null;
@@ -634,15 +755,65 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (value === null) await db.delete(settings).where(eq(settings.key, key));
     else await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
   }
-  /** The held runner update, if its server update is still in its trial. */
-  async function inTrial() {
-    const due = await getSetting<RunnerDue>(RUNNER_DUE);
-    return due && Date.now() < Date.parse(due.after) ? due : null;
+
+  /**
+   * Whether the standby colour the host kept for the trial is already stopped (BOS-953): with blue/green on and
+   * the live colour answering, the other colour being down is the deployer saying the trial is over (it stopped
+   * the standby when the window ended). Derived from the same colour probe Settings shows, so the red line can
+   * never disagree with the BLUE/GREEN rows. A single server (no blue/green rows) has no standby to read, so the
+   * clock ends the trial there.
+   */
+  async function standbyStopped(): Promise<boolean> {
+    const bg = deps.colours ? await deps.colours().catch(() => null) : null;
+    // No probe, or a single server with no colour rows: don't guess, let the clock end the trial.
+    if (!bg || bg.enabled === false) return false;
+    const live = bg.colours.find((c) => c.colour === bg.self);
+    const other = bg.colours.find((c) => c.colour !== bg.self);
+    // Only when the live colour is up: a failed probe of both is not "stopped".
+    return !!live?.up && !!other && other.up === false;
   }
+
+  /**
+   * The held runner update and where its trial stands (BOS-953). The trial is over as soon as the standby has
+   * stopped, or the host's window has passed, whichever comes first: never wait for a later deployer poll or a
+   * page reload. `endsAt` is the window's end from the deploy's own time (the last deployer status), so a later
+   * refused deploy that overwrote the status file still ends the older trial on time.
+   */
+  async function trialState(a: Available | null): Promise<{ due: RunnerDue; endsAt: string } | null> {
+    const due = await getSetting<RunnerDue>(RUNNER_DUE);
+    if (!due) return null;
+    const ends = Date.parse(due.after);
+    if (!Number.isFinite(ends)) return null;
+    if (Date.now() >= ends) return null;
+    if (await standbyStopped()) return null;
+    return { due, endsAt: due.after };
+  }
+  /** What the owner's Build and update runners press says during the trial: the very time it can work (BOS-953). */
+  const trialMessage = (endsAt: string, seconds: number) => {
+    const mins = Math.max(1, Math.ceil((Date.parse(endsAt) - Date.now()) / 60_000));
+    return `The server update is still in its ${trialWords(seconds)} trial, so the runners can't be updated yet. Runners can be updated from ${clock(endsAt)}, in about ${mins} minute${mins === 1 ? "" : "s"}. Boss Man offers the runner update by itself then, so you don't need to press again.`;
+  };
+
+  /**
+   * A rate-limit refusal ("Try again in N minute(s)") waits until its own end, not the frozen text (BOS-953): the
+   * host's message is stamped when it refused, so the wait ends N minutes after `ended`. The panel counts down to
+   * `until` and, once it has passed, says the owner can deploy now (a later result replaces the line). Null when the
+   * last status is not a rate-limit refusal.
+   */
+  function deployWait(s: DeployStatus | null): { until: string } | null {
+    if (!s || s.result !== "rejected" || s.target === "runner") return null;
+    const mins = s.message.match(/Try again in (\d+) minute\(s\)/i)?.[1];
+    const ended = Date.parse(s.ended || s.started);
+    if (!mins || !Number.isFinite(ended)) return null;
+    return { until: new Date(ended + Number(mins) * 60_000).toISOString() };
+  }
+
   /** Raises the held runner update once its trial is over, if the server is still on that commit; otherwise drops it quietly. */
   async function releaseRunnerDue(a: Available | null) {
     const due = await getSetting<RunnerDue>(RUNNER_DUE);
-    if (!due || Date.now() < Date.parse(due.after)) return;
+    if (!due) return;
+    const stillHeld = await trialState(a);
+    if (stillHeld) return;
     await putSetting(RUNNER_DUE, null);
     if (due.offer === false) return;
     // The image was rebuilt from a commit that already has the runner change (BOS-764): nothing to ask.
@@ -650,8 +821,17 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       deps.log?.(`self-deploy: runner update for ${short(due.commit)} not offered; the live runner image already has the change`);
       return;
     }
+    // The server must still be running the commit the runner update is for. A later refused deploy (e.g. the
+    // rate limit) overwrites the host's last status but changes nothing that runs, so it must not drop the offer
+    // (BOS-953). A switch-back or failure clears the hold in finished(), so it never reaches here.
     const last = await getSetting<LastServer>(LAST_SERVER);
-    if (last?.result === "deployed" && last.to === due.commit && a?.deployed === due.commit) await raise("runner", due.commit, due.fromCommit, a);
+    const switchedBack = last?.result === "rolled_back" || last?.result === "failed";
+    // BOS-1010: raiseRunner holds the card while a server update can't be acted on and withdraws every earlier
+    // runner card, so this path can't leave a stale one beside the new one. Only a deploy that ended well speaks for
+    // the live version: a refused or failed one (or none at all) says nothing about it, and the host's `deployed`
+    // commit decides, so the card can't be dropped for a running state the status file never wrote.
+    const live = last?.result === "deployed" ? last.to : a?.deployed;
+    if (!switchedBack && live === due.commit) await raiseRunner(due.commit, due.fromCommit, a);
     else deps.log?.(`self-deploy: runner update for ${short(due.commit)} dropped; the server is not on it after its trial`);
   }
 
@@ -710,8 +890,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const companyId = await homeCompany();
       const onlyTickets = companyId && s.to_commit ? await runnerOnlyTickets(db, companyId, s.to_commit) : [];
       const ticketNeeds = onlyTickets.at(-1)?.mergeCommit;
-      const needs = wants ? s.to_commit : old?.needs ?? ticketNeeds;
-      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held || onlyTickets.length > 0, ...(needs ? { needs } : {}) } satisfies RunnerDue);
+      // BOS-947: an open automatic runner card for an older commit means the runners still lack that change: the live
+      // version carries it, so the card is replaced by one for the live version once the trial is over (never left stale).
+      const staleCards = (await openFor("runner")).filter((o) => { const c = o.context as SelfDeployContext; return !!c.commit && c.commit !== s.to_commit; });
+      const cardNeeds = (staleCards[0]?.context as SelfDeployContext | undefined)?.commit;
+      const needs = wants ? s.to_commit : old?.needs ?? ticketNeeds ?? cardNeeds;
+      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held || onlyTickets.length > 0 || staleCards.length > 0, ...(needs ? { needs } : {}) } satisfies RunnerDue);
     }
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
@@ -780,6 +964,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (last?.result !== "deployed" || last.to !== a.deployed) return;
     const ended = Date.parse(last.ended);
     if (!Number.isFinite(ended) || Date.now() < ended + trialMs(a)) return;
+    // BOS-1010 rule 1: only a card that can be acted on now, so nothing goes on the owner's queue while a server
+    // update is approved, waiting for the host, running or in its wait. The next pass raises it once they clear.
+    if (await runnerBlocker(a)) return;
     if (deps.hostQuiet && !(await deps.hostQuiet().catch(() => false))) return;
     const companyId = await homeCompany();
     if (!companyId) return;
@@ -844,10 +1031,20 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const a = await available();
       if (s && s.result !== "running") await finished(s, a);
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
-      if (a) await this.clearDoneOwnerTodos(a, s);
+      if (a) await this.clearDoneOwnerTodos(a, s).catch((err) => deps.log?.(`self-deploy: clearing done to-dos failed: ${(err as Error).message}`));
       // Close any runner card, and drop any held offer, that the live image already has the change for (BOS-764).
       await closeBuiltRunnerCards().catch((err) => deps.log?.(`self-deploy: closing built runner cards failed: ${(err as Error).message}`));
+      // BOS-1010 rule 7: never more than one open runner card; clears any duplicate a release left on the queue.
+      await dedupeRunnerCards(a).catch((err) => deps.log?.(`self-deploy: de-duplicating runner cards failed: ${(err as Error).message}`));
+      // BOS-1010: once a server update is approved or waiting for the host, an open runner card can't be acted on (its
+      // version is about to change, and the trial holds the runners), so it is closed now, with a plain reason. The
+      // runner update for the new version is offered by itself once that update's trial ends; finished() sets that hold.
+      const serverUnderWay = (await pending()) || (await openServerCard(a)) !== null;
+      if (serverUnderWay) await closeRunnerCardsForServerUpdate(a?.deployed).catch((err) => deps.log?.(`self-deploy: closing runner cards for a server update failed: ${(err as Error).message}`));
       if (s?.result !== "running") await releaseRunnerDue(a);
+      // BOS-1010 rule 2: a server update that is running while a runner card is open closes it at once. (A deploy that
+      // ends well sets the trial hold in finished(); releaseRunnerDue offers the fresh card once the trial is over.)
+      if (s?.result === "running") await closeRunnerCardsForServerUpdate().catch((err) => deps.log?.(`self-deploy: closing runner cards for a running server update failed: ${(err as Error).message}`));
       // The database/proxy step is its own card, never part of a server update (BOS-487).
       await clearServiceCards(a);
       if (s?.result !== "running") await raiseServiceCards(a);
@@ -904,19 +1101,54 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (!dir) return { error: "Self-deploy is not set up on this install." } as const;
       const a = await available();
       if (!a?.deployed) return { error: await noOfferReason(a, await status()) } as const;
-      if (await inTrial()) return { error: trialMessage(soakSeconds(a)) } as const;
+      // BOS-953: during the trial say plainly when it can work, and remember the press so the offer is raised by
+      // itself when the trial ends. Never a silent refusal, and never a press that is quietly lost.
+      const trial = await trialState(a);
+      if (trial) {
+        const due = trial.due;
+        await putSetting(RUNNER_DUE, { ...due, offer: true, needs: due.needs ?? a.deployed } satisfies RunnerDue);
+        // BOS-1010 rule 4: a press while a server update waits for the host or runs can't work either; it gets the same
+        // plain reply with the reason, and the card is raised by itself once the server update's trial ends.
+        const blocked = await runnerBlocker(a);
+        return { error: blocked ? `${blocked[0]!.toUpperCase()}${blocked.slice(1)} Boss Man offers the runner update by itself then, so you don't need to press again.` : trialMessage(trial.endsAt, soakSeconds(a)), retryAt: trial.endsAt } as const;
+      }
+      // BOS-1010 rule 4: a race with a server update that started just now (waiting for the host, or running, or in the
+      // host's wait) is never a silent refusal: say why and when it can run, and leave the offer to follow by itself.
+      const notNow = await runnerBlocker(a);
+      if (notNow) return { error: notNow[0]!.toUpperCase() + notNow.slice(1) + " Boss Man offers the runner update by itself once it can run, so you don't need to press again." } as const;
       const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
+      if (open) {
+        // BOS-1010: the card for the live version is already there; still make sure it is the only open runner card.
+        await withdrawOtherRunnerCards(open.id, a.deployed);
+        return { decisionId: open.id } as const;
+      }
       // The plain key when no card for this commit is open (DR-042 point 5). Only if an answered card still holds it
       // (the owner said "Not now" before) does the button fall back to a keyed copy, so the ask is not silently dropped.
-      const d = open ?? (await raise("runner", a.deployed, a.deployed, a, false, true)) ?? (await raise("runner", a.deployed, a.deployed, a, true, true));
-      return d ? ({ decisionId: d.id } as const) : ({ error: "Create a company first: decisions belong to one." } as const);
+      // BOS-1010 rule 4: pressing it when it can't run (a race with a server update that started in between) raises the
+      // card anyway, and it says why and when it can run; and every raise here withdraws any earlier runner card.
+      const r = (await raiseRunner(a.deployed, a.deployed, a, { requested: true, askAnyway: true })) ?? (await raiseRunner(a.deployed, a.deployed, a, { requested: true, askAnyway: true, again: true }));
+      if (!r || "blocked" in r) return { error: "Create a company first: decisions belong to one." } as const;
+      return { decisionId: r.row.id } as const;
     },
 
     /** What Settings shows. */
     async overview() {
       const [s, a] = [await status(), await available()];
+      // BOS-953: the runner trial (with the time it ends) and any "try again in N minutes" wait, both worked out
+      // from the real time rather than the frozen text in the host's last status, so the panel counts down by itself.
+      const trial = await trialState(a);
+      const wait = deployWait(s);
       // BOS-753: when the host deployer last showed it is alive, so Settings only says "not reported" when it really is overdue.
-      return { enabled: !!dir, status: s, available: a, pending: await pending(), deployer: await deployerSeen(a, s), lateAfterMinutes: DEPLOYER_LATE_MS / 60_000 };
+      return {
+        enabled: !!dir,
+        status: s,
+        available: a,
+        pending: await pending(),
+        deployer: await deployerSeen(a, s),
+        lateAfterMinutes: DEPLOYER_LATE_MS / 60_000,
+        trial: trial ? { endsAt: trial.endsAt, seconds: soakSeconds(a) } : null,
+        deployWait: wait,
+      };
     },
 
     /**
@@ -933,7 +1165,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // DR-046 part 2: a runner image update already waiting for runs, so R16 refuses a card that asks the owner to
       // press Build and update runners again. `null` (not absent) says Boss Man looked and found nothing pending.
       const hold = await getHold(db).catch(() => null);
-      return { enabled: true, ...(installDir ? { installDir } : {}), ...(open?.commit ? { openCommit: open.commit } : {}), hold: hold ? { kind: hold.kind, ...(hold.since ? { since: hold.since } : {}), ...(hold.swapped ? { swapped: hold.swapped } : {}) } : null };
+      // A wrap-up hold (BOS-929) swaps no image, so it is not a pending runner update for R16; only real drains count.
+      const runnerHold = runnerCardHold(hold);
+      return { enabled: true, ...(installDir ? { installDir } : {}), ...(open?.commit ? { openCommit: open.commit } : {}), hold: runnerHold ? { kind: runnerHold.kind as "update" | "settings" | undefined, ...(runnerHold.since ? { since: runnerHold.since } : {}), ...(runnerHold.swapped ? { swapped: runnerHold.swapped } : {}) } : null };
     },
 
     /** Checked before an approval is recorded: one request at a time. */
@@ -942,7 +1176,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const s = await status();
       if (s?.result === "running") throw new AnswerError("A deploy is running now. Wait for it to finish.");
       if (await pending()) throw new AnswerError("A deploy request is already waiting for the host. Try again in a minute.");
-      if (ctx.target === "runner" && (await inTrial())) throw new AnswerError(trialMessage(await currentTrial()));
+      if (ctx.target === "runner") {
+        const a = await available();
+        const trial = await trialState(a);
+        if (trial) throw new AnswerError(trialMessage(trial.endsAt, soakSeconds(a)));
+        // BOS-1010 rule 4: a runner card raised by a race (the Settings button, or the offer held until it could run)
+        // answers with the same plain reason and time, never a silent refusal.
+        const blocker = await runnerBlocker(a);
+        if (blocker) throw new AnswerError(`${blocker[0]!.toUpperCase()}${blocker.slice(1)} Boss Man offers the runner update by itself once it can run, so you don't need to press it again.`);
+      }
       // Only the commit that failed to deploy is refused: after a rollback or a deploy by hand, what runs can still be built.
       if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed" && s.to_commit === ctx.commit) throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
     },

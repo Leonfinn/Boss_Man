@@ -19,6 +19,8 @@ const ROUTES: Array<["GET" | "POST" | "PATCH" | "DELETE", string]> = [
   ["GET", "/api/runner-report"],
   ["POST", "/api/maintenance/start"],
   ["POST", "/api/maintenance/cancel"],
+  ["POST", "/api/maintenance/wrapup"],
+  ["POST", "/api/maintenance/cancel-wrap"],
   ["GET", "/api/self-deploy"],
   ["POST", "/api/self-deploy/deploy-latest"],
   ["POST", "/api/self-deploy/update-runners"],

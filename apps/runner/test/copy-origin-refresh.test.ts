@@ -84,8 +84,10 @@ for (const copies of ["worktree", "clone"] as const) {
         expect(git(dir, "rev-parse", "refs/remotes/origin/main")).toBe(git(repo, "rev-parse", "refs/remotes/origin/main"));
         expect(git(dir, "rev-parse", "refs/remotes/origin/main")).toBe(tip);
       }
-      // A worktree's fetch writes into the shared repo itself: it must bring nothing but origin's branches there.
-      expect(git(repo, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/")).toBe("refs/remotes/origin/main");
+      // A worktree's fetch writes into the shared repo itself: it must bring nothing but origin's branches there. git 2.48+
+      // also records origin's HEAD on fetch (remote.<name>.followRemoteHEAD): a symbolic ref to origin/main, not a branch.
+      const fetched = git(repo, "for-each-ref", "--format=%(refname) %(symref)", "refs/remotes/origin/").split("\n").filter((l) => !l.startsWith("refs/remotes/origin/HEAD refs/remotes/origin/"));
+      expect(fetched.map((l) => l.trim())).toEqual(["refs/remotes/origin/main"]);
       // Without the runner's config the same fetch goes to the upstream address and fails, as it did before BOS-853.
       const plain = spawnSync("git", ["fetch", "origin"], { cwd: dir, env: { PATH: process.env.PATH, HOME: tmpdir(), GIT_TERMINAL_PROMPT: "0" }, encoding: "utf8" });
       expect(plain.status).not.toBe(0);

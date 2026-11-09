@@ -6,6 +6,7 @@ import {
   creditStatus,
   dateIn,
   forecastQuota,
+  FORECAST_WINDOW_MS,
   formatDate,
   parseClaudeRateLimit,
   parseCodexRateLimits,
@@ -386,6 +387,15 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return { total, ranges: ranges.map((_, i) => Number(row?.[`r${i}`] ?? 0)) };
   }
 
+  /**
+   * How far back a forecast must read a window's samples to see the whole window so far: a day
+   * (FORECAST_WINDOW_MS), or longer when the window has more of it left than that (a week's reset).
+   */
+  function lookbackFor(quota: (typeof quotaSamples.$inferSelect)[], now: Date) {
+    const left = Math.max(0, ...quota.filter((q) => q.resetsAt && q.resetsAt.getTime() > now.getTime()).map((q) => q.resetsAt!.getTime() - now.getTime()));
+    return Math.max(FORECAST_WINDOW_MS, left);
+  }
+
   async function latestQuota(fundingSourceId: string) {
     // The newest sample per window.
     const rows = await db
@@ -396,11 +406,17 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return rows;
   }
 
-  /** The latest reading per window and when each runs out at the recent rate (R78). */
+  /**
+   * The latest reading per window and when each runs out at its own pace (R78, BOS-1012). The rate
+   * averages over the whole window so far, or its last day, whichever is longer, so one busy hour
+   * can't swing it; the lookback here is wider than that rate's floor so a window starting earlier
+   * still has its first reading to average from.
+   */
   async function quotaForecasts(source: typeof fundingSources.$inferSelect, now: Date) {
     const fundingSourceId = source.id;
     const quota = source.kind === "subscription" ? await latestQuota(fundingSourceId) : [];
-    const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
+    const since = new Date(now.getTime() - lookbackFor(quota, now));
+    const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), gte(quotaSamples.observedAt, since))) : [];
     return { quota, forecasts: Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)])) };
   }
 

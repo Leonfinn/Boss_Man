@@ -93,7 +93,12 @@ function evidenceLink(ctx: DecisionContext): string {
 }
 const PRIORITY: Record<NotifyLevel, number> = { note: 2, flag: 3, page: 4, ask: 4 };
 
-export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null };
+/**
+ * `noPush` keeps a routine card (BOS-1010's runner update) in the feed and the browser only, never on the phone,
+ * whatever the owner's push levels say: it is not urgent, and the owner should see it when they next look, not be
+ * buzzed for it.
+ */
+export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean };
 
 export function notificationsService(db: Db, deps: { reveal: (secretId: string) => Promise<string | null>; fetch?: typeof fetch; now?: () => Date; log?: (msg: string) => void }) {
   const now = deps.now ?? (() => new Date());
@@ -164,7 +169,8 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       .onConflictDoNothing()
       .returning();
     if (!row) return null;
-    if (s.ntfy && s.pushLevels.includes(level)) {
+    // A routine card never reaches the phone (BOS-1010): the feed and the browser still show it.
+    if (s.ntfy && !input.noPush && s.pushLevels.includes(level)) {
       const { actions, approve } = row.decisionId ? await decisionButtons(s, row.decisionId, row.link) : { actions: [], approve: null };
       try {
         await push(s, { ...row, actions, ...(approve ? { body: approve.message, plain: true } : {}) });
@@ -253,7 +259,10 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         const c = d.context as DecisionContext;
         const urgent = c.type === "self_deploy" && d.tier !== "ceo" ? c.urgent : undefined;
         const level: NotifyLevel = d.tier === "ceo" ? "note" : urgent && !urgent.repeat ? "page" : alertOnly ? "flag" : "ask";
-        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : urgent ? urgent.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id });
+        // BOS-1010: the runner update is routine. It stays in the feed and the browser, and never goes to the phone,
+        // even when the owner's push levels include asks. (A self_deploy card that is not the runner update is unchanged.)
+        const routineRunner = c.type === "self_deploy" && c.target === "runner";
+        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : urgent ? urgent.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id, ...(routineRunner ? { noPush: true } : {}) });
       }
       return open.length;
     },

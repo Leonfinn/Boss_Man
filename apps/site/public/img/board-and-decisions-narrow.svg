@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 1160" width="360" height="1160" role="img" aria-labelledby="bdn-title bdn-desc">
+  <title id="bdn-title">The board and Decisions: tickets sit in six columns; a ticket that needs you becomes a card in Decisions; the menu badge counts only the cards that need you now</title>
+  <desc id="bdn-desc">The board has six columns: Backlog, Ready, In progress, Blocked, Review and Done. The Review column has two lanes, Awaiting review and Approved, merging. A separate lane called Your review holds tickets from any column that are waiting on you; its cards have a Review and approve button for a sign-off, or an Answer in Decisions button for a question. Each ask also becomes a card in the Decisions queue, such as a Permission, an Approval or a Question. Cards that need you now sit at the top, and the Decisions menu badge counts only those. Cards in the group called Waiting, nothing to do yet are not counted. They are there because you already answered and the agent is checking, or because the ticket is back with an agent after a failed merge check or a review that was sent back.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="bdn-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+    <marker id="bdn-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#c8282f"/></marker>
+  </defs>
+  <rect width="360" height="1160" fill="#ffffff"/>
+
+  <text x="0" y="20" class="bb" font-size="15" fill="#3d4757">The board shows every ticket.</text>
+  <text x="0" y="40" class="bb" font-size="15" fill="#3d4757">Decisions collects what needs you.</text>
+
+  <text x="0" y="74" class="d" font-size="17" fill="#17202c">1. The board: six columns</text>
+  <!-- column chips, two per row -->
+  <rect x="0" y="86" width="174" height="58" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/><text x="12" y="110" class="d" font-size="16" fill="#17202c">Backlog</text><text x="12" y="132" class="b" font-size="12.5" fill="#3d4757">Written, not started</text>
+  <rect x="186" y="86" width="174" height="58" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/><text x="198" y="110" class="d" font-size="16" fill="#17202c">Ready</text><text x="198" y="132" class="b" font-size="12.5" fill="#3d4757">An agent can take it</text>
+  <rect x="0" y="154" width="174" height="58" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/><text x="12" y="178" class="d" font-size="16" fill="#17202c">In progress</text><text x="12" y="200" class="b" font-size="12.5" fill="#3d4757">An agent is working</text>
+  <rect x="186" y="154" width="174" height="58" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/><text x="198" y="178" class="d" font-size="16" fill="#17202c">Blocked</text><text x="198" y="200" class="b" font-size="12.5" fill="#3d4757">Waiting on something</text>
+  <rect x="0" y="222" width="360" height="124" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="12" y="246" class="d" font-size="16" fill="#17202c">Review</text>
+  <rect x="12" y="256" width="336" height="38" rx="6" fill="#ffffff" stroke="#c3cbd6"/><text x="22" y="272" class="bb" font-size="13" fill="#17202c">Awaiting review</text><text x="22" y="287" class="b" font-size="12" fill="#3d4757">Agent asked for review</text>
+  <rect x="12" y="300" width="336" height="38" rx="6" fill="#ffffff" stroke="#c3cbd6"/><text x="22" y="316" class="bb" font-size="13" fill="#17202c">Approved, merging</text><text x="22" y="331" class="b" font-size="12" fill="#3d4757">Boss Man merges it</text>
+  <rect x="0" y="356" width="360" height="52" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/><text x="12" y="380" class="d" font-size="16" fill="#17202c">Done</text><text x="12" y="398" class="b" font-size="12.5" fill="#3d4757">Merged or closed</text>
+
+  <!-- your review -->
+  <path d="M180 424 V440" fill="none" stroke="#c8282f" stroke-width="3" marker-end="url(#bdn-arr)"/>
+  <rect x="0" y="444" width="360" height="148" rx="10" fill="#ffffff" stroke="#c8282f" stroke-width="2.5"/>
+  <text x="14" y="472" class="d" font-size="18" fill="#17202c">Your review</text>
+  <g class="b" font-size="14" fill="#17202c"><text x="14" y="496">Tickets from any column that</text><text x="14" y="514">wait on you. A strip at the top of</text><text x="14" y="532">the board counts them.</text></g>
+  <rect x="14" y="544" width="160" height="36" rx="8" fill="#c8282f"/><text x="94" y="567" class="bb" font-size="13" text-anchor="middle" fill="#ffffff">Review and approve</text>
+  <rect x="184" y="544" width="162" height="36" rx="8" fill="#17202c"/><text x="265" y="567" class="bb" font-size="13" text-anchor="middle" fill="#ffffff">Answer in Decisions</text>
+
+  <!-- decisions -->
+  <path d="M180 596 V630" fill="none" stroke="#c8282f" stroke-width="3" marker-end="url(#bdn-arr)"/>
+  <text x="204" y="618" class="b" font-size="12.5" fill="#3d4757">each ask is also a card</text>
+  <text x="0" y="656" class="d" font-size="17" fill="#17202c">2. Decisions: one card per ask</text>
+
+  <rect x="0" y="668" width="360" height="190" rx="10" fill="#ffffff" stroke="#c8282f" stroke-width="2.5"/>
+  <text x="14" y="696" class="d" font-size="17" fill="#17202c">Needs you now</text><text x="346" y="696" class="bb" font-size="14" text-anchor="end" fill="#c8282f">3 cards</text>
+  <rect x="14" y="708" width="332" height="44" rx="6" fill="#eef2f6"/><text x="24" y="727" class="bb" font-size="13" fill="#17202c">Permission</text><text x="24" y="743" class="b" font-size="12.5" fill="#17202c">A command it is not yet allowed to run</text>
+  <rect x="14" y="758" width="332" height="44" rx="6" fill="#eef2f6"/><text x="24" y="777" class="bb" font-size="13" fill="#17202c">Approval</text><text x="24" y="793" class="b" font-size="12.5" fill="#17202c">A finished ticket needs your sign-off</text>
+  <rect x="14" y="808" width="332" height="40" rx="6" fill="#eef2f6"/><text x="24" y="826" class="bb" font-size="13" fill="#17202c">Question</text><text x="24" y="841" class="b" font-size="12.5" fill="#17202c">An agent needs your answer</text>
+
+  <rect x="0" y="874" width="360" height="176" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="14" y="902" class="d" font-size="17" fill="#17202c">Waiting, nothing to do yet</text>
+  <text x="14" y="920" class="bb" font-size="13" fill="#3d4757">2 cards, not counted</text>
+  <rect x="14" y="932" width="332" height="52" rx="6" fill="#ffffff" stroke="#c3cbd6"/><text x="24" y="953" class="b" font-size="12.5" fill="#17202c">You answered, and the agent is</text><text x="24" y="971" class="b" font-size="12.5" fill="#17202c">checking it is still needed</text>
+  <rect x="14" y="992" width="332" height="52" rx="6" fill="#ffffff" stroke="#c3cbd6"/><text x="24" y="1013" class="b" font-size="12.5" fill="#17202c">Ticket is back with an agent: failed</text><text x="24" y="1031" class="b" font-size="12.5" fill="#17202c">merge check or sent-back review</text>
+
+  <!-- badge -->
+  <text x="0" y="1076" class="d" font-size="17" fill="#17202c">3. The menu badge</text>
+  <rect x="0" y="1088" width="360" height="62" rx="12" fill="#17202c"/>
+  <text x="18" y="1117" class="bb" font-size="16" fill="#eef2f6">Decisions</text>
+  <circle cx="326" cy="1112" r="15" fill="#f0b75c"/><text x="326" y="1118" class="bb" font-size="16" text-anchor="middle" fill="#17202c">3</text>
+  <text x="18" y="1138" class="b" font-size="12.5" fill="#f0b75c">Only cards that need you now. Waiting ones are left out.</text>
+</svg>

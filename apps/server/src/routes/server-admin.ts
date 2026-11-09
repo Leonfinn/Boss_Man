@@ -59,6 +59,16 @@ export function serverAdminRoutes(
     return maintenance.status();
   });
   owner.post("/api/maintenance/cancel", async () => ({ cancelled: await maintenance.cancel() })); // leader-only
+  // "Ask agents to wrap up" (BOS-929): the owner's clean stop before an update. A mode of the same hold, so it
+  // needs no launcher: it swaps nothing, it only messages every live work run and holds new ones until cancelled.
+  // While an update waits it joins that hold instead of being refused (BOS-988): the update stays and goes ahead
+  // when the runs end; the wrap-up adds the message, the still-running list, and Cancel wrap-up.
+  owner.post("/api/maintenance/wrapup", async () => {
+    await maintenance.start({ kind: "wrapup" }); // leader-only
+    return maintenance.status();
+  });
+  // "Cancel wrap-up" while an update waits (BOS-988): take back only the owner's ask; the update is untouched.
+  owner.post("/api/maintenance/cancel-wrap", async () => ({ cancelled: await maintenance.cancelWrap() })); // leader-only
 
   // Self-deploy: what the host deployer last reported, and the "Deploy latest" button.
   owner.get("/api/self-deploy", async () => selfDeploy.overview());
@@ -69,7 +79,10 @@ export function serverAdminRoutes(
 
   owner.post("/api/self-deploy/update-runners", async (_req, reply) => {
     const r = await selfDeploy.updateRunners();
-    return "error" in r ? reply.code(409).send({ error: "cannot_update_runners", message: r.error }) : r;
+    // BOS-953: during the trial the refusal says when it can work, and carries the time so the panel shows it too.
+    return "error" in r
+      ? reply.code(409).send({ error: "cannot_update_runners", message: r.error, ...("retryAt" in r && r.retryAt ? { retryAt: r.retryAt } : {}) })
+      : r;
   });
 
   // "Restart the server" (BOS-647): owner session only; it writes a request file the host deployer acts on. No MCP tool reaches it.
