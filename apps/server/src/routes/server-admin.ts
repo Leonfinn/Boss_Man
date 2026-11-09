@@ -59,6 +59,12 @@ export function serverAdminRoutes(
     return maintenance.status();
   });
   owner.post("/api/maintenance/cancel", async () => ({ cancelled: await maintenance.cancel() })); // leader-only
+  // "Ask agents to wrap up" (BOS-929): the owner's clean stop before an update. A mode of the same hold, so it
+  // needs no launcher: it swaps nothing, it only messages every live work run and holds new ones until cancelled.
+  owner.post("/api/maintenance/wrapup", async () => {
+    await maintenance.start({ kind: "wrapup" }); // leader-only
+    return maintenance.status();
+  });
 
   // Self-deploy: what the host deployer last reported, and the "Deploy latest" button.
   owner.get("/api/self-deploy", async () => selfDeploy.overview());
