@@ -1610,6 +1610,25 @@ describe("the runner update card only when it can be acted on, and one at a time
     expect(await runnerCards(c)).toHaveLength(1);
   });
 
+  it("a card the Settings button raises withdraws an earlier open automatic card, leaving one (round 4, Settings path)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-09T18:25:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-09T18:25:00Z");
+    // An automatic card for B is open, and Boss Man has since moved to C: an automatic offer for C can't raise (it is C's
+    // trial, or a stale quick moment), so plant the older automatic card directly and let the button raise for C.
+    await c.available({ deployed: C, tip: C });
+    await c.db.insert(decisions).values({ companyId: (await c.db.select().from(companies))[0]!.id, kind: "approval", question: "Update the runners to bbbbbbbb?", options: ["Update runners", "Not now"], recommendedOption: "Update runners", dedupeKey: `self-deploy:runner:${B}`, context: { type: "self_deploy", target: "runner", commit: B, fromCommit: A }, createdAt: new Date("2026-11-09T17:00:00Z") });
+    expect(await runnerCards(c)).toHaveLength(1);
+    // The button raises its own card for the live version (C); the earlier automatic card is withdrawn with the plain reason.
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.json().decisionId).toBeTruthy();
+    const cards = await runnerCards(c);
+    expect(cards).toHaveLength(1);
+    expect(target(cards[0]!)).toMatchObject({ commit: C });
+    expect((await withdrawals(c)).join(" ")).toContain(`Replaced by a newer runner update for ${C.slice(0, 8)}`);
+  });
+
   it("raises the card by itself once the trial ends with nothing pending, and never pushes it to the phone", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-09T18:10:00Z"));

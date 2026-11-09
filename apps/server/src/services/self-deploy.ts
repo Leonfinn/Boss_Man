@@ -621,16 +621,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         }
       }
     }
-    if (row && target === "runner") {
-      // BOS-947: one runner card at a time. Any older runner card, the button's included, is replaced by this one (the host
-      // builds from the version the server runs, which has everything the older card named).
-      const label = `Update the runners to ${short(commit)}`;
-      for (const d of await openFor("runner")) {
-        const dc = d.context as SelfDeployContext;
-        if (d.id === row.id || dc.commit === commit) continue;
-        await withdrawOpen(d.id, (steps) => newerNotice({ newerId: row.id, label, steps, now: new Date() }));
-      }
-    }
+    // BOS-947 / BOS-1010: one runner card at a time. The replace-on-raise lives in raiseRunner (via
+    // withdrawOtherRunnerCards), the one place a runner card is raised, so every path uses the same plain
+    // "replaced by a newer runner update for <version>" reason and no path can skip it.
     return row ?? null;
   }
 
