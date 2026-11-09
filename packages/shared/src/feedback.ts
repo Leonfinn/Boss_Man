@@ -106,3 +106,53 @@ export function suggestFeatures<T extends { id: string; title: string; descripti
   });
   return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
 }
+
+/** A feature is kept off the portal for one of two reasons: someone marked it, or the words say it's security work. */
+export type PortalHoldReason = "sensitive" | "security";
+/** What the portal rule says about a feature. */
+export type PortalVerdict =
+  | { onPortal: boolean; reason: null }
+  /** Off the portal: the manual mark wins, or the area/criteria/title/description make it security work. */
+  | { onPortal: false; reason: PortalHoldReason }
+  /** Ticked on, but held back until a public summary exists (the portal shows the internal title and description). */
+  | { onPortal: false; reason: "needs public summary" };
+
+/** Single words that make a feature security work when they appear in its title, description, area or criteria. */
+const SECURITY_WORDS = new Set([
+  "security", "secure", "permission", "permissions", "credential", "credentials", "secret", "secrets", "token", "tokens",
+  "password", "passwords", "vulnerability", "vulnerable", "exploit", "auth", "authentication", "authorisation", "authorization",
+  "sandbox", "firewall", "encrypt", "encryption", "decrypt", "crypto", "cryptography", "ssh", "ssl", "tls",
+  "certificate", "certificates", "privilege", "privileges", "sudo", "acl",
+]);
+/** Phrases that make a feature security work even though each word on its own could be ordinary. "keys" and "key" are not
+ * here on their own because a shortcut key or a sort key isn't security work. */
+const SECURITY_PHRASES = ["access control", "api key", "api keys", "private key", "network guard", "agent fence", "key rotation", "role based"];
+
+/** Whether text reads as security work: a security word, or one of the security phrases. A simple rule, not AI. */
+export function looksLikeSecurity(text: string): boolean {
+  const lower = text.toLowerCase();
+  const words = lower.match(/[a-z][a-z0-9'-]*/g) ?? [];
+  if (words.some((w) => SECURITY_WORDS.has(w) || SECURITY_WORDS.has(w.replace(/s$/, "")))) return true;
+  return SECURITY_PHRASES.some((p) => lower.includes(p));
+}
+
+/**
+ * Whether a feature goes on the feedback portal by default (BOS-957). A feature is off, and says why, when
+ * someone marked it "keep off the portal (sensitive)"; that mark always wins. Otherwise it is security work if
+ * its area, criteria, title or description read that way. A feature that may go on is still held back while it
+ * has no public summary, because the portal shows visitors its internal title and description. No model call.
+ */
+export function portalVerdict(input: {
+  title: string;
+  description?: string | null;
+  area?: string | null;
+  criteria?: string[];
+  keepOffPortal?: boolean;
+  hasPublicSummary?: boolean;
+}): PortalVerdict {
+  if (input.keepOffPortal) return { onPortal: false, reason: "sensitive" };
+  const text = [input.title, input.description ?? "", input.area ?? "", ...(input.criteria ?? [])].join(" ");
+  if (looksLikeSecurity(text)) return { onPortal: false, reason: "security" };
+  if (!input.hasPublicSummary) return { onPortal: false, reason: "needs public summary" };
+  return { onPortal: true, reason: null };
+}
