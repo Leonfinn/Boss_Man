@@ -16,6 +16,7 @@ function Row({ t }: { t: RelatedTicket }) {
         {t.ref ? <strong>{t.ref}</strong> : null}
         <span className="related-title">{t.title}</span>
       </a>
+      {t.until && <span className="muted" style={{ fontSize: 12 }}>(until {t.until})</span>}
       <span className={`tag ${t.cancelled ? "" : (STATE_TONE[t.state] ?? "")}`}>{t.cancelled ? "Cancelled" : (STATE_LABEL[t.state] ?? t.state)}</span>
     </li>
   );
