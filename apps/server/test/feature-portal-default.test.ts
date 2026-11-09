@@ -108,3 +108,19 @@ describe("features go on the portal by default (BOS-957)", () => {
     expect((await visitor()).json().features).toEqual([]);
   });
 });
+
+describe("QA: visitors never get the internal title (BOS-991)", () => {
+  it("whatever the internal title says, the portal payload carries the public title or summary line only, and an owner PATCH clearing publicTitle falls back", async () => {
+    const c = await setup();
+    const f = await c.feature({ title: "INTERNALMARK name", description: "INTERNALMARK description", publicTitle: "Faster search", publicSummary: "Search answers in a blink.\nSECOND-LINE-TEAM-ONLY" });
+    const { portalToken } = await c.portal(c.company.id);
+    const get = async () => (await t!.app.inject({ method: "GET", url: "/api/portal", headers: { "x-portal-token": portalToken } })).json();
+    let body = await get();
+    expect(body.features.find((x: { id: string }) => x.id === f.id).title).toBe("Faster search");
+    expect(JSON.stringify(body)).not.toContain("INTERNALMARK");
+    expect((await c.req("PATCH", `/api/features/${f.id}`, { publicTitle: null })).statusCode).toBe(200);
+    body = await get();
+    expect(body.features.find((x: { id: string }) => x.id === f.id).title).toBe("Search answers in a blink.");
+    expect(JSON.stringify(body)).not.toContain("INTERNALMARK");
+  });
+});

@@ -113,7 +113,12 @@ function evidenceLink(ctx: DecisionContext): string {
 export const URGENT_PRIORITY = 5;
 export const ROUTINE_PRIORITY = 3;
 
-export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null; /** The card is one of the urgent kinds (BOS-1006), so it goes to the phone whatever the setting. */ urgent?: boolean };
+/**
+ * `noPush` keeps a routine card (BOS-1010's runner update) in the feed and the browser only, never on the phone,
+ * whatever the owner's push levels say: it is not urgent, and the owner should see it when they next look, not be
+ * buzzed for it.
+ */
+export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean; /** The card is one of the urgent kinds (BOS-1006), so it goes to the phone whatever the setting. */ urgent?: boolean };
 
 export function notificationsService(db: Db, deps: { reveal: (secretId: string) => Promise<string | null>; fetch?: typeof fetch; now?: () => Date; log?: (msg: string) => void }) {
   const now = deps.now ?? (() => new Date());
@@ -186,10 +191,11 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     if (!row) return null;
     // BOS-1006: only an urgent card reaches the phone unless the owner chose "All decisions". Quiet hours
     // still demote first, so an urgent ask in quiet hours arrives as a flag and doesn't push.
+    // A routine card marked noPush (BOS-1010) never reaches the phone: the feed and the browser still show it.
     const urgent = input.level === "page" || !!input.urgent;
     const flagsToPhone = s.pushLevels?.includes("flag") ?? false;
     const routineToPhone = wantsEveryPush(s) && (level === "page" || level === "ask");
-    const toPhone = s.ntfy && (urgent ? level === "page" || level === "ask" : routineToPhone || (level === "flag" && flagsToPhone));
+    const toPhone = s.ntfy && !input.noPush && (urgent ? level === "page" || level === "ask" : routineToPhone || (level === "flag" && flagsToPhone));
     if (toPhone) {
       const { actions, approve } = row.decisionId ? await decisionButtons(s, row.decisionId, row.link) : { actions: [], approve: null };
       try {
@@ -293,7 +299,10 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         // BOS-1006: a blocking card (now not just "nothing to do yet") and a live-problem deploy are urgent;
         // a page or a plain card the CEO is handling is not. The test push is urgent in `test` itself.
         const urgent = d.tier !== "ceo" && !alertOnly && (blocking.has(d.id) || !!urgentFix);
-        await notify({ companyId: d.companyId, agentId: null, level, urgent, title: d.tier === "ceo" ? `${company}: for the CEO` : urgentFix ? urgentFix.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id });
+        // BOS-1010: the runner update is routine. It stays in the feed and the browser, and never goes to the phone,
+        // even under "All decisions". (A self_deploy card that is not the runner update is unchanged.)
+        const routineRunner = c.type === "self_deploy" && c.target === "runner";
+        await notify({ companyId: d.companyId, agentId: null, level, urgent, title: d.tier === "ceo" ? `${company}: for the CEO` : urgentFix ? urgentFix.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id, ...(routineRunner ? { noPush: true } : {}) });
       }
       return open.length;
     },

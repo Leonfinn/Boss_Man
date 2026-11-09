@@ -3,25 +3,24 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
-import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, featureHorizon, findCredential, formatDate, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, featureHorizon, formatDate, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
-import { NO_CHECK, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult, type WorkspaceDiff } from "@boss-man/shared";
+import { THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
 import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agentNotes, agents, checkJobs, companies, costEvents, decisions, engagements, features as featuresTable, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, checkJobs, companies, decisions, engagements, features as featuresTable, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
 import { modelProbeService } from "./services/model-probe.js";
-import { assetPathOf, PRECOMPRESSED_SUFFIX_LIST, parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
+import { assetPathOf, PRECOMPRESSED_SUFFIX_LIST } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
@@ -61,7 +60,7 @@ import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { record } from "./services/activity.js";
 import { workService, WorkError } from "./services/work.js";
-import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket, refreshBriefs } from "./services/project-brief.js";
+import { refreshBriefs } from "./services/project-brief.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
 import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
@@ -96,6 +95,7 @@ import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
+import { projectRoutes } from "./routes/projects.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
@@ -301,13 +301,16 @@ export async function buildApp(opts: AppOptions) {
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
   const checks = checkDispatcher(db, { send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
-  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
+  // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
+  let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
+  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve() });
   // The live commit each company's server runs (BOS-284): a deploy, a switch-back, a rollback or a
   // restart after a hand-apply wakes the Release Manager. Its deps are filled in further down.
   const releaseLog = releaseLogService(db, {
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     notify: (agentId, input) => scheduler.notify(agentId, input),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
+    afterLive: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
@@ -561,7 +564,7 @@ export async function buildApp(opts: AppOptions) {
         agentId: null,
         level: "flag",
         title: `${status.source.name}: the limit "${windowLabel(window).name}" runs out about ${dayAt(f.runsOutAt)}`,
-        body: `It's at ${Math.round(f.utilization * 100)}% and rising about ${Math.round((f.perHour ?? 0) * 100)}% an hour${f.resetsAt ? `, and resets ${dayAt(f.resetsAt)}` : ""}. Boss Man holds new runs on it once it's nearly used up, until it resets; pause less urgent work, or move agents to another funding source, to keep the important work going.`,
+        body: `It's at ${Math.round(f.utilization * 100)}% and, at the pace of this window so far, rising about ${Math.round((f.runsOutPerHour ?? f.perHour ?? 0) * 100)}% an hour${f.resetsAt ? `, and resets ${dayAt(f.resetsAt)}` : ""}. Boss Man holds new runs on it once it's nearly used up, until it resets; pause less urgent work, or move agents to another funding source, to keep the important work going.`,
         link: "#/funding",
       });
     }
@@ -847,6 +850,7 @@ export async function buildApp(opts: AppOptions) {
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
+  releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
   // In server mode (BOS-316, BOS-597) it reports the server-owned check queue's own mode, slots, and
   // running and waiting counts for the company, so the screen can show "waiting for a check slot".
@@ -1235,24 +1239,7 @@ export async function buildApp(opts: AppOptions) {
         throw err;
       }
     });
-    /** The project's own policy, or null when it uses the company's. */
-    owner.get("/api/projects/:id/review-policy", async (req, reply) => {
-      const [p] = await db.select({ policy: projects.reviewPolicy }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
-      return p ? { policy: p.policy } : reply.code(404).send({ error: "not_found" });
-    });
-    owner.put("/api/projects/:id/review-policy", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const [proj] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, id));
-      if (!proj) return reply.code(404).send({ error: "not_found" });
-      const p = await checkPolicy(proj.companyId, req.body);
-      if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
-      await db.update(projects).set({ reviewPolicy: p }).where(eq(projects.id, id));
-      return { policy: p };
-    });
-    owner.delete("/api/projects/:id/review-policy", async (req, reply) => {
-      const [p] = await db.update(projects).set({ reviewPolicy: null }).where(eq(projects.id, IdParam.parse(req.params).id)).returning({ id: projects.id });
-      return p ? { policy: null } : reply.code(404).send({ error: "not_found" });
-    });
+    // A project's own review policy: routes/projects.ts, registered with the project routes below.
 
     // Secrets: values go in, never come out over the API.
     const SecretInput = z.object({
@@ -1716,7 +1703,6 @@ export async function buildApp(opts: AppOptions) {
 
     // Work: projects, boards, tickets, dependencies, objectives (R16–R18, R25).
     const State = z.enum(SYSTEM_STATES);
-    const Column = z.object({ name: z.string().trim().min(1).max(60), systemState: State, wipLimit: z.number().int().positive().nullable().optional() });
     const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
     const TicketFields = z.object({
       title: z.string().trim().min(1).max(200),
@@ -1746,11 +1732,6 @@ export async function buildApp(opts: AppOptions) {
       acceptanceCriteriaLoaded: acceptanceCriteriaSchema,
     });
 
-    owner.get("/api/companies/:id/projects", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      return db.select().from(projects).where(eq(projects.companyId, id)).orderBy(projects.name);
-    });
-
     // New scope from the owner: noted for the CEO's next run, which checks the team covers it (docs/13).
     // shortcut: read-modify-write of one settings row; two owner adds in the same instant could drop one line.
     const teamCheck = async (companyId: string, what: string) => {
@@ -1760,178 +1741,8 @@ export async function buildApp(opts: AppOptions) {
       await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
     };
 
-    owner.post("/api/companies/:id/projects", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const body = z.object({ name: z.string().trim().min(1).max(80), columns: z.array(Column).optional() }).parse(req.body);
-      const p = await work.createProject(id, body.name, body.columns);
-      await teamCheck(id, `created a project, "${p.name}" (${p.id})`);
-      return reply.code(201).send(p);
-    });
-
-    owner.patch("/api/projects/:id", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z
-        .object({
-          name: z.string().trim().min(1).max(80),
-          repoUrl: z
-            .string()
-            .trim()
-            .max(500)
-            .refine(repoUrlAllowed, "Give an https://, ssh://, git@ or local path address. Plain http:// works for a LAN address such as http://192.0.2.10:3003/you/repo.git.")
-            .refine((u) => !findCredential(u), "The address looks like it contains a credential. Grant a GIT_TOKEN secret to the company instead.")
-            .nullable(),
-          defaultBranch: z.string().trim().min(1).max(200),
-          verifyCommand: z.string().trim().min(1).max(1000).nullable(),
-          deepVerifyCommand: z.string().trim().min(1).max(1000).nullable(),
-          ticketCostCapUsd: z.number().positive().nullable(),
-          starred: z.boolean(),
-          monthlyCapUsd: z.number().positive().nullable(),
-          archived: z.boolean(),
-          landing: z.enum(["merge", "pull_request"]),
-          gitHost: z.enum(["github", "gitea"]).nullable(),
-          gitApiBase: z
-            .string()
-            .trim()
-            .max(500)
-            .refine((u) => /^https:\/\//.test(u) || (u.startsWith("http://") && repoUrlAllowed(u)), "Give the API's https:// address, or http:// on a LAN address.")
-            .nullable(),
-        })
-        .partial()
-        .parse(req.body);
-      const { ticketCostCapUsd, monthlyCapUsd, archived, ...fields } = b;
-      // Archiving hides the project from agents, so work still open in it would be stranded.
-      if (archived) {
-        const [open] = await db.select({ n: count() }).from(tickets).where(and(eq(tickets.projectId, id), ne(tickets.systemState, "done")));
-        if (open!.n) return reply.code(409).send({ error: "open_tickets", message: `This project has ${open!.n} open task${open!.n === 1 ? "" : "s"}. Finish or cancel ${open!.n === 1 ? "it" : "them"} before archiving.` });
-      }
-      if (archived !== undefined) Object.assign(fields, { archivedAt: archived ? new Date() : null, ...(archived ? { starred: false } : {}) });
-      // A new repo address finds its host (R59), unless the owner set one with it.
-      if (fields.repoUrl !== undefined && fields.gitHost === undefined) {
-        const found = fields.repoUrl ? await gitHosts.detect(fields.repoUrl) : null;
-        Object.assign(fields, { gitHost: found?.gitHost ?? null, gitApiBase: found?.gitApiBase ?? null });
-      }
-      // The owner set this git address themselves, so its private address is meant (a LAN git server); the guard keeps it (BOS-708).
-      if (fields.repoUrl !== undefined) Object.assign(fields, { allowPrivate: !!fields.repoUrl });
-      const [p] = await db
-        .update(projects)
-        .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
-        .where(eq(projects.id, id))
-        .returning();
-      // A new repo address (or archiving) changes which git host the company's runner may reach.
-      if (p && (fields.repoUrl !== undefined || archived !== undefined)) void launch.syncAllow(p.companyId);
-      return p ?? reply.code(404).send({ error: "not_found" });
-    });
-
-    // What a project has cost (money only, as on the dashboard: subscription use is excluded). "This month" is the UTC calendar month.
-    owner.get("/api/projects/:id/spend", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const [p] = await db.select({ cap: projects.ticketCostCapMicros, monthlyCap: projects.monthlyCapMicros }).from(projects).where(eq(projects.id, id));
-      if (!p) return reply.code(404).send({ error: "not_found" });
-      const t = opts.now ? opts.now() : new Date();
-      const monthStart = monthStartUtc(t);
-      const month = await projectSpendMicros(db, id, monthStart);
-      const all = await projectSpendMicros(db, id);
-      const sum = sql<string>`sum(${costEvents.costMicros})`;
-      const top = await db
-        .select({ id: tickets.id, title: tickets.title, micros: sum })
-        .from(costEvents)
-        .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
-        .innerJoin(runsTable, eq(runsTable.id, costEvents.runId))
-        .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
-        .where(and(eq(tickets.projectId, id), ne(fundingSources.kind, "subscription")))
-        .groupBy(tickets.id, tickets.title)
-        .orderBy(desc(sum))
-        .limit(10);
-      // Tokens from every run on the project's tasks, subscription runs included (they have no money cost but still use the plan).
-      const tokenSum = (since?: Date) =>
-        db
-          .select({ input: sql<string>`coalesce(sum(${runsTable.inputTokens}), 0)`, output: sql<string>`coalesce(sum(${runsTable.outputTokens}), 0)` })
-          .from(runsTable)
-          .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
-          .where(since ? and(eq(tickets.projectId, id), gte(runsTable.startedAt, since)) : eq(tickets.projectId, id))
-          .then(([r]) => ({ input: Number(r?.input ?? 0), output: Number(r?.output ?? 0) }));
-      const tokens = { month: await tokenSum(monthStart), total: await tokenSum() };
-      return { tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
-    });
-
-    // The setup wizard (R56): where the owner is in it, and what's still to do for a company.
-    owner.get("/api/setup-progress", async () => setup.progress());
-    owner.put("/api/setup-progress", async (req) => setup.save(z.object({ dismissed: z.boolean(), step: z.number().int().min(0).max(10), companyId: Uuid.nullable() }).partial().parse(req.body)));
-    owner.get("/api/companies/:id/setup-checklist", async (req, reply) => (await setup.checklist(IdParam.parse(req.params).id)) ?? reply.code(404).send({ error: "not_found" }));
-
-    // Is the company's git token good for this repo (R58, R56)? One read of the repo, with its permissions.
-    owner.post("/api/projects/:id/check-git-token", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const [p] = await db.select().from(projects).where(eq(projects.id, id));
-      if (!p) return reply.code(404).send({ error: "not_found" });
-      const a = p.repoUrl ? parseRepoUrl(p.repoUrl) : null;
-      if (!a || (p.gitHost !== "github" && p.gitHost !== "gitea") || !p.gitApiBase) return { ok: false, canPush: false, message: "Boss Man doesn't know this project's git host yet; save its repo address first." };
-      const token = (await secretsSvc.resolveCompanyEnv(p.companyId, "check")).GIT_TOKEN;
-      if (!token) return { ok: false, canPush: false, message: "The company has no GIT_TOKEN yet." };
-      try {
-        return await gitHosts.checkAccess({ kind: p.gitHost, apiBase: p.gitApiBase, owner: a.owner, repo: a.repo }, token);
-      } catch (err) {
-        return { ok: false, canPush: false, message: `Couldn't reach the host: ${(err as Error).message}` };
-      }
-    });
-
-    // Does the company's Claude setup-token work (R58)? Only Claude Code can tell, so the runner
-    // runs one tiny prompt with it, which uses a little of the subscription allowance.
-    owner.post("/api/companies/:id/check-claude", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
-      if (!c) return reply.code(404).send({ error: "not_found" });
-      const [grant] = await db.select({ id: secretGrants.id }).from(secretGrants).where(and(eq(secretGrants.companyId, id), eq(secretGrants.envName, "CLAUDE_CODE_OAUTH_TOKEN")));
-      if (!grant) return { ok: false, message: "The company has no Claude setup-token yet." };
-      const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, id));
-      if (!runner || !runners.isConnected(runner.id)) return { ok: false, message: "The company's runner isn't connected, and the check runs there." };
-      try {
-        return await runners.request<{ ok: boolean; message: string }>(runner.id, (requestId) => ({ type: "credential.check", requestId }), 2 * 60_000);
-      } catch (err) {
-        return { ok: false, message: `The runner couldn't run the check: ${(err as Error).message}` };
-      }
-    });
-
-    // Merge check presets (R57): the runner proposes checks from the repo, alongside the standard ones.
-    owner.post("/api/projects/:id/check-presets", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const [p] = await db.select().from(projects).where(eq(projects.id, id));
-      if (!p) return reply.code(404).send({ error: "not_found" });
-      const base = { standard: STANDARD_CHECKS, none: NO_CHECK };
-      if (!p.repoUrl) return { ...base, detected: [], tools: null, error: "Set the project's git repo first." };
-      const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, p.companyId));
-      if (!runner || !runners.isConnected(runner.id)) return { ...base, detected: [], tools: null, error: "The company's runner isn't connected, so it can't look at the repo." };
-      try {
-        const r = await runners.request<DetectResult>(runner.id, (requestId) => ({ type: "workspace.detect", requestId, projectId: p.id, repoUrl: p.repoUrl!, baseRef: p.defaultBranch }), 2 * 60_000);
-        return { ...base, detected: r.checks, tools: r.tools, error: null };
-      } catch (err) {
-        return { ...base, detected: [], tools: null, error: `The runner couldn't read the repo: ${(err as Error).message}` };
-      }
-    });
-
-    owner.put("/api/projects/:id/columns", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      return work.setColumns(id, z.array(Column).parse(req.body));
-    });
-
-    // The project brief: a wiki page the CEO writes from the code. One open brief ticket at a time.
-    const briefStatus = async (projectId: string) => {
-      const [p] = await db.select().from(projects).where(eq(projects.id, projectId));
-      if (!p) return null;
-      const b = await findBrief(db, p.companyId, p.id);
-      return { p, exists: !!b, status: { slug: briefSlug(p.id), exists: !!b, commit: b?.commit ?? null, branch: b?.branch ?? null, updatedAt: b?.updatedAt ?? null, ticketId: (await openBriefTicket(db, p.id))?.id ?? null } };
-    };
-    owner.get("/api/projects/:id/brief", async (req, reply) => (await briefStatus(IdParam.parse(req.params).id))?.status ?? reply.code(404).send({ error: "not_found" }));
-    owner.post("/api/projects/:id/brief", async (req, reply) => {
-      const b = await briefStatus(IdParam.parse(req.params).id);
-      if (!b) return reply.code(404).send({ error: "not_found" });
-      const open = await openBriefTicket(db, b.p.id);
-      if (open) return open;
-      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, b.p.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-      if (!ceo) throw new WorkError(400, "This company has no CEO to write the brief. Add one first.");
-      const ticket = await work.createTicket(b.p.id, { title: b.exists ? BRIEF_TITLES[1]! : BRIEF_TITLES[0]!, body: briefTicketBody(b.p, b.exists), assigneeAgentId: ceo.id, noCode: true });
-      return reply.code(201).send(ticket);
-    });
+    // Projects, their review policy, spend, checks and brief, and the setup wizard: routes/projects.ts, on this owner scope.
+    projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, now: opts.now });
 
     owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
 
@@ -2596,16 +2407,16 @@ export async function buildApp(opts: AppOptions) {
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
     // The number for the menu badge (BOS-969): how many cards need the owner now, and how many are
-    // folded into "Waiting, nothing to do yet", from the same rows and rule as the queue above. The
-    // screen passes what it is showing by company (open, waiting) so its own heading agrees with it.
+    // folded into "Waiting, nothing to do yet", from the same rows and rule as the queue above.
+    // (BOS-996) The page heading reads the same figures; it no longer sends its own, and any open or
+    // waiting figures in the query are ignored, so the server's tally is the only source.
     owner.get("/api/decisions/tally", async (req) => {
       const q = z
-        .object({ companyId: z.string().uuid().optional(), includeAll: z.string().optional(), open: z.coerce.number().int().min(0).max(10_000).optional(), waiting: z.coerce.number().int().min(0).max(10_000).optional() })
+        .object({ companyId: z.string().uuid().optional(), includeAll: z.string().optional() })
         .parse(req.query ?? {});
       return decisionsSvc.queueTally({
         ...(q.companyId ? { companyId: q.companyId } : {}),
         ...(q.includeAll ? { includeAll: true } : {}),
-        ...(q.open !== undefined && q.waiting !== undefined ? { visible: { open: q.open, waiting: q.waiting } } : {}),
       });
     });
     // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.

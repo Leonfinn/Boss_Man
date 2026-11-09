@@ -56,12 +56,27 @@ const summaryOf = (d: Decision) => {
   return typeof s === "string" ? s : null;
 };
 
-/** Rule 0: the owner's private channel. A publish token, an https ntfy URL and an https public URL; and the owner hasn't switched it off. */
+/**
+ * https, or plain http to exactly the bundled ntfy container (host "ntfy", port 80, no login in the URL) on the private edge network,
+ * where the publish token never crosses an untrusted network. Any other http address is refused.
+ */
+function ntfyUrlIsPrivateOrHttps(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol === "https:") return true;
+  return u.protocol === "http:" && u.hostname === "ntfy" && (u.port === "" || u.port === "80") && !u.username && !u.password;
+}
+
+/** Rule 0: the owner's private channel. A publish token, an https ntfy URL (or the bundled http://ntfy) and an https public URL; and the owner hasn't switched it off. */
 export function approveGate(s: NotifySettings, ntfyToken: string | null): { on: true } | { on: false; why: string } {
   if (s.approveButtons === false) return { on: false, why: "switched off" };
   if (!s.ntfy) return { on: false, why: "phone push isn't set up" };
   if (!ntfyToken?.trim()) return { on: false, why: "the ntfy server has no access token (a private server)" };
-  if (!/^https:/i.test(s.ntfy.url) || new URL(s.ntfy.url).protocol !== "https:") return { on: false, why: "the ntfy address isn't https" };
+  if (!ntfyUrlIsPrivateOrHttps(s.ntfy.url)) return { on: false, why: "the ntfy address isn't https (or the bundled http://ntfy)" };
   if (!s.publicUrl || new URL(s.publicUrl).protocol !== "https:") return { on: false, why: "Boss Man's public address isn't https" };
   return { on: true };
 }

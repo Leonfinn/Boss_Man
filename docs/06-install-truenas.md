@@ -482,11 +482,11 @@ To see whether your copy is current:
 diff $D/host-deployer.sh /mnt/tank/apps/boss-man/src/scripts/host-deployer.sh && echo same
 ```
 
-**4. The config file, with the alert webhook.** This is the whole alert setup. It lives only here, not in Boss Man, so it still works when Boss Man is down. Keep the single quotes (a URL can contain `?` and `&`). Replace the address with your Home Assistant's, and the last part with the long random ID you will use in the automation (see "Home Assistant" below):
+**4. The config file, with the alert webhook (optional: skip this step if you want no webhook).** This is the whole alert setup. It lives only here, not in Boss Man, so it still works when Boss Man is down. Keep the single quotes (a URL can contain `?` and `&`). Replace the address with that of any service that accepts a JSON `POST` (this file is optional: leave `WEBHOOK_URL` out and no webhook is sent):
 
 ```sh
 cat > $D/host.conf <<'EOF'
-WEBHOOK_URL='http://homeassistant.local:8123/api/webhook/PUT-A-LONG-RANDOM-ID-HERE'
+WEBHOOK_URL='https://PUT-YOUR-WEBHOOK-ADDRESS-HERE'
 WEBHOOK_ON_SUCCESS=1
 EOF
 chown root:root $D/host.conf && chmod 600 $D/host.conf
@@ -495,7 +495,7 @@ chown root:root $D/host.conf && chmod 600 $D/host.conf
 - `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
 - Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`. The host publishes `SOAK_SECONDS` in `outbox/available.json` as `soakSeconds`, so Boss Man's runner-update trial uses the same length you set here (no second place to keep in step).
 - The script refuses to start if this file is not owned by the user running it with mode 600.
-- It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay or Home Assistant; that is untested.
+- It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay that adds it; that is untested.
 
 Test the webhook alone, with the same URL, before anything else:
 
@@ -503,7 +503,7 @@ Test the webhook alone, with the same URL, before anything else:
 . $D/host.conf && curl -fsS -X POST -H 'Content-Type: application/json' -d '{"result":"failed","message":"Test from the NAS","from_commit":"aaaaaaaa","to_commit":"bbbbbbbb","at":"2026-10-20T12:00:00Z"}' "$WEBHOOK_URL" && echo sent
 ```
 
-Your phone should buzz. `sent` only means Home Assistant accepted the request: it answers `200` even when no automation listens on that ID (seen on a real install, where the cause turned out to be a mistake in the automation's YAML). If you get `sent` and no buzz, check that the automation saved without errors and that its `webhook_id` matches the end of `WEBHOOK_URL` exactly.
+`sent` only means the service accepted the request. Some services answer `200` even when nothing is set up to act on it, so check that the alert really arrives where you expect it.
 
 **5. Test the script.** First with no request: it reads `main` and writes what is waiting.
 
@@ -556,34 +556,6 @@ What you may see instead of a deploy:
 - Approving the runner update builds the new image, then drains: runs in progress finish and each runner is swapped when its company is idle, so there is no need to wait for quiet. Approving frees the host script within minutes; the result of the swap arrives as a Boss Man notification.
 
 **Turn it off:** disable the cron job, or remove `:deploy/truenas-deployer.yml` from `COMPOSE_FILE` and run `docker compose up -d server`.
-
-### Home Assistant: a phone alert from the webhook
-
-Create an automation (Settings > Automations & Scenes > Create > Edit in YAML) with a `webhook` trigger. Pick a long random `webhook_id` (for example the output of `openssl rand -hex 24`); anyone who knows it can trigger the automation, so treat it like a password. This uses the current syntax (`triggers:` / `trigger: webhook`, `actions:` / `action:`), which Home Assistant introduced in 2024.10 (**UNVERIFIED** against your version):
-
-```yaml
-alias: Boss Man deploy alert
-description: The NAS posts here when a Boss Man deploy fails or is refused.
-triggers:
-  - trigger: webhook
-    webhook_id: "PUT-A-LONG-RANDOM-ID-HERE"
-    allowed_methods:
-      - POST
-    local_only: true
-actions:
-  - action: notify.mobile_app_YOUR_PHONE
-    data:
-      title: "Boss Man deploy: {{ trigger.json.result }}"
-      message: >-
-        {{ trigger.json.message }}
-        ({{ trigger.json.from_commit[:8] }} to {{ trigger.json.to_commit[:8] }})
-mode: queued
-```
-
-- The webhook's address is `http://<home-assistant>:8123/api/webhook/<webhook_id>`; that is what goes in `WEBHOOK_URL`.
-- `local_only: true` accepts only requests from your local network, so the NAS must reach Home Assistant directly, not through a public URL or a reverse proxy that adds forwarding headers.
-- `trigger.json` is the parsed JSON body of the POST. `notify.mobile_app_YOUR_PHONE` is the notify action Home Assistant makes for your phone's companion app; find its exact name in Developer tools > Actions.
-- Source for the trigger options and `trigger.json`: [Home Assistant, Webhook trigger](https://www.home-assistant.io/docs/automation/trigger/#webhook-trigger). That page could not be opened from where this was written, so the YAML above is from memory of it and not checked; test it with the curl line in step 4.
 
 ## 9b. Upgrading to v1.2
 
@@ -892,11 +864,7 @@ iPhones only get instant delivery from a self-hosted server if the server forwar
 
 ### Approve buttons
 
-ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the address from section 10b). The Approve button (BOS-243) only turns on when a publish token is set and Boss Man's public URL is https.
-
-### Moving off the Home Assistant webhook
-
-Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook where you set it up.
+ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the address from section 10b). The Approve button (BOS-243) only turns on when all of these hold: the ntfy server has a publish token; the **ntfy server** address is `https://...` or exactly the bundled `http://ntfy:80` from step 5 (any other `http://` address is refused, so the token never crosses an untrusted network in clear text); Boss Man's public URL is https; and **Approve buttons** haven't been switched off in Notifications. If one fails, Notifications says which.
 
 ### Blue/green installs
 
