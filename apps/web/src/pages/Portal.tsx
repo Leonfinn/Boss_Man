@@ -17,7 +17,7 @@ const STAGES: Array<{ id: Stage; label: string; help: string }> = [
   { id: "released", label: "Released", help: "Done recently." },
 ];
 type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
-type Portal = { title: string; intro: string | null; hasLogo: boolean; features: PortalFeature[] };
+type Portal = { title: string; intro: string | null; hasLogo: boolean; back: { url: string; text: string } | null; features: PortalFeature[] };
 
 const token = () => decodeURIComponent(window.location.hash.replace(/^#/, ""));
 
@@ -215,41 +215,60 @@ export function PortalApp() {
     );
   if (!data) return null;
   const shown = data.features.filter((f) => f.stage === stage);
+  // BOS-967: when the owner sets a website address, the page gains a bar at the top and a link at the
+  // bottom so a visitor can get back to the site. Both are plain links in the same tab.
+  const back = data.back ? (
+    <a className="portal-back" href={data.back.url}>
+      <span aria-hidden="true">←</span> Back to {data.back.text}
+    </a>
+  ) : null;
   return (
-    <main className="portal">
-      <header className="page-head">
-        <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
-          {logo && <img src={logo} alt="" style={{ maxHeight: 112, maxWidth: "40vw", width: "auto" }} />}
-          <div>
-            <h1>{data.title}</h1>
-            {data.intro && <p className="sub" style={{ whiteSpace: "pre-wrap" }}>{data.intro}</p>}
-          </div>
+    <>
+      {back && (
+        <div className="portal-back-bar">
+          <div className="portal-back-wrap">{back}</div>
         </div>
-      </header>
-      <div className="tabs" role="tablist" aria-label="Stages">
-        {STAGES.map((s) => (
-          <button key={s.id} type="button" role="tab" aria-selected={stage === s.id} onClick={() => setStage(s.id)}>
-            {s.label}
-            <span className="tab-count">{data.features.filter((f) => f.stage === s.id).length}</span>
-          </button>
-        ))}
-      </div>
-      <p className="muted" style={{ fontSize: 14 }}>
-        {STAGES.find((s) => s.id === stage)!.help}
-      </p>
-      {shown.length ? (
-        <ul className="portal-list">
-          {shown.map((f) => (
-            <FeatureCard key={f.id} f={f} onChanged={load} />
-          ))}
-        </ul>
-      ) : (
-        <p className="muted">Nothing here yet.</p>
       )}
-      <Idea />
-      <p className="muted" style={{ fontSize: 12 }}>
-        Votes are remembered in this browser, so you can change them later. What you send goes to the team as feedback.
-      </p>
-    </main>
+      <main className="portal">
+        <header className="page-head">
+          <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+            {logo && <img src={logo} alt="" style={{ maxHeight: 112, maxWidth: "40vw", width: "auto" }} />}
+            <div>
+              <h1>{data.title}</h1>
+              {data.intro && <p className="sub" style={{ whiteSpace: "pre-wrap" }}>{data.intro}</p>}
+            </div>
+          </div>
+        </header>
+        <div className="tabs" role="tablist" aria-label="Stages">
+          {STAGES.map((s) => (
+            <button key={s.id} type="button" role="tab" aria-selected={stage === s.id} onClick={() => setStage(s.id)}>
+              {s.label}
+              <span className="tab-count">{data.features.filter((f) => f.stage === s.id).length}</span>
+            </button>
+          ))}
+        </div>
+        <p className="muted" style={{ fontSize: 14 }}>
+          {STAGES.find((s) => s.id === stage)!.help}
+        </p>
+        {shown.length ? (
+          <ul className="portal-list">
+            {shown.map((f) => (
+              <FeatureCard key={f.id} f={f} onChanged={load} />
+            ))}
+          </ul>
+        ) : (
+          <p className="muted">Nothing here yet.</p>
+        )}
+        <Idea />
+        <p className="muted" style={{ fontSize: 12 }}>
+          Votes are remembered in this browser, so you can change them later. What you send goes to the team as feedback.
+        </p>
+        {back && (
+          <div className="portal-back-foot">
+            <p>{back}</p>
+          </div>
+        )}
+      </main>
+    </>
   );
 }

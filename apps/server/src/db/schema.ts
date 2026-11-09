@@ -1392,6 +1392,10 @@ export const feedbackSettings = pgTable("feedback_settings", {
   portalToken: text("portal_token").unique(),
   portalTitle: text("portal_title"),
   portalIntro: text("portal_intro"),
+  /** Where the portal's "← Back to …" links go: an https address on the owner's own site (BOS-967). */
+  portalBackUrl: text("portal_back_url"),
+  /** The words after "← Back to "; empty means the portal's heading. */
+  portalBackText: text("portal_back_text"),
   /** The logo beside the portal heading: png, jpeg or webp bytes, checked on upload. */
   portalLogo: bytea("portal_logo"),
   portalLogoType: text("portal_logo_type"),
