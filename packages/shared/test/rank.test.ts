@@ -10,6 +10,18 @@ describe("rankDecision", () => {
     expect(r.parts).toEqual({ blocking: 0, urgency: 0, age: 1.5, liveRun: 0 });
     expect(r.score).toBe(1.5);
     expect(r.reasons).toEqual(["Waiting 36 h"]);
+    expect(r.ageReason).toBe("Waiting 36 h");
+  });
+
+  it("marks the age reason so a page can hide it without matching its words (BOS-869)", () => {
+    const paused = rankDecision(
+      { createdAt: hoursAgo(0.5), blocked: [{ depth: 1, objectivePriority: null, dueDate: null }], holdsLiveRun: true },
+      now,
+    );
+    // The live-run reason is put first; the age reason keeps the same words and is still marked.
+    expect(paused.reasons[0]).toBe("An agent is paused until you answer");
+    expect(paused.ageReason).toBe("Raised just now");
+    expect(paused.reasons).toContain(paused.ageReason);
   });
 
   it("weights blocked work by objective priority and halves it down the chain", () => {
