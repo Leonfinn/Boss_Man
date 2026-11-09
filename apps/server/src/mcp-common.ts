@@ -1,7 +1,8 @@
 // Small helpers every MCP tool file shares (BOS-298 step 15): kept here so the tool files split out of
 // mcp.ts import them without importing mcp.ts back.
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { afterMergeLint, isAfterMerge, readVerdicts, stateNoteLine, ticketRef, type Criterion } from "@boss-man/shared";
+import { z } from "zod";
+import { afterMergeLint, criterionText, isAfterMerge, readVerdicts, stateNoteLine, ticketRef, type Criterion } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, companies, projects, tickets, wakes } from "./db/schema.js";
 
@@ -87,7 +88,44 @@ export const CAP = 40_000;
 /** A reference like HOL-12 (any prefix: an old one still finds the number). */
 export const REF = /^[A-Za-z0-9]{1,10}-(\d{1,9})$/;
 
+/**
+ * Write-time advice only (BOS-989): a summary that names another ticket (BOS-12, or a ticket id) close to "wait",
+ * "after" or "blocked" is an ordering written as prose, which nothing acts on. Returns the one line to add to the
+ * tool's reply, or "" when there is nothing to say. Never a refusal.
+ */
+export function waitsOnAdvice(summary: string | undefined | null): string {
+  if (!summary) return "";
+  const ticket = /\b[A-Za-z][A-Za-z0-9]{0,9}-\d{1,9}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+  const cue = /\b(waits?|waiting|after|blocked)\b/i;
+  for (const m of summary.matchAll(ticket)) {
+    const near = summary.slice(Math.max(0, m.index! - 30), m.index! + m[0].length + 30);
+    if (cue.test(near)) return "\nTip: use update_ticket waitsOn to make this a real link, so you are woken when it is merged or done.";
+  }
+  return "";
+}
+
 /** One line per criterion with the author's verdict, the after-merge ones marked so they read as skippable (DR-024 #5). */
 export function criterionLines(criteria: readonly Criterion[], note: string | null): string[] {
   return readVerdicts(criteria, note).map((r, i) => `- [${r.verdict ?? "not reported"}] ${r.criterion}${isAfterMerge(criteria[i]!) ? " (checked after merge; don't fail the review on it)" : ""}`);
 }
+
+/** The note Boss Man shows after a criterion it says to check once the work is live; stripped before matching text. */
+const AFTER_MERGE_NOTE = /\s*\(checked after merge[^)]*\)\s*$/i;
+
+/**
+ * A criterion argument as the tool really receives it (BOS-1012). Claude Code sends a number as the string
+ * "6", so a schema of `anyOf [integer, string]` never reaches the number branch: a number-looking string
+ * becomes a number here, before anything tries to match it as text. Text is stripped of the after-merge
+ * note Boss Man appends to it and compared with case and whitespace run together.
+ */
+export const criterionArg = z.preprocess((v) => (typeof v === "string" && /^\s*\d{1,2}\s*$/.test(v) ? Number(v.trim()) : v), z.union([z.number().int(), z.string().min(1).max(500)]).optional());
+
+/** The index (0-based) into `criteria` that a `criterion` argument names, by number (1-based) or by its text. */
+export function criterionAt(criteria: readonly Criterion[], criterion: number | string): number {
+  if (typeof criterion === "number") return criterion - 1;
+  const want = criterionArgText(criterion);
+  return criteria.findIndex((c) => criterionArgText(criterionText(c)) === want);
+}
+
+/** Text for matching a criterion name: the after-merge note off, case and runs of whitespace normalised. */
+const criterionArgText = (s: string) => s.replace(AFTER_MERGE_NOTE, "").trim().toLowerCase().replace(/\s+/g, " ");

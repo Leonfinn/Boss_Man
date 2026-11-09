@@ -940,6 +940,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                               <span key={b.ticketId}>
                                 {i > 0 && ", "}
                                 <a href={`#/tickets/${b.ticketId}`}>{b.ticketTitle ?? "a task"}</a>
+                                {b.until ? ` (until ${b.until})` : ""}
                               </span>
                             ))}
                         </span>

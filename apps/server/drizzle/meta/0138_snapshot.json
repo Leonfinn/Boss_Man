@@ -1,5 +1,5 @@
 {
-  "id": "7a585256-f018-4985-8c83-c92f5c9958e7",
+  "id": "2406c0fb-e4e7-4b5d-9871-eae66534f437",
   "prevId": "550cd3cd-42b4-4559-8d10-6e9784811055",
   "version": "7",
   "dialect": "postgresql",
@@ -1750,13 +1750,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'watch'"
-        },
-        "fence_mode_chosen_at": {
-          "name": "fence_mode_chosen_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
+          "default": "'off'"
         },
         "watchdog": {
           "name": "watchdog",
@@ -8487,6 +8481,13 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "until": {
+          "name": "until",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'done'"
         }
       },
       "indexes": {
