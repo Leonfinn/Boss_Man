@@ -104,7 +104,7 @@ import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { NotifySettings, NtfyUrl, notificationsService } from "./services/notifications.js";
-import { approveGate, phoneApproveService } from "./services/phone-approve.js";
+import { phoneApproveService } from "./services/phone-approve.js";
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
 const OWNER_TZ = timeZoneOr(process.env.TZ);
@@ -330,6 +330,7 @@ export async function buildApp(opts: AppOptions) {
     pushPlain: (n) => notes.pushPlain(n),
     answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
     now: opts.now,
+    fetch: opts.fetch,
   });
   notes.setApproveHook(phoneApprove);
   // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
@@ -1350,7 +1351,7 @@ export async function buildApp(opts: AppOptions) {
     });
     /** Whether phone Approve buttons are on, and if not why, for Settings → Notifications (BOS-243). */
     const approveStatus = async (s: NotifySettings) => {
-      const g = approveGate(s, s.ntfy?.tokenSecretId ? await secretsSvc.reveal(s.ntfy.tokenSecretId) : null);
+      const { gate: g } = await phoneApprove.gate(s);
       return g.on ? { on: true } : { on: false, why: g.why };
     };
     // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.

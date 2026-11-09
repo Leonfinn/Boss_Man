@@ -13,7 +13,7 @@ import type { Db } from "../db/client.js";
 import { approveTokens, decisions, owners, phoneActionHits, ticketDependencies } from "../db/schema.js";
 import { record } from "./activity.js";
 import { adviceOf, type Settled } from "./decisions.js";
-import { appUrl, fitBytes, type NotifySettings, type PushAction } from "./notifications.js";
+import { appUrl, fitBytes, ntfyPublishUrl, type NotifySettings, type PushAction } from "./notifications.js";
 
 export const TOKEN_TTL_MS = 15 * 60_000;
 /** A claim older than this is taken to have died with its request, so a re-tap may claim again. */
@@ -114,10 +114,22 @@ export function decisionRev(d: Decision): string {
 export const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 const TOKEN_SHAPE = /^[A-Za-z0-9_-]{43}$/;
 
-/** The text of a push about this card (rules 2 and N4): the question, then what Approve does. */
+/** The largest message a push carries (notifications.ts push() cuts the body to this many bytes). */
+export const PUSH_BODY_MAX = 3500;
+
+/**
+ * The text of a push about this card (rules 2 and N4): the question, then what Approve does. The Approve
+ * line is what the owner approves on, so it is never cut: when the two together are over the push limit
+ * (a 1000-character question in 4-byte characters is 4000 bytes) the question is trimmed to make room
+ * for it whole, so the owner can't tap a button without seeing the summary and option it sends (BOS-943).
+ */
 export function approveMessage(d: Decision): string {
-  return `${plainText(d.question).trim()}\n\nApprove = ${plainText(summaryOf(d) ?? "")} ('${plainText(d.recommendedOption)}')`;
+  const approve = `Approve = ${plainText(summaryOf(d) ?? "")} ('${plainText(d.recommendedOption)}')`;
+  const room = PUSH_BODY_MAX - new TextEncoder().encode(`\n\n${approve}`).length;
+  return `${fitBytes(plainText(d.question).trim(), room)}\n\n${approve}`;
 }
+
+const TOPIC_CHECK_MS = 60_000;
 
 export type Outcome = "approved" | "already_answered" | "being_applied" | "try_again" | "no_longer_works" | "too_many_taps";
 export type RedeemResult = { status: number; body: { ok: boolean; outcome?: Outcome; error?: string } };
@@ -130,9 +142,14 @@ export function phoneApproveService(
     pushPlain: (n: { title: string; body: string; link: string; actions?: PushAction[] }) => Promise<boolean>;
     answer: (id: string, answer: string, extra: { by?: string }) => Promise<unknown>;
     now?: () => Date;
+    fetch?: typeof fetch;
   },
 ) {
   const now = deps.now ?? (() => new Date());
+  const doFetch = deps.fetch ?? fetch;
+  /** Anonymous-read verdicts per ntfy URL + topic, kept for TOPIC_CHECK_MS. */
+  // shortcut: lost on restart, harmless because a restart costs at most one extra poll; cleared past 20 entries, so it stays small.
+  const topicChecks = new Map<string, { at: number; why: string | null }>();
   /** Unknown-token taps, counted rather than logged (rule 8). */
   let unknownTaps = 0;
   /** When each IP was last told "Too many taps", so a flood gets one reply per window. Leader memory only. */
@@ -140,10 +157,40 @@ export function phoneApproveService(
   // entries older than the window are pruned on each write, so it stays small.
   const toldTooMany = new Map<string, number>();
 
-  async function gate(s?: NotifySettings) {
+  /**
+   * BOS-944: a publish token proves Boss Man can publish, not that strangers can't read. Poll the topic with
+   * no Authorization header; only a 401 or 403 counts as private. Anything else (readable, unreachable,
+   * unexpected status) keeps Approve off. Cached briefly so a push or a tap doesn't poll every time.
+   */
+  async function topicPrivacy(n: { url: string; topic: string }): Promise<string | null> {
+    const key = `${n.url}\n${n.topic}`;
+    const t = now().getTime();
+    const hit = topicChecks.get(key);
+    if (hit && t - hit.at < TOPIC_CHECK_MS && t >= hit.at) return hit.why;
+    let why: string | null;
+    try {
+      const u = new URL(`${n.topic}/json`, ntfyPublishUrl(n.url));
+      u.searchParams.set("poll", "1");
+      const res = await doFetch(u, { method: "GET", signal: AbortSignal.timeout(5000), redirect: "manual" });
+      await res.body?.cancel().catch(() => {});
+      why = res.status === 401 || res.status === 403 ? null : res.status === 200 ? "anyone can read your ntfy topic" : "Boss Man couldn't confirm your ntfy topic is private";
+    } catch {
+      why = "Boss Man couldn't confirm your ntfy topic is private";
+    }
+    if (topicChecks.size > 20) topicChecks.clear();
+    topicChecks.set(key, { at: t, why });
+    return why;
+  }
+
+  async function gate(s?: NotifySettings): Promise<{ settings: NotifySettings; gate: ReturnType<typeof approveGate> }> {
     const settings = s ?? (await deps.getSettings());
     const token = settings.ntfy?.tokenSecretId ? await deps.reveal(settings.ntfy.tokenSecretId) : null;
-    return { settings, gate: approveGate(settings, token) };
+    const g = approveGate(settings, token);
+    if (g.on && settings.ntfy) {
+      const why = await topicPrivacy(settings.ntfy);
+      if (why) return { settings, gate: { on: false, why } };
+    }
+    return { settings, gate: g };
   }
   const isBlocker = async (decisionId: string) => (await db.select({ id: ticketDependencies.id }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, decisionId)).limit(1)).length > 0;
   const loadDecision = async (id: string) => (await db.select().from(decisions).where(eq(decisions.id, id)))[0];
