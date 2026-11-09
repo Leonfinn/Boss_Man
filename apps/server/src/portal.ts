@@ -90,7 +90,17 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
     if (!p) return;
     const voter = voterOf(req, reply);
     reply.header("cache-control", "no-store");
-    return { title: p.title ?? `${p.company}: what's next`, intro: p.intro, hasLogo: p.hasLogo, features: await deps.feedback.portalView(p.companyId, voter) };
+    // BOS-967: the optional "← Back to …" links. The address was checked to be https when it was saved;
+    // only an https one is ever sent, so a stored value can't point a visitor at javascript: or http.
+    const backUrl = p.backUrl && /^https:\/\//i.test(p.backUrl) ? p.backUrl : null;
+    const title = p.title ?? `${p.company}: what's next`;
+    return {
+      title,
+      intro: p.intro,
+      hasLogo: p.hasLogo,
+      back: backUrl ? { url: backUrl, text: p.backText?.trim() || title } : null,
+      features: await deps.feedback.portalView(p.companyId, voter),
+    };
   });
 
   app.get("/api/portal/logo", async (req, reply) => {

@@ -54,8 +54,25 @@ describe("limit estimate and daily use (R78)", () => {
     expect(status.forecasts.seven_day).toMatchObject({ perHour: 0, runsOutAt: null, beforeReset: false });
   });
 
-  it("adds up a week of runs and spend per day", async () => {
+  // BOS-1012: the owner's page said Claude Max 2 ran out on Thu 12 Nov from a short busy spell,
+  // when the week's own pace reached Saturday's reset at about half used. The week's readings are
+  // all read back, not just the last two hours.
+  it("forecasts a week from its own readings, so a burst doesn't make it run out early", async () => {
     const c = (ctx = await setup());
+    const weekStart = Date.now() - 44.5 * 3_600_000;
+    const weekReset = Math.floor((Date.now() + 5.5 * 86_400_000) / 1000);
+    // 14% over the 44.5 h so far, then 3% in the last hour: the last two hours read ~2% an hour.
+    const rows = Array.from({ length: 45 }, (_, h) => ({ fundingSourceId: c.sub.id, window: "seven_day", utilization: (0.14 * h) / 44.5, resetsAt: new Date(weekReset * 1000), observedAt: new Date(weekStart + h * 3_600_000) }));
+    rows.push({ fundingSourceId: c.sub.id, window: "seven_day", utilization: 0.17, resetsAt: new Date(weekReset * 1000), observedAt: new Date() });
+    await c.db.insert(quotaSamples).values(rows);
+
+    const f = (await c.req("GET", `/api/funding-sources/${c.sub.id}/status`)).json().forecasts.seven_day;
+    expect(f.perHour).toBeLessThan(0.01);
+    expect(f.beforeReset).toBe(false);
+    expect(new Date(f.runsOutAt).getTime()).toBeGreaterThanOrEqual(weekReset * 1000);
+  });
+
+  it("adds up a week of runs and spend per day", async () => {    const c = (ctx = await setup());
     const agent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", fundingSourceId: c.sub.id })).json() as { id: string };
     const credit = (await c.req("POST", "/api/funding-sources", { name: "API", kind: "api_credit", provider: "anthropic", monthlyGrantUsd: 100, cycleAnchor: new Date(Date.now() - 86_400_000).toISOString() })).json() as { id: string };
     const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Writer", fundingSourceId: credit.id })).json() as { id: string };

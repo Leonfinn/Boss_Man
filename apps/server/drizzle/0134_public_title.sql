@@ -1,0 +1,1 @@
+ALTER TABLE "features" ADD COLUMN "public_title" text;
