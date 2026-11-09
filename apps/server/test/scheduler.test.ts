@@ -36,9 +36,12 @@ async function setup(limits: Partial<Limits> = {}) {
   const [runnerRow] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   // A fake connected runner that records commands.
   const commands: Extract<RunnerCommand, { type: "run.start" }>[] = [];
+  // Every command of any kind, for tests that check nothing was cancelled.
+  const sent: RunnerCommand[] = [];
   let online = true;
   const release = built.runners.connect(reg.runnerId, (c) => {
     if (!online) return false;
+    sent.push(c);
     if (c.type === "run.start") commands.push(c);
     return true;
   });
@@ -50,7 +53,7 @@ async function setup(limits: Partial<Limits> = {}) {
     await built.scheduler.slow();
     return built.scheduler.tick();
   };
-  return { ...built, db, release, cookie, req, company, ceo, project, commands, endRun, setOnline, tick };
+  return { ...built, db, release, cookie, req, company, ceo, project, commands, sent, endRun, setOnline, tick };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 50));
@@ -125,6 +128,32 @@ describe("scheduler", () => {
     expect(await ctx.tick()).toMatchObject({ launched: 0, waiting: 1 });
     await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: false });
     expect(await ctx.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("Stop all work (BOS-836): a fresh server starts work as today; the hold keeps a wake waiting without cancelling a run already going; Resume launches it", async () => {
+    ctx = await setup();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json() as { id: string };
+    // A fresh database: no hold row at all, so no banner, and a wake launches.
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: false });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, {});
+    expect(await ctx.tick()).toMatchObject({ paused: false, launched: 1 });
+    const going = ctx.commands[0]!.runId;
+    // The press: the same POST the Settings button sends.
+    await ctx.req("POST", "/api/kill-switch", { paused: true });
+    await ctx.req("POST", `/api/agents/${worker.id}/wake`, {});
+    expect(await ctx.tick()).toMatchObject({ paused: true, launched: 0 });
+    expect(await ctx.tick()).toMatchObject({ paused: true, launched: 0 });
+    expect(ctx.commands).toHaveLength(1);
+    const [waiting] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, worker.id));
+    expect(waiting!.status).toBe("queued");
+    // The run already going is left alone: still open, and no cancel was sent.
+    const [run] = await ctx.db.select().from(runs).where(eq(runs.id, going));
+    expect(run!.endedAt).toBeNull();
+    expect(ctx.sent.filter((c) => c.type === "run.cancel")).toEqual([]);
+    // Resume: the banner's POST. The waiting wake launches on the next tick.
+    await ctx.req("POST", "/api/kill-switch", { paused: false });
+    expect(await ctx.tick()).toMatchObject({ paused: false, launched: 1 });
+    expect(ctx.commands.map((c) => c.agentId)).toEqual([ctx.ceo.id, worker.id]);
   });
 
   it("waits while the runner is offline", async () => {

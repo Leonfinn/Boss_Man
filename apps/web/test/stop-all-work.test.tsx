@@ -57,6 +57,15 @@ describe("Stop all work", () => {
     expect(screen.queryByRole("button", { name: "Stop all work" })).toBeNull();
   });
 
+  it("shows no banner on a server that never had the hold set", async () => {
+    server(false);
+    render(<HoldBanner />);
+    await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText("All work is stopped.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+  });
+
   it("does nothing when the confirm is cancelled", async () => {
     const s = server(false);
     vi.spyOn(window, "confirm").mockReturnValue(false);
