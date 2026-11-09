@@ -247,16 +247,7 @@ export function schedulerService(
     // handed over, which a launch always is.
     const waiting = waits.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
     if (waiting.length) return false;
-    const [col] = await db
-      .select({ id: workflowColumns.id })
-      .from(workflowColumns)
-      .where(and(eq(workflowColumns.projectId, t.projectId), eq(workflowColumns.systemState, "in_progress")))
-      .orderBy(asc(workflowColumns.position))
-      .limit(1);
-    await db
-      .update(tickets)
-      .set({ systemState: "in_progress", columnId: col?.id ?? null, lastActivityAt: now() })
-      .where(and(eq(tickets.id, ticketId), inArray(tickets.systemState, ["backlog", "ready"])));
+    await systemMoveTicket(db, { ticketId, from: ["backlog", "ready"], to: "in_progress", reason: "Boss Man: started on the wake", now: now() });
     if (t.featureId) await deps.onFeature?.(t.featureId);
     return true;
   }
@@ -1939,7 +1930,7 @@ export function schedulerService(
         if (!deps.length) return false;
         // A blocked ticket has always gone to ready here, assignee or not; keep that.
         if (cur.systemState === "blocked") {
-          await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "what it waited on finished", now: now() });
+          await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
           return true;
         }
         const rows = await db
@@ -1957,7 +1948,7 @@ export function schedulerService(
           .returning({ id: decisions.id });
         return rows.length > 0;
       }
-      const t = await systemMoveTicket(db, { ticketId, from: ["backlog", "blocked"], to: "ready", reason: "what it waited on finished", now: now() });
+      const t = await systemMoveTicket(db, { ticketId, from: ["backlog", "blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
       if (!t?.assigneeAgentId) return false;
       await this.notify(t.assigneeAgentId, { ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
       return true;

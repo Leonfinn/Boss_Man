@@ -103,7 +103,7 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
   if (columnId && columnId !== t.columnId && !opts.overLimit && !opts.projectId) {
     const col = cols.find((c) => c.id === columnId);
     if (col?.wipLimit != null) {
-      const inCol = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.columnId, col.id), ne(tickets.id, t.id)));
+      const inCol = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState), ne(tickets.id, t.id)));
       if (inCol.length >= col.wipLimit) throw new WorkError(409, `"${col.name}" is at its limit of ${col.wipLimit}.`);
     }
   }

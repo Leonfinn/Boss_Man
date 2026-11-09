@@ -94,7 +94,7 @@ export async function addTicketDependency(db: Db, input: DependencyWrite) {
       ticketId: input.blockedTicketId,
       from: input.actor.type === "agent" ? ["backlog", "ready", "in_progress", "blocked"] : undefined,
       to: "blocked",
-      reason: input.blockerTicketId ? "held by a ticket it depends on" : input.blockerDecisionId ? `held by the card ${input.blockerDecisionId}` : "held by an engagement",
+      reason: input.blockerTicketId ? "Boss Man: held by a ticket it depends on" : input.blockerDecisionId ? `Waiting on the owner's card ${input.blockerDecisionId}` : "Boss Man: held by an engagement",
       now: (input.now ?? (() => new Date()))(),
     });
   }
