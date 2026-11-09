@@ -40,7 +40,7 @@ import { reviewTicketWriteRefusal, type skillProposalsService } from "./services
 import { AgentError, type agentsService } from "./services/agents.js";
 import { describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
 import { resolveReviewer } from "./services/review-policy.js";
-import { latestRows } from "./services/review-kinds.js";
+import { activeRows, latestRows } from "./services/review-kinds.js";
 import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
@@ -1293,7 +1293,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       if (rt.assigneeAgentId === scope.agentId) return fail("You can't review a ticket assigned to you.");
       const rows = await latestRows(db, rt.id);
       const named = rows.length ? rows.some((r) => r.reviewerAgentId === scope.agentId) : (await resolveReviewer(db, rt)).agent?.id === scope.agentId;
-      if (me.role !== "ceo" && !named) return fail("Only your company's CEO or this ticket's reviewer reviews it.");
+      if (me.role !== "ceo" && !named) {
+        // Name who holds each open review, so the agent can nudge them or tell the CEO who to chase (BOS-298 step 12).
+        const open: Array<{ kind: string; reviewerAgentId: string | null }> = rows.length ? activeRows(rows) : [{ kind: "code", reviewerAgentId: (await resolveReviewer(db, rt)).agent?.id ?? null }];
+        const ids = open.flatMap((r) => (r.reviewerAgentId ? [r.reviewerAgentId] : []));
+        const names = new Map((ids.length ? await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, ids)) : []).map((a) => [a.id, a.name]));
+        const nameOf = (r: { reviewerAgentId: string | null }) => (r.reviewerAgentId ? names.get(r.reviewerAgentId) : undefined);
+        if (!open.length) return fail("This ticket has no open review you can join. Ask the CEO.");
+        const parts = open.map((r) => (nameOf(r) ? `${r.kind} review is with ${nameOf(r)}` : `${r.kind} review has no reviewer set`));
+        return fail(`This ticket's ${parts.join(" and its ")}. ${open.some(nameOf) ? "Nudge them, or ask the CEO to add you." : "Ask the CEO."}`);
+      }
       if ((input.action === "sequence" || input.action === "overrule" || input.action === "retry_merge") && me.role !== "ceo") return fail("Only your company's CEO can do that.");
       try {
         if (input.action === "release_hold" || input.action === "cancel_hold") {
