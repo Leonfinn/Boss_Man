@@ -163,6 +163,12 @@ const HAND_EFFECT: Record<NonNullable<DeployUpdate["handEffect"]>, string> = {
  * block is shown on the approval card and on the to-do it leaves behind.
  */
 function DeployUpdateView({ u }: { u: DeployUpdate }) {
+  // (BOS-809) An update can list a dozen tickets; show the first three and "+N more" that expands, so a
+  // card doesn't fill the screen with the whole list (the same on every update card, open or closed).
+  const KEEP_TICKETS = 3;
+  const shownChanges = u.changes.slice(0, KEEP_TICKETS);
+  const hidden = u.changes.length - shownChanges.length;
+  const [allShown, setAllShown] = useState(false);
   return (
     <div className="deploy-update" style={{ margin: "8px 0", fontSize: 14 }}>
       <p style={{ fontWeight: 600, margin: "0 0 4px" }}>
@@ -170,11 +176,18 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
       </p>
       {u.changes.length > 0 && (
         <ul aria-label="Tickets in this update" style={{ listStyle: "none", padding: 0, margin: "4px 0", display: "flex", flexDirection: "column", gap: 2 }}>
-          {u.changes.map((c) => (
+          {(allShown ? u.changes : shownChanges).map((c) => (
             <li key={c.ticketId} style={{ overflowWrap: "anywhere" }}>
               <a href={`#/tickets/${c.ticketId}`}><strong>{c.ref}</strong> {c.title}</a>
             </li>
           ))}
+          {hidden > 0 && (
+            <li>
+              <button type="button" className="linkish" onClick={() => setAllShown((v) => !v)}>
+                {allShown ? "Show fewer" : `+${hidden} more`}
+              </button>
+            </li>
+          )}
           {u.more > 0 && (
             <li className="muted">
               and {u.more} more. <a href="#/board">See all the tickets</a>.
@@ -667,44 +680,6 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         )}
       </header>
       {banner}
-      {shownNotices.length > 0 && (
-        // (BOS-739) A card Boss Man closed by itself while the owner may have been mid-way: the notice
-        // stands where the card was, with its steps kept read-only, for a couple of hours.
-        <section aria-label="Updates closed while you were doing them" style={{ display: "grid", gap: 10, marginBottom: 16 }}>
-          {shownNotices.map((n) => (
-            <article key={n.id} className="banner" data-closed-notice={n.notice.why} style={{ background: "var(--amber-soft)", color: "var(--ink)", border: "1px solid var(--amber)", borderRadius: 10, padding: "12px 14px" }}>
-              <p style={{ fontWeight: 700, margin: 0 }}>
-                <span className="tag amber">Closed for you</span> {n.question.split("\n")[0]}
-              </p>
-              <p style={{ margin: "6px 0 0" }}>{n.notice.text}</p>
-              {n.notice.newer && (
-                <p style={{ margin: "6px 0 0" }}>
-                  <a href="#/decisions">Follow the newer card: {n.notice.newer.label}</a>
-                </p>
-              )}
-              {(() => {
-                // A hand-apply card keeps its steps as `handSteps`; a hand-apply to-do as `steps` (BOS-739).
-                const steps = n.context.handSteps?.length ? n.context.handSteps : n.context.steps;
-                return steps?.length ? (
-                  <details style={{ marginTop: 6 }}>
-                    <summary className="muted">These steps are kept to read; there is nothing to press.</summary>
-                    <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
-                      {steps.map((s, i) => (
-                        <li key={i}><StepText text={s} /></li>
-                      ))}
-                    </ol>
-                    {n.context.check && (
-                      <p className="muted" style={{ fontSize: 13 }}>
-                        How to check it worked: <StepText text={n.context.check} />
-                      </p>
-                    )}
-                  </details>
-                ) : null;
-              })()}
-            </article>
-          ))}
-        </section>
-      )}
       {withTeam.length > 0 && (
         // Alerts the Scrum Master or CEO still hold: listed so nothing is hidden, but not the owner's to answer yet.
         <details className="sub">
@@ -713,41 +688,6 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
             {withTeam.map((a) => (
               <li key={a.id}>
                 {a.question} <span className="muted">· with {a.holder} since {when(a.since)}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-
-      {advised.length > 0 && (
-        <details className="sub">
-          <summary>Settled or withdrawn by the team in the last 30 days ({advised.length})</summary>
-          <ul>
-            {advised.map((a) => (
-              <li key={a.id}>
-                <TicketRefs about={a.about} />
-                {a.question}{" "}
-                <span className="muted">
-                  ·{" "}
-                  {a.withdrawn
-                    ? `withdrawn by ${a.withdrawn.by}: ${a.withdrawn.note}${a.withdrawn.notice ? ` (${a.withdrawn.notice})` : ""}`
-                    : a.settled
-                      ? `${settledWord(a.settled.answer)} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
-                      : a.advice?.state === "reissued"
-                        ? "replaced by a clearer decision"
-                        : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
-                </span>
-                {a.settled?.command && (
-                  <pre className="muted">
-                    <code>{a.settled.command}</code>
-                  </pre>
-                )}
-                {a.advice?.replacedBy && (
-                  <>
-                    {" "}
-                    <a href="#/decisions">See the new one in the list</a>
-                  </>
-                )}
               </li>
             ))}
           </ul>
@@ -1333,6 +1273,113 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           )}
         </>
       )}
+      {/* (BOS-809) Outside the empty-queue ternary on purpose: a closed notice (kept steps, the link to
+          the newer card) and the settled/withdrawn history must still show when nothing else is open. */}
+      <ClosedGroup notices={shownNotices} advised={advised} />
     </>
+  );
+}
+
+/** The one line a closed card shows while folded: what closed it, and where to follow it. */
+function closedLineFor(n: ClosedNoticeCard): string {
+  const head = n.question.split("\n")[0] ?? "";
+  if (n.notice.why === "newer" && n.notice.newer) return n.notice.newer.label;
+  if (n.notice.commit) return `Main has moved to ${shortSha(n.notice.commit)}`;
+  return head;
+}
+
+/**
+ * (BOS-809) Everything on the queue that is done with: cards Boss Man closed by itself (a newer update
+ * covers them, BOS-739) and cards the team settled or withdrew in the last 30 days. One collapsed
+ * "Closed (N)" fold at the bottom, one line each, so the open cards come first and the whole screen is
+ * not taken by the steps of cards that need nothing. A line opens to show its kept steps (read-only).
+ * These are not counted in "N decisions waiting".
+ */
+function ClosedGroup({ notices, advised }: { notices: ClosedNoticeCard[]; advised: AdvisedDecision[] }) {
+  const count = notices.length + advised.length;
+  if (!count) return null;
+  return (
+    <details className="sub closed-covers" style={{ marginTop: 16 }}>
+      <summary>Closed ({count})</summary>
+      <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0", display: "flex", flexDirection: "column", gap: 6 }}>
+        {advised.map((a) => (
+          <li key={a.id} data-closed-card>
+            <details>
+              <summary className="covered-line">
+                <span className="muted">Closed for you</span> · {a.question.split("\n")[0]}{" "}
+                <span className="muted">
+                  ·{" "}
+                  {a.withdrawn
+                    ? `withdrawn by ${a.withdrawn.by}`
+                    : a.settled
+                      ? `${settledWord(a.settled.answer)} by ${a.settled.by}`
+                      : a.advice?.state === "reissued"
+                        ? "replaced by a clearer decision"
+                        : "handled by the CEO"}
+                </span>
+              </summary>
+              <div className="closed-body" style={{ padding: "8px 0 0 12px", fontSize: 14 }}>
+                <TicketRefs about={a.about} />
+                {a.withdrawn ? (
+                  <p style={{ margin: "4px 0 0" }}>{a.withdrawn.note}{a.withdrawn.notice ? ` (${a.withdrawn.notice})` : ""}</p>
+                ) : a.settled ? (
+                  <p style={{ margin: "4px 0 0" }}>{a.settled.note ?? "no reason given"}</p>
+                ) : (
+                  <p style={{ margin: "4px 0 0" }}>{a.advice?.summary ?? "done"}</p>
+                )}
+                {a.settled?.command && (
+                  <pre className="muted">
+                    <code>{a.settled.command}</code>
+                  </pre>
+                )}
+                {a.advice?.replacedBy && (
+                  <p style={{ margin: "4px 0 0" }}>
+                    <a href="#/decisions">See the new one in the list</a>
+                  </p>
+                )}
+              </div>
+            </details>
+          </li>
+        ))}
+        {notices.map((n) => {
+          // A hand-apply card keeps its steps as `handSteps`; a hand-apply to-do as `steps` (BOS-739).
+          const steps = n.context.handSteps?.length ? n.context.handSteps : n.context.steps;
+          const label = closedLineFor(n);
+          return (
+            <li key={n.id} data-closed-card>
+              <details>
+                <summary className="covered-line">
+                  <span className="muted">Closed for you</span> · {label}
+                  {n.notice.newer && <span className="muted"> · covered by a newer card ›</span>}
+                </summary>
+                <div className="closed-body" style={{ padding: "8px 0 0 12px", fontSize: 14 }}>
+                  <p style={{ margin: "0 0 4px" }}>{n.notice.text}</p>
+                  {n.notice.newer && (
+                    <p style={{ margin: "0 0 4px" }}>
+                      <a href="#/decisions">Follow the newer card: {n.notice.newer.label}</a>
+                    </p>
+                  )}
+                  {steps?.length ? (
+                    <details>
+                      <summary className="muted">These steps are kept to read; there is nothing to press.</summary>
+                      <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                        {steps.map((s, i) => (
+                          <li key={i}><StepText text={s} /></li>
+                        ))}
+                      </ol>
+                      {n.context.check && (
+                        <p className="muted" style={{ fontSize: 13 }}>
+                          How to check it worked: <StepText text={n.context.check} />
+                        </p>
+                      )}
+                    </details>
+                  ) : null}
+                </div>
+              </details>
+            </li>
+          );
+        })}
+      </ul>
+    </details>
   );
 }
