@@ -203,9 +203,8 @@ describe("after-merge checks wait for go-live", () => {
     }
     const [rec] = await ctx.db.select().from(settings).where(eq(settings.key, `live_release:${ctx.co.company.id}`));
     expect((rec!.value as { new: string }).new).toBe(NEW);
-    const rowNow = await ctx.row(id);
-    expect({ wait: rowNow.goLiveWait, state: rowNow.systemState, merge: rowNow.mergeCommit, crit: rowNow.acceptanceCriteria }).toEqual({ wait: "server", state: "in_progress", merge: NEW, crit: [] });
-    expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(1);
+    // noteLive notes the commit and runs the go-live pass for the companies in the same call (release-log's afterLive),
+    // so the ticket that was waiting for the server is released as soon as the hand-apply's commit is recorded.
     expect((await ctx.row(id)).goLiveWait).toBeNull();
     expect(await afterMergeWakes(id)).toHaveLength(1);
   });
