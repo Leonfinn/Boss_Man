@@ -31,8 +31,9 @@ async function setup() {
   const [ticket] = await db.insert(tickets).values({ companyId, projectId: project.id, title: "Export the designs", systemState: "in_progress", assigneeAgentId: dev.id }).returning();
   const advance = (minutes: number) => (clock = new Date(clock.getTime() + minutes * 60_000));
   const switchOn = async (settings: Record<string, unknown> = {}) => expect((await req("PATCH", `/api/companies/${companyId}/watchdog`, { scrumMasterAgentId: sm.id, enabled: true, ...settings })).statusCode).toBe(200);
+  const switchOff = async () => expect((await req("PATCH", `/api/companies/${companyId}/watchdog`, { scrumMasterAgentId: sm.id, enabled: false })).statusCode).toBe(200);
   await db.delete(wakes);
-  return { ...built, db, close, base, req, companyId, sm, dev, qa, ceo: ceo!, ticket: ticket!, advance, switchOn, now: () => clock };
+  return { ...built, db, close, base, req, companyId, sm, dev, qa, ceo: ceo!, ticket: ticket!, advance, switchOn, switchOff, now: () => clock };
 }
 
 beforeEach(async () => {
@@ -241,6 +242,7 @@ describe("the alert ladder (BOS-64)", () => {
 
   describe("fall-through", () => {
     it("watchdog off: straight to the CEO", async () => {
+      await ctx.switchOff();
       const d = await wakeChain();
       expect(d).toMatchObject({ tier: "ceo", forAgentId: null });
       expect((d.context as { ladder: Ladder }).ladder.hops).toEqual([expect.objectContaining({ to: "ceo", why: expect.stringContaining("the watchdog is off") })]);
