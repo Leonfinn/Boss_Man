@@ -246,7 +246,8 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
         </div>
       )}
       <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
+        {/* Sideways only (BOS-962 sweep, same as BOS-554): the command wraps, so it never needs to scroll vertically, and without overflow-y: hidden a one-pixel overflow would swallow the wheel. */}
+        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", overflowY: "hidden", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
           <code>{command}</code>
         </pre>
         <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
