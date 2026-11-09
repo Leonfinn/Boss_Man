@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { runCanary } from "../src/canary.js";
 import { levelFor, probeLandlock } from "../src/fence.js";
-import { defaultBin } from "../src/session-manager.js";
+import { claudeAdapterBin } from "./claude-adapter.js";
 
 const level = levelFor(probeLandlock().abi).level;
 const PLAIN = { sessionStarted: true, modelReached: true, permissionAsked: true, toolRan: true, answered: true, endedCleanly: true };
@@ -12,14 +12,7 @@ const FENCED = { ...PLAIN, fenced: true, fenceHeld: true };
 const hasOpencode = spawnSync("sh", ["-c", "command -v opencode"]).status === 0;
 /** The real Claude adapter and Claude Code now live in the Claude pack (DR-050), not the runner's node_modules:
  * a real Claude session runs only where a pack is pointed at (a runner with a ready pack). */
-const hasClaude = (() => {
-  try {
-    defaultBin("claude", process.env.CLAUDE_AGENT_ACP_BIN);
-    return !!process.env.CLAUDE_CODE_EXECUTABLE;
-  } catch {
-    return false;
-  }
-})();
+const hasClaude = !!claudeAdapterBin() && !!process.env.CLAUDE_CODE_EXECUTABLE;
 
 describe("image canary (R52)", () => {
   it.skipIf(!hasClaude)("runs a Claude session with a tool call against the stand-in model", async () => {

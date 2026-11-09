@@ -5,18 +5,13 @@ import { describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
 import { startCanaryModel } from "../src/canary.js";
 import { probeModels } from "../src/models-probe.js";
-import { SessionManager, defaultBin, withoutGitCredentials } from "../src/session-manager.js";
+import { SessionManager, withoutGitCredentials } from "../src/session-manager.js";
+import { claudeAdapterBin } from "./claude-adapter.js";
 
 const fake = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-acp.mjs");
 /** The real Claude ACP adapter now lives in the Claude pack (DR-050), not the runner's node_modules: run this
  * only where one is pointed at (a runner with a ready pack); otherwise there is no adapter to probe. */
-const realClaudeAdapter = (() => {
-  try {
-    return defaultBin("claude", process.env.CLAUDE_AGENT_ACP_BIN);
-  } catch {
-    return null;
-  }
-})();
+const realClaudeAdapter = claudeAdapterBin();
 
 describe("models.probe", () => {
   it("emits runner.models from the session's config options and replies with them", async () => {
