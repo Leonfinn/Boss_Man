@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Company, type Plan as PlanData, type PlanNode } from "../api";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
+import { ageLabel } from "../age";
 
 const MIN_W = 230;
 const MAX_W = 360;
@@ -15,17 +16,6 @@ function cardWidth(available: number, columns: number) {
   if (!available || columns < 1) return MIN_W;
   const room = (available - PAD * 2 - (columns - 1) * GAP_X) / columns;
   return Math.max(MIN_W, Math.min(MAX_W, Math.floor(room)));
-}
-
-/** "just now", "4 min ago", "2h ago", "3d ago". */
-function ageLabel(ms: number) {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} min ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
 }
 
 const KIND = { ticket: "Task", engagement: "Engagement", decision: "Decision" } as const;

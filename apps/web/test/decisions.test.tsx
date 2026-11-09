@@ -36,6 +36,7 @@ const decision = (over: Partial<Decision> = {}): Decision => ({
   score: 52.4,
   parts: { blocking: 30, urgency: 12, age: 10.4, liveRun: 0 },
   reasons: ["Waiting 40 min"],
+  ageReason: "Waiting 40 min",
   dueDate: null,
   ...over,
 });
@@ -237,7 +238,7 @@ describe("decision queue", () => {
   });
 
   it("shows no score line or number for a card scoring 0 (BOS-804)", () => {
-    const { container } = render(<Decisions decisions={[decision({ score: 0, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 0 }, reasons: ["Raised just now"], blocks: [] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const { container } = render(<Decisions decisions={[decision({ score: 0, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 0 }, reasons: ["Raised just now"], ageReason: "Raised just now", blocks: [] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.queryByText(/Score 0/)).toBeNull();
     expect(screen.queryByText(/for waiting/)).toBeNull();
     expect(screen.queryByLabelText(/^Score/)).toBeNull();
@@ -248,16 +249,25 @@ describe("decision queue", () => {
     const eightMin = new Date(Date.now() - 8 * 60_000).toISOString();
     // The server sends the age as a rank reason too ("Raised just now" under an hour): the card must not
     // repeat it beside the "8 min ago" label, or it contradicts itself.
-    render(<Decisions decisions={[decision({ createdAt: eightMin, reasons: ["Raised just now"] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    render(<Decisions decisions={[decision({ createdAt: eightMin, reasons: ["Raised just now"], ageReason: "Raised just now" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByText("8 min ago")).toBeTruthy();
     expect(screen.queryByText("just now")).toBeNull();
   });
 
   it("drops the rank's age reason but keeps the others (BOS-804)", () => {
     const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
-    render(<Decisions decisions={[decision({ createdAt: hours, reasons: ["Waiting 3 h", "Blocks 1 ticket"] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    render(<Decisions decisions={[decision({ createdAt: hours, reasons: ["Waiting 3 h", "Blocks 1 ticket"], ageReason: "Waiting 3 h" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByText("3h ago")).toBeTruthy();
     expect(screen.queryByText("Waiting 3 h")).toBeNull();
+    expect(screen.getByText("Blocks 1 ticket")).toBeTruthy();
+  });
+
+  it("drops a reworded age reason by its mark, not its wording (BOS-869)", () => {
+    // The server now writes the age differently; the card follows the mark, so no second age shows.
+    const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    render(<Decisions decisions={[decision({ createdAt: hours, reasons: ["Open a while (about 3 hours)", "Blocks 1 ticket"], ageReason: "Open a while (about 3 hours)" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("3h ago")).toBeTruthy();
+    expect(screen.queryByText("Open a while (about 3 hours)")).toBeNull();
     expect(screen.getByText("Blocks 1 ticket")).toBeTruthy();
   });
 
