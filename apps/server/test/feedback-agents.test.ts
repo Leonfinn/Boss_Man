@@ -242,6 +242,11 @@ describe("placing features on the roadmap", () => {
     // The refusal is the tick only: the same agent can still write the summary or take it off.
     expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: "A tidier weekly routine for the team.", reason: "Write its public summary." } }))).toBe('Updated "Rotate the host-deployer token": wrote its public summary.');
     expect((await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: false, reason: "Take it off." } })).isError).not.toBe(true);
+    // A decoy title and description must not slip the security-worded feature past the rule: update_feature never
+    // saves them, so the guard judges the stored feature, and the call is refused outright (Jane's BOS-991 finding).
+    const decoy = textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: true, title: "Dark mode", description: "A dark theme", publicSummary: "A tidier weekly routine for the team.", reason: "A portal note asked for this." } }));
+    expect(decoy).toMatch(/does not change a feature's title or description/);
+    expect(await row()).toMatchObject({ title: "Rotate the host-deployer token", portalVisible: false });
     await ceo.close();
 
     // An ordinary feature may still be put on the portal by an agent, and the public title is written too.

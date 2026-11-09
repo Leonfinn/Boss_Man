@@ -780,6 +780,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
           if (!me || (me.role !== "ceo" && me.role !== "manager" && me.template !== "product-manager")) return fail("Only the CEO, a manager or a product manager can place features on the roadmap.");
           if (!input.featureId) return fail("Give featureId.");
+          // update_feature never saves a feature's title or description, so a title/description here would be silently
+          // ignored; worse, it could be used as decoy text to slip a security-worded feature onto the portal (BOS-991).
+          if (input.title !== undefined || input.description !== undefined) return fail("update_feature does not change a feature's title or description. Leave them out.");
           const changes = {
             ...(input.objectiveId !== undefined ? { objectiveId: input.objectiveId } : {}),
             ...(input.milestoneId !== undefined ? { milestoneId: input.milestoneId } : {}),
@@ -801,9 +804,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           if (input.portalVisible === true) {
             const target = await feedback.feature(input.featureId, scope.companyId);
             const facts = await feedback.portalFacts(scope.companyId, target.areaId, target.driverScores as Record<string, number | null>);
+            // Judge the stored feature: update_feature never saves title/description, so input values must not be used here.
             const verdict = portalVerdict({
-              title: input.title ?? target.title,
-              description: input.description ?? target.description,
+              title: target.title,
+              description: target.description,
               ...facts,
               keepOffPortal: input.keepOffPortal ?? target.keepOffPortal,
               hasPublicSummary: true,
